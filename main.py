@@ -3479,6 +3479,35 @@ def fix_database_constraints():
 fix_database_constraints()
 
 # ==================== MAIN BOT FUNCTION ====================
+# 👇 PASTE THIS FUNCTION BEFORE 'def main():' 👇
+
+def fix_db_column_issue():
+    """Fixes the database column name mismatch automatically"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        
+        cur = conn.cursor()
+        
+        # Check agar 'label' naam ka column mojood hai
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='movie_files' AND column_name='label'")
+        if cur.fetchone():
+            logger.info("🔧 Fixing Database: Renaming column 'label' back to 'quality'...")
+            # Use wapas 'quality' rename kar do taaki code chal sake
+            cur.execute("ALTER TABLE movie_files RENAME COLUMN label TO quality;")
+            conn.commit()
+            logger.info("✅ Database Fixed Successfully!")
+            
+        cur.close()
+    except Exception as e:
+        logger.error(f"DB Fix Error: {e}")
+        if conn: conn.rollback()
+    finally:
+        if conn: conn.close()
+
+# ==================== MAIN BOT FUNCTION ====================
 def main():
     """Run the Telegram bot"""
     logger.info("Bot is starting...")
@@ -3488,7 +3517,10 @@ def main():
         return
 
     try:
+        # 1. Setup tables
         setup_database()
+        # 2. Fix column names (Auto-repair 'label' -> 'quality')
+        fix_db_column_issue()
     except Exception as e:
         logger.error(f"Database setup failed but continuing: {e}")
 
@@ -3528,7 +3560,6 @@ def main():
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/post_query'), admin_post_query))
-    application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
 
     # 👇 NEW BATCH COMMANDS 👇
     application.add_handler(CommandHandler("batch", batch_add_command))
