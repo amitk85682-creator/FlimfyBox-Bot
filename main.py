@@ -3536,7 +3536,7 @@ def main():
 
     # 👇 NEW CHANNEL LISTENER (To catch files) 👇
     # Ye handler sirf tab chalega jab Document ya Video aaye
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document | filters.Video), channel_file_listener))
+    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.DOCUMENT | filters.VIDEO), channel_file_listener))
 
     # Advanced notification commands
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
