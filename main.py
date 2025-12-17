@@ -583,8 +583,8 @@ async def analyze_intent(message_text):
         model = genai.GenerativeModel(model_name='gemini-3-pro')
 
         prompt = f"""
-        You are a 'Request Analyzer' for a Telegram bot named Manvi.
-        Manvi's ONLY purpose is to provide MOVIES and WEB SERIES. Nothing else.
+        You are a 'Request Analyzer' for a Telegram bot named FlimfyBox Bot.
+        FlimfyBox Bot's ONLY purpose is to provide MOVIES and WEB SERIES. Nothing else.
 
         Analyze the user's message below. Your task is to determine ONLY ONE THING:
         Is the user asking for a movie or a web series?
@@ -1362,7 +1362,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query == '❓ Help':
             help_text = """
-🤖 How to use Manvi Bot:
+🤖 How to use FlimfyBox Bot:
 
 🔍 Search Movies: Find movies in our collection
 🙋 Request Movie: Request a new movie to be added
@@ -1936,7 +1936,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # =========================================================
         
         # Bots Usernames
-        bot1_username = "Ur_Manvi_Bot"
+        bot1_username = "FlimfyBox_SearchBot"
         bot2_username = "urmoviebot"
         bot3_username = "FlimfyBox_Bot"
         
@@ -1970,7 +1970,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Keyboard Layout
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🤖 Manvi Bot", url=link1),
+                InlineKeyboardButton("🤖 FlimfyBox Bot", url=link1),
                 InlineKeyboardButton("⚡Movie Bot", url=link2),
             ],
             [
@@ -1981,12 +1981,12 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Channel Caption
         channel_caption = (
-            f"🎬 **{query_text}** 🎬\n\n"
-            f"✅ **File Uploaded Successfully!**\n"
+            f"🎬 <b>{query_text}</b>\n\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"⚡ **Fast Download Links Available**\n"
-            f"👇 **Download from any Bot:**\n"
-            f"➖➖➖➖➖➖➖➖➖➖"
+            "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
+            "🔹 <b>Support group (https://t.me/+2hFeRL4DYfBjZDQ1)</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"👇 <b>Download from any Bot:</b>\n"
         )
 
         if ADMIN_CHANNEL_ID:
@@ -1996,7 +1996,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=update.message.photo[-1].file_id,
                 caption=channel_caption,
                 reply_markup=keyboard,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             # Reply to Admin (Confirmation)
             await update.message.reply_text(
@@ -2459,17 +2459,19 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast text message to all users"""
+    """Broadcast HTML message to all users with formatting support"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
 
     try:
+        # Command ke baad wala pura text (Formatting ke sath)
         if not context.args:
-            await update.message.reply_text("Usage: /broadcast Your message here")
+            await update.message.reply_text("Usage: /broadcast <b>Message Title</b>\n\nYour formatted text here...")
             return
 
-        message_text = ' '.join(context.args)
+        # Pure message ko extract karein
+        message_text = update.message.text.replace('/broadcast', '').strip()
 
         conn = get_db_connection()
         if not conn:
@@ -2477,7 +2479,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         cur = conn.cursor()
-        cur.execute("SELECT DISTINCT user_id, first_name, username FROM user_requests")
+        cur.execute("SELECT DISTINCT user_id FROM user_requests")
         all_users = cur.fetchall()
 
         if not all_users:
@@ -2486,32 +2488,33 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
             return
 
-        status_msg = await update.message.reply_text(
-            f"📤 Broadcasting to {len(all_users)} users...\n⏳ Please wait..."
-        )
+        status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(all_users)} users...\n⏳ Please wait...")
 
         success_count = 0
         failed_count = 0
 
-        for user_id, first_name, username in all_users:
+        for user_id_tuple in all_users:
+            user_id = user_id_tuple[0]
             try:
+                # 📢 YAHAN PAR 'HTML' USE HOGA
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=message_text
+                    text=message_text,
+                    parse_mode='HTML',  # Isse Enter aur Bold kaam karega
+                    disable_web_page_preview=True
                 )
                 success_count += 1
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.05) # Flood protection
             except telegram.error.Forbidden:
                 failed_count += 1
             except Exception as e:
                 failed_count += 1
-                logger.error(f"Failed broadcast to {user_id}: {e}")
 
         await status_msg.edit_text(
-            f"📊 **Broadcast Complete**\n\n"
+            f"📊 <b>Broadcast Complete</b>\n\n"
             f"✅ Sent: {success_count}\n"
-            f"❌ Failed: {failed_count}\n"
-            f"📝 Total: {len(all_users)}"
+            f"❌ Failed: {failed_count}",
+            parse_mode='HTML'
         )
 
         cur.close()
