@@ -1195,26 +1195,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = context.args[0]
         
         # --- CASE 1: DIRECT MOVIE ID (Sabse Fast) ---
-        # --- CASE 1: DIRECT MOVIE ID ---
-            if payload.startswith("movie_"):
-                try:
-                    movie_id = int(payload.split('_')[1])
-                    
-                    # ✅ FIX: Task ko variable me store karein aur set me add karein
-                    task = asyncio.create_task(deliver_movie_on_start(update, context, movie_id))
-                    
-                    # Task ko global set me add karein (Garbage Collection rokne ke liye)
-                    background_tasks.add(task)
-                    
-                    # Jab task khatam ho, use set se hata dein
-                    task.add_done_callback(background_tasks.discard)
-                    
-                    return MAIN_MENU
-                    
-                except (IndexError, ValueError) as e:
-                    logger.error(f"Error processing movie link: {e}")
-                    await update.message.reply_text("❌ Invalid movie link.")
-                    return MAIN_MENU
+        if payload.startswith("movie_"):
+            try:
+                movie_id = int(payload.split('_')[1])
+                
+                # ✅ FIX: Task ko variable me store karein aur set me add karein
+                task = asyncio.create_task(deliver_movie_on_start(update, context, movie_id))
+                
+                # Task ko global set me add karein (Garbage Collection rokne ke liye)
+                background_tasks.add(task)
+                
+                # Jab task khatam ho, use set se hata dein
+                task.add_done_callback(background_tasks.discard)
+                
+                return MAIN_MENU
+                
+            except (IndexError, ValueError) as e:
+                logger.error(f"Error processing movie link: {e}")
+                await update.message.reply_text("❌ Invalid movie link.")
+                return MAIN_MENU
 
         # --- CASE 2: AUTO SEARCH (Ab Fast Hoga) ---
         elif payload.startswith("q_"):
