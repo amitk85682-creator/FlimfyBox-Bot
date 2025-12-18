@@ -1216,19 +1216,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return MAIN_MENU
 
         # --- CASE 2: AUTO SEARCH (Ab Fast Hoga) ---
-elif payload.startswith("q_"):
+if payload.startswith("q_"):
     try:
-        # Query decode
-        query_text = payload[2:]  # Remove 'q_'
+        query_text = payload[2:]
         query_text = query_text.replace("_", " ")
         query_text = " ".join(query_text.split()).strip()
 
-        # 1. Instant feedback
         status_msg = await update.message.reply_text(
             f"🔎 Checking for '{query_text}'... ⚡"
         )
 
-        # 2. Background task (🔥 GC SAFE FIX 🔥)
         task = asyncio.create_task(
             background_search_and_send(update, context, query_text, status_msg)
         )
@@ -1239,6 +1236,7 @@ elif payload.startswith("q_"):
 
     except Exception as e:
         logger.error(f"Deep link error (q_): {e}")
+
 
     # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
