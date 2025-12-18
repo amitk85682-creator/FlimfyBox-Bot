@@ -276,7 +276,7 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
             pass
         return 0
 
-# ==================== UPDATED AUTO-DELETE FUNCTIONS ====================
+# ==================== FIXED AUTO-DELETE FUNCTIONS ====================
 
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
     """Delete messages after specified delay using Background Tasks"""
@@ -285,22 +285,24 @@ async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
         for msg_id in message_ids:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                logger.info(f"🎬 DEEP LINK CREATED: {movie_title} -> {link_param}")
+                logger.info(f"🗑️ Deleted message {msg_id}")
             except Exception:
-                pass # Message pehle hi delete ho gaya hoga
+                pass # Message shayad pehle hi delete ho gaya ho
     except Exception as e:
         logger.error(f"Error in delete task: {e}")
 
 def track_message_for_deletion(context, chat_id, message_id, delay=60):
     """
-    Schedules a message for deletion. 
-    NOTE: Requires 'context' as the first argument now.
+    Schedules a message for deletion using asyncio tasks.
+    IMPORTANT: Requires 'context' as the first argument.
     """
+    if not message_id: return
+    
     # Task create karein
     task = asyncio.create_task(
         delete_messages_after_delay(context, chat_id, [message_id], delay)
     )
-    # Global set me add karein (GC se bachane ke liye)
+    # Global set me add karein taki task beech me na ruke
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
 
@@ -973,10 +975,16 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         qualities = get_all_movie_qualities(movie_id)
         if qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': qualities}
+            
             selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
+            
+            # Message bhejein
             msg = await context.bot.send_message(chat_id=chat_id, text=selection_text, reply_markup=keyboard, parse_mode='Markdown')
-            track_message_for_deletion(chat_id, msg.message_id, 300)
+            
+            # ✅ FIX: Yahan 'context' pass karein aur time 60 seconds kar dein
+            track_message_for_deletion(context, chat_id, msg.message_id, 60)
+            
             return
 
     try:
@@ -1152,50 +1160,60 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
         except: 
             pass
 
-# ==================== NEW MISSING FUNCTION ====================
+# ==================== CLEAN LOADING FUNCTION ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
     """
-    Fetches and sends a movie safely - can be called multiple times
+    Fetches and sends a movie with a clean 'Loading' animation.
+    No technical details shown to the user.
     """
-    # Clear stale data
-    context.user_data.pop('selected_movie_data', None)
-    context.user_data.pop('search_results', None)
-    
     chat_id = update.effective_chat.id
     
-    # Status message
+    # 1. Loading Effect (User ko lage process chal raha hai)
     status_msg = None
     try:
-        status_msg = await context.bot.send_message(
-            chat_id=chat_id, 
-            text="⚡ Finding your movie... Please wait.",
-            disable_notification=True
-        )
-    except Exception as e:
-        logger.error(f"Cannot send status message: {e}")
+        # Aap chahein to yahan text ki jagah koi Sticker ID bhi laga sakte hain
+        # Example: status_msg = await context.bot.send_sticker(chat_id, "CAACAgIAAxkBAA...")
+        status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
+        
+        # Backup Auto-delete (Agar bot atak jaye to ye msg 1 min baad hat jaye)
+        track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
+    except:
+        pass
 
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            error_text = "❌ Server Error: Database connection failed. Please try again in a few minutes."
-            if status_msg:
-                await status_msg.edit_text(error_text)
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=error_text)
+            # User ko technical error mat dikhao, bas chupchap delete kar do
+            if status_msg: try: await status_msg.delete() 
+            except: pass
             return
 
         cur = conn.cursor()
         cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
         movie_data = cur.fetchone()
-        
-        # Delete status message
-        try:
-            if status_msg:
-                await status_msg.delete()
-        except:
-            pass
+        cur.close()
+        conn.close()
 
+        # 2. Movie milne ke baad turant Loading Msg delete karo
+        if status_msg:
+            try: await status_msg.delete()
+            except: pass
+
+        if movie_data:
+            title, url, file_id = movie_data
+            # Movie bhejo
+            await send_movie_to_user(update, context, movie_id, title, url, file_id)
+        else:
+            # Agar movie nahi mili to bas simple msg (No IDs/Technical details)
+            fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
+            track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
+
+    except Exception as e:
+        logger.error(f"Error in deliver_movie: {e}") # Error sirf Admin logs me jayega
+        if status_msg:
+            try: await status_msg.delete()
+            except: pass
         if movie_data:
             title, url, file_id = movie_data
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
@@ -1650,6 +1668,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_movie_to_user(update, context, movie_id, title, url, file_id)
                 return
 
+            # ... (upar ka code same rahega) ...
+
             context.user_data['selected_movie_data'] = {
                 'id': movie_id,
                 'title': title,
@@ -1659,11 +1679,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
+            # Message Edit karein
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
+            
+            # ✅ FIX: Is edited message ko bhi track karein (Delete in 60 seconds)
+            track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
         # ==================== ADMIN ACTIONS ====================
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
