@@ -1160,7 +1160,7 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
         except: 
             pass
 
-# ==================== CLEAN LOADING FUNCTION ====================
+# ==================== CLEAN LOADING FUNCTION (FIXED) ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
     """
     Fetches and sends a movie with a clean 'Loading' animation.
@@ -1168,14 +1168,12 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
     """
     chat_id = update.effective_chat.id
     
-    # 1. Loading Effect (User ko lage process chal raha hai)
+    # 1. Loading Effect
     status_msg = None
     try:
-        # Aap chahein to yahan text ki jagah koi Sticker ID bhi laga sakte hain
-        # Example: status_msg = await context.bot.send_sticker(chat_id, "CAACAgIAAxkBAA...")
         status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
         
-        # Backup Auto-delete (Agar bot atak jaye to ye msg 1 min baad hat jaye)
+        # Backup Auto-delete
         track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
     except:
         pass
@@ -1185,8 +1183,11 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
         conn = get_db_connection()
         if not conn:
             # User ko technical error mat dikhao, bas chupchap delete kar do
-            if status_msg: try: await status_msg.delete() 
-            except: pass
+            if status_msg: 
+                try: 
+                    await status_msg.delete() 
+                except: 
+                    pass
             return
 
         cur = conn.cursor()
@@ -1197,23 +1198,27 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
 
         # 2. Movie milne ke baad turant Loading Msg delete karo
         if status_msg:
-            try: await status_msg.delete()
-            except: pass
+            try: 
+                await status_msg.delete()
+            except: 
+                pass
 
         if movie_data:
             title, url, file_id = movie_data
             # Movie bhejo
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
         else:
-            # Agar movie nahi mili to bas simple msg (No IDs/Technical details)
+            # Agar movie nahi mili
             fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
             track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
 
     except Exception as e:
-        logger.error(f"Error in deliver_movie: {e}") # Error sirf Admin logs me jayega
+        logger.error(f"Error in deliver_movie: {e}")
         if status_msg:
-            try: await status_msg.delete()
-            except: pass
+            try: 
+                await status_msg.delete()
+            except: 
+                pass
         if movie_data:
             title, url, file_id = movie_data
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
