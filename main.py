@@ -3598,18 +3598,17 @@ def main():
 
     # Conversation handler for user interaction flow
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[CommandHandler('start', start, filters=filters.ChatType.PRIVATE)],
         states={
-            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message)],
-            SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies)],
-            REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie)],
-            REQUESTING_FROM_BUTTON: [MessageHandler(filters.TEXT & ~filters.COMMAND, request_movie_from_button)],
+            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu)],
+            SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_movies)],
+            REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, request_movie)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[CommandHandler('cancel', cancel, filters=filters.ChatType.PRIVATE)],
         per_message=False,
         per_chat=True,
+        allow_reentry=True  # ✅✅✅ YE LINE ADD KARNI HAI BAS ✅✅✅
     )
-
     # Register callback handler FIRST
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(conv_handler)
