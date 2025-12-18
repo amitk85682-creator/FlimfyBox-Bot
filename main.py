@@ -655,12 +655,12 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     notified_count = 0
 
     caption_text = (
-        f"🎬 <b>{movie_title}</b>\n\n"
-        f"➖➖➖➖➖➖➖➖➖➖\n"
-        "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-        f"➖➖➖➖➖➖➖➖➖➖\n"
-        "🔹 <b>Support group (https://t.me/+2hFeRL4DYfBjZDQ1)</b>\n"
-    
+    f"🎬 <b>{movie_title}</b>\n\n"
+    "➖➖➖➖➖➖➖➖➖➖\n"
+    "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
+    "➖➖➖➖➖➖➖➖➖➖\n"
+    "🔹 <b>Support group:</b> https://t.me/+2hFeRL4DYfBjZDQ1\n"
+)
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
     try:
