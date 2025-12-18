@@ -1216,23 +1216,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return MAIN_MENU
 
         # --- CASE 2: AUTO SEARCH (Ab Fast Hoga) ---
-        elif payload.startswith("q_"):
-            try:
-                # Query decode
-                query_text = payload[2:] # Remove 'q_'
-                query_text = query_text.replace("_", " ") # Replace underscores
-                query_text = " ".join(query_text.split()).strip() # Clean extra spaces
-                
-                # 1. Turant message bhej do (Instant Feedback)
-                status_msg = await update.message.reply_text(f"🔎 Checking for '{query_text}'... ⚡")
+elif payload.startswith("q_"):
+    try:
+        # Query decode
+        query_text = payload[2:]  # Remove 'q_'
+        query_text = query_text.replace("_", " ")
+        query_text = " ".join(query_text.split()).strip()
 
-                # 2. Asli kaam background me daal do (asyncio.create_task)
-                asyncio.create_task(background_search_and_send(update, context, query_text, status_msg))
-                
-                return MAIN_MENU
-                
-            except Exception as e:
-                logger.error(f"Deep link error: {e}")
+        # 1. Instant feedback
+        status_msg = await update.message.reply_text(
+            f"🔎 Checking for '{query_text}'... ⚡"
+        )
+
+        # 2. Background task (🔥 GC SAFE FIX 🔥)
+        task = asyncio.create_task(
+            background_search_and_send(update, context, query_text, status_msg)
+        )
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+
+        return MAIN_MENU
+
+    except Exception as e:
+        logger.error(f"Deep link error (q_): {e}")
 
     # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
