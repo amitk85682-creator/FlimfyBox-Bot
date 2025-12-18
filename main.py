@@ -3224,57 +3224,54 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def channel_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Listens to files in Dump Channel and saves them if Batch Mode is ON.
+    Saves files as LINKS instead of File IDs to protect thumbnails and cross-bot compatibility.
     """
-    # 1. Check if Batch is Active
     if not BATCH_SESSION.get('active'):
         return
 
-    # 2. Check if update is from Dump Channel (Security)
-    # Agar DUMP_CHANNEL_ID set nahi hai to koi bhi channel se accept karega (Not recommended)
     current_chat_id = str(update.effective_chat.id)
     if DUMP_CHANNEL_ID and current_chat_id != str(DUMP_CHANNEL_ID):
         return
 
-    # 3. Get File Details
     message = update.effective_message
-    file_id = None
     file_name = "Unknown"
     file_size_bytes = 0
     
+    # Check if it's a document or video
     if message.document:
-        file_id = message.document.file_id
         file_name = message.document.file_name or "Unknown"
         file_size_bytes = message.document.file_size
     elif message.video:
-        file_id = message.video.file_id
         file_name = message.video.file_name or f"Video {BATCH_SESSION['count']+1}"
         file_size_bytes = message.video.file_size
     else:
-        return # Not a file
+        return
 
-    # 4. Generate Smart Label (Quality + Size)
+    # 1. Generate Smart Label
     file_size_str = get_readable_file_size(file_size_bytes)
     label = generate_quality_label(file_name, file_size_str)
     
-    # 5. Save to Database (Silent Operation)
+    # 2. GENERATE MESSAGE LINK (The magic fix for thumbnails) 🪄
+    # Private Channel ID se '-100' hatana padta hai link banane ke liye
+    clean_chat_id = str(current_chat_id).replace("-100", "")
+    message_link = f"https://t.me/c/{clean_chat_id}/{message.message_id}"
+
+    # 3. Save to Database
     conn = get_db_connection()
     if conn:
         try:
             cur = conn.cursor()
-            # movie_files table me insert karo
-            # Note: 'quality' column ab 'label' ki tarah use hoga
+            # ⚠️ file_id को NULL (None) रखें और url में link सेव करें
             cur.execute(
-                "INSERT INTO movie_files (movie_id, file_id, quality, file_size) VALUES (%s, %s, %s, %s)",
-                (BATCH_SESSION['movie_id'], file_id, label, file_size_str)
+                "INSERT INTO movie_files (movie_id, file_id, quality, file_size, url) VALUES (%s, %s, %s, %s, %s)",
+                (BATCH_SESSION['movie_id'], None, label, file_size_str, message_link)
             )
             conn.commit()
             cur.close()
             conn.close()
             
-            # Increment Count
             BATCH_SESSION['count'] += 1
-            logger.info(f"Batch Auto-Save: {file_name} -> {label}")
+            logger.info(f"✅ Saved as LINK: {file_name} -> {label}")
             
         except Exception as e:
             logger.error(f"Failed to auto-save file: {e}")
