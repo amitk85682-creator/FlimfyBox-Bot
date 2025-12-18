@@ -45,7 +45,7 @@ from collections import defaultdict
 # ==================== LOGGING SETUP ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG  # Change from INFO to DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
         for msg_id in message_ids:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                logger.info(f"🗑️ Deleted message {msg_id}")
+                logger.info(f"🎬 DEEP LINK CREATED: {movie_title} -> {link_param}")
             except Exception:
                 pass # Message pehle hi delete ho gaya hoga
     except Exception as e:
@@ -393,17 +393,36 @@ def setup_database():
         logger.error(f"Error setting up database: {e}")
         logger.info("Continuing without database setup...")
 
-def get_db_connection():
-    """Get database connection with error handling"""
-    try:
-        conn_str = FIXED_DATABASE_URL or DATABASE_URL
-        if not conn_str:
-            logger.error("No database URL configured")
-            return None
-        return psycopg2.connect(conn_str)
-    except Exception as e:
-        logger.error(f"Database connection error: {e}")
-        return None
+def get_db_connection(max_retries=3):
+    """Get database connection with retry logic and timeout handling"""
+    for attempt in range(max_retries):
+        try:
+            conn_str = FIXED_DATABASE_URL or DATABASE_URL
+            if not conn_str:
+                logger.error("No database URL configured")
+                return None
+            
+            # Add connection timeout parameters
+            conn = psycopg2.connect(
+                conn_str,
+                connect_timeout=10,  # 10 second timeout
+                options='-c statement_timeout=30000'  # 30 second query timeout
+            )
+            
+            # Test connection
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            
+            return conn
+            
+        except Exception as e:
+            logger.error(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
+            if attempt == max_retries - 1:
+                return None
+            time.sleep(1)  # Wait before retry
+    
+    return None
 
 def update_movies_in_db():
     """Update movies from Blogger API"""
@@ -1136,54 +1155,87 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 # ==================== NEW MISSING FUNCTION ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
     """
-    Fetches and sends a movie safely.
+    Fetches and sends a movie safely with detailed error handling
     """
     chat_id = update.effective_chat.id
     
-    # 1. Processing message (Taki user ko lage bot zinda hai)
+    # Status message
+    status_msg = None
     try:
-        status_msg = await context.bot.send_message(chat_id, "⚡ Finding your movie... Please wait.")
+        status_msg = await context.bot.send_message(
+            chat_id=chat_id, 
+            text="⚡ Finding your movie... Please wait.",
+            disable_notification=True
+        )
     except Exception as e:
         logger.error(f"Cannot send status message: {e}")
-        return
+        # Continue without status message
 
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            await status_msg.edit_text("❌ Server Error: Database connection failed.")
+            error_text = "❌ Server Error: Database connection failed. Please try again in a few minutes."
+            if status_msg:
+                await status_msg.edit_text(error_text)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=error_text)
             return
 
         cur = conn.cursor()
+        
+        # Add timeout to query
+        cur.execute("SET LOCAL statement_timeout = '10s'")
         cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
         movie_data = cur.fetchone()
-        cur.close()
-        conn.close()
-
-        # Message delete karein taki chat clean rahe
-        try: await status_msg.delete()
-        except: pass
+        
+        # Delete status message
+        try:
+            if status_msg:
+                await status_msg.delete()
+        except:
+            pass
 
         if movie_data:
             title, url, file_id = movie_data
-            # Send movie function call
             await send_movie_to_user(update, context, movie_id, title, url, file_id)
         else:
-            await context.bot.send_message(chat_id, "❌ Movie not found (ID Invalid or Deleted).")
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="❌ Movie not found. It may have been removed from our database."
+            )
 
+    except psycopg2.OperationalError as e:
+        logger.error(f"Database operational error: {e}")
+        error_msg = "❌ Database timeout. Please try again in a few minutes."
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_msg)
+            except:
+                pass
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=error_msg)
+            
     except Exception as e:
         logger.error(f"CRITICAL ERROR in deliver_movie: {e}", exc_info=True)
-        try: await status_msg.edit_text("❌ An internal error occurred. Please try again.")
-        except: pass
+        error_msg = "❌ Failed to retrieve movie. Please try searching manually."
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_msg)
+            except:
+                pass
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=error_msg)
+            
     finally:
         if conn:
-            try: conn.close()
-            except: pass
-
+            try:
+                conn.close()
+            except:
+                pass
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Start command handler with NON-BLOCKING Deep Link & Asyncio Task.
-    Now supports instant response even during heavy database loads.
+    Start command handler with proper error handling and user feedback
     """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -1194,59 +1246,83 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         
-        # --- CASE 1: DIRECT MOVIE ID (Sabse Fast) ---
+        # --- CASE 1: DIRECT MOVIE ID ---
         if payload.startswith("movie_"):
             try:
                 movie_id = int(payload.split('_')[1])
                 
-                # ✅ FIX: Task ko variable me store karein aur set me add karein
-                task = asyncio.create_task(deliver_movie_on_start(update, context, movie_id))
+                # Send immediate feedback
+                status_msg = await update.message.reply_text(
+                    "🎬 Deep link detected! Fetching your movie... Please wait.",
+                    disable_notification=True
+                )
                 
-                # Task ko global set me add karein (Garbage Collection rokne ke liye)
+                # Process in background but with error capture
+                async def safe_deliver():
+                    try:
+                        await deliver_movie_on_start(update, context, movie_id)
+                        try:
+                            await status_msg.delete()
+                        except:
+                            pass
+                    except Exception as e:
+                        logger.error(f"Background delivery failed: {e}")
+                        try:
+                            await status_msg.edit_text(
+                                "❌ Sorry, couldn't fetch the movie. It might have been removed or there's a server issue.\n\n"
+                                "Try searching manually using the 🔍 Search button."
+                            )
+                        except:
+                            pass
+                
+                task = asyncio.create_task(safe_deliver())
                 background_tasks.add(task)
-                
-                # Jab task khatam ho, use set se hata dein
                 task.add_done_callback(background_tasks.discard)
                 
                 return MAIN_MENU
                 
             except (IndexError, ValueError) as e:
                 logger.error(f"Error processing movie link: {e}")
-                await update.message.reply_text("❌ Invalid movie link.")
+                await update.message.reply_text("❌ Invalid movie link format.")
                 return MAIN_MENU
 
-        # --- CASE 2: AUTO SEARCH (Ab Fast Hoga) ---
-if payload.startswith("q_"):
-    try:
-        query_text = payload[2:]
-        query_text = query_text.replace("_", " ")
-        query_text = " ".join(query_text.split()).strip()
-
-        status_msg = await update.message.reply_text(
-            f"🔎 Checking for '{query_text}'... ⚡"
-        )
-
-        task = asyncio.create_task(
-            background_search_and_send(update, context, query_text, status_msg)
-        )
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
-
-        return MAIN_MENU
-
-    except Exception as e:
-        logger.error(f"Deep link error (q_): {e}")
-
+        # --- CASE 2: AUTO SEARCH ---
+        elif payload.startswith("q_"):
+            try:
+                query_text = payload[2:].replace("_", " ").strip()
+                
+                # Immediate feedback
+                status_msg = await update.message.reply_text(
+                    f"🔎 Searching for '{query_text}'... Please wait.",
+                    disable_notification=True
+                )
+                
+                # Process in background with error capture
+                async def safe_search():
+                    try:
+                        await background_search_and_send(update, context, query_text, status_msg)
+                    except Exception as e:
+                        logger.error(f"Background search failed: {e}")
+                        try:
+                            await status_msg.edit_text(
+                                "❌ Search failed. Please try again later or use the 🔍 Search button."
+                            )
+                        except:
+                            pass
+                
+                asyncio.create_task(safe_search())
+                return MAIN_MENU
+                
+            except Exception as e:
+                logger.error(f"Deep link error: {e}")
+                await update.message.reply_text("❌ Error processing search link.")
 
     # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
-📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
-... (baaki text waisa hi rahega)
+📨 Send Movie Or Series Name And Year As Per Google Spelling..!! 👍
+...
 """
-    # Msg ko variable me lein
     msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
-    
-    # Auto-delete lagayein (e.g., 5 minute baad)
     track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
     
     return MAIN_MENU
