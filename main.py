@@ -16,6 +16,7 @@ import requests
 import signal
 import sys
 import re
+background_tasks = set()
 from bs4 import BeautifulSoup
 import telegram
 import psycopg2
@@ -275,22 +276,33 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
             pass
         return 0
 
+# ==================== UPDATED AUTO-DELETE FUNCTIONS ====================
+
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
-    """Delete messages after specified delay"""
+    """Delete messages after specified delay using Background Tasks"""
     try:
         await asyncio.sleep(delay)
         for msg_id in message_ids:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                logger.info(f"✅ Deleted message {msg_id} from chat {chat_id}")
-            except Exception as e:
-                logger.error(f"Failed to delete message {msg_id}: {e}")
+                logger.info(f"🗑️ Deleted message {msg_id}")
+            except Exception:
+                pass # Message pehle hi delete ho gaya hoga
     except Exception as e:
-        logger.error(f"Error in delete_messages_after_delay: {e}")
+        logger.error(f"Error in delete task: {e}")
 
-def track_message_for_deletion(chat_id, message_id, delay=60):
-    """Track message for auto-deletion"""
-    messages_to_auto_delete[chat_id].append((message_id, delay))
+def track_message_for_deletion(context, chat_id, message_id, delay=60):
+    """
+    Schedules a message for deletion. 
+    NOTE: Requires 'context' as the first argument now.
+    """
+    # Task create karein
+    task = asyncio.create_task(
+        delete_messages_after_delay(context, chat_id, [message_id], delay)
+    )
+    # Global set me add karein (GC se bachane ke liye)
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 # ==================== DATABASE FUNCTIONS ====================
 def setup_database():
@@ -1123,38 +1135,50 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 
 # ==================== NEW MISSING FUNCTION ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
-    """Background task to fetch and send movie from Deep Link"""
+    """
+    Fetches and sends a movie safely.
+    """
     chat_id = update.effective_chat.id
+    
+    # 1. Processing message (Taki user ko lage bot zinda hai)
+    try:
+        status_msg = await context.bot.send_message(chat_id, "⚡ Finding your movie... Please wait.")
+    except Exception as e:
+        logger.error(f"Cannot send status message: {e}")
+        return
+
+    conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Database Error.")
+            await status_msg.edit_text("❌ Server Error: Database connection failed.")
             return
 
         cur = conn.cursor()
-        # Movie details fetch karein
-        cur.execute("SELECT id, title, url, file_id FROM movies WHERE id = %s", (movie_id,))
-        movie = cur.fetchone()
+        cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
+        movie_data = cur.fetchone()
         cur.close()
         conn.close()
 
-        if movie:
-            m_id, title, url, file_id = movie
-            # Loading message bhejein (Optional)
-            status_msg = await context.bot.send_message(chat_id=chat_id, text=f"⚡ Fetching: {title}...")
-            
-            # Main send function call karein
-            await send_movie_to_user(update, context, m_id, title, url, file_id)
-            
-            # Loading message delete karein
-            try: await status_msg.delete()
-            except: pass
+        # Message delete karein taki chat clean rahe
+        try: await status_msg.delete()
+        except: pass
+
+        if movie_data:
+            title, url, file_id = movie_data
+            # Send movie function call
+            await send_movie_to_user(update, context, movie_id, title, url, file_id)
         else:
-            await context.bot.send_message(chat_id=chat_id, text="❌ Movie database mein nahi mili (Shayad delete ho gayi ho).")
+            await context.bot.send_message(chat_id, "❌ Movie not found (ID Invalid or Deleted).")
 
     except Exception as e:
-        logger.error(f"Error in deliver_movie_on_start: {e}")
-        await context.bot.send_message(chat_id=chat_id, text="❌ Error fetching movie.")
+        logger.error(f"CRITICAL ERROR in deliver_movie: {e}", exc_info=True)
+        try: await status_msg.edit_text("❌ An internal error occurred. Please try again.")
+        except: pass
+    finally:
+        if conn:
+            try: conn.close()
+            except: pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -1171,18 +1195,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = context.args[0]
         
         # --- CASE 1: DIRECT MOVIE ID (Sabse Fast) ---
-        if payload.startswith("movie_"):
-            try:
-                movie_id = int(payload.split('_')[1])
-                
-                # --- FIX: Update pass karna zaroori hai ---
-                # Purana code: asyncio.create_task(deliver_movie_on_start(context, movie_id, chat_id))
-                # Naya code:
-                asyncio.create_task(deliver_movie_on_start(update, context, movie_id))
-                
-                return MAIN_MENU
-            except Exception as e:
-                logger.error(f"Error parsing movie_id in start: {e}")
+        # --- CASE 1: DIRECT MOVIE ID ---
+            if payload.startswith("movie_"):
+                try:
+                    movie_id = int(payload.split('_')[1])
+                    
+                    # ✅ FIX: Task ko variable me store karein aur set me add karein
+                    task = asyncio.create_task(deliver_movie_on_start(update, context, movie_id))
+                    
+                    # Task ko global set me add karein (Garbage Collection rokne ke liye)
+                    background_tasks.add(task)
+                    
+                    # Jab task khatam ho, use set se hata dein
+                    task.add_done_callback(background_tasks.discard)
+                    
+                    return MAIN_MENU
+                    
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Error processing movie link: {e}")
+                    await update.message.reply_text("❌ Invalid movie link.")
+                    return MAIN_MENU
 
         # --- CASE 2: AUTO SEARCH (Ab Fast Hoga) ---
         elif payload.startswith("q_"):
@@ -1203,17 +1235,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Deep link error: {e}")
 
-    # --- NORMAL WELCOME MESSAGE (No Deep Link) ---
+    # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
 📨 Sᴇɴᴅ Mᴏᴠɪᴇ Oʀ Sᴇʀɪᴇs Nᴀᴍᴇ ᴀɴᴅ Yᴇᴀʀ Aꜱ Pᴇʀ Gᴏᴏɢʟᴇ Sᴘᴇʟʟɪɴɢ..!! 👍
-
-⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ Mᴏᴠɪᴇ 👇
-👉 Jailer 2023
-
-⚠️ Exᴀᴍᴘʟᴇ Fᴏʀ WᴇʙSᴇʀɪᴇs 👇
-👉 Stranger Things S02
+... (baaki text waisa hi rahega)
 """
-    await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+    # Msg ko variable me lein
+    msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+    
+    # Auto-delete lagayein (e.g., 5 minute baad)
+    track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
+    
     return MAIN_MENU
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
@@ -1222,12 +1254,12 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if query == '🔍 Search Movies':
             msg = await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
             return SEARCHING
 
         elif query == '🙋 Request Movie':
             msg = await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
         elif query == '📊 My Stats':
@@ -1322,15 +1354,19 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
 
-        # Send selection keyboard (Page 0)
         keyboard = create_movie_selection_keyboard(movies, page=0)
         
-        await update.message.reply_text(
+        # Msg capture karein
+        msg = await update.message.reply_text(
             f"🎬 **Found {len(movies)} results for '{query}'**\n\n"
             "👇 Select your movie below:",
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
+        
+        # Auto-delete lagayein (e.g., 2 minute baad)
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+        
         return MAIN_MENU
 
     except Exception as e:
@@ -1354,13 +1390,13 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।\n"
                 "बार‑बार भेजने से फ़ायदा नहीं होगा।"
             )
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
         intent = await analyze_intent(user_message)
         if not intent["is_request"]:
             msg = await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है। कृपया सही नाम भेजें।")
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
         movie_title = intent["content_title"] or user_message
@@ -1379,7 +1415,7 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                 )
                 msg = await update.message.reply_text(strict_text)
-                track_message_for_deletion(update.effective_chat.id, msg.message_id, 120)
+                track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
                 return REQUESTING
 
         stored = store_user_request(
