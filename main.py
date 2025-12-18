@@ -1155,8 +1155,12 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 # ==================== NEW MISSING FUNCTION ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
     """
-    Fetches and sends a movie safely with detailed error handling
+    Fetches and sends a movie safely - can be called multiple times
     """
+    # Clear stale data
+    context.user_data.pop('selected_movie_data', None)
+    context.user_data.pop('search_results', None)
+    
     chat_id = update.effective_chat.id
     
     # Status message
@@ -1169,7 +1173,6 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
         )
     except Exception as e:
         logger.error(f"Cannot send status message: {e}")
-        # Continue without status message
 
     conn = None
     try:
@@ -1183,9 +1186,6 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         cur = conn.cursor()
-        
-        # Add timeout to query
-        cur.execute("SET LOCAL statement_timeout = '10s'")
         cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
         movie_data = cur.fetchone()
         
@@ -1205,20 +1205,9 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
                 text="❌ Movie not found. It may have been removed from our database."
             )
 
-    except psycopg2.OperationalError as e:
-        logger.error(f"Database operational error: {e}")
-        error_msg = "❌ Database timeout. Please try again in a few minutes."
-        if status_msg:
-            try:
-                await status_msg.edit_text(error_msg)
-            except:
-                pass
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=error_msg)
-            
     except Exception as e:
         logger.error(f"CRITICAL ERROR in deliver_movie: {e}", exc_info=True)
-        error_msg = "❌ Failed to retrieve movie. Please try searching manually."
+        error_msg = "❌ Failed to retrieve movie. Please try again or use search."
         if status_msg:
             try:
                 await status_msg.edit_text(error_msg)
@@ -1233,94 +1222,152 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
                 conn.close()
             except:
                 pass
+# Add this at the top level
+from asyncio import Lock
+from collections import defaultdict
+
+user_processing_locks = defaultdict(Lock)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Start command handler with proper error handling and user feedback
+    Start command handler with forced state reset and user-level locking
     """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    logger.info(f"START called by user {user_id}")
+    logger.info(f"START called by user {user_id} with args: {context.args}")
 
-    # Deep link payload check
+    # 🚨 CRITICAL: Force clear any stuck conversation state
+    context.user_data.clear()
+    
+    # 🚨 CRITICAL: Force reset conversation state
+    if hasattr(context, 'conversation') and context.conversation:
+        context.conversation = None
+
+    # Deep link processing with user-level lock to prevent duplicates
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         
-        # --- CASE 1: DIRECT MOVIE ID ---
-        if payload.startswith("movie_"):
-            try:
-                movie_id = int(payload.split('_')[1])
-                
-                # Send immediate feedback
-                status_msg = await update.message.reply_text(
-                    "🎬 Deep link detected! Fetching your movie... Please wait.",
-                    disable_notification=True
-                )
-                
-                # Process in background but with error capture
-                async def safe_deliver():
+        # Check if user is already processing a request
+        if user_processing_locks[user_id].locked():
+            await update.message.reply_text(
+                "⏳ Please wait! Your previous request is still processing...",
+                disable_notification=True
+            )
+            return MAIN_MENU
+
+        async with user_processing_locks[user_id]:
+            # --- CASE 1: DIRECT MOVIE ID ---
+            if payload.startswith("movie_"):
+                try:
+                    movie_id = int(payload.split('_')[1])
+                    
+                    # Immediate feedback
+                    status_msg = await update.message.reply_text(
+                        f"🎬 Deep link detected!\n"
+                        f"Movie ID: {movie_id}\n"
+                        f"Fetching... Please wait ⏳",
+                        disable_notification=True
+                    )
+                    
+                    # Process with detailed error capture
                     try:
                         await deliver_movie_on_start(update, context, movie_id)
+                        
+                        # Success - delete status message
                         try:
                             await status_msg.delete()
                         except:
                             pass
+                            
+                        logger.info(f"✅ Deep link SUCCESS for user {user_id}, movie {movie_id}")
+                        
                     except Exception as e:
-                        logger.error(f"Background delivery failed: {e}")
+                        logger.error(f"❌ Deep link FAILED for user {user_id}: {e}")
+                        
+                        # Update status message with error
+                        error_text = (
+                            f"❌ Sorry, couldn't fetch the movie (ID: {movie_id}).\n\n"
+                            f"**Possible reasons:**\n"
+                            f"• Movie was removed from database\n"
+                            f"• Server connection timeout\n"
+                            f"• File is temporarily unavailable\n\n"
+                            f"**Try:**\n"
+                            f"• Use 🔍 Search button to find it manually\n"
+                            f"• Or wait 2 minutes and try this link again"
+                        )
+                        
                         try:
                             await status_msg.edit_text(
-                                "❌ Sorry, couldn't fetch the movie. It might have been removed or there's a server issue.\n\n"
-                                "Try searching manually using the 🔍 Search button."
+                                error_text,
+                                parse_mode='Markdown'
                             )
                         except:
-                            pass
-                
-                task = asyncio.create_task(safe_deliver())
-                background_tasks.add(task)
-                task.add_done_callback(background_tasks.discard)
-                
-                return MAIN_MENU
-                
-            except (IndexError, ValueError) as e:
-                logger.error(f"Error processing movie link: {e}")
-                await update.message.reply_text("❌ Invalid movie link format.")
-                return MAIN_MENU
+                            # If edit fails, send new message
+                            await update.message.reply_text(
+                                error_text,
+                                parse_mode='Markdown'
+                            )
+                    
+                    return MAIN_MENU
+                    
+                except (IndexError, ValueError) as e:
+                    logger.error(f"Invalid movie link format: {e}")
+                    await update.message.reply_text(
+                        "❌ Invalid movie link format.\n"
+                        "Correct format: `/start movie_123`",
+                        parse_mode='Markdown'
+                    )
+                    return MAIN_MENU
 
-        # --- CASE 2: AUTO SEARCH ---
-        elif payload.startswith("q_"):
-            try:
-                query_text = payload[2:].replace("_", " ").strip()
-                
-                # Immediate feedback
-                status_msg = await update.message.reply_text(
-                    f"🔎 Searching for '{query_text}'... Please wait.",
-                    disable_notification=True
-                )
-                
-                # Process in background with error capture
-                async def safe_search():
+            # --- CASE 2: AUTO SEARCH ---
+            elif payload.startswith("q_"):
+                try:
+                    query_text = payload[2:].replace("_", " ").strip()
+                    
+                    # Immediate feedback
+                    status_msg = await update.message.reply_text(
+                        f"🔎 Deep link search detected!\n"
+                        f"Query: '{query_text}'\n"
+                        f"Searching... Please wait ⏳",
+                        disable_notification=True
+                    )
+                    
+                    # Process with error capture
                     try:
                         await background_search_and_send(update, context, query_text, status_msg)
+                        logger.info(f"✅ Deep link SEARCH SUCCESS for user {user_id}, query: {query_text}")
+                        
                     except Exception as e:
-                        logger.error(f"Background search failed: {e}")
+                        logger.error(f"❌ Deep link SEARCH FAILED for user {user_id}: {e}")
+                        
+                        error_text = (
+                            f"❌ Search failed for '{query_text}'.\n\n"
+                            f"**Try:**\n"
+                            f"• Use 🔍 Search button manually\n"
+                            f"• Check your spelling\n"
+                            f"• Request the movie using 🙋 Request button"
+                        )
+                        
                         try:
-                            await status_msg.edit_text(
-                                "❌ Search failed. Please try again later or use the 🔍 Search button."
-                            )
+                            await status_msg.edit_text(error_text, parse_mode='Markdown')
                         except:
-                            pass
-                
-                asyncio.create_task(safe_search())
-                return MAIN_MENU
-                
-            except Exception as e:
-                logger.error(f"Deep link error: {e}")
-                await update.message.reply_text("❌ Error processing search link.")
+                            await update.message.reply_text(error_text, parse_mode='Markdown')
+                    
+                    return MAIN_MENU
+                    
+                except Exception as e:
+                    logger.error(f"Deep link search error: {e}")
+                    await update.message.reply_text("❌ Error processing search link.")
+                    return MAIN_MENU
 
     # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
 📨 Send Movie Or Series Name And Year As Per Google Spelling..!! 👍
-...
+
+🎬 <b>FlimfyBox Bot</b> is ready to serve you!
+
+👇 Use the buttons below to get started:
 """
     msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
     track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
