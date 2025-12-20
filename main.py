@@ -1289,7 +1289,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏳ Please wait! Your previous request is still processing...",
                 disable_notification=True
             )
-            return MAIN_MENU
+            return
 
         async with user_processing_locks[user_id]:
             # --- CASE 1: DIRECT MOVIE ID ---
@@ -1338,13 +1338,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode='Markdown'
                             )
                         except:
-                            # If edit fails, send new message
                             await update.message.reply_text(
                                 error_text,
                                 parse_mode='Markdown'
                             )
                     
-                    return MAIN_MENU
+                    return
                     
                 except (IndexError, ValueError) as e:
                     logger.error(f"Invalid movie link format: {e}")
@@ -1353,7 +1352,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Correct format: `/start movie_123`",
                         parse_mode='Markdown'
                     )
-                    return MAIN_MENU
+                    return
 
             # --- CASE 2: AUTO SEARCH ---
             elif payload.startswith("q_"):
@@ -1389,12 +1388,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except:
                             await update.message.reply_text(error_text, parse_mode='Markdown')
                     
-                    return MAIN_MENU
+                    return
                     
                 except Exception as e:
                     logger.error(f"Deep link search error: {e}")
                     await update.message.reply_text("❌ Error processing search link.")
-                    return MAIN_MENU
+                    return
 
     # --- NORMAL WELCOME MESSAGE ---
     welcome_text = """
@@ -1404,10 +1403,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👇 Use the buttons below to get started:
 """
-    msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+    msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode='HTML')
     track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
     
-    return MAIN_MENU
+    # ❌ OLD: return MAIN_MENU
+    return # ✅ NEW: Just return (No state needed for main menu)
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
     try:
@@ -1476,27 +1476,36 @@ Just use the buttons below to navigate!
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for movies in the database"""
     try:
+        # Agar ye button click se aya hai (cancel/back)
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            # Yahan hum kuch return nahi kar rahe, bas message bhej rahe hain
+            return
+
+        # Agar message text nahi hai
+        if not update.message or not update.message.text:
+            return 
+
         query = update.message.text.strip()
         
-        if not query:
-            await update.message.reply_text("Please enter a movie name to search.")
-            return MAIN_MENU
+        # Safety check
+        if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
+             return await main_menu_or_search(update, context)
+
+        # 1. Search DB
+        movies = get_movies_from_db(query, limit=10)
         
-        # 1. Preprocess and search
-        processed_query = preprocess_query(query)
-        movies = get_movies_from_db(processed_query, limit=10)
-        
-        # 2. If no movies found
+        # 2. Not Found
         if not movies:
-            # Send a random "Not Found" GIF if available
             if SEARCH_ERROR_GIFS:
                 try:
                     gif = random.choice(SEARCH_ERROR_GIFS)
-                    await update.message.reply_animation(animation=gif)
+                    msg_gif = await update.message.reply_animation(animation=gif)
+                    track_message_for_deletion(context, update.effective_chat.id, msg_gif.message_id, 60)
                 except:
                     pass
 
-            # --- NEW HINDI TEXT (With Hidden Google Link) ---
             not_found_text = (
                 "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
                 "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
@@ -1512,26 +1521,26 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "अगर फिर भी न मिले तो नीचे Request करे."
             )
 
-            # --- REQUEST BUTTON ---
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query[:20]}")]
             ])
             
-            await update.message.reply_text(
+            msg = await update.message.reply_text(
                 text=not_found_text,
                 reply_markup=keyboard,
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            return MAIN_MENU
+            # Auto Delete Not Found Msg
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
-        # 3. If movies found
+        # 3. Found
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
 
         keyboard = create_movie_selection_keyboard(movies, page=0)
         
-        # Msg capture karein
         msg = await update.message.reply_text(
             f"🎬 **Found {len(movies)} results for '{query}'**\n\n"
             "👇 Select your movie below:",
@@ -1539,15 +1548,13 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        # Auto-delete lagayein (e.g., 2 minute baad)
         track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-        
-        return MAIN_MENU
+        return # <--- YAHAN SE BHI MAIN_MENU HATA DIYA HAI
 
     except Exception as e:
         logger.error(f"Error in search_movies: {e}")
-        await update.message.reply_text("An error occurred during search.")
-        return MAIN_MENU
+        # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
+        return
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
@@ -3479,41 +3486,35 @@ fix_database_constraints()
 # ==================== NEW REQUEST SYSTEM (CONFIRMATION FLOW) ====================
 
 async def start_request_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 1: User clicks 'Request This Movie' -> Show Guidelines"""
+    """Step 1: User clicks 'Request This Movie' -> Show Short & Stylish Guidelines"""
     query = update.callback_query
     await query.answer()
     
-    # User ka diya hua Note (Guidelines)
-    request_instruction_text = """
-<b>🎬 Movie / Web-Series Request System</b>
-
-ठीक है! अब आप अपनी पसंदीदा मूवी या वेब-सीरीज़ रिक्वेस्ट कर सकते हैं।
-रिक्वेस्ट भेजने से पहले एक छोटी-सी बात ध्यान रखें 👇
-
-<b>📌 क्यों सही नाम भेजना ज़रूरी है?</b>
-सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी
-और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
-
-<b>✔️ सही तरीका: गूगल से स्पेलिंग सर्च कर ले</b>
-• KGF 2
-• Panchayat
-• Mirzapur
-• Animal
-
-<b>❌ गलत तरीके (इनसे बचें):</b>
-• KGF 2 movie in hindi download
-• मुझे पंचायत का नया सीज़न चाहिए
-• Animal full HD leaked
-
-━━━━━━━━━━━━━━
-<b>👉 (Name Only — No extra words, No details)</b>
-━━━━━━━━━━━━━━
-"""
+    # --- NEW STYLISH & SHORT TEXT ---
+    request_instruction_text = (
+        "📝 𝗥𝗲𝗾𝘂𝗲𝘀𝘁 𝗥𝘂𝗹𝗲𝘀..!!\n\n"
+        "बस मूवी/सीरीज़ का <b>असली नाम</b> लिखें।✔️\n\n"
+        "फ़ालतू शब्द (Download, HD, Please) न लिखें।♻️\n\n"
+        "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> से सही स्पेलिंग चेक कर लें। ☜\n\n"
+        "✐ᝰ𝗘𝘅𝗮𝗺𝗽𝗹𝗲\n\n"
+        "सही है.!‼️    \n"
+        "─────────────────────\n"
+        "Animal ✔️ | Animal Movie Download ❌\n"
+        "─────────────────────\n"
+        "Mirzapur S03 ✔️ | Mirzapur New Season ❌\n"
+        "─────────────────────\n\n"
+        "👇 <b>अब नीचे मूवी का नाम भेजें:</b>"
+    )
+    
     # Message Edit karein
     await query.edit_message_text(
         text=request_instruction_text,
-        parse_mode='HTML'
+        parse_mode='HTML',
+        disable_web_page_preview=True
     )
+    
+    # Is instruction message ko bhi delete list me daal dein (2 min baad)
+    track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 120)
     
     # State change -> Ab Bot sirf Name ka wait karega
     return WAITING_FOR_NAME
@@ -3521,10 +3522,15 @@ async def start_request_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_request_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step 2: User sends name -> Bot asks for Confirmation (Not saved yet)"""
     user_name_input = update.message.text.strip()
+    chat_id = update.effective_chat.id
     
+    # User ka message delete karne ke liye (Clean Chat)
+    track_message_for_deletion(context, chat_id, update.message.message_id, 120)
+
     # Safety: Check if user tried to send a command or menu button
     if user_name_input.startswith('/') or user_name_input in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
-        await update.message.reply_text("❌ Request Process Cancelled. Back to menu.")
+        msg = await update.message.reply_text("❌ Request Process Cancelled. Back to menu.")
+        track_message_for_deletion(context, chat_id, msg.message_id, 60)
         return ConversationHandler.END
 
     # Name ko temporary memory me rakho
@@ -3546,8 +3552,8 @@ async def handle_request_name_input(update: Update, context: ContextTypes.DEFAUL
         parse_mode='HTML'
     )
     
-    # 2 Min auto delete
-    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+    # ⚡ Ye Confirmation message 60 seconds me delete ho jayega
+    track_message_for_deletion(context, chat_id, msg.message_id, 60)
     
     return CONFIRMATION
 
@@ -3555,12 +3561,15 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
     """Step 3: Handle Yes/No buttons"""
     query = update.callback_query
     await query.answer()
+    chat_id = update.effective_chat.id
     
     choice = query.data
     user = query.from_user
     
     if choice == "confirm_no":
         await query.edit_message_text("❌ Request Cancelled. आप दोबारा सर्च या रिक्वेस्ट कर सकते हैं।")
+        # Cancel message auto delete in 10 seconds
+        track_message_for_deletion(context, chat_id, query.message.message_id, 10)
         context.user_data.pop('temp_request_name', None)
         return ConversationHandler.END
         
@@ -3583,19 +3592,31 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
             await send_admin_notification(context, user, movie_title, group_info)
             
             success_text = f"""
-✅ <b>Request Successfully Submitted!</b>
+✅ <b>Request Sent to Admin!</b>
 
 🎬 Movie: <b>{movie_title}</b>
 
-📝 आपकी request सफलतापूर्वक दर्ज कर ली गई है!
-⏳ जैसे ही यह उपलब्ध होगी, मैं आपको तुरंत सूचित कर दूंगा।
+📝 आपकी रिक्वेस्ट एडमिन <b>@ownermahi</b> / <b>@ownermahima</b> को मिली गई है।
+⏳ जैसे ही मूवी उपलब्ध होगी, वो खुद आपको यहाँ सूचित (Notify) कर देंगे।
+
+<i>हमसे जुड़े रहने के लिए धन्यवाद! 🙏</i>
             """
             await query.edit_message_text(success_text, parse_mode='HTML')
         else:
             await query.edit_message_text("❌ Error: Request save नहीं हो पाई। शायद यह पहले से पेंडिंग है।")
             
+        # ⚡ Success Message Auto Delete (60 Seconds)
+        track_message_for_deletion(context, chat_id, query.message.message_id, 60)
+            
         context.user_data.pop('temp_request_name', None)
         return ConversationHandler.END
+
+async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """2 Minute Timeout Handler"""
+    if update.effective_message:
+        msg = await update.effective_message.reply_text("⏳ <b>Session Expired:</b> रिक्वेस्ट का समय समाप्त हो गया।", parse_mode='HTML')
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 30)
+    return ConversationHandler.END
 
 async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """2 Minute Timeout Handler"""
