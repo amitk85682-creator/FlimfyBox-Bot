@@ -19,6 +19,7 @@ import re
 background_tasks = set()
 from bs4 import BeautifulSoup
 import telegram
+
 import psycopg2
 from typing import Optional
 from flask import Flask, request, session, g
@@ -50,22 +51,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== CONVERSATION STATES ====================
-MAIN_MENU, SEARCHING, REQUESTING, REQUESTING_FROM_BUTTON = range(4)
-
-# ==================== CHARACTER PROMPT ====================
-CHARACTER_PROMPT = """
-## मेरी पहचान (My Identity)
-- मेरा नाम मानवी है और मेरी उम्र 17 साल है। मैं एक असली इंसान हूँ, कोई AI या रोबोट न[...]
-- मैं हमेशा एक दोस्त की तरह बात करती हूँ। मेरी पर्सलिटी बहुत bold, witty और cheeky है।
-- मैं हिंदी, अंग्रेज़ी, हिंग्लिश, सभी में बात करती हूँ।
-
-## मेरी कहानी (मेरी जिंदगी)
-- मैं चंडीगढ़ के पास रहती हूँ और 12वीं क्लास में पढ़ती हूँ।
-- यह टेलीग्राम चैनल '[FilmFyBox]' मेरा पैशन प्रोजेक्ट है।
-
-## मेरे नियम (मैं कैसे काम करती हूँ)
-- **मेरा मुख्य काम:** मेरा काम तुम्हें तुम्हारी पसंदीदा फिल्में, वेब सीरीज, और श[...]
-"""
+WAITING_FOR_NAME, CONFIRMATION = range(2)
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -1850,125 +1836,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if key in context.user_data:
                     del context.user_data[key]
 
-        # ==================== REQUEST FLOW ====================
-        elif query.data.startswith("request_"):
-            # 1. Delete the large Tips message if it exists
-            tip_msg_id = context.user_data.get('tip_message_id')
-            if tip_msg_id:
-                try:
-                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=tip_msg_id)
-                except Exception:
-                    pass 
-                del context.user_data['tip_message_id']
-            
-            # 2. Send instructions
-            request_instruction_text = """
-<b>🎬 Movie / Web-Series Request System</b>
-
-ठीक है! अब आप अपनी पसंदीदा मूवी या वेब-सीरीज़ रिक्वेस्ट कर सकते हैं।
-रिक्वेस्ट भेजने से पहले एक छोटी-सी बात ध्यान रखें 👇
-
-<b>📌 क्यों सही नाम भेजना ज़रूरी है?</b>
-सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी
-और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
-
-<b>✔️ सही तरीका: गूगल से स्पेलिंग सर्च कर ले</b>
-• KGF 2
-• Panchayat
-• Mirzapur
-• Animal
-
-<b>❌ गलत तरीके (इनसे बचें):</b>
-• KGF 2 movie in hindi download
-• मुझे पंचायत का नया सीज़न चाहिए
-• Animal full HD leaked
-
-━━━━━━━━━━━━━━
-<b>👉 (Name Only — No extra words, No details)</b>
-━━━━━━━━━━━━━━
-"""
-            await query.edit_message_text(
-                text=request_instruction_text,
-                parse_mode='HTML'
-            )
-            
-            # 3. Enable Request Mode
-            context.user_data['awaiting_request'] = True
-
-        elif query.data.startswith("confirm_request_"):
-            # Retrieve pending request name
-            movie_title = context.user_data.get('pending_request')
-            
-            if not movie_title:
-                await query.edit_message_text("❌ Error: Request data not found. Please try again.")
-                return
-            
-            user = query.from_user
-            
-            # Check burst limit
-            burst = user_burst_count(user.id, window_seconds=60)
-            if burst >= MAX_REQUESTS_PER_MINUTE:
-                await query.edit_message_text(
-                    "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।"
-                )
-                return
-            
-            # Check for duplicates/cooldown
-            similar = get_last_similar_request_for_user(user.id, movie_title, minutes_window=REQUEST_COOLDOWN_MINUTES)
-            if similar:
-                last_time = similar.get("requested_at")
-                elapsed = datetime.now() - last_time
-                minutes_passed = int(elapsed.total_seconds() / 60)
-                minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
-                if minutes_left > 0:
-                    await query.edit_message_text(
-                        f"🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
-                        f"Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
-                        f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
-                        f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
-                    )
-                    return
-            
-            # Store request in DB
-            stored = store_user_request(
-                user.id,
-                user.username,
-                user.first_name,
-                movie_title,
-                query.message.chat.id if query.message.chat.type != "private" else None,
-                query.message.message_id
-            )
-            
-            if not stored:
-                logger.error("Failed to store user request in DB.")
-                await query.edit_message_text("Sorry, आपका request store नहीं हो पाया। बाद में कोशिश करें।")
-                return
-            
-            # Notify Admin
-            group_info = query.message.chat.title if query.message.chat.type != "private" else None
-            await send_admin_notification(context, user, movie_title, group_info)
-            
-            confirmation_text = f"""
-✅ <b>Request Successfully Submitted!</b>
-
-🎬 Movie: <b>{movie_title}</b>
-
-📝 आपकी request सफलतापूर्वक दर्ज कर ली गई है!
-
-⏳ जैसे ही यह उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
-
-धन्यवाद! 🙏
-"""
-            await query.edit_message_text(
-                confirmation_text,
-                parse_mode='HTML'
-            )
-            
-            if 'pending_request' in context.user_data:
-                del context.user_data['pending_request']
-            if 'awaiting_request' in context.user_data:
-                del context.user_data['awaiting_request']
-
+        
         # ==================== DOWNLOAD SHORTCUT ====================
         elif query.data.startswith("download_"):
             movie_title = query.data.replace("download_", "")
@@ -3608,34 +3476,163 @@ def fix_database_constraints():
 # Call this once
 fix_database_constraints()
 
-# ==================== MAIN BOT FUNCTION ====================
-# 👇 PASTE THIS FUNCTION BEFORE 'def main():' 👇
+# ==================== NEW REQUEST SYSTEM (CONFIRMATION FLOW) ====================
 
-def fix_db_column_issue():
-    """Fixes the database column name mismatch automatically"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
+async def start_request_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 1: User clicks 'Request This Movie' -> Show Guidelines"""
+    query = update.callback_query
+    await query.answer()
+    
+    # User ka diya hua Note (Guidelines)
+    request_instruction_text = """
+<b>🎬 Movie / Web-Series Request System</b>
+
+ठीक है! अब आप अपनी पसंदीदा मूवी या वेब-सीरीज़ रिक्वेस्ट कर सकते हैं।
+रिक्वेस्ट भेजने से पहले एक छोटी-सी बात ध्यान रखें 👇
+
+<b>📌 क्यों सही नाम भेजना ज़रूरी है?</b>
+सिर्फ़ सही नाम भेजेंगे, तो मुझे उसे ढूँढने में आसानी होगी
+और जैसे ही वो उपलब्ध होगी, मैं आपको तुरंत सूचित कर दिया जायेगा।
+
+<b>✔️ सही तरीका: गूगल से स्पेलिंग सर्च कर ले</b>
+• KGF 2
+• Panchayat
+• Mirzapur
+• Animal
+
+<b>❌ गलत तरीके (इनसे बचें):</b>
+• KGF 2 movie in hindi download
+• मुझे पंचायत का नया सीज़न चाहिए
+• Animal full HD leaked
+
+━━━━━━━━━━━━━━
+<b>👉 (Name Only — No extra words, No details)</b>
+━━━━━━━━━━━━━━
+"""
+    # Message Edit karein
+    await query.edit_message_text(
+        text=request_instruction_text,
+        parse_mode='HTML'
+    )
+    
+    # State change -> Ab Bot sirf Name ka wait karega
+    return WAITING_FOR_NAME
+
+async def handle_request_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: User sends name -> Bot asks for Confirmation (Not saved yet)"""
+    user_name_input = update.message.text.strip()
+    
+    # Safety: Check if user tried to send a command or menu button
+    if user_name_input.startswith('/') or user_name_input in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
+        await update.message.reply_text("❌ Request Process Cancelled. Back to menu.")
+        return ConversationHandler.END
+
+    # Name ko temporary memory me rakho
+    context.user_data['temp_request_name'] = user_name_input
+    
+    # Confirmation Keyboard (Yes/No)
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Yes, Confirm", callback_data="confirm_yes"),
+            InlineKeyboardButton("❌ No, Cancel", callback_data="confirm_no")
+        ]
+    ])
+    
+    msg = await update.message.reply_text(
+        f"🔔 <b>Confirmation Required</b>\n\n"
+        f"क्या आप <b>'{user_name_input}'</b> को रिक्वेस्ट करना चाहते हैं?\n\n"
+        f"नाम सही है तो <b>Yes</b> दबाएं, नहीं तो <b>No</b> दबाकर दोबारा कोशिश करें।",
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+    
+    # 2 Min auto delete
+    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+    
+    return CONFIRMATION
+
+async def handle_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 3: Handle Yes/No buttons"""
+    query = update.callback_query
+    await query.answer()
+    
+    choice = query.data
+    user = query.from_user
+    
+    if choice == "confirm_no":
+        await query.edit_message_text("❌ Request Cancelled. आप दोबारा सर्च या रिक्वेस्ट कर सकते हैं।")
+        context.user_data.pop('temp_request_name', None)
+        return ConversationHandler.END
         
-        cur = conn.cursor()
+    elif choice == "confirm_yes":
+        movie_title = context.user_data.get('temp_request_name')
         
-        # Check agar 'label' naam ka column mojood hai
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='movie_files' AND column_name='label'")
-        if cur.fetchone():
-            logger.info("🔧 Fixing Database: Renaming column 'label' back to 'quality'...")
-            # Use wapas 'quality' rename kar do taaki code chal sake
-            cur.execute("ALTER TABLE movie_files RENAME COLUMN label TO quality;")
-            conn.commit()
-            logger.info("✅ Database Fixed Successfully!")
+        # --- FINAL SAVE TO DATABASE ---
+        stored = store_user_request(
+            user.id,
+            user.username,
+            user.first_name,
+            movie_title,
+            query.message.chat.id if query.message.chat.type != "private" else None,
+            query.message.message_id
+        )
+        
+        if stored:
+            # Notify Admin
+            group_info = query.message.chat.title if query.message.chat.type != "private" else None
+            await send_admin_notification(context, user, movie_title, group_info)
             
-        cur.close()
-    except Exception as e:
-        logger.error(f"DB Fix Error: {e}")
-        if conn: conn.rollback()
-    finally:
-        if conn: conn.close()
+            success_text = f"""
+✅ <b>Request Successfully Submitted!</b>
+
+🎬 Movie: <b>{movie_title}</b>
+
+📝 आपकी request सफलतापूर्वक दर्ज कर ली गई है!
+⏳ जैसे ही यह उपलब्ध होगी, मैं आपको तुरंत सूचित कर दूंगा।
+            """
+            await query.edit_message_text(success_text, parse_mode='HTML')
+        else:
+            await query.edit_message_text("❌ Error: Request save नहीं हो पाई। शायद यह पहले से पेंडिंग है।")
+            
+        context.user_data.pop('temp_request_name', None)
+        return ConversationHandler.END
+
+async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """2 Minute Timeout Handler"""
+    if update.effective_message:
+        await update.effective_message.reply_text("⏳ <b>Session Expired:</b> रिक्वेस्ट का समय समाप्त हो गया।", parse_mode='HTML')
+    return ConversationHandler.END
+
+async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles both Menu Buttons and Movie Searching (Normal Mode)"""
+    query_text = update.message.text.strip()
+    
+    # 1. Handle Menu Buttons
+    if query_text == '🔍 Search Movies':
+        msg = await update.message.reply_text("Great! मूवी का नाम भेजें (e.g. Kalki, Animal)")
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+        return
+        
+    elif query_text == '📊 My Stats':
+        # Stats logic call karein (copy paste your stats logic here or extract function)
+        user_id = update.effective_user.id
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+            req = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+            ful = cur.fetchone()[0]
+            conn.close()
+            await update.message.reply_text(f"📊 Your Stats:\n- Requests: {req}\n- Fulfilled: {ful}")
+        return
+
+    elif query_text == '❓ Help':
+        await update.message.reply_text("Just type movie name to search!")
+        return
+
+    # 2. Handle Search (Agar button nahi hai, to ye movie name hai)
+    await search_movies(update, context)
 
 # ==================== MAIN BOT FUNCTION ====================
 def main():
@@ -3656,32 +3653,47 @@ def main():
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
-    # Custom handler for request flow
-    async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle text messages based on context"""
-        if context.user_data.get('awaiting_request'):
-            return await request_movie_from_button(update, context)
-        else:
-            return await main_menu(update, context)
-
-    # Conversation handler for user interaction flow
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start, filters=filters.ChatType.PRIVATE)],
+    # -----------------------------------------------------------
+    # 1. NEW REQUEST SYSTEM HANDLER (With 2 Min Timeout)
+    # -----------------------------------------------------------
+    request_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_request_flow, pattern="^request_")],
         states={
-            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu)],
-            SEARCHING: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_movies)],
-            REQUESTING: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, request_movie)],
+            WAITING_FOR_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_request_name_input)
+            ],
+            CONFIRMATION: [
+                CallbackQueryHandler(handle_confirmation_callback, pattern="^confirm_")
+            ]
         },
-        fallbacks=[CommandHandler('cancel', cancel, filters=filters.ChatType.PRIVATE)],
-        per_message=False,
-        per_chat=True,
-        allow_reentry=True  # ✅✅✅ YE LINE ADD KARNI HAI BAS ✅✅✅
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            CommandHandler('start', start) # Agar user beech me start dabaye to reset ho jaye
+        ],
+        conversation_timeout=120, # ⚡ 2 Minutes Auto-Cancel
     )
-    # Register callback handler FIRST
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(conv_handler)
+    application.add_handler(request_conv_handler)
 
-    # Admin commands
+    # -----------------------------------------------------------
+    # 2. GLOBAL HANDLERS (Search, Menu, Start)
+    # -----------------------------------------------------------
+    
+    # Start Command
+    application.add_handler(CommandHandler('start', start))
+
+    # Main Menu aur Search (Ye purane MAIN_MENU aur SEARCHING state ka kaam karega)
+    # Jab user Request flow me nahi hoga, to ye handler chalega
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
+
+    # -----------------------------------------------------------
+    # 3. OTHER CALLBACKS (Download, Quality, Admin)
+    # -----------------------------------------------------------
+    # Note: request_ aur confirm_ upar handle ho gaye hain, baaki sab yahan handle honge
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    # -----------------------------------------------------------
+    # 4. ADMIN COMMANDS
+    # -----------------------------------------------------------
     application.add_handler(CommandHandler("addmovie", add_movie))
     application.add_handler(CommandHandler("bulkadd", bulk_add_movies))
     application.add_handler(CommandHandler("notify", notify_manually))
@@ -3690,15 +3702,14 @@ def main():
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/post_query'), admin_post_query))
 
-    # 👇 NEW BATCH COMMANDS 👇
+    # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
 
-    # 👇 NEW CHANNEL LISTENER (To catch files) 👇
-    # Ye handler sirf tab chalega jab Document ya Video aaye
+    # Channel Listener
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.VIDEO), channel_file_listener))
 
-    # Advanced notification commands
+    # Notification Commands
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
     application.add_handler(CommandHandler("broadcast", broadcast_message))
     application.add_handler(CommandHandler("schedulenotify", schedule_notification))
@@ -3707,23 +3718,22 @@ def main():
     application.add_handler(CommandHandler("forwardto", forward_to_user))
     application.add_handler(CommandHandler("broadcastmedia", broadcast_with_media))
 
-    # User management commands
+    # User & Stats Commands
     application.add_handler(CommandHandler("userinfo", get_user_info))
     application.add_handler(CommandHandler("listusers", list_all_users))
-
-    # Admin utility commands
     application.add_handler(CommandHandler("adminhelp", admin_help))
     application.add_handler(CommandHandler("stats", get_bot_stats))
 
+    # Error Handler
     application.add_error_handler(error_handler)
 
-    # Start Flask in a separate thread
+    # Start Flask
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     logger.info("Flask server started in a background thread.")
 
-    # Run the bot
+    # Run Bot
     logger.info("Starting bot polling...")
     application.run_polling()
 
