@@ -1550,7 +1550,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         return MAIN_MENU
 
-except Exception as e:
+# 2. Now the except block is valid because it aligns with 'try'
+    except Exception as e:
         logger.error(f"Error in search_movies: {e}")
         await update.message.reply_text("An error occurred during search.")
         return MAIN_MENU
