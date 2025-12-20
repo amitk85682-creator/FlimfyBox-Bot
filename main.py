@@ -857,7 +857,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
 def get_main_keyboard():
     """Get the main menu keyboard"""
     keyboard = [
-        ['🔍 Search Movies', '🙋 Request Movie'],
+        ['🔍 Search Movies',
         ['📊 My Stats', '❓ Help']
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
@@ -944,6 +944,8 @@ def get_all_movie_qualities(movie_id):
         if conn:
             conn.close()
 
+# create_quality_selection_keyboard function ko isse replace karein ya modify karein:
+
 def create_quality_selection_keyboard(movie_id, title, qualities):
     """Create inline keyboard with quality selection buttons showing SIZE"""
     keyboard = []
@@ -952,12 +954,15 @@ def create_quality_selection_keyboard(movie_id, title, qualities):
     for quality, url, file_id, file_size in qualities:
         callback_data = f"quality_{movie_id}_{quality}"
         
-        # Agar size available hai to dikhayein, nahi to sirf Quality dikhayein
-        size_text = f" - {file_size}" if file_size else ""
+        # Logic Fix: Agar size available hai to variable set karein
+        size_str = f"{file_size}" if file_size else ""
         link_type = "File" if file_id else "Link"
         
-        # Button text example: "🎬 720p - 1.4GB (Link)"
-        button_text = f"🎬 {quality}{size_text} ({link_type})"
+        # Button text format fix: "🎬 720p - 1.3GB (File)"
+        if size_str:
+             button_text = f"🎬 {quality} - {size_str} ({link_type})"
+        else:
+             button_text = f"🎬 {quality} ({link_type})"
         
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
@@ -970,21 +975,39 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION"""
     chat_id = update.effective_chat.id
 
+    # --- 1. Language Detection from FILES (Database) ---
+    # Hum saari qualities fetch karke check karenge ki audio info hai ya nahi
+    all_qualities = get_all_movie_qualities(movie_id)
+    
+    # Saare file labels ko jod kar text banao check karne ke liye
+    combined_file_text = " ".join([q[0].lower() for q in all_qualities])
+    
+    langs = []
+    if "hind" in combined_file_text: langs.append("Hindi")
+    if "eng" in combined_file_text: langs.append("English")
+    if "tam" in combined_file_text: langs.append("Tamil")
+    if "tel" in combined_file_text: langs.append("Telugu")
+    if "kan" in combined_file_text: langs.append("Kannada")
+    if "mal" in combined_file_text: langs.append("Malayalam")
+    if "dual" in combined_file_text: langs.append("Dual Audio")
+    if "multi" in combined_file_text: langs.append("Multi Audio")
+    
+    # Agar multiple languages mili, to duplicate hata kar string banao
+    lang_display = ""
+    if langs:
+        lang_display = f"🔊 <b>Language:</b> {', '.join(sorted(set(langs)))}\n"
+    # ---------------------------------------------------
+
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
-        qualities = get_all_movie_qualities(movie_id)
-        if qualities:
-            context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': qualities}
+        if all_qualities: # variable name change kiya upar fetch kiya tha
+            context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
             
             selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
+            keyboard = create_quality_selection_keyboard(movie_id, title, all_qualities)
             
-            # Message bhejein
             msg = await context.bot.send_message(chat_id=chat_id, text=selection_text, reply_markup=keyboard, parse_mode='Markdown')
-            
-            # ✅ FIX: Yahan 'context' pass karein aur time 60 seconds kar dein
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
-            
             return
 
     try:
@@ -997,13 +1020,16 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         sent_msg = None
         
-        # Caption with HTML
+        # --- CAPTION UPDATE WITH HTML ---
         caption_text = (
-            f"🎬 <b>{title}</b>\n\n"
-            f"🔗 <b>JOIN »</b> <a href='{FILMFYBOX_CHANNEL_URL}'>FilmfyBox</a>\n\n"
-            "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-            "🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
+            f"🎬 <b>{title}</b>\n"
+            f"{lang_display}"  # Language yahan add ki gayi hai
+            f"\n🔗 <b>JOIN »</b> <a href='{FILMFYBOX_CHANNEL_URL}'>FilmfyBox</a>\n\n"
+            f"🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
+            f"🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
         )
+        # -------------------------------
+        
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
         # ==================================================================
@@ -1462,20 +1488,7 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search for movies in the database"""
-    try:
-        # If called from a button click or state transition without message text
-        if not update.message or not update.message.text:
-            return MAIN_MENU
-
-        query = update.message.text.strip()
-
-        # Safety check: if user types a menu command, redirect to main menu
-        if query in ['🔍 Search Movies', '🙋 Request Movie', '📊 My Stats', '❓ Help']:
-             return await main_menu(update, context)
-
-        # 1. Search in DB
-        movies = get_movies_from_db(query)
+    # ... (Shuru ka code same rahega) ...
 
         # 2. If no movies found
         if not movies:
@@ -1487,15 +1500,34 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
 
-            # Send "Not Found" text with Request button
+            # --- NEW HINDI TEXT (With Hidden Google Link) ---
+            not_found_text = (
+                "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
+                # 👇 Yahan Link ko text ke peeche chipa diya hai
+                "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
+                "मूवी की स्पेलिंग गूगल पर सर्च करके, कॉपी करे, उसके बाद यहां टाइप करें।✔️\n\n"
+                "बस मूवी का नाम + वर्ष:::: लिखें, उसके आगे पीछे कुछ भी ना लिखे..।♻️\n\n"
+                "✐ᝰ𝗘𝘅𝗮𝗺𝗽𝗹𝗲\n\n"
+                "सही है.!‼️    \n"
+                "─────────────────────\n"
+                "𝑲𝒈𝒇 𝟐✔️ | 𝑲𝒈𝒇 𝟐 𝑴𝒐𝒗𝒊𝒆 ❌\n"
+                "─────────────────────\n"
+                "𝑨𝒔𝒖𝒓 𝑺𝟎𝟏 𝑬𝟎𝟑✔️ | 𝑨𝒔𝒖𝒓 𝑺𝒆𝒂𝒔𝒐𝒏𝟑❌\n"
+                "─────────────────────\n\n"
+                "अगर फिर भी न मिले तो नीचे Request करे."
+            )
+
+            # --- REQUEST BUTTON ---
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query[:20]}")]
             ])
             
+            # 👇 Yahan 'parse_mode' add karna zaroori hai tabhi link chupa hua dikhega
             await update.message.reply_text(
-                f"😕 Sorry, I couldn't find any movie matching '{query}'.\n\n"
-                "Would you like to request it?",
-                reply_markup=keyboard
+                text=not_found_text,
+                reply_markup=keyboard,
+                parse_mode='HTML',  # ✅ IMPORTANT: Iske bina link code jaisa dikhega
+                disable_web_page_preview=True
             )
             return MAIN_MENU
 
@@ -2074,8 +2106,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_caption = (
             f"🎬 <b>{query_text}</b>\n\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
-            "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-            "🔹 <b>Support group (https://t.me/+2hFeRL4DYfBjZDQ1)</b>\n"
+            f"🔹 <b>Support group:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Request & Search Movies</a>\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
             f"👇 <b>Download from any Bot:</b>\n"
         )
