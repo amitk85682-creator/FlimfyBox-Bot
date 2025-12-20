@@ -1488,8 +1488,18 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (Shuru ka code same rahega) ...
-
+    """Search for movies in the database"""
+    try:
+        query = update.message.text.strip()
+        
+        if not query:
+            await update.message.reply_text("Please enter a movie name to search.")
+            return MAIN_MENU
+        
+        # 1. Preprocess and search
+        processed_query = preprocess_query(query)
+        movies = get_movies_from_db(processed_query, limit=10)
+        
         # 2. If no movies found
         if not movies:
             # Send a random "Not Found" GIF if available
@@ -1503,7 +1513,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # --- NEW HINDI TEXT (With Hidden Google Link) ---
             not_found_text = (
                 "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
-                # 👇 Yahan Link ko text ke peeche chipa diya hai
                 "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
                 "मूवी की स्पेलिंग गूगल पर सर्च करके, कॉपी करे, उसके बाद यहां टाइप करें।✔️\n\n"
                 "बस मूवी का नाम + वर्ष:::: लिखें, उसके आगे पीछे कुछ भी ना लिखे..।♻️\n\n"
@@ -1522,16 +1531,14 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query[:20]}")]
             ])
             
-            # 👇 Yahan 'parse_mode' add karna zaroori hai tabhi link chupa hua dikhega
             await update.message.reply_text(
                 text=not_found_text,
                 reply_markup=keyboard,
-                parse_mode='HTML',  # ✅ IMPORTANT: Iske bina link code jaisa dikhega
+                parse_mode='HTML',
                 disable_web_page_preview=True
             )
             return MAIN_MENU
 
-        try:
         # 3. If movies found
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
