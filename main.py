@@ -1531,6 +1531,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return MAIN_MENU
 
+        try:
         # 3. If movies found
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
@@ -1550,7 +1551,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         return MAIN_MENU
 
-# 2. Now the except block is valid because it aligns with 'try'
     except Exception as e:
         logger.error(f"Error in search_movies: {e}")
         await update.message.reply_text("An error occurred during search.")
