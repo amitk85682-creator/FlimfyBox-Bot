@@ -857,7 +857,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
 def get_main_keyboard():
     """Get the main menu keyboard"""
     keyboard = [
-        ['🔍 Search Movies',
+        ['🔍 Search Movies'],
         ['📊 My Stats', '❓ Help']
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
