@@ -869,51 +869,47 @@ def get_movie_options_keyboard(movie_title, url):
 
 def create_movie_selection_keyboard(movies, page=0, movies_per_page=8):
     """
-    Vertical list with Smart Pagination (Page Count).
+    Vertical list with Screenshot-style Navigation [ 📄 1/5 ] [ NEXT ⏩ ]
     """
     keyboard = []
     
-    # Pagination Math
     total_movies = len(movies)
     total_pages = (total_movies + movies_per_page - 1) // movies_per_page
     start_idx = page * movies_per_page
     end_idx = start_idx + movies_per_page
     current_movies = movies[start_idx:end_idx]
 
-    # --- Movie Buttons (Vertical) ---
+    # --- Movie Buttons ---
     for movie in current_movies:
         movie_id, title, url, file_id = movie
         
-        # Title formatting (Thoda clean look)
-        clean_title = title[:30] + "..." if len(title) > 30 else title
-        button_label = f"🎬 {clean_title}"
+        # Title clean karo (Jyada lamba na ho)
+        clean_title = title[:35] + "..." if len(title) > 35 else title
         
-        keyboard.append([InlineKeyboardButton(button_label, callback_data=f"movie_{movie_id}")])
+        # Button Text: "🎬 Movie Name"
+        button_text = f"🎬 {clean_title}"
+        
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"movie_{movie_id}")])
 
-    # --- Smart Navigation Row ---
+    # --- Navigation Row (Screenshot Style) ---
     nav_buttons = []
     
-    # Previous Button
+    # 1. Page Indicator (Left Side)
+    # Format: 🗒️ 1/10
+    nav_buttons.append(InlineKeyboardButton(f"🗓️ {page+1}/{total_pages}", callback_data="noop"))
+
+    # 2. Back Button (Middle - Only if not on first page)
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"page_{page-1}"))
-    else:
-        # Agar first page hai to blank button (alignment ke liye)
-        nav_buttons.append(InlineKeyboardButton("⏹️", callback_data="noop"))
+        nav_buttons.append(InlineKeyboardButton("⏪ BACK", callback_data=f"page_{page-1}"))
 
-    # Page Number Indicator (Non-clickable)
-    nav_buttons.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="noop"))
-
-    # Next Button
+    # 3. Next Button (Right - Only if more pages exist)
     if end_idx < total_movies:
-        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"page_{page+1}"))
-    else:
-        # Agar last page hai
-        nav_buttons.append(InlineKeyboardButton("⏹️", callback_data="noop"))
+        nav_buttons.append(InlineKeyboardButton("NEXT ⏩", callback_data=f"page_{page+1}"))
 
     keyboard.append(nav_buttons)
 
-    # Cancel Button
-    keyboard.append([InlineKeyboardButton("❌ Close Search", callback_data="cancel_selection")])
+    # Close Button (Bottom)
+    keyboard.append([InlineKeyboardButton("❌ CLOSE", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -952,38 +948,54 @@ def get_all_movie_qualities(movie_id):
 
 def create_quality_selection_keyboard(movie_id, title, qualities):
     """
-    Vertical file list with Quality Emojis and File Size.
+    Vertical file list matching Screenshot 2 style.
+    Fix: Removes duplicate size display.
     """
     keyboard = []
 
+    # qualities = [(quality, url, file_id, file_size), ...]
     for quality, url, file_id, file_size in qualities:
         callback_data = f"qual_{movie_id}_{quality}"
         
-        # --- Smart Emoji Logic ---
-        q_lower = quality.lower()
-        icon = "📁" # Default
+        # 1. Get Icon
+        icon = get_quality_icon(quality)
         
-        if "4k" in q_lower or "2160p" in q_lower:
-            icon = "🌟" # Premium/4K
-        elif "1080p" in q_lower:
-            icon = "🖥️" # Full HD
-        elif "720p" in q_lower:
-            icon = "💿" # HD
-        elif "480p" in q_lower or "360p" in q_lower:
-            icon = "📱" # Mobile
+        # 2. Format Size: [1.2GB]
+        # Agar file_size available hai to use bracket me dalo
+        size_str = f"[{file_size}]" if file_size and file_size != "N/A" else ""
         
-        # Size Display
-        size_display = f"[{file_size}]" if file_size else ""
+        # 3. Clean Quality Name (Jadoo Yahan Hai ✨)
+        # Step A: 'Quality' word hatao
+        clean_quality = quality.replace("Quality", "").strip()
         
-        # Final Button Text: "🖥️ 1080p - [1.4GB]"
-        button_text = f"{icon} {quality} {size_display}"
+        # Step B: Agar quality name me pehle se [...] hai to use hata do
+        # Taki "1080p [2GB] [2GB]" na bane, sirf "1080p [2GB]" bane.
+        clean_quality = re.sub(r'\[.*?\]', '', clean_quality).strip()
+        
+        # 4. Final Text Construction
+        button_text = f"{icon} {clean_quality} {size_str}"
         
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     # Bottom Close Button
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
+    keyboard.append([InlineKeyboardButton("❌ CLOSE", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
+
+def get_quality_icon(quality_text):
+    """Returns exact icons based on Screenshot 2"""
+    q = quality_text.lower()
+    
+    if "1080" in q or "fhd" in q:
+        return "🖥️"  # Monitor for 1080p
+    elif "720" in q or "hd" in q:
+        return "💿"  # Disc for 720p
+    elif "480" in q or "360" in q or "mobile" in q:
+        return "📱"  # Mobile phone
+    elif "4k" in q or "2160" in q:
+        return "🌟"  # Star for 4K
+    else:
+        return "📁"  # Default Folder
 
 # ==================== HELPER FUNCTION ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
