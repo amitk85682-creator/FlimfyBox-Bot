@@ -867,35 +867,53 @@ def get_movie_options_keyboard(movie_title, url):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
-    """Create inline keyboard with movie selection buttons"""
+def create_movie_selection_keyboard(movies, page=0, movies_per_page=8):
+    """
+    Vertical list with Smart Pagination (Page Count).
+    """
+    keyboard = []
+    
+    # Pagination Math
+    total_movies = len(movies)
+    total_pages = (total_movies + movies_per_page - 1) // movies_per_page
     start_idx = page * movies_per_page
     end_idx = start_idx + movies_per_page
     current_movies = movies[start_idx:end_idx]
 
-    keyboard = []
-
+    # --- Movie Buttons (Vertical) ---
     for movie in current_movies:
         movie_id, title, url, file_id = movie
-        button_text = title if len(title) <= 40 else title[:37] + "..."
-        keyboard.append([InlineKeyboardButton(
-            f"🎬 {button_text}",
-            callback_data=f"movie_{movie_id}"
-        )])
+        
+        # Title formatting (Thoda clean look)
+        clean_title = title[:30] + "..." if len(title) > 30 else title
+        button_label = f"🎬 {clean_title}"
+        
+        keyboard.append([InlineKeyboardButton(button_label, callback_data=f"movie_{movie_id}")])
 
+    # --- Smart Navigation Row ---
     nav_buttons = []
-    total_pages = (len(movies) + movies_per_page - 1) // movies_per_page
-
+    
+    # Previous Button
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"page_{page-1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"page_{page-1}"))
+    else:
+        # Agar first page hai to blank button (alignment ke liye)
+        nav_buttons.append(InlineKeyboardButton("⏹️", callback_data="noop"))
 
-    if end_idx < len(movies):
-        nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}"))
+    # Page Number Indicator (Non-clickable)
+    nav_buttons.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="noop"))
 
-    if nav_buttons:
-        keyboard.append(nav_buttons)
+    # Next Button
+    if end_idx < total_movies:
+        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"page_{page+1}"))
+    else:
+        # Agar last page hai
+        nav_buttons.append(InlineKeyboardButton("⏹️", callback_data="noop"))
 
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
+    keyboard.append(nav_buttons)
+
+    # Cancel Button
+    keyboard.append([InlineKeyboardButton("❌ Close Search", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -933,26 +951,37 @@ def get_all_movie_qualities(movie_id):
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, title, qualities):
-    """Create inline keyboard with quality selection buttons showing SIZE"""
+    """
+    Vertical file list with Quality Emojis and File Size.
+    """
     keyboard = []
 
-    # Note: qualities tuple ab 4 items ka hai -> (quality, url, file_id, file_size)
     for quality, url, file_id, file_size in qualities:
-        callback_data = f"quality_{movie_id}_{quality}"
+        callback_data = f"qual_{movie_id}_{quality}"
         
-        # Logic Fix: Agar size available hai to variable set karein
-        size_str = f"{file_size}" if file_size else ""
-        link_type = "File" if file_id else "Link"
+        # --- Smart Emoji Logic ---
+        q_lower = quality.lower()
+        icon = "📁" # Default
         
-        # Button text format fix: "🎬 720p - 1.3GB (File)"
-        if size_str:
-             button_text = f"🎬 {quality} - {size_str} ({link_type})"
-        else:
-             button_text = f"🎬 {quality} ({link_type})"
+        if "4k" in q_lower or "2160p" in q_lower:
+            icon = "🌟" # Premium/4K
+        elif "1080p" in q_lower:
+            icon = "🖥️" # Full HD
+        elif "720p" in q_lower:
+            icon = "💿" # HD
+        elif "480p" in q_lower or "360p" in q_lower:
+            icon = "📱" # Mobile
+        
+        # Size Display
+        size_display = f"[{file_size}]" if file_size else ""
+        
+        # Final Button Text: "🖥️ 1080p - [1.4GB]"
+        button_text = f"{icon} {quality} {size_display}"
         
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
-    keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
+    # Bottom Close Button
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
 
