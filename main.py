@@ -1945,6 +1945,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     - Checks Main Title AND Aliases in Database.
     - Generates FAST Links (movie_ID) if found.
     - Fallback to SLOW Links (q_Name) if not found.
+    - Supports Posting to MULTIPLE Channels.
     """
     try:
         # 1. Permission Check
@@ -1996,7 +1997,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error finding movie ID: {e}")
                 if conn: conn.close()
 
-# =========================================================
+        # =========================================================
         # 🔗 LINK GENERATION STRATEGY
         # =========================================================
         
@@ -2010,12 +2011,10 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if movie_id:
             # 🚀 FAST MODE (ID Based)
-            # Use this when movie/alias is found in DB
             link_param = f"movie_{movie_id}"
             log_message = f"✅ **FAST MODE (ID Found: {movie_id})**"
         else:
             # 🐢 SLOW MODE (Search Based)
-            # Use this when movie is NOT in DB (New request/upload)
             safe_query = re.sub(r'[^\w\s-]', '', query_text) # Special chars remove
             safe_query = safe_query.replace(" ", "_")
             safe_query = re.sub(r'_+', '_', safe_query).strip('_')
@@ -2029,7 +2028,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link3 = f"https://t.me/{bot3_username}?start={link_param}"
 
         # =========================================================
-        # 📤 SENDING POST
+        # 📤 SENDING POST TO MULTIPLE CHANNELS
         # =========================================================
 
         # Keyboard Layout
@@ -2053,24 +2052,44 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👇 <b>Download from any Bot:</b>\n"
         )
 
-        if ADMIN_CHANNEL_ID:
-            # Post to Channel
-            await context.bot.send_photo(
-                chat_id=ADMIN_CHANNEL_ID,
-                photo=update.message.photo[-1].file_id,
-                caption=channel_caption,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
+        # --- MULTI CHANNEL LOGIC START ---
+        
+        # 1. Channels ki list banao (Env Var 'BROADCAST_CHANNELS' se ya purane ADMIN_CHANNEL_ID se)
+        # Format in Env: "-10012345, -10067890, @mychannel"
+        channels_str = os.environ.get('BROADCAST_CHANNELS', str(ADMIN_CHANNEL_ID) if ADMIN_CHANNEL_ID else "")
+        
+        # List me convert karo aur empty values hatao
+        target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
+
+        if target_channels:
+            sent_count = 0
+            failed_count = 0
+            
+            for chat_id in target_channels:
+                try:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=update.message.photo[-1].file_id,
+                        caption=channel_caption,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                    sent_count += 1
+                except Exception as post_error:
+                    logger.error(f"Failed to post to {chat_id}: {post_error}")
+                    failed_count += 1
+            
             # Reply to Admin (Confirmation)
             await update.message.reply_text(
-                f"✅ Post Sent Successfully!\n\n"
+                f"✅ Post Processed!\n\n"
+                f"📤 Sent to: {sent_count} channels\n"
+                f"❌ Failed: {failed_count} channels\n\n"
                 f"{log_message}\n"
                 f"Query: `{query_text}`",
                 parse_mode='Markdown'
             )
         else:
-            await update.message.reply_text("❌ ADMIN_CHANNEL_ID environment variable set nahi hai.")
+            await update.message.reply_text("❌ No Channels Configured. Check 'BROADCAST_CHANNELS' or 'ADMIN_CHANNEL_ID'.")
 
     except Exception as e:
         logger.error(f"Error in admin_post_query: {e}")
