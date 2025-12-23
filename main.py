@@ -1,10 +1,10 @@
 # Add this snippet near the top of main.py, after your imports:
 try:
-    # prefer db_utils' fixed URL if it exists
-    import db_utils
-    FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
+    # prefer db_utils' fixed URL if it exists
+    import db_utils
+    FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
 except Exception:
-    FIXED_DATABASE_URL = None
+    FIXED_DATABASE_URL = None
 # -*- coding: utf-8 -*-
 import os
 import threading
