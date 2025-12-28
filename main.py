@@ -1941,11 +1941,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Smart Post Generator: 
-    - Checks Main Title AND Aliases in Database.
-    - Generates FAST Links (movie_ID) if found.
-    - Fallback to SLOW Links (q_Name) if not found.
-    - Supports Posting to MULTIPLE Channels.
+    Smart Post Generator (Supports Photo AND Video)
     """
     try:
         # 1. Permission Check
@@ -1953,23 +1949,36 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id != ADMIN_USER_ID:
             return
 
-        # 2. Input Validation (Photo & Caption)
-        if not update.message.photo:
-            await update.message.reply_text("❌ Photo bhejo caption ke sath: `/post_query Name`", parse_mode='Markdown')
+        message = update.message
+        
+        # 2. Validate Media (Check if Photo OR Video exists)
+        if not (message.photo or message.video):
+            await message.reply_text("❌ Photo ya Video bhejo caption ke sath: `/post_query Name`", parse_mode='Markdown')
             return
 
-        caption_text = update.message.caption
+        caption_text = message.caption
         if not caption_text or not caption_text.startswith('/post_query'):
             return
 
-        # 3. Clean Query (Movie Name nikalo)
+        # 3. Extract File ID & Type
+        file_id = None
+        media_type = 'photo' # Default
+
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = 'photo'
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = 'video'
+
+        # 4. Clean Query
         query_text = caption_text.replace('/post_query', '').strip()
         if not query_text:
-            await update.message.reply_text("❌ Name missing.")
+            await message.reply_text("❌ Name missing.")
             return
 
         # =========================================================
-        # 🧠 SMART DATABASE CHECK (Main Title + Aliases)
+        # 🧠 SMART DATABASE CHECK
         # =========================================================
         movie_id = None
         conn = get_db_connection()
@@ -1977,7 +1986,6 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             try:
                 cur = conn.cursor()
-                # Query: Movies table OR Aliases table me dhoondo
                 sql = """
                     SELECT m.id 
                     FROM movies m
@@ -1986,11 +1994,9 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     LIMIT 1
                 """
                 cur.execute(sql, (query_text.strip(), query_text.strip()))
-                
                 row = cur.fetchone()
                 if row:
-                    movie_id = row[0] # ID mil gayi!
-                
+                    movie_id = row[0]
                 cur.close()
                 conn.close()
             except Exception as e:
@@ -1998,10 +2004,8 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if conn: conn.close()
 
         # =========================================================
-        # 🔗 LINK GENERATION STRATEGY
+        # 🔗 LINK GENERATION
         # =========================================================
-        
-        # Bots Usernames
         bot1_username = "FlimfyBox_SearchBot"
         bot2_username = "urmoviebot"
         bot3_username = "FlimfyBox_Bot"
@@ -2010,28 +2014,19 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_message = ""
 
         if movie_id:
-            # 🚀 FAST MODE (ID Based)
             link_param = f"movie_{movie_id}"
             log_message = f"✅ **FAST MODE (ID Found: {movie_id})**"
         else:
-            # 🐢 SLOW MODE (Search Based)
-            safe_query = re.sub(r'[^\w\s-]', '', query_text) # Special chars remove
-            safe_query = safe_query.replace(" ", "_")
+            safe_query = re.sub(r'[^\w\s-]', '', query_text).replace(" ", "_")
             safe_query = re.sub(r'_+', '_', safe_query).strip('_')
-            
             link_param = f"q_{safe_query}"
             log_message = f"⚠️ **SLOW MODE (Name Search)**\n(Movie DB me nahi mili)"
 
-        # Generate Full Links 
         link1 = f"https://t.me/{bot1_username}?start={link_param}"
         link2 = f"https://t.me/{bot2_username}?start={link_param}"
         link3 = f"https://t.me/{bot3_username}?start={link_param}"
 
-        # =========================================================
-        # 📤 SENDING POST TO MULTIPLE CHANNELS
-        # =========================================================
-
-        # Keyboard Layout
+        # Keyboard
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🤖 FlimfyBox Bot", url=link1),
@@ -2043,7 +2038,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
-        # Channel Caption
+        # Caption
         channel_caption = (
             f"🎬 <b>{query_text}</b>\n\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
@@ -2052,13 +2047,10 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👇 <b>Download from any Bot:</b>\n"
         )
 
-        # --- MULTI CHANNEL LOGIC START ---
-        
-        # 1. Channels ki list banao (Env Var 'BROADCAST_CHANNELS' se ya purane ADMIN_CHANNEL_ID se)
-        # Format in Env: "-10012345, -10067890, @mychannel"
+        # =========================================================
+        # 📤 SENDING POST (Smart Send)
+        # =========================================================
         channels_str = os.environ.get('BROADCAST_CHANNELS', str(ADMIN_CHANNEL_ID) if ADMIN_CHANNEL_ID else "")
-        
-        # List me convert karo aur empty values hatao
         target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
 
         if target_channels:
@@ -2067,29 +2059,38 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             for chat_id in target_channels:
                 try:
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=update.message.photo[-1].file_id,
-                        caption=channel_caption,
-                        reply_markup=keyboard,
-                        parse_mode='HTML'
-                    )
+                    # Check Media Type and Send Accordingly
+                    if media_type == 'video':
+                        await context.bot.send_video(
+                            chat_id=chat_id,
+                            video=file_id,
+                            caption=channel_caption,
+                            reply_markup=keyboard,
+                            parse_mode='HTML'
+                        )
+                    else:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=file_id,
+                            caption=channel_caption,
+                            reply_markup=keyboard,
+                            parse_mode='HTML'
+                        )
                     sent_count += 1
                 except Exception as post_error:
                     logger.error(f"Failed to post to {chat_id}: {post_error}")
                     failed_count += 1
             
-            # Reply to Admin (Confirmation)
-            await update.message.reply_text(
-                f"✅ Post Processed!\n\n"
-                f"📤 Sent to: {sent_count} channels\n"
-                f"❌ Failed: {failed_count} channels\n\n"
+            await message.reply_text(
+                f"✅ Post Processed ({media_type.capitalize()})!\n\n"
+                f"📤 Sent to: {sent_count}\n"
+                f"❌ Failed: {failed_count}\n\n"
                 f"{log_message}\n"
                 f"Query: `{query_text}`",
                 parse_mode='Markdown'
             )
         else:
-            await update.message.reply_text("❌ No Channels Configured. Check 'BROADCAST_CHANNELS' or 'ADMIN_CHANNEL_ID'.")
+            await message.reply_text("❌ No Channels Configured.")
 
     except Exception as e:
         logger.error(f"Error in admin_post_query: {e}")
@@ -3727,6 +3728,36 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 2. Handle Search (Agar button nahi hai, to ye movie name hai)
     await search_movies(update, context)
 
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle messages in groups.
+    Agar movie database me hai to reply karega, nahi to chup rahega.
+    """
+    if not update.message or not update.message.text:
+        return
+    
+    text = update.message.text.strip()
+    
+    # 1. Commands ignore karo
+    if text.startswith('/'):
+        return
+    
+    # 2. Bahut chote words ignore karo (e.g. "Hi", "Ok")
+    if len(text) < 2:
+        return
+
+    # 3. Pehle DB me check karo (Silent Check)
+    # Hum sirf 1 result maang rahe check karne ke liye
+    movies = get_movies_from_db(text, limit=1)
+
+    if not movies:
+        # 🤫 Agar movie nahi mili, to YAHIN RUK JAO.
+        # Bot kuch reply nahi karega, group me shanti rahegi.
+        return
+
+    # 4. Agar movie mil gayi, to list bhejo
+    await search_movies(update, context)
+
 # ==================== MAIN BOT FUNCTION ====================
 def main():
     """Run the Telegram bot"""
@@ -3796,7 +3827,7 @@ def main():
     application.add_handler(CommandHandler("addalias", add_alias))
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
-    application.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/post_query'), admin_post_query))
+    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
 
     # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
@@ -3805,6 +3836,12 @@ def main():
     # Channel Listener
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.VIDEO), channel_file_listener))
 
+    # 1. Private Chat Handler (DM me "Not Found" bolega - Normal behavior)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
+
+    # 2. Group Chat Handler (Group me movie nahi mili to CHUP rahega)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
+      
     # Notification Commands
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
     application.add_handler(CommandHandler("broadcast", broadcast_message))
