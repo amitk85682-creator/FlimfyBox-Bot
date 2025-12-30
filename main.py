@@ -562,6 +562,55 @@ def get_movies_from_db(user_query, limit=10):
             except:
                 pass
 
+# 👇👇👇 IS FUNCTION KO 'get_movies_from_db' KE NEECHE PASTE KARO 👇👇👇
+
+def get_movies_fast_sql(query: str, limit: int = 5):
+    """
+    Smart SQL Search: Fast like SQL + Smart like FuzzyWuzzy.
+    Handles typos using PostgreSQL 'pg_trgm' (Similarity).
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+
+        cur = conn.cursor()
+        
+        # 1. Pehle ensure karo ki extension enable hai (One time check)
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+        
+        # 2. Smart Query
+        # Hum 'SIMILARITY' function use kar rahe hain jo FuzzyWuzzy jaisa hai
+        # Par ye DB level par chalta hai isliye super fast hai.
+        sql = """
+            SELECT m.id, m.title, m.url, m.file_id, 
+                   SIMILARITY(m.title, %s) as sim_score
+            FROM movies m
+            WHERE SIMILARITY(m.title, %s) > 0.3
+            ORDER BY sim_score DESC
+            LIMIT %s
+        """
+        
+        cur.execute(sql, (query, query, limit))
+        results = cur.fetchall()
+        
+        # Format results to match old structure (remove score from tuple)
+        final_results = [(r[0], r[1], r[2], r[3]) for r in results]
+        
+        cur.close()
+        return final_results
+
+    except Exception as e:
+        logger.error(f"Smart SQL Search Error: {e}")
+        return []
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     """Store user request in database"""
     try:
@@ -3728,9 +3777,11 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 2. Handle Search (Agar button nahi hai, to ye movie name hai)
     await search_movies(update, context)
 
+# 👇👇👇 IS FUNCTION KO REPLACE KARO (Line ~1665) 👇👇👇
+
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handle messages in groups.
+    Handle messages in groups using FAST SQL Search.
     Agar movie database me hai to reply karega, nahi to chup rahega.
     """
     if not update.message or not update.message.text:
@@ -3742,21 +3793,34 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if text.startswith('/'):
         return
     
-    # 2. Bahut chote words ignore karo (e.g. "Hi", "Ok")
+    # 2. Bahut chote words ignore karo
     if len(text) < 2:
         return
 
-    # 3. Pehle DB me check karo (Silent Check)
-    # Hum sirf 1 result maang rahe check karne ke liye
-    movies = get_movies_from_db(text, limit=1)
+    # 3. 🚀 FAST SEARCH CALL (Sirf SQL Check)
+    # Hum 5 results maang rahe hain taaki agar typos ho to best match mile
+    movies = get_movies_fast_sql(text, limit=5)
 
     if not movies:
         # 🤫 Agar movie nahi mili, to YAHIN RUK JAO.
         # Bot kuch reply nahi karega, group me shanti rahegi.
         return
 
-    # 4. Agar movie mil gayi, to list bhejo
-    await search_movies(update, context)
+    # 4. Results mil gaye, ab show karo
+    context.user_data['search_results'] = movies
+    context.user_data['search_query'] = text
+
+    keyboard = create_movie_selection_keyboard(movies, page=0)
+    
+    # Reply to user
+    msg = await update.message.reply_text(
+        f"🎬 **Found {len(movies)} results for '{text}'**\n👇 Select movie:",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+    
+    # Auto-delete (Optional - 2 min)
+    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
 
 # ==================== MAIN BOT FUNCTION ====================
 def main():
