@@ -3879,11 +3879,16 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles text messages in Private Chat:
+    1. Checks Membership (FSub)
+    2. Checks for Menu Buttons (Stats, Help, etc.)
+    3. If not a button, performs a Movie Search
+    """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    # === FSub Check (Start) ===
-    # Sirf Private chat me check karo
+    # === 1. FSub Check (Only in Private Chat) ===
     if update.effective_chat.type == "private":
         check = await is_user_member(context, user_id)
         if not check['is_member']:
@@ -3894,30 +3899,64 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             track_message_for_deletion(context, chat_id, msg.message_id, 120)
             return
-    # === FSub Check (End) ===
+    # ============================================
+
+    if not update.message or not update.message.text:
+        return
 
     query_text = update.message.text.strip()
-    # ... (Baaki ka code same rahega) ...
-        
+    
+    # === 2. Menu Button Logic ===
+    
+    # Handle 'Search Movies' button (Guidance)
+    if query_text == '🔍 Search Movies':
+        msg = await update.message.reply_text("Great! Just type the name of the movie you want to search for.")
+        track_message_for_deletion(context, chat_id, msg.message_id, 60)
+        return
+
+    # Handle 'Request Movie' button (Guidance)
+    elif query_text == '🙋 Request Movie':
+        msg = await update.message.reply_text("Click the button below to request:", reply_markup=get_main_keyboard())
+        track_message_for_deletion(context, chat_id, msg.message_id, 60)
+        return
+
+    # Handle 'My Stats' button
     elif query_text == '📊 My Stats':
-        # Stats logic call karein (copy paste your stats logic here or extract function)
-        user_id = update.effective_user.id
         conn = get_db_connection()
         if conn:
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-            req = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-            ful = cur.fetchone()[0]
-            conn.close()
-            await update.message.reply_text(f"📊 Your Stats:\n- Requests: {req}\n- Fulfilled: {ful}")
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+                req = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+                ful = cur.fetchone()[0]
+                
+                stats_msg = await update.message.reply_text(
+                    f"📊 **Your Stats**\n\n"
+                    f"📝 Total Requests: {req}\n"
+                    f"✅ Fulfilled: {ful}",
+                    parse_mode='Markdown'
+                )
+                track_message_for_deletion(context, chat_id, stats_msg.message_id, 120)
+            except Exception as e:
+                logger.error(f"Stats Error: {e}")
+            finally:
+                conn.close()
         return
 
+    # Handle 'Help' button
     elif query_text == '❓ Help':
-        await update.message.reply_text("Just type movie name to search!")
+        help_text = (
+            "🤖 **How to use:**\n\n"
+            "1. **Search:** Just type any movie name (e.g., 'Avengers').\n"
+            "2. **Request:** If not found, use the Request button.\n"
+            "3. **Download:** Click the buttons provided."
+        )
+        msg = await update.message.reply_text(help_text, parse_mode='Markdown')
+        track_message_for_deletion(context, chat_id, msg.message_id, 120)
         return
 
-    # 2. Handle Search (Agar button nahi hai, to ye movie name hai)
+    # === 3. If no button matched, Search for the Movie ===
     await search_movies(update, context)
 
 # 👇👇👇 IS FUNCTION KO REPLACE KARO (Line ~1665) 👇👇👇
