@@ -132,34 +132,43 @@ async def check_rate_limit(user_id):
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
-    """Check if user is member of channel and group"""
+    """Check if user is member of channel and group (Matching Reference Code)"""
     
+    # Agar FSub disabled hai to turant pass kar do
     if not FORCE_JOIN_ENABLED:
         return {'is_member': True, 'channel': True, 'group': True, 'error': None}
     
     current_time = datetime.now()
     
-    # Check cache
+    # 1. Cache Check
+    # Agar force_fresh FALSE hai, tabhi cache check karo
     if not force_fresh and user_id in verified_users:
         last_checked, cached = verified_users[user_id]
+        # Agar 1 ghante (3600s) se kam hua hai to cache use karo
         if (current_time - last_checked).total_seconds() < VERIFICATION_CACHE_TIME:
             return cached
     
-    result = {'is_member': False, 'channel': False, 'group': False, 'error': None}
+    result = {
+        'is_member': False,
+        'channel': False,
+        'group': False,
+        'error': None
+    }
     
+    # Valid statuses jo member maane jayenge
     VALID_STATUSES = ['member', 'administrator', 'creator']
     
-    # 1. Check Channel
+    # 2. Check Channel
     try:
         channel_member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
         if channel_member.status in VALID_STATUSES:
             result['channel'] = True
     except Exception as e:
         logger.error(f"Channel Check Error: {e}")
-        # Agar bot admin nahi hai ya error hai, to assume karo join hai taaki user block na ho
+        # Agar bot admin nahi hai ya error hai, to assume karo join hai (Safe Fallback)
         result['channel'] = False 
 
-    # 2. Check Group
+    # 3. Check Group
     try:
         group_member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
         if group_member.status in VALID_STATUSES:
@@ -168,10 +177,10 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
         logger.error(f"Group Check Error: {e}")
         result['group'] = False
 
-    # Final Result
+    # 4. Final Result
     result['is_member'] = result['channel'] and result['group']
     
-    # Update Cache (Sirf tab jab koi error na ho massive level pe)
+    # 5. Update Cache (Cache me naya status save karo)
     verified_users[user_id] = (current_time, result)
     
     return result
@@ -1417,8 +1426,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
-    # === FSub Check ===
-    check = await is_user_member(context, user_id)
+    # === FSub Check (Smart Logic) ===
+    # Agar user Link (context.args) se aaya hai, to Fresh Check karo (Cache Ignore).
+    # Agar Normal /start hai, to Cache use karo (Fast Response).
+    force_check = True if context.args else False
+    
+    check = await is_user_member(context, user_id, force_fresh=force_check)
+    
     if not check['is_member']:
         msg = await update.message.reply_text(
             get_join_message(check['channel'], check['group']),
@@ -1567,9 +1581,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode='HTML')
     track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
     
-    # ❌ OLD: return MAIN_MENU
-    return # ✅ NEW: Just return (No state needed for main menu)
-
+    # ✅ Just return (No state needed for main menu)
+    return
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
     try:
