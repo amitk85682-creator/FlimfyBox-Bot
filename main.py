@@ -1877,16 +1877,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
     # ==============================================================
 
-    # ... (Baaki ka existing logic yahan se shuru hoga) ...
     try:
-        # await query.answer() <--- NOTE: Is line ko hata dena kyunki hum upar handle kar chuke hain
-        
-        # Existing logic starts here...
-        if query.data.startswith("movie_"):
-             # ...
-
-
-# ==================== MOVIE SELECTION ====================
+        # ==================== MOVIE SELECTION ====================
         if query.data.startswith("movie_"):
             movie_id = int(query.data.replace("movie_", ""))
 
@@ -1916,8 +1908,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_movie_to_user(update, context, movie_id, title, url, file_id)
                 return
 
-            # ... (upar ka code same rahega) ...
-
             context.user_data['selected_movie_data'] = {
                 'id': movie_id,
                 'title': title,
@@ -1936,7 +1926,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # ✅ FIX: Is edited message ko bhi track karein (Delete in 60 seconds)
             track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
+
         # ==================== ADMIN ACTIONS ====================
+        
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
         elif query.data.startswith("qualpage_"):
             parts = query.data.split('_')
@@ -2063,6 +2055,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if 'selected_movie_data' in context.user_data:
                 del context.user_data['selected_movie_data']
+
         # ==================== PAGINATION ====================
         elif query.data.startswith("page_"):
             page = int(query.data.replace("page_", ""))
