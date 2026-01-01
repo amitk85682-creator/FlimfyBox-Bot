@@ -3332,7 +3332,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all bot users"""
+    """List all bot users with Accurate Count from Activity Log"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("⛔ Admin only command.")
         return
@@ -3352,41 +3352,53 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
 
-        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        # 1. ✅ REAL TOTAL COUNT (From user_activity table)
+        # Ye un sabhi unique users ko ginega jinhone kabhi bhi bot use kiya hai
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_activity")
         result = cur.fetchone()
         total_users = result[0] if result else 0
 
+        # 2. GET LIST (From user_requests table because it has Names)
+        # Note: List mein shayad kam log dikhein (sirf wo jinhone request kiya hai), 
+        # lekin uppar Total Count sahi dikhega.
         cur.execute("""
-            SELECT
-                user_id,
-                username,
-                first_name,
-                COUNT(*) as requests,
+            SELECT 
+                user_id, 
+                username, 
+                first_name, 
+                COUNT(*) as requests, 
                 MAX(requested_at) as last_seen
-            FROM user_requests
-            GROUP BY user_id, username, first_name
-            ORDER BY MAX(requested_at) DESC
+            FROM user_requests 
+            GROUP BY user_id, username, first_name 
+            ORDER BY MAX(requested_at) DESC 
             LIMIT %s OFFSET %s
         """, (per_page, offset))
 
         users = cur.fetchall()
 
-        total_pages = (total_users + per_page - 1) // per_page if total_users > 0 else 1
+        # Calculate pages based on the list available (user_requests)
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM user_requests")
+        listable_users = cur.fetchone()[0]
+        total_pages = (listable_users + per_page - 1) // per_page if listable_users > 0 else 1
 
-        users_text = f"👥 **Bot Users** (Page {page}/{total_pages})\n\n"
+        users_text = f"👥 **Bot Users** (Page {page}/{total_pages})\n"
+        users_text += f"📊 **Total Unique Users: {total_users}**\n\n"
 
         if not users:
-            users_text += "No users found on this page."
+            users_text += "No active requesters found on this page."
         else:
             for idx, (user_id, username, first_name, req_count, last_seen) in enumerate(users, start=offset+1):
                 username_str = f"`@{username}`" if username else "N/A"
-                users_text += f"{idx}. {first_name} ({username_str})\n"
-                users_text += f"   ID: `{user_id}` | Requests: {req_count}\n"
-                users_text += f"   Last seen: {last_seen.strftime('%Y-%m-%d %H:%M')}\n\n"
+                safe_name = (first_name or "Unknown").replace("<", "&lt;").replace(">", "&gt;")
+                
+                users_text += f"{idx}. <b>{safe_name}</b> ({username_str})\n"
+                users_text += f"   🆔 `{user_id}` | 📥 Reqs: {req_count}\n"
+                users_text += f"   🕒 {last_seen.strftime('%Y-%m-%d %H:%M')}\n\n"
 
-        users_text += f"\n📊 Total Users: {total_users}"
+        if total_users > listable_users:
+            users_text += f"\n⚠️ *Note:* {total_users - listable_users} users ne bot use kiya hai par koi Request nahi bheji (isliye list me naam nahi hai)."
 
-        await update.message.reply_text(users_text, parse_mode='Markdown')
+        await update.message.reply_text(users_text, parse_mode='HTML')
 
         cur.close()
         conn.close()
