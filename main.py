@@ -68,9 +68,15 @@ ADMIN_USER_ID = int(_admin_id) if _admin_id.isdigit() else 0
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1003330141433')
+REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003460387180')
+FILMFYBOX_GROUP_URL = 'https://t.me/FlimfyBox'
 FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'  # Yahan apna Channel Link dalein
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
+FORCE_JOIN_ENABLED = True
+# Verified users cache (Taaki baar baar API call na ho)
+verified_users = {}
+VERIFICATION_CACHE_TIME = 3600  # 1 Hour
 
 # --- Random GIF IDs for Search Failure ---
 SEARCH_ERROR_GIFS = [
@@ -123,6 +129,80 @@ async def check_rate_limit(user_id):
 
     user_last_request[user_id] = now
     return True
+
+# ==================== MEMBERSHIP CHECK LOGIC ====================
+async def is_user_member(context, user_id: int, force_fresh: bool = False):
+    """Check if user is member of channel and group"""
+    
+    if not FORCE_JOIN_ENABLED:
+        return {'is_member': True, 'channel': True, 'group': True, 'error': None}
+    
+    current_time = datetime.now()
+    
+    # Check cache
+    if not force_fresh and user_id in verified_users:
+        last_checked, cached = verified_users[user_id]
+        if (current_time - last_checked).total_seconds() < VERIFICATION_CACHE_TIME:
+            return cached
+    
+    result = {'is_member': False, 'channel': False, 'group': False, 'error': None}
+    
+    VALID_STATUSES = ['member', 'administrator', 'creator']
+    
+    # 1. Check Channel
+    try:
+        channel_member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
+        if channel_member.status in VALID_STATUSES:
+            result['channel'] = True
+    except Exception as e:
+        logger.error(f"Channel Check Error: {e}")
+        # Agar bot admin nahi hai ya error hai, to assume karo join hai taaki user block na ho
+        result['channel'] = False 
+
+    # 2. Check Group
+    try:
+        group_member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
+        if group_member.status in VALID_STATUSES:
+            result['group'] = True
+    except Exception as e:
+        logger.error(f"Group Check Error: {e}")
+        result['group'] = False
+
+    # Final Result
+    result['is_member'] = result['channel'] and result['group']
+    
+    # Update Cache (Sirf tab jab koi error na ho massive level pe)
+    verified_users[user_id] = (current_time, result)
+    
+    return result
+
+def get_join_keyboard():
+    """Join buttons keyboard"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL),
+            InlineKeyboardButton("💬 Join Group", url=FILMFYBOX_GROUP_URL)
+        ],
+        [InlineKeyboardButton("✅ Joined Both - Verify", callback_data="verify")]
+    ])
+
+def get_join_message(channel_status, group_status):
+    """Generate message based on what is missing"""
+    if not channel_status and not group_status:
+        missing = "Channel and Group both"
+    elif not channel_status:
+        missing = "Channel"
+    else:
+        missing = "Group"
+    
+    return (
+        f"📂 **Your File is Ready!**\n\n"
+        f"🚫 **But Access Denied**\n\n"
+        f"You haven't joined {missing}!\n\n"
+        f"📢 Channel: {'✅' if channel_status else '❌'}\n"
+        f"💬 Group: {'✅' if group_status else '❌'}\n\n"
+        f"Join both, then click **Verify** button 👇"
+    )
 
 def is_valid_url(url):
     """Check if a URL is valid"""
@@ -1334,13 +1414,24 @@ from collections import defaultdict
 user_processing_locks = defaultdict(Lock)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Start command handler with forced state reset and user-level locking
-    """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
+    # === FSub Check ===
+    check = await is_user_member(context, user_id)
+    if not check['is_member']:
+        msg = await update.message.reply_text(
+            get_join_message(check['channel'], check['group']),
+            reply_markup=get_join_keyboard(),
+            parse_mode='Markdown'
+        )
+        # 2 min baad delete kar do taaki chat gandi na ho
+        track_message_for_deletion(context, chat_id, msg.message_id, 120)
+        return
+    # ==================
+
     logger.info(f"START called by user {user_id} with args: {context.args}")
+    # ... (Baaki ka purana code wese hi rehne do) ...
 
     # 🚨 CRITICAL: Force clear any stuck conversation state
     context.user_data.clear()
@@ -1741,10 +1832,58 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
         return MAIN_MENU
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle inline button callbacks"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    chat_id = query.message.chat.id
+    data = query.data
+
+    # === 1. VERIFY BUTTON LOGIC ===
+    if data == "verify":
+        await query.answer("🔍 Checking membership...", show_alert=True)
+        # Force Fresh Check (Cache ignore karo)
+        check = await is_user_member(context, user_id, force_fresh=True)
+        
+        if check['is_member']:
+            await query.edit_message_text(
+                "✅ **Verified Successfully!**\n\n"
+                "You can now use the bot! 🎬\n"
+                "Click /start or search any movie.",
+                parse_mode='Markdown'
+            )
+            track_message_for_deletion(context, chat_id, query.message.message_id, 10)
+        else:
+            try:
+                await query.edit_message_text(
+                    get_join_message(check['channel'], check['group']),
+                    reply_markup=get_join_keyboard(),
+                    parse_mode='Markdown'
+                )
+            except telegram.error.BadRequest:
+                await query.answer("❌ You haven't joined yet!", show_alert=True)
+        return
+    # ==============================
+
+    # === 2. OTHER BUTTONS PROTECTION (Optional but Recommended) ===
+    # Agar user 'download', 'movie', 'request' dabaye to bhi check karo
+    if data.startswith(("movie_", "download_", "quality_", "request_")):
+        check = await is_user_member(context, user_id) # Cache use karega
+        if not check['is_member']:
+            await query.answer("❌ Please join channels first!", show_alert=True)
+            await query.edit_message_text(
+                get_join_message(check['channel'], check['group']),
+                reply_markup=get_join_keyboard(),
+                parse_mode='Markdown'
+            )
+            return
+    # ==============================================================
+
+    # ... (Baaki ka existing logic yahan se shuru hoga) ...
     try:
-        query = update.callback_query
-        await query.answer()
+        # await query.answer() <--- NOTE: Is line ko hata dena kyunki hum upar handle kar chuke hain
+        
+        # Existing logic starts here...
+        if query.data.startswith("movie_"):
+             # ...
 
 
 # ==================== MOVIE SELECTION ====================
@@ -3747,14 +3886,25 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles both Menu Buttons and Movie Searching (Normal Mode)"""
-    query_text = update.message.text.strip()
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
     
-    # 1. Handle Menu Buttons
-    if query_text == '🔍 Search Movies':
-        msg = await update.message.reply_text("Great! मूवी का नाम भेजें (e.g. Kalki, Animal)")
-        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
-        return
+    # === FSub Check (Start) ===
+    # Sirf Private chat me check karo
+    if update.effective_chat.type == "private":
+        check = await is_user_member(context, user_id)
+        if not check['is_member']:
+            msg = await update.message.reply_text(
+                get_join_message(check['channel'], check['group']),
+                reply_markup=get_join_keyboard(),
+                parse_mode='Markdown'
+            )
+            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            return
+    # === FSub Check (End) ===
+
+    query_text = update.message.text.strip()
+    # ... (Baaki ka code same rahega) ...
         
     elif query_text == '📊 My Stats':
         # Stats logic call karein (copy paste your stats logic here or extract function)
