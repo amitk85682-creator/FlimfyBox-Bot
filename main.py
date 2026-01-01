@@ -2078,11 +2078,11 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Keyboard
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("🤖 FlimfyBox Bot", url=link1),
-                InlineKeyboardButton("⚡Movie Bot", url=link2),
+                InlineKeyboardButton("Download Now", url=link1),
+                InlineKeyboardButton("Download Now", url=link2),
             ],
             [
-                InlineKeyboardButton("🚀 FilmfyBox Bot", url=link3)
+                InlineKeyboardButton("Download Now", url=link3)
             ],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
