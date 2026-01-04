@@ -9,6 +9,7 @@ import requests
 import signal
 import sys
 import re
+import anthropic  # ✅ NEW IMPORT FOR CLAUDE AI
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, quote
 from collections import defaultdict
@@ -74,6 +75,11 @@ FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'  # Yahan apna Channel L
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
 FORCE_JOIN_ENABLED = True
+
+# ✅ NEW ENVIRONMENT VARIABLES FOR MULTI-CHANNEL & AI
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")  # ✅ NEW: Claude API Key
+STORAGE_CHANNELS = os.environ.get("STORAGE_CHANNELS", "")  # ✅ NEW: Backup Channels List
+
 # Verified users cache (Taaki baar baar API call na ho)
 verified_users = {}
 VERIFICATION_CACHE_TIME = 3600  # 1 Hour
@@ -99,6 +105,9 @@ MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', '10'))
 
 # Auto-delete tracking
 messages_to_auto_delete = defaultdict(list)
+
+# ✅ NEW GLOBAL VARIABLES FOR BATCH SESSION
+BATCH_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None}
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -455,6 +464,12 @@ def setup_database():
             cur.execute("ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS message_id BIGINT;")
         except Exception as e:
             logger.info(f"Column addition note: {e}")
+
+        # ✅ NEW: Add backup_map column for Multi-Channel support
+        try:
+            cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS backup_map JSONB DEFAULT '{}'::jsonb;")
+        except Exception as e:
+            logger.info(f"Column backup_map note: {e}")
 
         # Create indexes
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
@@ -2131,6 +2146,352 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     track_message_for_deletion(update.effective_chat.id, msg.message_id, 60)
     return MAIN_MENU
 
+# ==================== NEW MULTI-CHANNEL BACKUP FUNCTIONS ====================
+
+def get_storage_channels():
+    """Load channel list from .env"""
+    channels_str = os.environ.get('STORAGE_CHANNELS', '')
+    return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
+
+def generate_quality_label(file_name, file_size_str):
+    """
+    Smart Logic to generate button label from filename
+    Example: "Thamma.2025.1080p.mkv" -> "1080p [1.2GB]"
+    """
+    name_lower = file_name.lower()
+    quality = "HD" # Default
+    
+    # 1. Detect Quality
+    if "4k" in name_lower or "2160p" in name_lower: quality = "4K"
+    elif "1080p" in name_lower: quality = "1080p"
+    elif "720p" in name_lower: quality = "720p"
+    elif "480p" in name_lower: quality = "480p"
+    elif "360p" in name_lower: quality = "360p"
+    elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
+    
+    # 2. Detect Series (S01E01)
+    season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
+    if season_match:
+        episode_tag = season_match.group(0).upper()
+        # Format: S01E01 - 720p [200MB]
+        return f"{episode_tag} - {quality} [{file_size_str}]"
+        
+    # 3. Default Movie Format: 720p [1.2GB]
+    return f"{quality} [{file_size_str}]"
+
+def get_readable_file_size(size_in_bytes):
+    """Converts bytes to readable format (MB, GB)"""
+    try:
+        if not size_in_bytes: return "N/A"
+        size = int(size_in_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024:
+                return f"{size:.2f} {unit}"
+            size /= 1024
+    except Exception:
+        return "Unknown"
+    return "Unknown"
+
+def generate_aliases_claude(movie_title):
+    """
+    Generates SEO aliases using Claude AI based on your prompt.
+    Returns a list of comma-separated aliases.
+    """
+    api_key = os.environ.get("CLAUDE_API_KEY")
+    if not api_key:
+        logger.error("❌ CLAUDE_API_KEY not found.")
+        return []
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        # Tumhara Prompt Logic
+        prompt = f"""
+        Act as a Search Query Analyst, SEO Expert, and User Behavior Specialist.
+
+I need an exhaustive list of "Aliases," "Keywords," and "Search Terms" for the movie/web series: "{movie_title}".
+
+**CONTEXT (if available):**
+- Release Year:
+- Language:
+- Platform (Netflix/Prime/Hotstar etc.):
+- Director/Lead Actors:
+- Genre:
+
+Generate a list that covers ALL possible ways a human might type this query — including mistakes, regional variations, voice search patterns, and intent-based searches. Do NOT summarize; list every variation explicitly.
+
+---
+
+## OUTPUT CATEGORIES (8 Categories):
+
+### 1. Official & Structural Variations:
+- Full official title with punctuation
+- Subtitle variations (with/without colon, dash)
+- Season/Episode notations (Season 1, S01, S1, Part 1, Vol 1, Chapter 1)
+- Year combinations (Movie Name 2025)
+- Language-specific official titles (Hindi/Tamil/Telugu titles)
+- Franchise naming (Part 1, Part 2, Sequel name)
+
+### 2. Acronyms & Short Forms:
+- First letter acronyms (DDLJ, GOT, BB3)
+- Common fan abbreviations
+- Lazy typing shortcuts
+- Social media hashtag formats (#MovieName)
+
+### 3. Phonetic & Spelling Mistakes (CRITICAL SECTION):
+Focus on how someone would TYPE if they only HEARD the name:
+- Hinglish/Regional phonetic errors
+- Vowel swaps: a↔e, i↔e, u↔o, aa↔a
+- Consonant confusion: ph↔f, sh↔s, th↔t, ch↔c, kh↔k, dh↔d
+- Double letter errors (single→double, double→single)
+- Silent letter omissions
+- Regional accent-based spellings (South Indian, Punjabi, Bengali pronunciation)
+
+Example logic:
+- "Phoenix" → Fonix, Fenix, Finix
+- "Mirzapur" → Mirjapur, Mirzapoor
+- "Bahubali" → Baahubali, Bahuballi, Bhaubali
+
+### 4. Keyboard Slips & Fat-finger Errors:
+- Adjacent QWERTY key mistakes (a↔s, i↔o, n↔m)
+- Skipped letters (typing too fast)
+- Double-pressed keys
+- Mobile swipe keyboard errors
+- Spacebar errors (no space, extra space, wrong space position)
+- Shifted finger errors (first letter wrong)
+
+### 5. Platform & Intent-Based Searches (NEW):
+How users search with specific intent:
+- "[Movie] watch online"
+- "[Movie] download"
+- "[Movie] Netflix/Prime/Hotstar"
+- "[Movie] full movie"
+- "[Movie] Hindi dubbed"
+- "[Movie] trailer"
+- "[Movie] review"
+- "[Movie] cast"
+- "[Movie] OTT release"
+- "[Movie] free streaming"
+
+### 6. Voice Search & Conversational Queries (NEW):
+How users speak to Alexa/Google/Siri:
+- "Play [Movie name]"
+- "Show me [Movie name]"
+- "I want to watch [Movie name]"
+- Natural language with filler words
+- Mispronunciation patterns in voice
+
+### 7. Cast & Crew Combinations (NEW):
+- "[Actor name] new movie"
+- "[Director] latest film"
+- "[Actor] [Year] movie"
+- "[Actor] [Genre] movie"
+- "[Actor] [Co-actor] movie"
+
+### 8. Regional & Transliteration Variations (NEW):
+- Devanagari to Roman transliteration errors
+- Tamil/Telugu/Kannada/Malayalam phonetic spellings
+- Urdu/Arabic influenced spellings
+- Bengali/Marathi pronunciation-based spellings
+
+---
+
+## OUTPUT FORMAT:
+
+**Option A:** Provide exactly 50 comma-separated aliases (current format)
+
+**Option B (Recommended):** Provide 75-100 aliases organized by category with priority tags:
+- 🔴 HIGH PRIORITY (most common searches)
+- 🟡 MEDIUM PRIORITY (frequent mistakes)
+- 🟢 LOW PRIORITY (edge cases but valid)
+
+---
+
+## ADDITIONAL INSTRUCTIONS:
+
+1. DO NOT include generic words alone (like just "movie" or "film")
+2. Every alias must be directly related to the title
+3. Include at least 5 variations per category
+4. For multi-word titles, include both spaced and non-spaced versions
+5. Consider both mobile and desktop typing patterns
+6. Include common autocorrect failures
+        """
+
+        message = client.messages.create(
+            model="claude-3-haiku-20240307", # Sasta aur Fast model
+            max_tokens=1000,
+            temperature=0.5,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        # Response clean karna
+        content = message.content[0].text
+        # Comma se split karke list bana lo
+        aliases = [x.strip() for x in content.split(',') if x.strip()]
+        return aliases
+
+    except Exception as e:
+        logger.error(f"Claude AI Error: {e}")
+        return []
+
+# ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
+
+async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start Batch Session (PM Only)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID: return
+
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/batch Movie Name`")
+        return
+
+    movie_title = " ".join(context.args).strip()
+    
+    # 1. DB Entry (Create Movie if not exists)
+    conn = get_db_connection()
+    if not conn: return
+    
+    cur = conn.cursor()
+    cur.execute("INSERT INTO movies (title, url) VALUES (%s, '') ON CONFLICT (title) DO UPDATE SET title=EXCLUDED.title RETURNING id", (movie_title,))
+    movie_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    # 2. Start Session
+    BATCH_SESSION.update({
+        'active': True,
+        'movie_id': movie_id,
+        'movie_title': movie_title,
+        'file_count': 0,
+        'admin_id': user_id
+    })
+
+    await update.message.reply_text(
+        f"🚀 **Batch Mode ON for:** `{movie_title}`\n\n"
+        f"1. Send files here (Bot PM).\n"
+        f"2. Bot will auto-upload to ALL Backup Channels.\n"
+        f"3. Type `/done` to auto-generate Aliases & Finish.",
+        parse_mode='Markdown'
+    )
+
+async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
+    """
+    if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
+        return
+
+    message = update.effective_message
+    if not (message.document or message.video): return
+
+    # Status message
+    status = await message.reply_text("⏳ Processing... Uploading to Backup Channels...", quote=True)
+
+    # 1. Get Channels
+    channels = get_storage_channels()
+    if not channels:
+        await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
+        return
+
+    backup_map = {} # Store {channel_id: message_id}
+    success_uploads = 0
+
+    # 2. Multi-Channel Upload Loop
+    for chat_id in channels:
+        try:
+            sent = await message.copy(chat_id=chat_id)
+            backup_map[str(chat_id)] = sent.message_id
+            success_uploads += 1
+        except Exception as e:
+            logger.error(f"Upload failed for {chat_id}: {e}")
+
+    if success_uploads == 0:
+        await status.edit_text("❌ Failed to upload to any channel.")
+        return
+
+    # 3. Prepare DB Data
+    file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
+    file_size = message.document.file_size if message.document else message.video.file_size
+    file_size_str = get_readable_file_size(file_size)
+    label = generate_quality_label(file_name, file_size_str)
+    
+    # Generate Main Link (From first channel in list)
+    main_channel_id = channels[0]
+    main_msg_id = backup_map.get(str(main_channel_id))
+    clean_id = str(main_channel_id).replace("-100", "")
+    main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
+
+    # 4. Save to DB
+    conn = get_db_connection()
+    if conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+               VALUES (%s, %s, %s, %s, %s)""",
+            (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    BATCH_SESSION['file_count'] += 1
+    await status.edit_text(
+        f"✅ **Saved Successfully!**\n"
+        f"📂 Backup Copies: {success_uploads}\n"
+        f"🏷 Label: `{label}`\n"
+        f"🔢 Total Files in Session: {BATCH_SESSION['file_count']}",
+        parse_mode='Markdown'
+    )
+
+async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Finishes session -> Generates AI Aliases -> Shows Report
+    """
+    if not BATCH_SESSION['active']: return
+
+    status_msg = await update.message.reply_text("🔄 **Generating AI Aliases... Please wait!** 🧠")
+
+    # 1. AI Generation (Claude)
+    movie_title = BATCH_SESSION['movie_title']
+    movie_id = BATCH_SESSION['movie_id']
+    
+    aliases = generate_aliases_claude(movie_title)
+    
+    alias_count = 0
+    conn = get_db_connection()
+    if conn and aliases:
+        cur = conn.cursor()
+        for alias in aliases:
+            try:
+                cur.execute(
+                    "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (movie_id, alias.lower())
+                )
+                alias_count += 1
+            except: pass
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    # 2. Final Report
+    report = (
+        f"🎉 **Batch Completed Successfully!**\n\n"
+        f"🎬 **Movie:** `{movie_title}`\n"
+        f"📂 **Files Saved:** {BATCH_SESSION['file_count']}\n"
+        f"🤖 **AI Aliases Added:** {alias_count}\n\n"
+        f"✅ *All backups secured across {len(get_storage_channels())} channels.*"
+    )
+
+    await status_msg.edit_text(report, parse_mode='Markdown')
+    
+    # Reset Session
+    BATCH_SESSION['active'] = False
+    BATCH_SESSION['movie_id'] = None
+    BATCH_SESSION['movie_title'] = None
+    BATCH_SESSION['file_count'] = 0
+    BATCH_SESSION['admin_id'] = None
+
 # 👇👇👇 FIXED 3-BOT FUNCTION 👇👇👇
 
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2571,7 +2932,6 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if conn:
             conn.close()
-
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -3565,208 +3925,10 @@ def run_flask():
 
     flask_app.run(host='0.0.0.0', port=port)
 
-# ==================== BATCH UPLOAD HANDLERS ====================
+# ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
-async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Command: /batch MovieName
-    Starts a listening session in the Dump Channel.
-    """
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("❌ Usage: `/batch Movie Name`\n(Use this in Dump Channel or PM)")
-        return
-
-    movie_title = " ".join(context.args).strip()
-    
-    # 1. Find or Create Movie in DB
-    conn = get_db_connection()
-    if not conn:
-        await update.message.reply_text("❌ DB Connection Failed")
-        return
-        
-    try:
-        cur = conn.cursor()
-        # Check if exists
-        cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
-        row = cur.fetchone()
-        
-        if row:
-            movie_id = row[0]
-            msg = f"✅ **Movie Found:** `{movie_title}` (ID: {movie_id})"
-        else:
-            # Create new
-            cur.execute("INSERT INTO movies (title, url) VALUES (%s, '') RETURNING id", (movie_title,))
-            movie_id = cur.fetchone()[0]
-            conn.commit()
-            msg = f"🆕 **New Movie Created:** `{movie_title}` (ID: {movie_id})"
-            
-        cur.close()
-        conn.close()
-        
-        # 2. Activate Batch Session
-        BATCH_SESSION['active'] = True
-        BATCH_SESSION['admin_id'] = user_id
-        BATCH_SESSION['movie_id'] = movie_id
-        BATCH_SESSION['movie_title'] = movie_title
-        BATCH_SESSION['count'] = 0
-        
-        await update.message.reply_text(
-            f"{msg}\n\n"
-            f"🚀 **Batch Mode ON!**\n"
-            f"Now forward/upload files to the **Dump Channel**.\n"
-            f"Bot will auto-save them.\n\n"
-            f"Type `/done` when finished.",
-            parse_mode='Markdown'
-        )
-        
-    except Exception as e:
-        logger.error(f"Batch Error: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
-
-async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stops the batch session"""
-    if update.effective_user.id != ADMIN_USER_ID:
-        return
-        
-    if not BATCH_SESSION['active']:
-        await update.message.reply_text("⚠️ No active batch session.")
-        return
-        
-    count = BATCH_SESSION['count']
-    title = BATCH_SESSION['movie_title']
-    
-    # Reset Session
-    BATCH_SESSION['active'] = False
-    BATCH_SESSION['movie_id'] = None
-    
-    await update.message.reply_text(
-        f"🎉 **Batch Completed!**\n\n"
-        f"🎬 Movie: **{title}**\n"
-        f"✅ Files Saved: **{count}**\n\n"
-        f"You can now search this movie in the bot.",
-        parse_mode='Markdown'
-    )
-
-async def channel_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Saves files as LINKS instead of File IDs to protect thumbnails and cross-bot compatibility.
-    """
-    if not BATCH_SESSION.get('active'):
-        return
-
-    current_chat_id = str(update.effective_chat.id)
-    if DUMP_CHANNEL_ID and current_chat_id != str(DUMP_CHANNEL_ID):
-        return
-
-    message = update.effective_message
-    file_name = "Unknown"
-    file_size_bytes = 0
-    
-    # Check if it's a document or video
-    if message.document:
-        file_name = message.document.file_name or "Unknown"
-        file_size_bytes = message.document.file_size
-    elif message.video:
-        file_name = message.video.file_name or f"Video {BATCH_SESSION['count']+1}"
-        file_size_bytes = message.video.file_size
-    else:
-        return
-
-    # 1. Generate Smart Label
-    file_size_str = get_readable_file_size(file_size_bytes)
-    label = generate_quality_label(file_name, file_size_str)
-    
-    # 2. GENERATE MESSAGE LINK (The magic fix for thumbnails) 🪄
-    # Private Channel ID se '-100' hatana padta hai link banane ke liye
-    clean_chat_id = str(current_chat_id).replace("-100", "")
-    message_link = f"https://t.me/c/{clean_chat_id}/{message.message_id}"
-
-    # 3. Save to Database
-    conn = get_db_connection()
-    if conn:
-        try:
-            cur = conn.cursor()
-            # ⚠️ file_id को NULL (None) रखें और url में link सेव करें
-            cur.execute(
-                "INSERT INTO movie_files (movie_id, file_id, quality, file_size, url) VALUES (%s, %s, %s, %s, %s)",
-                (BATCH_SESSION['movie_id'], None, label, file_size_str, message_link)
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            
-            BATCH_SESSION['count'] += 1
-            logger.info(f"✅ Saved as LINK: {file_name} -> {label}")
-            
-        except Exception as e:
-            logger.error(f"Failed to auto-save file: {e}")
-
-# ==================== BATCH UPLOAD HELPERS ====================
-
-# Global variable to track batch session
-# Format: {'active': False, 'admin_id': None, 'movie_id': None, 'movie_title': None, 'count': 0}
-BATCH_SESSION = {'active': False}
-
-def get_readable_file_size(size_in_bytes):
-    """Converts bytes to readable format (MB, GB)"""
-    try:
-        if not size_in_bytes: return "N/A"
-        size = int(size_in_bytes)
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024:
-                return f"{size:.2f} {unit}"
-            size /= 1024
-    except Exception:
-        return "Unknown"
-    return "Unknown"
-
-def generate_quality_label(file_name, file_size_str):
-    """
-    Smart Logic to generate button label from filename
-    Example: "Thamma.2025.1080p.mkv" -> "1080p [1.2GB]"
-    """
-    name_lower = file_name.lower()
-    quality = "HD" # Default
-    
-    # 1. Detect Quality
-    if "4k" in name_lower or "2160p" in name_lower: quality = "4K"
-    elif "1080p" in name_lower: quality = "1080p"
-    elif "720p" in name_lower: quality = "720p"
-    elif "480p" in name_lower: quality = "480p"
-    elif "360p" in name_lower: quality = "360p"
-    elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
-    
-    # 2. Detect Series (S01E01)
-    season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
-    if season_match:
-        episode_tag = season_match.group(0).upper()
-        # Format: S01E01 - 720p [200MB]
-        return f"{episode_tag} - {quality} [{file_size_str}]"
-        
-    # 3. Default Movie Format: 720p [1.2GB]
-    return f"{quality} [{file_size_str}]"
-
-def fix_database_constraints():
-    """Removes the UNIQUE constraint from movie_files to allow multiple files"""
-    try:
-        conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            # Drop the constraint that prevents duplicate qualities
-            cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS movie_files_movie_id_quality_key;")
-            conn.commit()
-            cur.close()
-            conn.close()
-            logger.info("✅ Database constraints fixed for Batch Upload.")
-    except Exception as e:
-        logger.error(f"Error fixing DB constraints: {e}")
-
-# Call this once
-fix_database_constraints()
+# Note: Purane batch functions ko replace kar diya gaya hai naye multi-channel batch functions se
+# Isliye ye functions delete kar diye gaye hain aur unki jagah naye functions upar add kiye gaye hain.
 
 # ==================== NEW REQUEST SYSTEM (CONFIRMATION FLOW) ====================
 
@@ -4100,12 +4262,13 @@ def main():
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
 
-    # Batch Commands
+    # ✅ NEW BATCH COMMANDS WITH MULTI-CHANNEL UPLOAD
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
-
-    # Channel Listener
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.VIDEO), channel_file_listener))
+    
+    # ✅ NEW PM FILE LISTENER (Only Active during Batch)
+    # Note: Ise Group Handler se pehle rakhna
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener))
 
     # 1. Private Chat Handler (DM me "Not Found" bolega - Normal behavior)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
