@@ -56,6 +56,7 @@ background_tasks = set()
 
 # ==================== CONVERSATION STATES ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
+SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
