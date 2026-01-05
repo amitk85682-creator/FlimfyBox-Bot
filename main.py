@@ -2193,18 +2193,20 @@ def get_readable_file_size(size_in_bytes):
         return "Unknown"
     return "Unknown"
 
-def generate_aliases_claude(movie_title):
+def generate_aliases_gemini(movie_title):
     """
-    Generates SEO aliases using Claude AI based on your prompt.
+    Generates SEO aliases using Google Gemini (Free).
     Returns a list of comma-separated aliases.
     """
-    api_key = os.environ.get("CLAUDE_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.error("❌ CLAUDE_API_KEY not found.")
+        logger.error("❌ GEMINI_API_KEY not found.")
         return []
 
     try:
-        client = anthropic.Anthropic(api_key=api_key)
+        genai.configure(api_key=api_key)
+        # Using Flash model because it's faster for list generation
+        model = genai.GenerativeModel('gemini-3-pro')
         
         # Tumhara Prompt Logic
         prompt = f"""
@@ -2332,7 +2334,7 @@ How users speak to Alexa/Google/Siri:
         return aliases
 
     except Exception as e:
-        logger.error(f"Claude AI Error: {e}")
+        logger.error(f"Gemini AI Error: {e}")
         return []
 
 # ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
@@ -2457,7 +2459,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     movie_title = BATCH_SESSION['movie_title']
     movie_id = BATCH_SESSION['movie_id']
     
-    aliases = generate_aliases_claude(movie_title)
+    aliases = generate_aliases_gemini(movie_title)
     
     alias_count = 0
     conn = get_db_connection()
@@ -2600,7 +2602,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"➖➖➖➖➖➖➖➖➖➖\n"
             f"🔹 <b>Support group:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Request & Search Movies</a>\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"👇 <b>Download from any Bot:</b>\n"
+            f"<b>🧙‍♂️Download Below:👇</b>\n"
         )
 
         # =========================================================
@@ -2656,7 +2658,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add a movie manually (Supports Unreleased)"""
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("Sorry Darling, sirf Admin hi is command ka istemal kar sakte hain.")
+        await update.message.reply_text("Sorry Darling, sirf 𝑶𝒘𝒏𝒆𝒓 hi is command ka istemal kar sakte hain.")
         return
 
     conn = None
@@ -3283,7 +3285,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         warning_msg = await context.bot.send_message(
             chat_id=user_id,
-            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
+            text="ᯓ➤This file automatically❕️deletes after 1 minute❕️so please forward it to another chat જ⁀➴",
             parse_mode='Markdown'
         )
 
@@ -4044,7 +4046,7 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
 
 🎬 Movie: <b>{movie_title}</b>
 
-📝 आपकी रिक्वेस्ट एडमिन <b>@ownermahi</b> / <b>@ownermahima</b> को मिली गई है।
+📝 आपकी रिक्वेस्ट 𝑶𝒘𝒏𝒆𝒓 <b>@ownermahi</b> / <b>@ownermahima</b> को मिली गई है।
 ⏳ जैसे ही मूवी उपलब्ध होगी, वो खुद आपको यहाँ सूचित (Notify) कर देंगे।
 
 <i>हमसे जुड़े रहने के लिए धन्यवाद! 🙏</i>
