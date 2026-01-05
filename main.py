@@ -755,7 +755,7 @@ async def analyze_intent(message_text):
             return {"is_request": False, "content_title": None}
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name='gemini-3-pro')
+        model = genai.GenerativeModel(model_name='gemini-1.5-flash')
 
         prompt = f"""
         You are a 'Request Analyzer' for a Telegram bot named FlimfyBox Bot.
@@ -2207,8 +2207,8 @@ def generate_aliases_gemini(movie_title):
         # Configure Gemini
         genai.configure(api_key=api_key)
         
-        # Use correct model name (gemini-3-pro is free & fast)
-        model = genai.GenerativeModel('gemini-3-pro')
+        # Use correct model name (gemini-1.5-flash is free & fast)
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
         # Your Prompt
         prompt = f"""
