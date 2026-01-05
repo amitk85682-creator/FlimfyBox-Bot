@@ -2204,13 +2204,15 @@ def generate_aliases_gemini(movie_title):
         return []
 
     try:
+        # Configure Gemini
         genai.configure(api_key=api_key)
-        # Using Flash model because it's faster for list generation
+        
+        # Use correct model name (gemini-3-pro is free & fast)
         model = genai.GenerativeModel('gemini-3-pro')
         
-        # Tumhara Prompt Logic
+        # Your Prompt
         prompt = f"""
-        Act as a Search Query Analyst, SEO Expert, and User Behavior Specialist.
+Act as a Search Query Analyst, SEO Expert, and User Behavior Specialist.
 
 I need an exhaustive list of "Aliases," "Keywords," and "Search Terms" for the movie/web series: "{movie_title}".
 
@@ -2250,21 +2252,14 @@ Focus on how someone would TYPE if they only HEARD the name:
 - Silent letter omissions
 - Regional accent-based spellings (South Indian, Punjabi, Bengali pronunciation)
 
-Example logic:
-- "Phoenix" → Fonix, Fenix, Finix
-- "Mirzapur" → Mirjapur, Mirzapoor
-- "Bahubali" → Baahubali, Bahuballi, Bhaubali
-
 ### 4. Keyboard Slips & Fat-finger Errors:
 - Adjacent QWERTY key mistakes (a↔s, i↔o, n↔m)
 - Skipped letters (typing too fast)
 - Double-pressed keys
 - Mobile swipe keyboard errors
 - Spacebar errors (no space, extra space, wrong space position)
-- Shifted finger errors (first letter wrong)
 
-### 5. Platform & Intent-Based Searches (NEW):
-How users search with specific intent:
+### 5. Platform & Intent-Based Searches:
 - "[Movie] watch online"
 - "[Movie] download"
 - "[Movie] Netflix/Prime/Hotstar"
@@ -2272,69 +2267,49 @@ How users search with specific intent:
 - "[Movie] Hindi dubbed"
 - "[Movie] trailer"
 - "[Movie] review"
-- "[Movie] cast"
-- "[Movie] OTT release"
-- "[Movie] free streaming"
 
-### 6. Voice Search & Conversational Queries (NEW):
-How users speak to Alexa/Google/Siri:
+### 6. Voice Search & Conversational Queries:
 - "Play [Movie name]"
 - "Show me [Movie name]"
 - "I want to watch [Movie name]"
-- Natural language with filler words
-- Mispronunciation patterns in voice
 
-### 7. Cast & Crew Combinations (NEW):
+### 7. Cast & Crew Combinations:
 - "[Actor name] new movie"
 - "[Director] latest film"
-- "[Actor] [Year] movie"
-- "[Actor] [Genre] movie"
-- "[Actor] [Co-actor] movie"
 
-### 8. Regional & Transliteration Variations (NEW):
+### 8. Regional & Transliteration Variations:
 - Devanagari to Roman transliteration errors
-- Tamil/Telugu/Kannada/Malayalam phonetic spellings
-- Urdu/Arabic influenced spellings
-- Bengali/Marathi pronunciation-based spellings
+- Tamil/Telugu/Kannada phonetic spellings
 
 ---
 
 ## OUTPUT FORMAT:
+Provide exactly 50 comma-separated aliases only. No explanations, no categories, no numbering. Just plain comma-separated text.
 
-**Option A:** Provide exactly 50 comma-separated aliases (current format)
+Example output format:
+alias1, alias2, alias3, alias4, alias5...
+"""
 
-**Option B (Recommended):** Provide 75-100 aliases organized by category with priority tags:
-- 🔴 HIGH PRIORITY (most common searches)
-- 🟡 MEDIUM PRIORITY (frequent mistakes)
-- 🟢 LOW PRIORITY (edge cases but valid)
-
----
-
-## ADDITIONAL INSTRUCTIONS:
-
-1. DO NOT include generic words alone (like just "movie" or "film")
-2. Every alias must be directly related to the title
-3. Include at least 5 variations per category
-4. For multi-word titles, include both spaced and non-spaced versions
-5. Consider both mobile and desktop typing patterns
-6. Include common autocorrect failures
-        """
-
-        message = client.messages.create(
-            model="claude-3-haiku-20240307", # Sasta aur Fast model
-            max_tokens=1000,
-            temperature=0.5,
-            messages=[{"role": "user", "content": prompt}]
+        # Generate response using Gemini
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.7,
+                max_output_tokens=1500,
+            )
         )
         
-        # Response clean karna
-        content = message.content[0].text
-        # Comma se split karke list bana lo
+        # Extract text from response
+        content = response.text
+        
+        # Clean and split by comma
         aliases = [x.strip() for x in content.split(',') if x.strip()]
+        
+        logger.info(f"✅ Generated {len(aliases)} aliases for '{movie_title}'")
         return aliases
 
     except Exception as e:
-        logger.error(f"Gemini AI Error: {e}")
+        logger.error(f"❌ Gemini AI Error: {e}")
         return []
 
 # ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
