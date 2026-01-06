@@ -63,6 +63,10 @@ except Exception:
 
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
+# ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
+WAITING_FOR_NAME, CONFIRMATION = range(2)
+SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
+
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
