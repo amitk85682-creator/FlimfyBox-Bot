@@ -2,26 +2,36 @@
 import os
 import threading
 import asyncio
-import logging
+import logging  # Logging import zaroori hai
 import random
 import json
 import requests
 import signal
 import sys
 import re
-import anthropic  # ✅ NEW IMPORT FOR CLAUDE AI
+# import anthropic  # Agar zaroorat ho toh uncomment karein
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, quote
 from collections import defaultdict
 from typing import Optional
 
+# ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.DEBUG  # Change from INFO to DEBUG if needed
+)
+logger = logging.getLogger(__name__)
+
+# ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
     from imdb import Cinemagoer
     ia = Cinemagoer()
 except ImportError:
+    # Ab logger define ho chuka hai, toh yeh error nahi dega
     logger.warning("imdb (cinemagoer) module not found. Run: pip install cinemagoer")
     ia = None
 
+# ==================== 3. BAAKI IMPORTS ====================
 # Third-party imports
 from bs4 import BeautifulSoup
 import telegram
@@ -44,27 +54,15 @@ from telegram.ext import (
 # Local imports
 import admin_views as admin_views_module
 
-# Try to import db_utils and get FIXED_DATABASE_URL
+# Try to import db_utils
 try:
     import db_utils
     FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
 except Exception:
     FIXED_DATABASE_URL = None
 
-# ==================== LOGGING SETUP ====================
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Change from INFO to DEBUG
-)
-logger = logging.getLogger(__name__)
-
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
-
-# ==================== CONVERSATION STATES ====================
-WAITING_FOR_NAME, CONFIRMATION = range(2)
-SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
-
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
