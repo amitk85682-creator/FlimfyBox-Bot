@@ -1321,11 +1321,172 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
         if cur: cur.close()
         if conn: conn.close()
 
+# ==================== NEW GENRE FUNCTIONS ====================
+
+def get_all_genres_from_db():
+    """Fetch all unique genres from database"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT genre FROM movies WHERE genre IS NOT NULL AND genre != ''")
+        results = cur.fetchall()
+        
+        # Parse comma-separated genres and flatten
+        all_genres = []
+        for row in results:
+            genre_str = row[0]
+            if genre_str:
+                # Split by comma and strip spaces
+                genres = [g.strip() for g in genre_str.split(',')]
+                all_genres.extend(genres)
+        
+        # Remove duplicates and return sorted list
+        unique_genres = sorted(set(all_genres))
+        cur.close()
+        conn.close()
+        return unique_genres
+        
+    except Exception as e:
+        logger.error(f"Error fetching genres: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+def create_genre_selection_keyboard():
+    """Create inline keyboard with genre selection buttons"""
+    genres = get_all_genres_from_db()
+    
+    if not genres:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("❌ No Genres Found", callback_data="cancel_genre")]])
+    
+    keyboard = []
+    row = []
+    
+    for idx, genre in enumerate(genres):
+        row.append(InlineKeyboardButton(
+            f"📂 {genre}",
+            callback_data=f"genre_{genre}"
+        ))
+        
+        # 2 buttons per row
+        if (idx + 1) % 2 == 0:
+            keyboard.append(row)
+            row = []
+    
+    # Add remaining buttons
+    if row:
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_genre")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_movies_by_genre(genre: str, limit: int = 10):
+    """Fetch movies filtered by genre"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        cur = conn.cursor()
+        # Use ILIKE for case-insensitive search within genre string
+        cur.execute("""
+            SELECT id, title, url, file_id, poster_url, year 
+            FROM movies 
+            WHERE genre ILIKE %s
+            ORDER BY year DESC NULLS LAST
+            LIMIT %s
+        """, (f'%{genre}%', limit))
+        
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error fetching movies by genre: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+
+async def show_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Browse by Genre' button click"""
+    if update.message:
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        
+        # FSub check
+        check = await is_user_member(context, user_id)
+        if not check['is_member']:
+            msg = await update.message.reply_text(
+                get_join_message(check['channel'], check['group']),
+                reply_markup=get_join_keyboard(),
+                parse_mode='Markdown'
+            )
+            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            return
+        
+        # Show genre selection
+        keyboard = create_genre_selection_keyboard()
+        msg = await update.message.reply_text(
+            "📂 **Select a genre to browse movies:**",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        track_message_for_deletion(context, chat_id, msg.message_id, 180)
+
+
+async def handle_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle genre selection callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "cancel_genre":
+        await query.edit_message_text("❌ Genre browsing cancelled.")
+        return
+    
+    if data.startswith("genre_"):
+        genre = data.replace("genre_", "")
+        
+        # Fetch movies for this genre
+        movies = get_movies_by_genre(genre, limit=15)
+        
+        if not movies:
+            await query.edit_message_text(
+                f"😕 No movies found for genre: **{genre}**\n\n"
+                "Try another genre or use 🔍 Search.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Create movie selection keyboard
+        context.user_data['search_results'] = movies
+        context.user_data['search_query'] = genre
+        
+        keyboard = create_movie_selection_keyboard(movies, page=0)
+        
+        await query.edit_message_text(
+            f"🎬 **Found {len(movies)} movies in '{genre}' genre**\n\n"
+            "👇 Select a movie:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+
 # ==================== KEYBOARD MARKUPS ====================
 def get_main_keyboard():
-    """Get the main menu keyboard"""
+    """Get the main menu keyboard - UPDATED with Genre"""
     keyboard = [
         ['🔍 Search Movies'],
+        ['📂 Browse by Genre', '🙋 Request Movie'],
         ['📊 My Stats', '❓ Help']
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
@@ -1458,14 +1619,34 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
 
 # ==================== HELPER FUNCTION ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
-    """Sends the movie file/link to the user with THUMBNAIL PROTECTION"""
+    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - UPDATED with Genre Display"""
     chat_id = update.effective_chat.id
 
-    # --- 1. Language Detection from FILES (Database) ---
-    # Hum saari qualities fetch karke check karenge ki audio info hai ya nahi
+    # --- 1. Fetch movie details including genre & year ---
+    conn = get_db_connection()
+    genre = ""
+    year = ""
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT genre, year FROM movies WHERE id = %s", (movie_id,))
+            result = cur.fetchone()
+            if result:
+                db_genre, db_year = result
+                if db_genre:
+                    genre = f"🎭 <b>Genre:</b> {db_genre}\n"
+                if db_year and db_year > 0:
+                    year = f"📅 <b>Year:</b> {db_year}\n"
+            cur.close()
+        except Exception as e:
+            logger.error(f"Error fetching genre: {e}")
+        finally:
+            conn.close()
+    # ---------------------------------------------------
+
+    # --- 2. Language Detection from FILES (Database) ---
     all_qualities = get_all_movie_qualities(movie_id)
     
-    # Saare file labels ko jod kar text banao check karne ke liye
     combined_file_text = " ".join([q[0].lower() for q in all_qualities])
     
     langs = []
@@ -1478,15 +1659,14 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if "dual" in combined_file_text: langs.append("Dual Audio")
     if "multi" in combined_file_text: langs.append("Multi Audio")
     
-    # Agar multiple languages mili, to duplicate hata kar string banao
     lang_display = ""
     if langs:
         lang_display = f"🔊 <b>Language:</b> {', '.join(sorted(set(langs)))}\n"
-# ---------------------------------------------------
+    # ---------------------------------------------------
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
-        if all_qualities: # variable name change kiya upar fetch kiya tha
+        if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
             
             selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
@@ -1506,17 +1686,20 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         sent_msg = None
         
-        # --- CAPTION UPDATE WITH HTML ---
+        # --- CAPTION UPDATE WITH GENRE, YEAR & LANGUAGE ---
         caption_text = (
             f"🎬 <b>{title}</b>\n"
-            f"{lang_display}"  # Language yahan add ki gayi hai
+            f"{year}"        # Year added
+            f"{genre}"       # Genre added
+            f"{lang_display}"  # Language
             f"\n🔗 <b>JOIN »</b> <a href='{FILMFYBOX_CHANNEL_URL}'>FilmfyBox</a>\n\n"
             f"🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
             f"🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
         )
-        # -------------------------------
+        # ---------------------------------------------------
         
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
+
 
         # ==================================================================
         # 🚀 PRIORITY 1: TRY COPYING FROM CHANNEL LINK (Best for Thumbnails)
@@ -2192,6 +2375,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # === NEW: GENRE CALLBACK HANDLER ===
+    if data.startswith(("genre_", "cancel_genre")):
+        await handle_genre_selection(update, context)
+        return
+    # ===================================
+    
     # === 1. VERIFY BUTTON LOGIC ===
     if data == "verify":
         await query.answer("🔍 Checking membership...", show_alert=True)
@@ -4209,6 +4398,83 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cur: cur.close()
         if conn: conn.close()
 
+async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Magic Command: Finds movies with missing Genre/Poster and fixes them automatically.
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        await update.message.reply_text("⛔ सिर्फ एडमिन के लिए!")
+        return
+
+    status_msg = await update.message.reply_text("⏳ **Scanning Database for incomplete movies...**", parse_mode='Markdown')
+
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ Database connection failed.")
+        return
+
+    try:
+        cur = conn.cursor()
+        # Sirf wo movies dhundo jinka Genre ya Poster gayab hai
+        cur.execute("SELECT title FROM movies WHERE genre IS NULL OR poster_url IS NULL")
+        movies_to_fix = cur.fetchall()
+        
+        if not movies_to_fix:
+            await status_msg.edit_text("✅ **All Good!** Database mein sabhi movies ka metadata complete hai.")
+            return
+
+        total = len(movies_to_fix)
+        await status_msg.edit_text(f"🧐 Found **{total}** movies to fix. Starting update process... (This may take time)")
+
+        success_count = 0
+        failed_count = 0
+
+        for index, (title,) in enumerate(movies_to_fix):
+            try:
+                # Progress update every 10 movies
+                if index % 10 == 0:
+                    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+                # Fetch Data using our Super Fetcher
+                real_title, poster, rating, year, genre = fetch_movie_metadata(title)
+
+                if genre or poster:
+                    # Update Database
+                    cur.execute("""
+                        UPDATE movies 
+                        SET genre = %s, poster_url = %s, rating = %s, year = %s
+                        WHERE title = %s
+                    """, (genre, poster, rating, year, title))
+                    conn.commit()
+                    success_count += 1
+                else:
+                    failed_count += 1
+                
+                # Sleep to respect API limits (important!)
+                await asyncio.sleep(0.5) 
+
+            except Exception as e:
+                logger.error(f"Failed to fix {title}: {e}")
+                failed_count += 1
+
+        # Final Report
+        await status_msg.edit_text(
+            f"🎉 **Repair Complete!**\n\n"
+            f"✅ Fixed: {success_count}\n"
+            f"❌ Failed: {failed_count}\n"
+            f"📊 Total Processed: {total}\n\n"
+            f"Ab website check karo! 🚀",
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Error in fix_metadata: {e}")
+        await status_msg.edit_text(f"❌ Error: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: conn.close()
+
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -4435,7 +4701,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     """
     Handles text messages in Private Chat:
     1. Checks Membership (FSub)
-    2. Checks for Menu Buttons (Stats, Help, etc.)
+    2. Checks for Menu Buttons (Stats, Help, Genre, etc.)
     3. If not a button, performs a Movie Search
     """
     user_id = update.effective_user.id
@@ -4472,6 +4738,12 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg = await update.message.reply_text("Click the button below to request:", reply_markup=get_main_keyboard())
         track_message_for_deletion(context, chat_id, msg.message_id, 60)
         return
+
+    # === NEW: Handle 'Browse by Genre' button ===
+    elif query_text == '📂 Browse by Genre':
+        await show_genre_selection(update, context)
+        return
+    # ============================================
 
     # Handle 'My Stats' button
     elif query_text == '📊 My Stats':
@@ -4640,6 +4912,7 @@ def main():
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
     application.add_handler(CommandHandler("batchid", batch_id_command))
+    application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     
     # ✅ NEW PM FILE LISTENER (Only Active during Batch)
     # Note: Ise Group Handler se pehle rakhna
@@ -4647,6 +4920,7 @@ def main():
 
     # 1. Private Chat Handler (DM me "Not Found" bolega - Normal behavior)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
+    application.add_handler(CommandHandler("genres", show_genre_selection))
 
     # 2. Group Chat Handler (Group me movie nahi mili to CHUP rahega)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
