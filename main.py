@@ -15,6 +15,13 @@ from urllib.parse import urlparse, urlunparse, quote
 from collections import defaultdict
 from typing import Optional
 
+try:
+    from imdb import Cinemagoer
+    ia = Cinemagoer()
+except ImportError:
+    logger.warning("imdb (cinemagoer) module not found. Run: pip install cinemagoer")
+    ia = None
+
 # Third-party imports
 from bs4 import BeautifulSoup
 import telegram
@@ -394,8 +401,9 @@ def track_message_for_deletion(context, chat_id, message_id, delay=60):
     task.add_done_callback(background_tasks.discard)
 
 # ==================== DATABASE FUNCTIONS ====================
+
 def setup_database():
-    """Setup database tables and indexes"""
+    """Setup database tables and indexes - UPDATED with IMDb columns"""
     try:
         conn_str = FIXED_DATABASE_URL or DATABASE_URL
         conn = psycopg2.connect(conn_str)
@@ -403,13 +411,18 @@ def setup_database():
         
         cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
 
+        # ✅ UPDATED TABLE: Added imdb_id, poster_url, year, genre columns
         cur.execute('''
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL UNIQUE,
                 url TEXT NOT NULL,
                 file_id TEXT,
-                is_unreleased BOOLEAN DEFAULT FALSE
+                is_unreleased BOOLEAN DEFAULT FALSE,
+                imdb_id TEXT,
+                poster_url TEXT,
+                year INTEGER,
+                genre TEXT
             )
         ''')
 
@@ -458,15 +471,19 @@ def setup_database():
             END $$;
         ''')
 
-        # Add columns if they don't exist
+        # Add columns if they don't exist (for existing databases)
         try:
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS file_id TEXT;")
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS is_unreleased BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
+            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
+            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER;")
+            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
             cur.execute("ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS message_id BIGINT;")
         except Exception as e:
             logger.info(f"Column addition note: {e}")
 
-        # ✅ NEW: Add backup_map column for Multi-Channel support
+        # ✅ Add backup_map column for Multi-Channel support
         try:
             cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS backup_map JSONB DEFAULT '{}'::jsonb;")
         except Exception as e:
@@ -475,6 +492,8 @@ def setup_database():
         # Create indexes
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title_trgm ON movies USING gin (title gin_trgm_ops);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias ON movie_aliases (alias);')
@@ -488,6 +507,32 @@ def setup_database():
         logger.error(f"Error setting up database: {e}")
         logger.info("Continuing without database setup...")
 
+
+def migrate_add_imdb_columns():
+    """One-time migration to add imdb_id column if not exists"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);')
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ DB Migration: IMDb columns added successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Migration Error: {e}")
+        if conn: 
+            conn.close()
+        return False
+
+
 def get_db_connection(max_retries=3):
     """Get database connection with retry logic and timeout handling"""
     for attempt in range(max_retries):
@@ -497,14 +542,12 @@ def get_db_connection(max_retries=3):
                 logger.error("No database URL configured")
                 return None
             
-            # Add connection timeout parameters
             conn = psycopg2.connect(
                 conn_str,
-                connect_timeout=10,  # 10 second timeout
-                options='-c statement_timeout=30000'  # 30 second query timeout
+                connect_timeout=10,
+                options='-c statement_timeout=30000'
             )
             
-            # Test connection
             cur = conn.cursor()
             cur.execute("SELECT 1")
             cur.close()
@@ -515,9 +558,10 @@ def get_db_connection(max_retries=3):
             logger.error(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
             if attempt == max_retries - 1:
                 return None
-            time.sleep(1)  # Wait before retry
+            time.sleep(1)
     
     return None
+
 
 def update_movies_in_db():
     """Update movies from Blogger API"""
@@ -537,10 +581,10 @@ def update_movies_in_db():
 
         cur.execute("SELECT last_sync FROM sync_info ORDER BY id DESC LIMIT 1;")
         last_sync_result = cur.fetchone()
-        last_sync_time = last_sync_result if last_sync_result else None
+        last_sync_time = last_sync_result[0] if last_sync_result else None
 
         cur.execute("SELECT title FROM movies;")
-        existing_movies = {row[0] for row in cur.fetchall()}  # ✅ Extract first element
+        existing_movies = {row[0] for row in cur.fetchall()}
 
         if not BLOGGER_API_KEY or not BLOG_ID:
             return "Blogger API keys not configured"
@@ -596,6 +640,7 @@ def update_movies_in_db():
         if cur: cur.close()
         if conn: conn.close()
 
+
 def get_movies_from_db(user_query, limit=10):
     """Search for MULTIPLE movies in database with fuzzy matching"""
     conn = None
@@ -608,8 +653,10 @@ def get_movies_from_db(user_query, limit=10):
 
         logger.info(f"Searching for: '{user_query}'")
 
+        # ✅ Updated to include new columns
         cur.execute(
-            "SELECT id, title, url, file_id FROM movies WHERE LOWER(title) LIKE LOWER(%s) ORDER BY title LIMIT %s",
+            """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
+               FROM movies WHERE LOWER(title) LIKE LOWER(%s) ORDER BY title LIMIT %s""",
             (f'%{user_query}%', limit)
         )
         exact_matches = cur.fetchall()
@@ -621,7 +668,7 @@ def get_movies_from_db(user_query, limit=10):
             return exact_matches
 
         cur.execute("""
-            SELECT DISTINCT m.id, m.title, m.url, m.file_id
+            SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
             WHERE LOWER(ma.alias) LIKE LOWER(%s)
@@ -636,7 +683,7 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return alias_matches
 
-        cur.execute("SELECT id, title, url, file_id FROM movies")
+        cur.execute("SELECT id, title, url, file_id, imdb_id, poster_url, year, genre FROM movies")
         all_movies = cur.fetchall()
 
         if not all_movies:
@@ -644,8 +691,8 @@ def get_movies_from_db(user_query, limit=10):
             conn.close()
             return []
 
-        movie_titles = [movie[1] for movie in all_movies]  # Index 1 = title
-        movie_dict = {movie[1]: movie for movie in all_movies}  # Title as key, full tuple as value
+        movie_titles = [movie[1] for movie in all_movies]
+        movie_dict = {movie[1]: movie for movie in all_movies}
 
         matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
 
@@ -667,7 +714,6 @@ def get_movies_from_db(user_query, limit=10):
             except:
                 pass
 
-# 👇👇👇 IS FUNCTION KO 'get_movies_from_db' KE NEECHE PASTE KARO 👇👇👇
 
 def get_movies_fast_sql(query: str, limit: int = 5):
     """
@@ -682,14 +728,11 @@ def get_movies_fast_sql(query: str, limit: int = 5):
 
         cur = conn.cursor()
         
-        # 1. Pehle ensure karo ki extension enable hai (One time check)
         cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
         
-        # 2. Smart Query
-        # Hum 'SIMILARITY' function use kar rahe hain jo FuzzyWuzzy jaisa hai
-        # Par ye DB level par chalta hai isliye super fast hai.
+        # ✅ Updated to include new columns
         sql = """
-            SELECT m.id, m.title, m.url, m.file_id, 
+            SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
                    SIMILARITY(m.title, %s) as sim_score
             FROM movies m
             WHERE SIMILARITY(m.title, %s) > 0.3
@@ -700,8 +743,8 @@ def get_movies_fast_sql(query: str, limit: int = 5):
         cur.execute(sql, (query, query, limit))
         results = cur.fetchall()
         
-        # Format results to match old structure (remove score from tuple)
-        final_results = [(r[0], r[1], r[2], r[3]) for r in results]
+        # Format results (remove score from tuple)
+        final_results = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in results]
         
         cur.close()
         return final_results
@@ -715,6 +758,88 @@ def get_movies_fast_sql(query: str, limit: int = 5):
                 conn.close()
             except:
                 pass
+
+
+def get_movie_by_imdb_id(imdb_id: str):
+    """Get movie from database by IMDb ID"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
+               FROM movies WHERE imdb_id = %s LIMIT 1""",
+            (imdb_id,)
+        )
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching movie by IMDb ID: {e}")
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def update_movie_metadata(movie_id: int, imdb_id: str = None, poster_url: str = None, year: int = None, genre: str = None):
+    """Update movie metadata in database"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+
+        cur = conn.cursor()
+        
+        updates = []
+        values = []
+        
+        if imdb_id:
+            updates.append("imdb_id = %s")
+            values.append(imdb_id)
+        if poster_url:
+            updates.append("poster_url = %s")
+            values.append(poster_url)
+        if year:
+            updates.append("year = %s")
+            values.append(year)
+        if genre:
+            updates.append("genre = %s")
+            values.append(genre)
+        
+        if not updates:
+            return False
+        
+        values.append(movie_id)
+        query = f"UPDATE movies SET {', '.join(updates)} WHERE id = %s"
+        
+        cur.execute(query, values)
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        logger.info(f"✅ Updated metadata for movie ID: {movie_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error updating movie metadata: {e}")
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
 
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
     """Store user request in database"""
@@ -742,6 +867,207 @@ def store_user_request(user_id, username, first_name, movie_title, group_id=None
         except:
             pass
         return False
+
+
+# ==================== METADATA FUNCTIONS ====================
+
+def is_valid_imdb_id(imdb_id: str) -> bool:
+    """Validate IMDb ID format (tt1234567 or tt12345678)"""
+    if not imdb_id:
+        return False
+    return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
+
+
+def fetch_movie_metadata(query: str):
+    """
+    HYBRID METADATA FETCHER
+    - If query is tt1234567: Use IMDb ID (Most Accurate)
+    - If query is text: Try OMDb first, fallback to Cinemagoer
+    - Returns: (title, year, poster_url, genre, imdb_id) or None
+    """
+    try:
+        # 🔍 CASE 1: IMDb ID Format (tt1234567)
+        if is_valid_imdb_id(query):
+            imdb_id = query.strip()
+            logger.info(f"🎯 IMDb ID detected: {imdb_id}")
+            
+            # Try Cinemagoer first for IMDb IDs
+            try:
+                movie = ia.get_movie(imdb_id[2:])  # Remove 'tt'
+                title = movie.get('title', 'Unknown')
+                year = movie.get('year', 0)
+                poster_url = movie.get('full-size cover url', '')
+                genres = movie.get('genres', [])[:3]
+                
+                logger.info(f"✅ IMDb Data fetched: {title} ({year})")
+                return title, year, poster_url, ', '.join(genres), imdb_id
+                
+            except Exception as e:
+                logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
+                return None
+        
+        # 📝 CASE 2: Text Search (Movie Name)
+        # First try OMDb (Fast but sometimes outdated)
+        try:
+            omdb_api_key = os.environ.get("OMDB_API_KEY")
+            if omdb_api_key:
+                response = requests.get(
+                    f"http://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}",
+                    timeout=10
+                )
+                data = response.json()
+                
+                if data.get("Response") == "True":
+                    logger.info(f"✅ OMDb success: {data['Title']}")
+                    year_str = data.get('Year', '0').split('–')[0]  # Handle series
+                    try:
+                        year = int(year_str)
+                    except:
+                        year = 0
+                    return (
+                        data['Title'],
+                        year,
+                        data.get('Poster', ''),
+                        data.get('Genre', ''),
+                        data.get('imdbID', '')
+                    )
+        except Exception as e:
+            logger.warning(f"⚠️ OMDb failed: {e}")
+
+        # Fallback to Cinemagoer if OMDb fails
+        logger.info(f"🔄 Falling back to Cinemagoer for: {query}")
+        try:
+            movies = ia.search_movie(query)
+            if movies:
+                movie = movies[0]
+                ia.update(movie)
+                
+                title = movie.get('title', query)
+                year = movie.get('year', 0)
+                poster_url = movie.get('full-size cover url', '')
+                genres = movie.get('genres', [])[:3]
+                imdb_id = f"tt{movie.movieID}"
+                
+                logger.info(f"✅ Cinemagoer fallback success: {title}")
+                return title, year, poster_url, ', '.join(genres), imdb_id
+                
+        except Exception as e:
+            logger.error(f"❌ Cinemagoer fallback failed: {e}")
+
+        # Return original query if all fail
+        return query, 0, '', '', ''
+
+    except Exception as e:
+        logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
+        return None
+
+
+def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
+    """Automatically fetch and update metadata for a movie"""
+    try:
+        metadata = fetch_movie_metadata(movie_title)
+        if metadata:
+            title, year, poster_url, genre, imdb_id = metadata
+            update_movie_metadata(
+                movie_id=movie_id,
+                imdb_id=imdb_id if imdb_id else None,
+                poster_url=poster_url if poster_url else None,
+                year=year if year else None,
+                genre=genre if genre else None
+            )
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error in auto_fetch_and_update_metadata: {e}")
+        return False
+
+# ==================== NEW METADATA HELPER FUNCTIONS ====================
+
+# Helper function to validate IMDb ID
+def is_valid_imdb_id(imdb_id: str) -> bool:
+    return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
+
+def fetch_movie_metadata(query: str):
+    """
+    HYBRID METADATA FETCHER
+    - If query is tt1234567: Use IMDb ID (Most Accurate)
+    - If query is text: Try OMDb first, fallback to Cinemagoer
+    - Returns: (title, year, poster_url, genre, imdb_id)
+    """
+    if not ia: # Check if Cinemagoer is initialized
+        logger.error("Cinemagoer (imdb) not initialized.")
+        return query, 0, '', '', ''
+
+    try:
+        # 🔍 CASE 1: IMDb ID Format (tt1234567)
+        if re.match(r'^tt\d{7,8}$', query.strip()):
+            imdb_id = query.strip()
+            logger.info(f"🎯 IMDb ID detected: {imdb_id}")
+            
+            try:
+                # Cinemagoer requires numeric ID (without 'tt')
+                movie = ia.get_movie(imdb_id[2:])  
+                title = movie.get('title', 'Unknown')
+                year = movie.get('year', 0)
+                poster_url = movie.get('full-size cover url', '')
+                genres = movie.get('genres', [])[:3]
+                
+                logger.info(f"✅ IMDb Data fetched: {title} ({year})")
+                return title, year, poster_url, ', '.join(genres), imdb_id
+                
+            except Exception as e:
+                logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
+                return None
+        
+        # 📝 CASE 2: Text Search (Movie Name)
+        # First try OMDb (Fast but sometimes outdated)
+        try:
+            omdb_api_key = os.environ.get("OMDB_API_KEY")
+            if omdb_api_key:
+                response = requests.get(
+                    f"http://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}",
+                    timeout=10
+                )
+                data = response.json()
+                
+                if data.get("Response") == "True":
+                    logger.info(f"✅ OMDb success: {data['Title']}")
+                    return (
+                        data['Title'],
+                        int(data.get('Year', 0).split('–')[0]) if data.get('Year') else 0,
+                        data.get('Poster', ''),
+                        data.get('Genre', ''),
+                        data.get('imdbID', '')
+                    )
+        except Exception as e:
+            logger.warning(f"⚠️ OMDb failed: {e}")
+
+        # Fallback to Cinemagoer if OMDb fails
+        logger.info(f"🔄 Falling back to Cinemagoer for: {query}")
+        try:
+            movies = ia.search_movie(query)
+            if movies:
+                movie = movies[0]
+                ia.update(movie)  # Get full details
+                
+                title = movie.get('title', query)
+                year = movie.get('year', 0)
+                poster_url = movie.get('full-size cover url', '')
+                genres = movie.get('genres', [])[:3]
+                imdb_id = f"tt{movie.movieID}"
+                
+                logger.info(f"✅ Cinemagoer fallback success: {title}")
+                return title, year, poster_url, ', '.join(genres), imdb_id
+                
+        except Exception as e:
+            logger.error(f"❌ Cinemagoer fallback failed: {e}")
+
+        # Return original query if all fail
+        return query, 0, '', '', ''
+
+    except Exception as e:
+        logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
+        return None
 
 # ==================== AI INTENT ANALYSIS ====================
 async def analyze_intent(message_text):
@@ -2314,44 +2640,106 @@ alias1, alias2, alias3, alias4, alias5...
 
 # ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
 
+async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct IMDb ID batch command"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+        
+    if not context.args:
+        await update.message.reply_text("❌ Usage: `/batchid tt1234567`", parse_mode='Markdown')
+        return
+        
+    imdb_id = context.args[0].strip()
+    
+    # Check if helper function exists, otherwise simple regex check
+    if 'is_valid_imdb_id' in globals():
+        if not is_valid_imdb_id(imdb_id):
+            await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
+            return
+    elif not re.match(r'^tt\d{7,8}$', imdb_id):
+         await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
+         return
+        
+    # Reuse batch_add_command logic
+    context.args = [imdb_id]
+    await batch_add_command(update, context)
+
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Batch Session (PM Only)"""
+    """Start Batch Session with IMDb ID support"""
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
 
     if not context.args:
-        await update.message.reply_text("❌ Usage: `/batch Movie Name`")
+        await update.message.reply_text(
+            "❌ Usage:\n"
+            "`/batch Movie Name`\n"
+            "`/batch tt1234567` (IMDb ID for exact match)",
+            parse_mode='Markdown'
+        )
         return
 
-    movie_title = " ".join(context.args).strip()
+    # Detect if input is IMDb ID
+    query = " ".join(context.args).strip()
+    is_imdb = is_valid_imdb_id(query)
     
-    # 1. DB Entry (Create Movie if not exists)
+    # Fetch metadata
+    metadata = fetch_movie_metadata(query)
+    if not metadata:
+        await update.message.reply_text("❌ Could not fetch movie metadata. Check your query.")
+        return
+
+    title, year, poster_url, genre, imdb_id = metadata
+    
+    # Show different messages for ID vs Name
+    if is_imdb:
+        status_text = f"🎯 **IMDb ID Mode**\n📌 Exact match found: **{title} ({year})**"
+    else:
+        status_text = f"🎬 **Title Mode**\n📌 Using: **{title} ({year})**"
+        
+    if imdb_id:
+        status_text += f"\n🏷 IMDb ID: `{imdb_id}`"
+    
+    await update.message.reply_text(status_text, parse_mode='Markdown')
+
+    # Create/Update DB entry with IMDb data
     conn = get_db_connection()
     if not conn: return
     
     cur = conn.cursor()
-    cur.execute("INSERT INTO movies (title, url) VALUES (%s, '') ON CONFLICT (title) DO UPDATE SET title=EXCLUDED.title RETURNING id", (movie_title,))
+    cur.execute(
+        """
+        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre) 
+        VALUES (%s, '', %s, %s, %s, %s) 
+        ON CONFLICT (title) DO UPDATE 
+        SET imdb_id = EXCLUDED.imdb_id,
+            poster_url = EXCLUDED.poster_url,
+            year = EXCLUDED.year,
+            genre = EXCLUDED.genre
+        RETURNING id
+        """,
+        (title, imdb_id, poster_url, year, genre)
+    )
     movie_id = cur.fetchone()[0]
     conn.commit()
     cur.close()
     conn.close()
 
-    # 2. Start Session
+    # Start batch session
     BATCH_SESSION.update({
         'active': True,
         'movie_id': movie_id,
-        'movie_title': movie_title,
+        'movie_title': title,
         'file_count': 0,
         'admin_id': user_id
     })
 
     await update.message.reply_text(
-        f"🚀 **Batch Mode ON for:** `{movie_title}`\n\n"
-        f"1. Send files here (Bot PM).\n"
-        f"2. Bot will auto-upload to ALL Backup Channels.\n"
-        f"3. Type `/done` to auto-generate Aliases & Finish.",
+        f"🚀 **Batch Mode ON for:** `{title}`\n\n"
+        f"📤 Send files here (Bot PM). Bot will auto-upload to ALL backup channels.\n"
+        f"✅ Type `/done` to finish and generate AI aliases.",
         parse_mode='Markdown'
     )
+
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -2372,7 +2760,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
         return
 
-    backup_map = {} # Store {channel_id: message_id}
+    backup_map = {}  # Store {channel_id: message_id}
     success_uploads = 0
 
     # 2. Multi-Channel Upload Loop
@@ -4179,16 +4567,24 @@ def main():
         return
 
     try:
-        # 1. Setup tables
+        # 1. Setup tables (Updated function call)
         setup_database()
-        # 2. Fix column names (Auto-repair 'label' -> 'quality')
+        
+        # 👇👇👇 YE LINE ADD KAREIN 👇👇👇
+        # 2. Migrate DB (Add new columns specifically)
+        migrate_add_imdb_columns()
+        # 👆👆👆 YAHAN TAK 👆👆👆
+
+        # 3. Fix column names (Old logic, optional)
         try:
-            fix_db_column_issue()
+            # fix_db_column_issue() # Agar ye function exist karta hai to rehne de
+            pass
         except NameError:
-            pass # Function might be missing in this snippet, ignore safely
+            pass 
+            
     except Exception as e:
         logger.error(f"Database setup failed but continuing: {e}")
-
+    
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
 
     # -----------------------------------------------------------
@@ -4243,6 +4639,7 @@ def main():
     # ✅ NEW BATCH COMMANDS WITH MULTI-CHANNEL UPLOAD
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
+    application.add_handler(CommandHandler("batchid", batch_id_command))
     
     # ✅ NEW PM FILE LISTENER (Only Active during Batch)
     # Note: Ise Group Handler se pehle rakhna
