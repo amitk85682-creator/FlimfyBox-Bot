@@ -882,92 +882,6 @@ def is_valid_imdb_id(imdb_id: str) -> bool:
         return False
     return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
 
-
-def fetch_movie_metadata(query: str):
-    """
-    HYBRID METADATA FETCHER
-    - If query is tt1234567: Use IMDb ID (Most Accurate)
-    - If query is text: Try OMDb first, fallback to Cinemagoer
-    - Returns: (title, year, poster_url, genre, imdb_id, rating)  # Always 6 values
-    """
-    try:
-        # 🔍 CASE 1: IMDb ID Format (tt1234567)
-        if is_valid_imdb_id(query):
-            imdb_id = query.strip()
-            logger.info(f"🎯 IMDb ID detected: {imdb_id}")
-            
-            # Try Cinemagoer first for IMDb IDs
-            try:
-                movie = ia.get_movie(imdb_id[2:])  # Remove 'tt'
-                title = movie.get('title', 'Unknown')
-                year = movie.get('year', 0)
-                poster_url = movie.get('full-size cover url', '')
-                genres = movie.get('genres', [])[:3]
-                rating = str(movie.get('rating', 'N/A'))
-                
-                logger.info(f"✅ IMDb Data fetched: {title} ({year})")
-                return title, year, poster_url, ', '.join(genres), imdb_id, rating
-                
-            except Exception as e:
-                logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
-                return query, 0, '', '', '', 'N/A'  # 6 values
-        
-        # 📝 CASE 2: Text Search (Movie Name)
-        # First try OMDb (Fast but sometimes outdated)
-        try:
-            omdb_api_key = os.environ.get("OMDB_API_KEY")
-            if omdb_api_key:
-                response = requests.get(
-                    f"http://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}",
-                    timeout=10
-                )
-                data = response.json()
-                
-                if data.get("Response") == "True":
-                    logger.info(f"✅ OMDb success: {data['Title']}")
-                    year_str = data.get('Year', '0').split('–')[0]  # Handle series
-                    try:
-                        year = int(year_str)
-                    except:
-                        year = 0
-                    return (
-                        data['Title'],
-                        year,
-                        data.get('Poster', ''),
-                        data.get('Genre', ''),
-                        data.get('imdbID', ''),
-                        data.get('imdbRating', 'N/A')
-                    )
-        except Exception as e:
-            logger.warning(f"⚠️ OMDb failed: {e}")
-
-        # Fallback to Cinemagoer if OMDb fails
-        logger.info(f"🔄 Falling back to Cinemagoer for: {query}")
-        try:
-            movies = ia.search_movie(query)
-            if movies:
-                movie = movies[0]
-                ia.update(movie)
-                
-                title = movie.get('title', query)
-                year = movie.get('year', 0)
-                poster_url = movie.get('full-size cover url', '')
-                genres = movie.get('genres', [])[:3]
-                imdb_id = f"tt{movie.movieID}"
-                rating = str(movie.get('rating', 'N/A'))
-                
-                logger.info(f"✅ Cinemagoer fallback success: {title}")
-                return title, year, poster_url, ', '.join(genres), imdb_id, rating
-                
-        except Exception as e:
-            logger.error(f"❌ Cinemagoer fallback failed: {e}")
-
-        # Return original query if all fail (with 6 values)
-        return query, 0, '', '', '', 'N/A'
-
-    except Exception as e:
-        logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
-        return query, 0, '', '', '', 'N/A'  # 6 values
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
     try:
@@ -990,20 +904,16 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
-# Helper function to validate IMDb ID
-def is_valid_imdb_id(imdb_id: str) -> bool:
-    return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
-
 def fetch_movie_metadata(query: str):
     """
     HYBRID METADATA FETCHER
     - If query is tt1234567: Use IMDb ID (Most Accurate)
     - If query is text: Try OMDb first, fallback to Cinemagoer
-    - Returns: (title, year, poster_url, genre, imdb_id)
+    - Returns: (title, year, poster_url, genre, imdb_id, rating)
     """
-    if not ia: # Check if Cinemagoer is initialized
+    if not ia:  # Check if Cinemagoer is initialized
         logger.error("Cinemagoer (imdb) not initialized.")
-        return query, 0, '', '', ''
+        return query, 0, '', '', '', 'N/A'  # Added 'N/A' for rating
 
     try:
         # 🔍 CASE 1: IMDb ID Format (tt1234567)
@@ -1013,14 +923,15 @@ def fetch_movie_metadata(query: str):
             
             try:
                 # Cinemagoer requires numeric ID (without 'tt')
-                movie = ia.get_movie(imdb_id[2:])  
+                movie = ia.get_movie(imdb_id[2:])
                 title = movie.get('title', 'Unknown')
                 year = movie.get('year', 0)
                 poster_url = movie.get('full-size cover url', '')
                 genres = movie.get('genres', [])[:3]
+                rating = movie.get('rating', 'N/A')  # Added rating
                 
                 logger.info(f"✅ IMDb Data fetched: {title} ({year})")
-                return title, year, poster_url, ', '.join(genres), imdb_id
+                return title, year, poster_url, ', '.join(genres), imdb_id, rating
                 
             except Exception as e:
                 logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
@@ -1039,12 +950,14 @@ def fetch_movie_metadata(query: str):
                 
                 if data.get("Response") == "True":
                     logger.info(f"✅ OMDb success: {data['Title']}")
+                    rating = data.get('imdbRating', 'N/A')  # Added rating
                     return (
                         data['Title'],
                         int(data.get('Year', 0).split('–')[0]) if data.get('Year') else 0,
                         data.get('Poster', ''),
                         data.get('Genre', ''),
-                        data.get('imdbID', '')
+                        data.get('imdbID', ''),
+                        rating  # Added rating
                     )
         except Exception as e:
             logger.warning(f"⚠️ OMDb failed: {e}")
@@ -1062,20 +975,20 @@ def fetch_movie_metadata(query: str):
                 poster_url = movie.get('full-size cover url', '')
                 genres = movie.get('genres', [])[:3]
                 imdb_id = f"tt{movie.movieID}"
+                rating = movie.get('rating', 'N/A')  # Added rating
                 
                 logger.info(f"✅ Cinemagoer fallback success: {title}")
-                return title, year, poster_url, ', '.join(genres), imdb_id
+                return title, year, poster_url, ', '.join(genres), imdb_id, rating
                 
         except Exception as e:
             logger.error(f"❌ Cinemagoer fallback failed: {e}")
 
         # Return original query if all fail
-        return query, 0, '', '', ''
+        return query, 0, '', '', '', 'N/A'  # Added 'N/A' for rating
 
     except Exception as e:
         logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
         return None
-
 # ==================== AI INTENT ANALYSIS ====================
 async def analyze_intent(message_text):
     """Analyze if the message is a movie request using AI"""
