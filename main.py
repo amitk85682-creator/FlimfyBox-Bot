@@ -1364,12 +1364,12 @@ async def show_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         track_message_for_deletion(context, chat_id, msg.message_id, 180)
 
 
-async def handle_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_genre_selection(update: Update, context:  ContextTypes.DEFAULT_TYPE):
     """Handle genre selection callback"""
     query = update.callback_query
     await query.answer()
     
-    data = query.data
+    data = query. data
     
     if data == "cancel_genre":
         await query.edit_message_text("❌ Genre browsing cancelled.")
@@ -1393,7 +1393,7 @@ async def handle_genre_selection(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = genre
         
-        keyboard = create_movie_selection_keyboard(movies, page=0)
+        keyboard = create_movie_selection_keyboard(movies, page=0)  # ✅ Now handles 6-tuple
         
         await query.edit_message_text(
             f"🎬 **Found {len(movies)} movies in '{genre}' genre**\n\n"
@@ -1401,7 +1401,6 @@ async def handle_genre_selection(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
-
 # ==================== KEYBOARD MARKUPS ====================
 def get_main_keyboard():
     """Get the main menu keyboard - UPDATED with Genre"""
@@ -1432,7 +1431,7 @@ def get_movie_options_keyboard(movie_title, url):
     return InlineKeyboardMarkup(keyboard)
 
 def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
-    """Create inline keyboard with movie selection buttons - FIXED"""
+    """Create inline keyboard with movie selection buttons - FIXED for all sources"""
     start_idx = page * movies_per_page
     end_idx = start_idx + movies_per_page
     current_movies = movies[start_idx:end_idx]
@@ -1440,10 +1439,19 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     keyboard = []
 
     for movie in current_movies:
-        # ✅ FIXED:  Unpack all 8 values from get_movies_from_db
-        movie_id, title, url, file_id, imdb_id, poster_url, year, genre = movie
+        # ✅ FIXED: Handle both 4-tuple and 6-tuple returns
+        if len(movie) >= 6:
+            # From get_movies_by_genre (6 values:  id, title, url, file_id, poster_url, year)
+            movie_id, title, url, file_id, poster_url, year = movie[: 6]
+        elif len(movie) >= 8:
+            # From get_movies_from_db (8 values: id, title, url, file_id, imdb_id, poster_url, year, genre)
+            movie_id, title, url, file_id, imdb_id, poster_url, year, genre = movie[:8]
+        else:
+            # Fallback for 4-tuple (id, title, url, file_id)
+            movie_id, title = movie[0], movie[1]
+        
         button_text = title if len(title) <= 40 else title[:37] + "..."
-        keyboard. append([InlineKeyboardButton(
+        keyboard.append([InlineKeyboardButton(
             f"🎬 {button_text}",
             callback_data=f"movie_{movie_id}"
         )])
@@ -4494,10 +4502,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
     if isinstance(update, Update) and update.effective_message:
         try:
-            await update.effective_message.reply_text(
-                "Sorry, something went wrong. Please try again later.",
-                reply_markup=get_main_keyboard()
-            )
+            # ✅ IMPROVED: Show more helpful error message
+            error_msg = str(context.error)
+            if "too many values to unpack" in error_msg:
+                await update.effective_message.reply_text(
+                    "❌ Error:  Data format issue. Please try again.",
+                    reply_markup=get_main_keyboard()
+                )
+            elif "unpacking" in error_msg:
+                await update.effective_message.reply_text(
+                    "❌ Error: Could not process your request. Please try again.",
+                    reply_markup=get_main_keyboard()
+                )
+            else:
+                await update.effective_message.reply_text(
+                    "Sorry, something went wrong. Please try again later.",
+                    reply_markup=get_main_keyboard()
+                )
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
