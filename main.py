@@ -888,7 +888,7 @@ def fetch_movie_metadata(query: str):
     HYBRID METADATA FETCHER
     - If query is tt1234567: Use IMDb ID (Most Accurate)
     - If query is text: Try OMDb first, fallback to Cinemagoer
-    - Returns: (title, year, poster_url, genre, imdb_id) or None
+    - Returns: (title, year, poster_url, genre, imdb_id, rating)  # Always 6 values
     """
     try:
         # 🔍 CASE 1: IMDb ID Format (tt1234567)
@@ -906,11 +906,11 @@ def fetch_movie_metadata(query: str):
                 rating = str(movie.get('rating', 'N/A'))
                 
                 logger.info(f"✅ IMDb Data fetched: {title} ({year})")
-                return title, year, poster_url, ', '.join(genres), imdb_id
+                return title, year, poster_url, ', '.join(genres), imdb_id, rating
                 
             except Exception as e:
                 logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
-                return None
+                return query, 0, '', '', '', 'N/A'  # 6 values
         
         # 📝 CASE 2: Text Search (Movie Name)
         # First try OMDb (Fast but sometimes outdated)
@@ -957,18 +957,17 @@ def fetch_movie_metadata(query: str):
                 rating = str(movie.get('rating', 'N/A'))
                 
                 logger.info(f"✅ Cinemagoer fallback success: {title}")
-                return title, year, poster_url, ', '.join(genres), imdb_id
+                return title, year, poster_url, ', '.join(genres), imdb_id, rating
                 
         except Exception as e:
             logger.error(f"❌ Cinemagoer fallback failed: {e}")
 
-        # Return original query if all fail
-        return query, 0, '', '', ''
+        # Return original query if all fail (with 6 values)
+        return query, 0, '', '', '', 'N/A'
 
     except Exception as e:
         logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
-        return None
-
+        return query, 0, '', '', '', 'N/A'  # 6 values
 
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
