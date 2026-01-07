@@ -4457,6 +4457,11 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
                 await asyncio.sleep(0.5) 
 
             except Exception as e:
+                # 👇👇👇 FIX ADDED HERE 👇👇👇
+                if conn:
+                    conn.rollback()  # Resets the connection if an error occurs
+                # 👆👆👆 FIX ADDED HERE 👆👆👆
+
                 logger.error(f"Failed to fix {title}: {e}")
                 failed_count += 1
 
