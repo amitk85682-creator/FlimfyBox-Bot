@@ -904,36 +904,35 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
-def fetch_movie_metadata(query: str):
+def fetch_movie_metadata(query:  str):
     """
-    HYBRID METADATA FETCHER
-    - If query is tt1234567: Use IMDb ID (Most Accurate)
+    HYBRID METADATA FETCHER - FIXED
+    - If query is tt1234567:  Use IMDb ID (Most Accurate)
     - If query is text: Try OMDb first, fallback to Cinemagoer
-    - Returns: (title, year, poster_url, genre, imdb_id, rating)
+    - Returns:  (title, year, poster_url, genre, imdb_id, rating)
     """
-    if not ia:  # Check if Cinemagoer is initialized
+    if not ia:   # Check if Cinemagoer is initialized
         logger.error("Cinemagoer (imdb) not initialized.")
-        return query, 0, '', '', '', 'N/A'  # Added 'N/A' for rating
+        return query, 0, '', '', '', 'N/A'
 
     try:
         # 🔍 CASE 1: IMDb ID Format (tt1234567)
-        if re.match(r'^tt\d{7,8}$', query.strip()):
+        if re.match(r'^tt\d{7,8}$', query. strip()):
             imdb_id = query.strip()
             logger.info(f"🎯 IMDb ID detected: {imdb_id}")
             
             try:
-                # Cinemagoer requires numeric ID (without 'tt')
                 movie = ia.get_movie(imdb_id[2:])
                 title = movie.get('title', 'Unknown')
                 year = movie.get('year', 0)
                 poster_url = movie.get('full-size cover url', '')
                 genres = movie.get('genres', [])[:3]
-                rating = movie.get('rating', 'N/A')  # Added rating
+                rating = movie.get('rating', 'N/A')
                 
                 logger.info(f"✅ IMDb Data fetched: {title} ({year})")
                 return title, year, poster_url, ', '.join(genres), imdb_id, rating
                 
-            except Exception as e:
+            except Exception as e: 
                 logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
                 return None
         
@@ -943,48 +942,50 @@ def fetch_movie_metadata(query: str):
             omdb_api_key = os.environ.get("OMDB_API_KEY")
             if omdb_api_key:
                 response = requests.get(
-                    f"http://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}",
+                    f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}",  # ✅ HTTPS instead of HTTP
                     timeout=10
                 )
                 data = response.json()
                 
-                if data.get("Response") == "True":
-                    logger.info(f"✅ OMDb success: {data['Title']}")
-                    rating = data.get('imdbRating', 'N/A')  # Added rating
+                # ✅ ADDED: Check for OMDb error response
+                if data.get("Response") == "True" and data.get("Error") != "Incorrect API key. ":
+                    logger.info(f"✅ OMDb success:  {data['Title']}")
+                    rating = data.get('imdbRating', 'N/A')
                     return (
                         data['Title'],
-                        int(data.get('Year', 0).split('–')[0]) if data.get('Year') else 0,
+                        int(data. get('Year', 0).split('–')[0]) if data.get('Year') else 0,
                         data.get('Poster', ''),
                         data.get('Genre', ''),
                         data.get('imdbID', ''),
-                        rating  # Added rating
+                        rating
                     )
+                else:
+                    logger.warning(f"⚠️ OMDb returned error: {data.get('Error', 'Unknown error')}")
         except Exception as e:
             logger.warning(f"⚠️ OMDb failed: {e}")
 
         # Fallback to Cinemagoer if OMDb fails
-        logger.info(f"🔄 Falling back to Cinemagoer for: {query}")
+        logger. info(f"🔄 Falling back to Cinemagoer for:  {query}")
         try:
             movies = ia.search_movie(query)
             if movies:
                 movie = movies[0]
-                ia.update(movie)  # Get full details
+                ia.update(movie)
                 
                 title = movie.get('title', query)
                 year = movie.get('year', 0)
                 poster_url = movie.get('full-size cover url', '')
                 genres = movie.get('genres', [])[:3]
                 imdb_id = f"tt{movie.movieID}"
-                rating = movie.get('rating', 'N/A')  # Added rating
+                rating = movie. get('rating', 'N/A')
                 
-                logger.info(f"✅ Cinemagoer fallback success: {title}")
+                logger. info(f"✅ Cinemagoer fallback success: {title}")
                 return title, year, poster_url, ', '.join(genres), imdb_id, rating
                 
-        except Exception as e:
+        except Exception as e: 
             logger.error(f"❌ Cinemagoer fallback failed: {e}")
 
-        # Return original query if all fail
-        return query, 0, '', '', '', 'N/A'  # Added 'N/A' for rating
+        return query, 0, '', '', '', 'N/A'
 
     except Exception as e:
         logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
@@ -2774,11 +2775,11 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await batch_add_command(update, context)
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Batch Session with IMDb ID support - UPDATED with Rating & Correct Mapping"""
+    """Start Batch Session with IMDb ID support - UPDATED"""
     user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID: return
+    if user_id != ADMIN_USER_ID:  return
 
-    if not context.args:
+    if not context.args: 
         await update.message.reply_text(
             "❌ Usage:\n"
             "`/batch Movie Name`\n"
@@ -2787,19 +2788,27 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Detect if input is IMDb ID
     query = " ".join(context.args).strip()
     is_imdb = is_valid_imdb_id(query)
     
-    # Fetch metadata (Now returns 6 items including Rating)
+    # ✅ ADDED: Show loading message
+    status_msg = await update.message.reply_text("⏳ Fetching metadata...", parse_mode='Markdown')
+    
     metadata = fetch_movie_metadata(query)
     
-    # Safety Check: If fetch failed
-    if not metadata:
-        await update.message.reply_text("❌ Could not fetch movie metadata. Check your query.")
+    # ✅ ADDED: Check if metadata fetch failed
+    if not metadata: 
+        await status_msg.edit_text(
+            "❌ **Error:** Could not fetch movie metadata.\n\n"
+            "**Reasons:**\n"
+            "• Invalid movie name\n"
+            "• OMDb API key is invalid (check OMDB_API_KEY in .env)\n"
+            "• Movie not found on IMDb\n\n"
+            "**Fix:** Update your OMDB_API_KEY and try again.",
+            parse_mode='Markdown'
+        )
         return
 
-    # ✅ CORRECT UNPACKING (6 Values)
     title, year, poster_url, genre, imdb_id, rating = metadata
     
     # Show status message
