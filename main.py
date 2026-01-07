@@ -424,7 +424,8 @@ def setup_database():
                 imdb_id TEXT,
                 poster_url TEXT,
                 year INTEGER,
-                genre TEXT
+                genre TEXT,
+                rating TEXT  -- 👈 Added Rating
             )
         ''')
 
@@ -481,6 +482,7 @@ def setup_database():
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER;")
             cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
+            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;") # 👈 Fix missing column
             cur.execute("ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS message_id BIGINT;")
         except Exception as e:
             logger.info(f"Column addition note: {e}")
@@ -521,6 +523,7 @@ def migrate_add_imdb_columns():
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;") # 👈 Important
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);')
         conn.commit()
@@ -900,6 +903,7 @@ def fetch_movie_metadata(query: str):
                 year = movie.get('year', 0)
                 poster_url = movie.get('full-size cover url', '')
                 genres = movie.get('genres', [])[:3]
+                rating = str(movie.get('rating', 'N/A'))
                 
                 logger.info(f"✅ IMDb Data fetched: {title} ({year})")
                 return title, year, poster_url, ', '.join(genres), imdb_id
@@ -931,7 +935,8 @@ def fetch_movie_metadata(query: str):
                         year,
                         data.get('Poster', ''),
                         data.get('Genre', ''),
-                        data.get('imdbID', '')
+                        data.get('imdbID', ''),
+                        data.get('imdbRating', 'N/A')
                     )
         except Exception as e:
             logger.warning(f"⚠️ OMDb failed: {e}")
@@ -949,6 +954,7 @@ def fetch_movie_metadata(query: str):
                 poster_url = movie.get('full-size cover url', '')
                 genres = movie.get('genres', [])[:3]
                 imdb_id = f"tt{movie.movieID}"
+                rating = str(movie.get('rating', 'N/A'))
                 
                 logger.info(f"✅ Cinemagoer fallback success: {title}")
                 return title, year, poster_url, ', '.join(genres), imdb_id
@@ -2856,7 +2862,7 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await batch_add_command(update, context)
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Batch Session with IMDb ID support"""
+    """Start Batch Session with IMDb ID support - UPDATED with Rating & Correct Mapping"""
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
 
@@ -2873,64 +2879,71 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     is_imdb = is_valid_imdb_id(query)
     
-    # Fetch metadata
+    # Fetch metadata (Now returns 6 items including Rating)
     metadata = fetch_movie_metadata(query)
+    
+    # Safety Check: If fetch failed
     if not metadata:
         await update.message.reply_text("❌ Could not fetch movie metadata. Check your query.")
         return
 
-    title, year, poster_url, genre, imdb_id = metadata
+    # ✅ CORRECT UNPACKING (6 Values)
+    title, year, poster_url, genre, imdb_id, rating = metadata
     
-    # Show different messages for ID vs Name
-    if is_imdb:
-        status_text = f"🎯 **IMDb ID Mode**\n📌 Exact match found: **{title} ({year})**"
-    else:
-        status_text = f"🎬 **Title Mode**\n📌 Using: **{title} ({year})**"
-        
-    if imdb_id:
-        status_text += f"\n🏷 IMDb ID: `{imdb_id}`"
+    # Show status message
+    status_text = f"🎬 **Batch Started:** {title} ({year})"
+    if imdb_id: status_text += f"\n🏷 ID: `{imdb_id}`"
+    if rating and rating != 'N/A': status_text += f" | ⭐ {rating}"
     
     await update.message.reply_text(status_text, parse_mode='Markdown')
 
-    # Create/Update DB entry with IMDb data
+    # Create/Update DB entry
     conn = get_db_connection()
     if not conn: return
     
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre) 
-        VALUES (%s, '', %s, %s, %s, %s) 
-        ON CONFLICT (title) DO UPDATE 
-        SET imdb_id = EXCLUDED.imdb_id,
-            poster_url = EXCLUDED.poster_url,
-            year = EXCLUDED.year,
-            genre = EXCLUDED.genre
-        RETURNING id
-        """,
-        (title, imdb_id, poster_url, year, genre)
-    )
-    movie_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        
+        # ✅ CORRECT SQL QUERY WITH RATING
+        cur.execute(
+            """
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating) 
+            VALUES (%s, '', %s, %s, %s, %s, %s) 
+            ON CONFLICT (title) DO UPDATE 
+            SET imdb_id = EXCLUDED.imdb_id,
+                poster_url = EXCLUDED.poster_url,
+                year = EXCLUDED.year,
+                genre = EXCLUDED.genre,
+                rating = EXCLUDED.rating
+            RETURNING id
+            """,
+            (title, imdb_id, poster_url, year, genre, rating)
+        )
+        
+        movie_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
 
-    # Start batch session
-    BATCH_SESSION.update({
-        'active': True,
-        'movie_id': movie_id,
-        'movie_title': title,
-        'file_count': 0,
-        'admin_id': user_id
-    })
+        # Start batch session
+        BATCH_SESSION.update({
+            'active': True,
+            'movie_id': movie_id,
+            'movie_title': title,
+            'file_count': 0,
+            'admin_id': user_id
+        })
 
-    await update.message.reply_text(
-        f"🚀 **Batch Mode ON for:** `{title}`\n\n"
-        f"📤 Send files here (Bot PM). Bot will auto-upload to ALL backup channels.\n"
-        f"✅ Type `/done` to finish and generate AI aliases.",
-        parse_mode='Markdown'
-    )
-
+        await update.message.reply_text(
+            f"🚀 **Batch Mode ON for:** `{title}`\n\n"
+            f"📤 Send files here (Bot PM). Bot will auto-upload to ALL backup channels.\n"
+            f"✅ Type `/done` to finish and generate AI aliases.",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"Batch Start Error: {e}")
+        await update.message.reply_text(f"❌ Error starting batch: {e}")
+        if conn: conn.close()
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -4402,7 +4415,7 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Magic Command: Finds movies with missing Genre/Poster and fixes them automatically.
+    Magic Command: Finds movies with missing info and fixes them - UPDATED
     """
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID:
@@ -4418,8 +4431,8 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         cur = conn.cursor()
-        # Sirf wo movies dhundo jinka Genre ya Poster gayab hai
-        cur.execute("SELECT title FROM movies WHERE genre IS NULL OR poster_url IS NULL")
+        # Find movies where ANY key info is missing (Genre, Poster, or Year)
+        cur.execute("SELECT title FROM movies WHERE genre IS NULL OR poster_url IS NULL OR year IS NULL")
         movies_to_fix = cur.fetchall()
         
         if not movies_to_fix:
@@ -4438,30 +4451,40 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
                 if index % 10 == 0:
                     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-                # Fetch Data using our Super Fetcher
-                real_title, poster, rating, year, genre = fetch_movie_metadata(title)
+                # ✅ FETCH CORRECT METADATA (6 Values)
+                metadata = fetch_movie_metadata(title)
+                
+                # Unpack carefully
+                if metadata:
+                    new_title, year, poster_url, genre, imdb_id, rating = metadata
 
-                if genre or poster:
-                    # Update Database
-                    cur.execute("""
-                        UPDATE movies 
-                        SET genre = %s, poster_url = %s, rating = %s, year = %s
-                        WHERE title = %s
-                    """, (genre, poster, rating, year, title))
-                    conn.commit()
-                    success_count += 1
+                    # Only update if we found something useful
+                    if genre or poster_url or year > 0:
+                        # ✅ CORRECT SQL UPDATE QUERY (Order Matters!)
+                        cur.execute("""
+                            UPDATE movies 
+                            SET genre = %s, 
+                                poster_url = %s, 
+                                year = %s, 
+                                imdb_id = %s, 
+                                rating = %s
+                            WHERE title = %s
+                        """, (genre, poster_url, year, imdb_id, rating, title))
+                        
+                        conn.commit()
+                        success_count += 1
+                    else:
+                        failed_count += 1
                 else:
                     failed_count += 1
                 
-                # Sleep to respect API limits (important!)
+                # Sleep slightly to respect API limits
                 await asyncio.sleep(0.5) 
 
             except Exception as e:
-                # 👇👇👇 FIX ADDED HERE 👇👇👇
+                # 🛑 ROLLBACK IS CRITICAL HERE
                 if conn:
-                    conn.rollback()  # Resets the connection if an error occurs
-                # 👆👆👆 FIX ADDED HERE 👆👆👆
-
+                    conn.rollback() 
                 logger.error(f"Failed to fix {title}: {e}")
                 failed_count += 1
 
@@ -4471,7 +4494,7 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ Fixed: {success_count}\n"
             f"❌ Failed: {failed_count}\n"
             f"📊 Total Processed: {total}\n\n"
-            f"Ab website check karo! 🚀",
+            f"Database updated successfully! 🚀",
             parse_mode='Markdown'
         )
 
@@ -4481,7 +4504,6 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         if cur: cur.close()
         if conn: conn.close()
-
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
     if update.effective_user.id != ADMIN_USER_ID:
