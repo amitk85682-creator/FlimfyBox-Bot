@@ -968,19 +968,19 @@ def fetch_movie_metadata(query: str):
     except Exception as e:
         logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
         return query, 0, '', '', '', 'N/A'  # 6 values
-
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
     try:
         metadata = fetch_movie_metadata(movie_title)
         if metadata:
-            title, year, poster_url, genre, imdb_id = metadata
+            title, year, poster_url, genre, imdb_id, rating = metadata  # 6 values unpack
             update_movie_metadata(
                 movie_id=movie_id,
                 imdb_id=imdb_id if imdb_id else None,
                 poster_url=poster_url if poster_url else None,
                 year=year if year else None,
-                genre=genre if genre else None
+                genre=genre if genre else None,
+                rating=rating if rating and rating != 'N/A' else None  # Rating add करें
             )
             return True
         return False
