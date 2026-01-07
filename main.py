@@ -1432,7 +1432,7 @@ def get_movie_options_keyboard(movie_title, url):
     return InlineKeyboardMarkup(keyboard)
 
 def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
-    """Create inline keyboard with movie selection buttons"""
+    """Create inline keyboard with movie selection buttons - FIXED"""
     start_idx = page * movies_per_page
     end_idx = start_idx + movies_per_page
     current_movies = movies[start_idx:end_idx]
@@ -1440,9 +1440,10 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     keyboard = []
 
     for movie in current_movies:
-        movie_id, title, url, file_id = movie
+        # ✅ FIXED:  Unpack all 8 values from get_movies_from_db
+        movie_id, title, url, file_id, imdb_id, poster_url, year, genre = movie
         button_text = title if len(title) <= 40 else title[:37] + "..."
-        keyboard.append([InlineKeyboardButton(
+        keyboard. append([InlineKeyboardButton(
             f"🎬 {button_text}",
             callback_data=f"movie_{movie_id}"
         )])
@@ -1451,7 +1452,7 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     total_pages = (len(movies) + movies_per_page - 1) // movies_per_page
 
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"page_{page-1}"))
+        nav_buttons. append(InlineKeyboardButton("◀️ Previous", callback_data=f"page_{page-1}"))
 
     if end_idx < len(movies):
         nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}"))
@@ -2362,11 +2363,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
-                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie...", parse_mode='Markdown')
+                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie.. .", parse_mode='Markdown')
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
-                url, file_id = cur.fetchone() or (None, None)
+                result = cur.fetchone()
+                url, file_id = result if result else (None, None)  # ✅ Added safety check
                 cur.close()
                 conn.close()
 
@@ -2374,23 +2376,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             context.user_data['selected_movie_data'] = {
-                'id': movie_id,
+                'id':  movie_id,
                 'title': title,
-                'qualities': qualities
+                'qualities':  qualities
             }
 
             selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
-            # Message Edit karein
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
                 parse_mode='Markdown'
             )
             
-            # ✅ FIX: Is edited message ko bhi track karein (Delete in 60 seconds)
-            track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
+            track_message_for_deletion(context, update. effective_chat. id, query.message.message_id, 60)
+
 
         # ==================== ADMIN ACTIONS ====================
         
@@ -2988,6 +2989,8 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Smart Post Generator (Supports Photo AND Video)
+    Updated: Supports comma separation for Custom Text
+    Example: /post_query Kalki, Hindi HD
     """
     try:
         # 1. Permission Check
@@ -3017,8 +3020,20 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_id = message.video.file_id
             media_type = 'video'
 
-        # 4. Clean Query
-        query_text = caption_text.replace('/post_query', '').strip()
+        # =========================================================
+        # 4. Clean Query & Split Logic (UPDATED HERE)
+        # =========================================================
+        raw_input = caption_text.replace('/post_query', '').strip()
+        
+        # Check for comma to split DB Name and Custom Msg
+        if ',' in raw_input:
+            parts = raw_input.split(',', 1) # Split only on first comma
+            query_text = parts[0].strip()   # Ye DB me search hoga (e.g. Kalki)
+            custom_msg = parts[1].strip()   # Ye caption me dikhega (e.g. Hindi HD)
+        else:
+            query_text = raw_input
+            custom_msg = ""
+
         if not query_text:
             await message.reply_text("❌ Name missing.")
             return
@@ -3084,9 +3099,16 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
-        # Caption
-        channel_caption = (
-            f"🎬 <b>{query_text}</b>\n\n"
+        # Caption (UPDATED HERE to include custom_msg)
+        channel_caption = f"🎬 <b>{query_text}</b>\n"
+        
+        # Agar custom message (comma ke baad wala text) hai to add karein
+        if custom_msg:
+            channel_caption += f"✨ <b>{custom_msg}</b>\n\n"
+        else:
+            channel_caption += "\n"
+
+        channel_caption += (
             f"➖➖➖➖➖➖➖➖➖➖\n"
             f"🔹 <b>Support group:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Request & Search Movies</a>\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
@@ -3132,7 +3154,8 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📤 Sent to: {sent_count}\n"
                 f"❌ Failed: {failed_count}\n\n"
                 f"{log_message}\n"
-                f"Query: `{query_text}`",
+                f"Query: `{query_text}`\n"
+                f"Extra Info: `{custom_msg}`",
                 parse_mode='Markdown'
             )
         else:
