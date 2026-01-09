@@ -66,6 +66,104 @@ background_tasks = set()
 # ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
 SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
+# ================= CONFIGURATION =================
+FORUM_GROUP_ID = -1003696437312  # Apne Group ki ID
+
+# Yahan Topic ID aur uske Keywords set karo
+# Bot in shabdon ko Genre ya Description me dhundega
+TOPIC_MAPPING = {
+    # Format:  Topic_ID:  ['keyword1', 'keyword2', 'keyword3']
+    
+    20: ['south', 'telugu', 'tamil', 'kannada', 'malayalam', 'allu arjun'], # South Topic (ID: 12)
+    1: ['hollywood', 'english', 'marvel', 'dc', 'disney'],                 # Hollywood Topic (ID: 34)
+    16: ['bollywood', 'hindi', 'khan', 'kapoor'],                           # Bollywood Topic (ID: 56)
+    18: ['series', 'season', 'episode', 'netflix', 'amazon'],               # Web Series Topic (ID: 78)
+    22: ['anime', 'cartoon', 'animation'],                                  # Anime Topic (ID: 90)
+    
+    # Default Topic (Agar kuch match na ho to yahan jayega)
+    100: ['default'] 
+}
+# =================================================
+
+def get_auto_topic_id(genre, description):
+    """
+    Ye function movie ke data ko padhkar sahi Topic ID batata hai.
+    """
+    text_to_check = (str(genre) + " " + str(description)).lower()
+    
+    for topic_id, keywords in TOPIC_MAPPING.items():
+        for word in keywords:
+            if word in text_to_check:
+                return topic_id
+    
+    return 100 # Agar kuch samajh na aaye to Default Topic ID
+
+async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage: /post MovieName
+    (Category batane ki zarurat nahi, bot khud sochega)
+    """
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID: return
+
+    # 1. Movie Dhundo
+    movie_search_name = " ".join(context.args).strip()
+    movie_data = None
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if movie_search_name:
+        # Naam se dhundo
+        cursor.execute("SELECT id, title, year, rating, genre, poster_url, description FROM movies WHERE title ILIKE %s", (f"%{movie_search_name}%",))
+        movie_data = cursor.fetchone()
+    elif BATCH_SESSION.get('active'):
+        # Current Batch uthao
+        movie_id_session = BATCH_SESSION['movie_id']
+        cursor.execute("SELECT id, title, year, rating, genre, poster_url, description FROM movies WHERE id = %s", (movie_id_session,))
+        movie_data = cursor.fetchone()
+    
+    cursor.close()
+    conn.close()
+
+    if not movie_data:
+        await update.message.reply_text("❌ Movie nahi mili! Naam sahi se likho.")
+        return
+
+    # Data Unpack
+    movie_id, title, year, rating, genre, poster_url, description = movie_data
+
+    # 2. 🧠 SMART LOGIC: Topic ID Auto-Detect karo
+    topic_id = get_auto_topic_id(genre, description)
+
+    # 3. Caption
+    caption = (
+        f"🎬 **{title} ({year})**\n\n"
+        f"⭐️ **Rating:** {rating}/10\n"
+        f"🎭 **Genre:** {genre}\n\n"
+        f"📜 **Story:** {description[:150]}...\n\n"
+        f"👇 **Click Button to Download** 👇"
+    )
+
+    bot_username = context.bot.username
+    deep_link = f"https://t.me/{bot_username}?start=get_{movie_id}"
+    keyboard = [[InlineKeyboardButton("📥 Download / Watch Now 📥", url=deep_link)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        # 4. Post karo
+        await context.bot.send_photo(
+            chat_id=FORUM_GROUP_ID,
+            message_thread_id=topic_id,
+            photo=poster_url,
+            caption=caption,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        await update.message.reply_text(f"✅ Auto-Posted **{title}** to Topic ID: `{topic_id}`")
+    except Exception as e:
+        logger.error(f"Post failed: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -4907,6 +5005,7 @@ def main():
     application.add_handler(CommandHandler("done", batch_done_command))
     application.add_handler(CommandHandler("batchid", batch_id_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
+    application.add_handler(CommandHandler("post", post_to_topic_command))
     
     # ✅ NEW PM FILE LISTENER (Only Active during Batch)
     # Note: Ise Group Handler se pehle rakhna
