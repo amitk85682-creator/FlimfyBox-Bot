@@ -118,7 +118,6 @@ messages_to_auto_delete = defaultdict(list)
 
 # ✅ NEW GLOBAL VARIABLES FOR BATCH SESSION
 BATCH_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None}
-REPLACE_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'admin_id': None}
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -2878,124 +2877,73 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Handles file uploads for BOTH Batch Mode AND Replace Mode
+    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
     """
-    user_id = update.effective_user.id
-    message = update.effective_message
+    if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
+        return
 
+    message = update.effective_message
     if not (message.document or message.video): return
 
-    # ================= REPLACEMENT LOGIC =================
-    if REPLACE_SESSION['active'] and user_id == REPLACE_SESSION['admin_id']:
-        
-        status = await message.reply_text("🔄 **Replacing File...**", quote=True)
-        
-        # 1. Channels pe upload karein (Backup) - Optional but safe
-        channels = get_storage_channels()
-        main_file_id = None
-        
-        # Agar file_id direct use karni hai (No upload to backup channels), to ye block hata dein
-        # Lekin "Like Batch" bola hai to hum backup bhi lenge
-        if channels:
-            for chat_id in channels:
-                try:
-                    sent = await message.copy(chat_id=chat_id)
-                    # Pehle channel ki file ID save kar lenge
-                    if not main_file_id:
-                        main_file_id = sent.video.file_id if sent.video else sent.document.file_id
-                except Exception:
-                    pass
-        
-        # Agar backup fail hua ya channels set nahi hain, to direct current message ki ID le lo
-        if not main_file_id:
-            main_file_id = message.video.file_id if message.video else message.document.file_id
+    # Status message
+    status = await message.reply_text("⏳ Processing... Uploading to Backup Channels...", quote=True)
 
-        # 2. Database Update karein
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                # Main 'movies' table update (Purani link hatao, nayi file lagao)
-                cur.execute(
-                    "UPDATE movies SET file_id = %s, url = '', is_unreleased = FALSE WHERE id = %s",
-                    (main_file_id, REPLACE_SESSION['movie_id'])
-                )
-                conn.commit()
-                
-                await status.edit_text(
-                    f"✅ **Replacement Successful!**\n\n"
-                    f"🎬 Movie: `{REPLACE_SESSION['movie_title']}`\n"
-                    f"📁 New File Updated.\n\n"
-                    f"🔚 Session Closed.",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                await status.edit_text(f"❌ Database Error: {e}")
-            finally:
-                conn.close()
-        
-        # 3. Session Reset
-        REPLACE_SESSION['active'] = False
-        REPLACE_SESSION['movie_id'] = None
+    # 1. Get Channels
+    channels = get_storage_channels()
+    if not channels:
+        await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
         return
 
-    # ================= BATCH LOGIC (EXISTING) =================
-    if BATCH_SESSION['active'] and user_id == BATCH_SESSION['admin_id']:
-        
-        status = await message.reply_text("⏳ Processing Batch Upload...", quote=True)
-        
-        channels = get_storage_channels()
-        if not channels:
-            await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
-            return
+    backup_map = {}  # Store {channel_id: message_id}
+    success_uploads = 0
 
-        backup_map = {} 
-        success_uploads = 0
+    # 2. Multi-Channel Upload Loop
+    for chat_id in channels:
+        try:
+            sent = await message.copy(chat_id=chat_id)
+            backup_map[str(chat_id)] = sent.message_id
+            success_uploads += 1
+        except Exception as e:
+            logger.error(f"Upload failed for {chat_id}: {e}")
 
-        # Multi-Channel Upload Loop
-        for chat_id in channels:
-            try:
-                sent = await message.copy(chat_id=chat_id)
-                backup_map[str(chat_id)] = sent.message_id
-                success_uploads += 1
-            except Exception as e:
-                logger.error(f"Upload failed for {chat_id}: {e}")
+    if success_uploads == 0:
+        await status.edit_text("❌ Failed to upload to any channel.")
+        return
 
-        if success_uploads == 0:
-            await status.edit_text("❌ Failed to upload to any channel.")
-            return
+    # 3. Prepare DB Data
+    file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
+    file_size = message.document.file_size if message.document else message.video.file_size
+    file_size_str = get_readable_file_size(file_size)
+    label = generate_quality_label(file_name, file_size_str)
+    
+    # Generate Main Link (From first channel in list)
+    main_channel_id = channels[0]
+    main_msg_id = backup_map.get(str(main_channel_id))
+    clean_id = str(main_channel_id).replace("-100", "")
+    main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-        # Prepare DB Data
-        file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
-        file_size = message.document.file_size if message.document else message.video.file_size
-        file_size_str = get_readable_file_size(file_size)
-        label = generate_quality_label(file_name, file_size_str)
-        
-        # Generate Main Link
-        main_channel_id = channels[0]
-        main_msg_id = backup_map.get(str(main_channel_id))
-        clean_id = str(main_channel_id).replace("-100", "")
-        main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
-
-        conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-            )
-            conn.commit()
-            conn.close()
-
-        BATCH_SESSION['file_count'] += 1
-        await status.edit_text(
-            f"✅ **Saved!** (Batch)\n"
-            f"🏷 `{label}`\n"
-            f"🔢 Total: {BATCH_SESSION['file_count']}",
-            parse_mode='Markdown'
+    # 4. Save to DB
+    conn = get_db_connection()
+    if conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+               VALUES (%s, %s, %s, %s, %s)""",
+            (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
         )
-        return
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    BATCH_SESSION['file_count'] += 1
+    await status.edit_text(
+        f"✅ **Saved Successfully!**\n"
+        f"📂 Backup Copies: {success_uploads}\n"
+        f"🏷 Label: `{label}`\n"
+        f"🔢 Total Files in Session: {BATCH_SESSION['file_count']}",
+        parse_mode='Markdown'
+    )
+
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Finishes session -> Generates AI Aliases -> Shows Report
@@ -3583,66 +3531,6 @@ Failed: {failed_count}
     finally:
         if conn:
             conn.close()
-
-async def start_replace_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Step 1: Admin sends /replace MovieName
-    Bot activates session and waits for file upload.
-    """
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        await update.message.reply_text("⛔ Admin only command.")
-        return
-
-    # Check arguments
-    if not context.args:
-        await update.message.reply_text("❌ Usage: `/replace Movie Name`", parse_mode='Markdown')
-        return
-
-    movie_title = " ".join(context.args).strip()
-
-    conn = get_db_connection()
-    if not conn:
-        await update.message.reply_text("❌ Database connection failed.")
-        return
-
-    try:
-        cur = conn.cursor()
-        # Movie search karein
-        cur.execute("SELECT id, title FROM movies WHERE title ILIKE %s", (movie_title,))
-        movie = cur.fetchone()
-
-        if not movie:
-            await update.message.reply_text(f"❌ '{movie_title}' database me nahi mili.")
-            return
-
-        movie_id, real_title = movie
-
-        # ✅ Session Activate karein
-        REPLACE_SESSION.update({
-            'active': True,
-            'movie_id': movie_id,
-            'movie_title': real_title,
-            'admin_id': user_id
-        })
-
-        # Batch session band kar dein taaki conflict na ho
-        if BATCH_SESSION['active']:
-            BATCH_SESSION['active'] = False
-            await update.message.reply_text("⚠️ Batch session paused. Replace mode ON.")
-
-        await update.message.reply_text(
-            f"🔄 **Replace Mode ON for:** `{real_title}`\n\n"
-            f"📤 **Ab File (Video/Document) bhejo.**\n"
-            f"Mai purani file hata kar nayi wali save kar dunga.",
-            parse_mode='Markdown'
-        )
-
-    except Exception as e:
-        logger.error(f"Replace Start Error: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
-    finally:
-        if conn: conn.close()
 
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
@@ -5019,7 +4907,6 @@ def main():
     application.add_handler(CommandHandler("done", batch_done_command))
     application.add_handler(CommandHandler("batchid", batch_id_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
-    application.add_handler(CommandHandler("replace", start_replace_session))
     
     # ✅ NEW PM FILE LISTENER (Only Active during Batch)
     # Note: Ise Group Handler se pehle rakhna
