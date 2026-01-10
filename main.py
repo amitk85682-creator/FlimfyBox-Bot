@@ -100,71 +100,110 @@ def get_auto_topic_id(genre, description):
 
 async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Usage: /post MovieName
-    (Category batane ki zarurat nahi, bot khud sochega)
+    Final Version: 
+    - Handles Missing Description & Poster
+    - Auto Category Detection
+    - 3 Deep Links (Multi-Bot Support)
     """
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
 
-    # 1. Movie Dhundo
+    # 1. MOVIE SEARCH
     movie_search_name = " ".join(context.args).strip()
-    movie_data = None
-
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    if movie_search_name:
-        # Naam se dhundo
-        cursor.execute("SELECT id, title, year, rating, genre, poster_url, description FROM movies WHERE title ILIKE %s", (f"%{movie_search_name}%",))
-        movie_data = cursor.fetchone()
-    elif BATCH_SESSION.get('active'):
-        # Current Batch uthao
-        movie_id_session = BATCH_SESSION['movie_id']
-        cursor.execute("SELECT id, title, year, rating, genre, poster_url, description FROM movies WHERE id = %s", (movie_id_session,))
-        movie_data = cursor.fetchone()
     
+    # DB se sab kuch nikalo
+    query = "SELECT id, title, year, rating, genre, poster_url, description, category FROM movies"
+    
+    if movie_search_name:
+        cursor.execute(f"{query} WHERE title ILIKE %s", (f"%{movie_search_name}%",))
+    elif BATCH_SESSION.get('active'):
+        cursor.execute(f"{query} WHERE id = %s", (BATCH_SESSION['movie_id'],))
+    else:
+        await update.message.reply_text("❌ Naam batao! Example: `/post Pushpa`")
+        conn.close()
+        return
+
+    movie_data = cursor.fetchone()
     cursor.close()
     conn.close()
 
     if not movie_data:
-        await update.message.reply_text("❌ Movie nahi mili! Naam sahi se likho.")
+        await update.message.reply_text("❌ Movie nahi mili.")
         return
 
-    # Data Unpack
-    movie_id, title, year, rating, genre, poster_url, description = movie_data
+    # Unpack 8 values
+    movie_id, title, year, rating, genre, poster_url, description, category = movie_data
 
-    # 2. 🧠 SMART LOGIC: Topic ID Auto-Detect karo
-    topic_id = get_auto_topic_id(genre, description)
+    # 2. TOPIC SELECTION (Direct DB Category se)
+    topic_id = 100 # Default
+    cat_lower = str(category).lower()
 
-    # 3. Caption
+    # Mapping Match karo
+    for tid, keywords in TOPIC_MAPPING.items():
+        if cat_lower in [k.lower() for k in keywords]: 
+            topic_id = tid
+            break
+            
+    # Fallback Logic
+    if topic_id == 100:
+        if "south" in cat_lower: topic_id = 20
+        elif "hollywood" in cat_lower: topic_id = 1
+        elif "bollywood" in cat_lower: topic_id = 16
+        elif "anime" in cat_lower: topic_id = 22
+        elif "series" in cat_lower: topic_id = 18
+
+    # 3. HANDLE MISSING DATA
+    final_photo = poster_url if poster_url and poster_url != 'N/A' else DEFAULT_POSTER
+    short_desc = (description[:150] + "...") if description else "Plot details unavailable."
+
+    # 4. CAPTION
     caption = (
         f"🎬 **{title} ({year})**\n\n"
         f"⭐️ **Rating:** {rating}/10\n"
-        f"🎭 **Genre:** {genre}\n\n"
-        f"📜 **Story:** {description[:150]}...\n\n"
-        f"👇 **Click Button to Download** 👇"
+        f"🎭 **Genre:** {genre}\n"
+        f"🏷 **Category:** {category}\n\n"
+        f"📜 **Story:** {short_desc}\n\n"
+        f"👇 **Click Below to Download** 👇"
     )
 
-    bot_username = context.bot.username
-    deep_link = f"https://t.me/{bot_username}?start=get_{movie_id}"
-    keyboard = [[InlineKeyboardButton("📥 Download / Watch Now 📥", url=deep_link)]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # 5. 🔗 MULTI-BOT DEEP LINKS (Yahan Magic Hai)
+    link_param = f"get_{movie_id}"
+    
+    # Aapke 3 Bots
+    bot1_username = "FlimfyBox_SearchBot"
+    bot2_username = "urmoviebot"
+    bot3_username = "FlimfyBox_Bot"
+
+    link1 = f"https://t.me/{bot1_username}?start={link_param}"
+    link2 = f"https://t.me/{bot2_username}?start={link_param}"
+    link3 = f"https://t.me/{bot3_username}?start={link_param}"
+
+    # Keyboard Layout (2 buttons upar, 1 niche)
+    keyboard = [
+        [
+            InlineKeyboardButton("📥 Download Server 1", url=link1),
+            InlineKeyboardButton("📥 Download Server 2", url=link2)
+        ],
+        [
+            InlineKeyboardButton("⚡ Fast Download (Server 3)", url=link3)
+        ]
+    ]
 
     try:
-        # 4. Post karo
         await context.bot.send_photo(
             chat_id=FORUM_GROUP_ID,
             message_thread_id=topic_id,
-            photo=poster_url,
+            photo=final_photo,
             caption=caption,
             parse_mode='Markdown',
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        await update.message.reply_text(f"✅ Auto-Posted **{title}** to Topic ID: `{topic_id}`")
+        await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with 3 Links!")
     except Exception as e:
         logger.error(f"Post failed: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
-
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -1002,91 +1041,87 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
-def fetch_movie_metadata(query:  str):
+def fetch_movie_metadata(query: str):
     """
-    HYBRID METADATA FETCHER - FIXED
-    - If query is tt1234567:  Use IMDb ID (Most Accurate)
-    - If query is text: Try OMDb first, fallback to Cinemagoer
-    - Returns:  (title, year, poster_url, genre, imdb_id, rating)
+    Smart Metadata Fetcher:
+    - Fetches Plot (Description) & Poster
+    - Decides Category based on Country/Language
+    Returns: (title, year, poster, genre, imdb_id, rating, plot, category)
     """
-    if not ia:   # Check if Cinemagoer is initialized
-        logger.error("Cinemagoer (imdb) not initialized.")
-        return query, 0, '', '', '', 'N/A'
+    if not ia: return query, 0, '', '', '', 'N/A', '', 'Unknown'
+
+    # --- Helper: Region Decide Karne Ka Logic ---
+    def get_smart_category(country, language, genre):
+        c = str(country).lower()
+        l = str(language).lower()
+        g = str(genre).lower()
+
+        if 'japan' in c or 'animation' in g: return "Anime"
+        if 'series' in g or 'episode' in g: return "Series"
+        if 'india' not in c: return "Hollywood"
+        
+        # India Logic
+        if any(x in l for x in ['telugu', 'tamil', 'kannada', 'malayalam', 'marathi']):
+            return "South"
+        
+        return "Bollywood" # Default Hindi/India
 
     try:
-        # 🔍 CASE 1: IMDb ID Format (tt1234567)
-        if re.match(r'^tt\d{7,8}$', query. strip()):
-            imdb_id = query.strip()
-            logger.info(f"🎯 IMDb ID detected: {imdb_id}")
-            
+        # 📝 1. OMDb Strategy (First Priority)
+        omdb_api_key = os.environ.get("OMDB_API_KEY")
+        if omdb_api_key:
             try:
-                movie = ia.get_movie(imdb_id[2:])
-                title = movie.get('title', 'Unknown')
-                year = movie.get('year', 0)
-                poster_url = movie.get('full-size cover url', '')
-                genres = movie.get('genres', [])[:3]
-                rating = movie.get('rating', 'N/A')
-                
-                logger.info(f"✅ IMDb Data fetched: {title} ({year})")
-                return title, year, poster_url, ', '.join(genres), imdb_id, rating
-                
-            except Exception as e: 
-                logger.error(f"❌ Cinemagoer failed for {imdb_id}: {e}")
-                return None
-        
-        # 📝 CASE 2: Text Search (Movie Name)
-        # First try OMDb (Fast but sometimes outdated)
-        try:
-            omdb_api_key = os.environ.get("OMDB_API_KEY")
-            if omdb_api_key:
-                response = requests.get(
-                    f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}",  # ✅ HTTPS instead of HTTP
-                    timeout=10
-                )
+                url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
+                if re.match(r'^tt\d{7,8}$', query.strip()): # IMDb ID support
+                    url = f"https://www.omdbapi.com/?i={query.strip()}&apikey={omdb_api_key}"
+
+                response = requests.get(url, timeout=10)
                 data = response.json()
                 
-                # ✅ ADDED: Check for OMDb error response
-                if data.get("Response") == "True" and data.get("Error") != "Incorrect API key. ":
-                    logger.info(f"✅ OMDb success:  {data['Title']}")
+                if data.get("Response") == "True":
+                    # Data Extraction
+                    title = data['Title']
+                    year = int(data.get('Year', 0).split('–')[0]) if data.get('Year') else 0
+                    poster = data.get('Poster', '') if data.get('Poster') != 'N/A' else ''
+                    genre = data.get('Genre', '')
+                    imdb_id = data.get('imdbID', '')
                     rating = data.get('imdbRating', 'N/A')
-                    return (
-                        data['Title'],
-                        int(data. get('Year', 0).split('–')[0]) if data.get('Year') else 0,
-                        data.get('Poster', ''),
-                        data.get('Genre', ''),
-                        data.get('imdbID', ''),
-                        rating
-                    )
-                else:
-                    logger.warning(f"⚠️ OMDb returned error: {data.get('Error', 'Unknown error')}")
-        except Exception as e:
-            logger.warning(f"⚠️ OMDb failed: {e}")
+                    plot = data.get('Plot', '') # Description
+                    
+                    # Smart Category Decision
+                    category = get_smart_category(data.get('Country', ''), data.get('Language', ''), genre)
+                    
+                    return title, year, poster, genre, imdb_id, rating, plot, category
+            except Exception as e:
+                logger.warning(f"OMDb Error: {e}")
 
-        # Fallback to Cinemagoer if OMDb fails
-        logger. info(f"🔄 Falling back to Cinemagoer for:  {query}")
-        try:
+        # 🔍 2. Cinemagoer Strategy (Fallback)
+        if re.match(r'^tt\d{7,8}$', query.strip()):
+            movie = ia.get_movie(query.strip()[2:])
+        else:
             movies = ia.search_movie(query)
-            if movies:
-                movie = movies[0]
-                ia.update(movie)
-                
-                title = movie.get('title', query)
-                year = movie.get('year', 0)
-                poster_url = movie.get('full-size cover url', '')
-                genres = movie.get('genres', [])[:3]
-                imdb_id = f"tt{movie.movieID}"
-                rating = movie. get('rating', 'N/A')
-                
-                logger. info(f"✅ Cinemagoer fallback success: {title}")
-                return title, year, poster_url, ', '.join(genres), imdb_id, rating
-                
-        except Exception as e: 
-            logger.error(f"❌ Cinemagoer fallback failed: {e}")
+            if not movies: return None
+            movie = movies[0]
+            ia.update(movie)
 
-        return query, 0, '', '', '', 'N/A'
+        title = movie.get('title', 'Unknown')
+        year = movie.get('year', 0)
+        poster = movie.get('full-size cover url', '')
+        genres = ', '.join(movie.get('genres', [])[:3])
+        imdb_id = f"tt{movie.movieID}"
+        rating = movie.get('rating', 'N/A')
+        # Description Fix
+        plot = movie.get('plot outline') or (movie.get('plot')[0] if movie.get('plot') else '')
+        
+        # Smart Category
+        countries = movie.get('countries', [])
+        languages = movie.get('languages', [])
+        category = get_smart_category(countries, languages, genres)
+
+        return title, year, poster, genres, imdb_id, rating, plot, category
 
     except Exception as e:
-        logger.error(f"❌ Fatal error in fetch_movie_metadata: {e}")
+        logger.error(f"Metadata Error: {e}")
         return None
 # ==================== AI INTENT ANALYSIS ====================
 async def analyze_intent(message_text):
@@ -2882,70 +2917,54 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await batch_add_command(update, context)
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Batch Session with IMDb ID support - UPDATED"""
     user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:  return
+    if user_id != ADMIN_USER_ID: return
 
     if not context.args: 
-        await update.message.reply_text(
-            "❌ Usage:\n"
-            "`/batch Movie Name`\n"
-            "`/batch tt1234567` (IMDb ID for exact match)",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("❌ Usage: `/batch Name` or `/batchid tt123`")
         return
 
-    query = " ".join(context.args).strip()
-    is_imdb = is_valid_imdb_id(query)
-    
-    # ✅ ADDED: Show loading message
     status_msg = await update.message.reply_text("⏳ Fetching metadata...", parse_mode='Markdown')
+    metadata = fetch_movie_metadata(" ".join(context.args).strip())
     
-    metadata = fetch_movie_metadata(query)
-    
-    # ✅ ADDED: Check if metadata fetch failed
     if not metadata: 
-        await status_msg.edit_text(
-            "❌ **Error:** Could not fetch movie metadata.\n\n"
-            "**Reasons:**\n"
-            "• Invalid movie name\n"
-            "• OMDb API key is invalid (check OMDB_API_KEY in .env)\n"
-            "• Movie not found on IMDb\n\n"
-            "**Fix:** Update your OMDB_API_KEY and try again.",
-            parse_mode='Markdown'
-        )
+        await status_msg.edit_text("❌ Metadata not found. Check Name or OMDb Key.")
         return
 
-    title, year, poster_url, genre, imdb_id, rating = metadata
+    # ✅ 8 Values Unpack
+    title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
     
-    # Show status message
-    status_text = f"🎬 **Batch Started:** {title} ({year})"
-    if imdb_id: status_text += f"\n🏷 ID: `{imdb_id}`"
-    if rating and rating != 'N/A': status_text += f" | ⭐ {rating}"
-    
-    await update.message.reply_text(status_text, parse_mode='Markdown')
+    # Poster Check for Display
+    display_poster = poster_url if poster_url else "No Poster"
 
-    # Create/Update DB entry
+    await status_msg.edit_text(
+        f"🎬 **Batch Started:** {title} ({year})\n"
+        f"🏷 **Category:** {category}\n"
+        f"📜 **Plot:** {plot[:50]}...", 
+        parse_mode='Markdown'
+    )
+
     conn = get_db_connection()
     if not conn: return
     
     try:
         cur = conn.cursor()
-        
-        # ✅ CORRECT SQL QUERY WITH RATING
+        # Insert Category and Description
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating) 
-            VALUES (%s, '', %s, %s, %s, %s, %s) 
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (title) DO UPDATE 
             SET imdb_id = EXCLUDED.imdb_id,
                 poster_url = EXCLUDED.poster_url,
                 year = EXCLUDED.year,
                 genre = EXCLUDED.genre,
-                rating = EXCLUDED.rating
+                rating = EXCLUDED.rating,
+                description = EXCLUDED.description,
+                category = EXCLUDED.category
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating)
+            (title, imdb_id, poster_url, year, genre, rating, plot, category)
         )
         
         movie_id = cur.fetchone()[0]
@@ -2953,7 +2972,6 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
         conn.close()
 
-        # Start batch session
         BATCH_SESSION.update({
             'active': True,
             'movie_id': movie_id,
@@ -2962,17 +2980,11 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'admin_id': user_id
         })
 
-        await update.message.reply_text(
-            f"🚀 **Batch Mode ON for:** `{title}`\n\n"
-            f"📤 Send files here (Bot PM). Bot will auto-upload to ALL backup channels.\n"
-            f"✅ Type `/done` to finish and generate AI aliases.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"🚀 **Batch ON!** Send files now.")
     except Exception as e:
-        logger.error(f"Batch Start Error: {e}")
-        await update.message.reply_text(f"❌ Error starting batch: {e}")
+        logger.error(f"Batch Error: {e}")
+        await update.message.reply_text(f"❌ DB Error: {e}")
         if conn: conn.close()
-
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
