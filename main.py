@@ -100,10 +100,7 @@ def get_auto_topic_id(genre, description):
 
 async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Final Version: 
-    - Handles Missing Description & Poster
-    - Auto Category Detection
-    - 3 Deep Links (Multi-Bot Support)
+    Fixed Version: Deep Link format ab 'movie_' use karega jo start handler me hai.
     """
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
@@ -113,7 +110,6 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # DB se sab kuch nikalo
     query = "SELECT id, title, year, rating, genre, poster_url, description, category FROM movies"
     
     if movie_search_name:
@@ -136,17 +132,15 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     # Unpack 8 values
     movie_id, title, year, rating, genre, poster_url, description, category = movie_data
 
-    # 2. TOPIC SELECTION (Direct DB Category se)
+    # 2. TOPIC SELECTION
     topic_id = 100 # Default
     cat_lower = str(category).lower()
 
-    # Mapping Match karo
     for tid, keywords in TOPIC_MAPPING.items():
         if cat_lower in [k.lower() for k in keywords]: 
             topic_id = tid
             break
             
-    # Fallback Logic
     if topic_id == 100:
         if "south" in cat_lower: topic_id = 20
         elif "hollywood" in cat_lower: topic_id = 1
@@ -168,10 +162,9 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"👇 **Click Below to Download** 👇"
     )
 
-    # 5. 🔗 MULTI-BOT DEEP LINKS (Yahan Magic Hai)
-    link_param = f"get_{movie_id}"
+    # 5. 🔗 CORRECTED DEEP LINKS (movie_ prefix)
+    link_param = f"movie_{movie_id}"  # <--- YEH CHANGE KIYA HAI (Ab Start handler pakad lega)
     
-    # Aapke 3 Bots
     bot1_username = "FlimfyBox_SearchBot"
     bot2_username = "urmoviebot"
     bot3_username = "FlimfyBox_Bot"
@@ -180,7 +173,6 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     link2 = f"https://t.me/{bot2_username}?start={link_param}"
     link3 = f"https://t.me/{bot3_username}?start={link_param}"
 
-    # Keyboard Layout (2 buttons upar, 1 niche)
     keyboard = [
         [
             InlineKeyboardButton("📥 Download Server 1", url=link1),
@@ -200,7 +192,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with 3 Links!")
+        await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with Working Links!")
     except Exception as e:
         logger.error(f"Post failed: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
@@ -2444,6 +2436,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # ===================================
     
+    # 👇👇👇 YE NAYA CODE ADD KARO 👇👇👇
+    if query.data.startswith("clearfiles_"):
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Sirf Admin ke liye!", show_alert=True)
+            return
+
+        movie_id = int(query.data.split("_")[1])
+        
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM movie_files WHERE movie_id = %s", (movie_id,))
+                deleted_count = cur.rowcount # Kitni delete hui
+                conn.commit()
+                cur.close()
+                conn.close()
+                
+                await query.answer(f"✅ {deleted_count} purani files delete ho gayi!", show_alert=True)
+                await query.edit_message_text(
+                    f"🗑️ **Deleted {deleted_count} old files.**\n\n"
+                    f"✅ **Clean Slate!** Ab nayi files upload karo.",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Delete Error: {e}")
+                await query.answer("❌ Error deleting files", show_alert=True)
+        return
+    # 👆👆👆 YAHAN TAK 👆👆👆
+    
+    
     # === 1. VERIFY BUTTON LOGIC ===
     if data == "verify":
         await query.answer("🔍 Checking membership...", show_alert=True)
@@ -2924,32 +2947,26 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Usage: `/batch Name` or `/batchid tt123`")
         return
 
+    # 1. Loading Message
     status_msg = await update.message.reply_text("⏳ Fetching metadata...", parse_mode='Markdown')
-    metadata = fetch_movie_metadata(" ".join(context.args).strip())
+    
+    query = " ".join(context.args).strip()
+    metadata = fetch_movie_metadata(query)
     
     if not metadata: 
         await status_msg.edit_text("❌ Metadata not found. Check Name or OMDb Key.")
         return
 
-    # ✅ 8 Values Unpack
+    # 8 Values Unpack
     title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
     
-    # Poster Check for Display
-    display_poster = poster_url if poster_url else "No Poster"
-
-    await status_msg.edit_text(
-        f"🎬 **Batch Started:** {title} ({year})\n"
-        f"🏷 **Category:** {category}\n"
-        f"📜 **Plot:** {plot[:50]}...", 
-        parse_mode='Markdown'
-    )
-
     conn = get_db_connection()
     if not conn: return
     
     try:
         cur = conn.cursor()
-        # Insert Category and Description
+        
+        # 2. Movie Data Insert/Update
         cur.execute(
             """
             INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
@@ -2966,28 +2983,50 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """,
             (title, imdb_id, poster_url, year, genre, rating, plot, category)
         )
-        
         movie_id = cur.fetchone()[0]
         conn.commit()
+
+        # 3. Check for OLD FILES (Kitni files pehle se hain?)
+        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+        file_count = cur.fetchone()[0]
+        
         cur.close()
         conn.close()
 
+        # 4. Activate Batch Session (Ye har haal mein ON hoga)
         BATCH_SESSION.update({
             'active': True,
             'movie_id': movie_id,
             'movie_title': title,
-            'file_count': 0,
+            'file_count': 0, # Session ka count 0 se shuru hoga
             'admin_id': user_id
         })
 
-        await update.message.reply_text(f"🚀 **Batch ON!** Send files now.")
+        # 5. Message Prepare Karo
+        msg_text = (
+            f"🎬 **Batch Started:** {title} ({year})\n"
+            f"🏷 **Category:** {category}\n"
+            f"📂 **Existing Files in DB:** {file_count}\n\n"
+            f"🚀 **Send NEW files now!** (Bot is listening...)"
+        )
+
+        # 6. Logic: Agar purani files hain tabhi Delete Button dikhao
+        reply_markup = None
+        if file_count > 0:
+            msg_text += "\n\n⚠️ *Purani files mili hain. Agar sab delete karke fresh start karna hai to button dabayein:* 👇"
+            keyboard = [[InlineKeyboardButton("🗑️ Delete OLD Files (Clean Slate)", callback_data=f"clearfiles_{movie_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # 7. Final Message Send
+        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=reply_markup)
+
     except Exception as e:
         logger.error(f"Batch Error: {e}")
-        await update.message.reply_text(f"❌ DB Error: {e}")
+        await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: conn.close()
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
+    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves/Replaces in DB
     """
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
@@ -3032,13 +3071,24 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # 4. Save to DB
+    # 4. Save to DB (WITH REPLACE LOGIC) 🛠️
     conn = get_db_connection()
     if conn:
         cur = conn.cursor()
+        
+        # 👇 YEH HAI JAADU (Magic)
+        # Agar movie_id + quality same hai, to purana link hata ke naya daal dega
         cur.execute(
-            """INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-               VALUES (%s, %s, %s, %s, %s)""",
+            """
+            INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (movie_id, quality) 
+            DO UPDATE SET 
+                url = EXCLUDED.url,
+                file_size = EXCLUDED.file_size,
+                backup_map = EXCLUDED.backup_map,
+                file_id = NULL  -- Link use kar rahe hain to File ID hata do
+            """,
             (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
         )
         conn.commit()
@@ -3046,11 +3096,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
     BATCH_SESSION['file_count'] += 1
+    
+    # Message update logic to show if it was replaced (Optional check)
     await status.edit_text(
-        f"✅ **Saved Successfully!**\n"
-        f"📂 Backup Copies: {success_uploads}\n"
+        f"✅ **File Saved/Replaced!**\n"
+        f"📂 Copies: {success_uploads}\n"
         f"🏷 Label: `{label}`\n"
-        f"🔢 Total Files in Session: {BATCH_SESSION['file_count']}",
+        f"🔢 Total: {BATCH_SESSION['file_count']}",
         parse_mode='Markdown'
     )
 
