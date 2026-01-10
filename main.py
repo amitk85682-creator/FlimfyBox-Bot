@@ -75,7 +75,7 @@ TOPIC_MAPPING = {
     # Format:  Topic_ID:  ['keyword1', 'keyword2', 'keyword3']
     
     20: ['south', 'telugu', 'tamil', 'kannada', 'malayalam', 'allu arjun'], # South Topic (ID: 12)
-    1: ['hollywood', 'english', 'marvel', 'dc', 'disney'],                 # Hollywood Topic (ID: 34)
+    32: ['hollywood', 'english', 'marvel', 'dc', 'disney'],                 # Hollywood Topic (ID: 34)
     16: ['bollywood', 'hindi', 'khan', 'kapoor'],                           # Bollywood Topic (ID: 56)
     18: ['series', 'season', 'episode', 'netflix', 'amazon'],               # Web Series Topic (ID: 78)
     22: ['anime', 'cartoon', 'animation'],                                  # Anime Topic (ID: 90)
