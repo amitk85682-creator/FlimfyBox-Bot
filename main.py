@@ -4869,6 +4869,11 @@ def run_flask():
 
 # ==================== NEW REQUEST SYSTEM (CONFIRMATION FLOW) ====================
     
+    # Make sure this function is defined with 'async def'
+async def your_function_name(update, context):
+    query = update.callback_query
+    await query.answer() # Optional: Good practice to stop the loading animation
+
     # --- NEW STYLISH & SHORT TEXT ---
     request_instruction_text = (
         "📝 𝗥𝗲𝗾𝘂𝗲𝘀𝘁 𝗥𝘂𝗹𝗲𝘀..!!\n\n"
@@ -4885,17 +4890,18 @@ def run_flask():
         "👇 <b>अब नीचे मूवी का नाम भेजें:</b>"
     )
     
-    # Message Edit karein
+    # ✅ Since we are inside 'async def', 'await' will now work
     await query.edit_message_text(
         text=request_instruction_text,
         parse_mode='HTML',
         disable_web_page_preview=True
     )
     
-    # Is instruction message ko bhi delete list me daal dein (2 min baad)
+    # NOTE: If 'track_message_for_deletion' is also an async function, 
+    # you might need to add 'await' before it too.
     track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 120)
     
-    # State change -> Ab Bot sirf Name ka wait karega
+    # State change
     return WAITING_FOR_NAME
 
 async def handle_request_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
