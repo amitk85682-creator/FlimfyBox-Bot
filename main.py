@@ -1968,11 +1968,11 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 
 # ==================== CLEAN LOADING FUNCTION (FIXED) ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
-    """
-    Shows movie qualities as a TEXT LIST (No Buttons), similar to Search Results.
-    """
+    """Shows Quality List in Clean HTML Format"""
     chat_id = update.effective_chat.id
-    bot_username = context.bot.username
+    
+    # ✅ FIX: Username Hardcoded
+    bot_username = "FlimfyBox_SearchBot"
 
     conn = get_db_connection()
     if not conn: return
@@ -1980,7 +1980,7 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
     try:
         cur = conn.cursor()
         
-        # 1. Movie Details
+        # 1. Fetch Movie Info
         cur.execute("SELECT title, year, genre FROM movies WHERE id = %s", (movie_id,))
         movie = cur.fetchone()
         
@@ -1990,57 +1990,46 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
 
         title, year, genre = movie
         
-        # 2. Files (Qualities) Fetch
-        # Note: Hum 'id' bhi le rahe hain taaki unique link bana sakein
-        cur.execute("""
-            SELECT id, quality, file_size 
-            FROM movie_files 
-            WHERE movie_id = %s 
-            ORDER BY id ASC
-        """, (movie_id,))
-        
+        # 2. Fetch Files
+        cur.execute("SELECT id, quality, file_size FROM movie_files WHERE movie_id = %s ORDER BY id ASC", (movie_id,))
         files = cur.fetchall()
+        
         cur.close()
         conn.close()
 
-        # 3. LIST BUILD KARO (Screenshot Style)
+        # 3. Build HTML List
+        import html
+        safe_title = html.escape(title)
         
-        # Header
-        list_text = f"📝 **Hey {update.effective_user.first_name} 😐🙃™ Your Requested Files Are Here**\n\n"
-        list_text += f"🎬 **{title} ({year})**\n"
+        list_text = f"🎬 <b>{safe_title} ({year})</b>\n"
         if genre: list_text += f"🎭 {genre}\n"
         list_text += "\n"
 
         if not files:
-            list_text += "😕 No files uploaded yet for this movie."
+            list_text += "😕 No files available."
         else:
-            # Loop through files and create links
             for idx, (row_id, quality, size) in enumerate(files, start=1):
-                # Size formatting
-                size_str = f"[{size}]" if size else ""
+                size_str = f"[{size}]" if size else "[Link]"
                 
-                # Deep Link to THIS bot with 'filesend_' payload
-                # Example: https://t.me/MyBot?start=filesend_55
+                # Link generation
                 link = f"https://t.me/{bot_username}?start=filesend_{row_id}"
                 
-                # Format: 1. [Size] Quality Name
-                list_text += f"**{idx}.** [{size_str} {quality} {title}]({link})\n\n"
+                # Clean HTML Link
+                list_text += f"<b>{idx}.</b> <a href='{link}'>{size_str} {quality}</a>\n\n"
 
-        list_text += "👇 **Click on the link above to download**"
+        list_text += "👇 <b>Click above to get file</b>"
 
-        # Message Send
+        # 4. Send
         msg = await context.bot.send_message(
             chat_id=chat_id, 
             text=list_text, 
-            parse_mode='Markdown',
+            parse_mode='HTML',
             disable_web_page_preview=True
         )
-        
         track_message_for_deletion(context, chat_id, msg.message_id, 120)
 
     except Exception as e:
-        logger.error(f"Error in deliver_movie_on_start: {e}")
-        await context.bot.send_message(chat_id, "❌ Error retrieving movie details.")
+        logger.error(f"Deliver Error: {e}")
     # ==================
 
     logger.info(f"START called by user {user_id} with args: {context.args}")
@@ -2216,6 +2205,7 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
     
     # ✅ Just return (No state needed for main menu)
     return
+
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
     try:
@@ -2282,9 +2272,11 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search functionality matches screenshot list style"""
+    """
+    Search Function - Handles 'Not Found' with detailed guide & 'Found' with clean HTML List.
+    """
     try:
-        # Button click handle
+        # 1. Basic Checks
         if update.callback_query:
             await update.callback_query.answer()
             return
@@ -2298,12 +2290,21 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
              return await main_menu_or_search(update, context)
 
-        # 1. Search DB
+        # 2. Search Database
         movies = get_movies_from_db(query, limit=10)
         
-        # 2. Not Found Handling (Corrected)
+        # --- CASE A: MOVIE NOT FOUND (Detailed Message) ---
         if not movies:
-            # Agar movie nahi mili to ye lamba message bhejo
+            # Random GIF (Optional - keep existing logic)
+            if 'SEARCH_ERROR_GIFS' in globals() and SEARCH_ERROR_GIFS:
+                try:
+                    gif = random.choice(SEARCH_ERROR_GIFS)
+                    msg_gif = await update.message.reply_animation(animation=gif)
+                    track_message_for_deletion(context, update.effective_chat.id, msg_gif.message_id, 60)
+                except:
+                    pass
+
+            # Your Specific Long Message
             not_found_text = (
                 "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
                 "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
@@ -2326,56 +2327,53 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text(
                 text=not_found_text,
                 reply_markup=keyboard,
-                parse_mode='HTML', # HTML is safer
+                parse_mode='HTML', 
                 disable_web_page_preview=True
             )
+            
             # Auto Delete Not Found Msg
             track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-            return 
+            return
 
-        # 3. List Generation (Found)
-        # HTML Header
+        # --- CASE B: MOVIE FOUND (Clean HTML List) ---
+        import html
+        
         user_name = html.escape(update.effective_user.first_name)
+        # Use hardcoded username to prevent "Username not found" error
+        bot_username = "FlimfyBox_SearchBot" 
+        
         list_text = f"📝 <b>Hey {user_name} 😐🙃™ Your Requested Files Are Here</b>\n\n"
         
-        bot_username = context.bot.username
-        
         for idx, movie in enumerate(movies, start=1):
-            # Tuple Unpacking (Make sure DB returns this order)
-            # Maan lijiye: 0=id, 1=title, 6=year/size
+            # Tuple Unpacking (8 values expected from DB)
+            # id, title, url, file_id, imdb_id, poster_url, year, genre
             if len(movie) >= 2:
                 m_id = movie[0]
-                m_title = html.escape(movie[1]) # Special chars escape karein
+                m_title = html.escape(movie[1]) # Safety
+                m_year = movie[6] if len(movie) > 6 and movie[6] else ""
                 
-                # Agar screenshot jaisa [Size] dikhana hai to DB se size fetch karein
-                # Filhal main Year use kar raha hu jaisa aapne likha tha
-                extra_info = movie[6] if len(movie) > 6 and movie[6] else "File"
+                # Use 'filesend_' logic for list view deep linking
+                link = f"https://t.me/{bot_username}?start=filesend_{m_id}"
                 
-                # Deep Link (Start parameter)
-                link = f"https://t.me/{bot_username}?start=movie_{m_id}"
-                
-                # Format: 1. [Year/Size] Name (Clickable)
-                # HTML Syntax: <a href='url'>Text</a>
-                list_text += f"<b>{idx}. [{extra_info}] <a href='{link}'>{m_title}</a></b>\n\n"
+                # HTML List Item
+                list_text += f"<b>{idx}.</b> <a href='{link}'>{m_title} {m_year}</a>\n\n"
 
-        # Footer
         list_text += "👇 <b>Click on the link to download</b>"
 
-        # Send as Text Message
+        # Send List Message
         msg = await update.message.reply_text(
             text=list_text,
-            parse_mode='HTML', # Markdown ki jagah HTML use karein
+            parse_mode='HTML',
             disable_web_page_preview=True
         )
         
-        # Auto delete
         track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
         return
 
     except Exception as e:
-        # Logger use karein agar setup hai, warna print
-        print(f"Error in search_movies: {e}")
-        return
+        logger.error(f"Search Error: {e}")
+        # Optional: Send a generic error message to user
+        # await update.message.reply_text("❌ Error searching.")
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
@@ -4870,11 +4868,6 @@ def run_flask():
 # Isliye ye functions delete kar diye gaye hain aur unki jagah naye functions upar add kiye gaye hain.
 
 # ==================== NEW REQUEST SYSTEM (CONFIRMATION FLOW) ====================
-
-async def start_request_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 1: User clicks 'Request This Movie' -> Show Short & Stylish Guidelines"""
-    query = update.callback_query
-    await query.answer()
     
     # --- NEW STYLISH & SHORT TEXT ---
     request_instruction_text = (
@@ -5236,6 +5229,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_keyboard(),
         parse_mode='Markdown'
     )
+
+async def start_request_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 1: User clicks 'Request This Movie' -> Show Short & Stylish Guidelines"""
+    query = update.callback_query
+    await query.answer()
 
 # ==================== MAIN BOT FUNCTION ====================
 def main():
