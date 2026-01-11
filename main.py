@@ -257,38 +257,6 @@ if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set")
     raise ValueError("DATABASE_URL is not set.")
 
-def detect_languages_from_filename(filename):
-    """
-    Filename se smart tarike se audio language detect karega.
-    """
-    if not filename: 
-        return None # Agar filename hi nahi mila to crash nahi karega
-
-    name = filename.lower()
-    found_langs = []
-
-    # Common patterns
-    if "hindi" in name or "hin" in name: found_langs.append("Hindi")
-    if "english" in name or "eng" in name: found_langs.append("English")
-    if "tamil" in name or "tam" in name: found_langs.append("Tamil")
-    if "telugu" in name or "tel" in name: found_langs.append("Telugu")
-    if "kannada" in name or "kan" in name: found_langs.append("Kannada")
-    if "malayalam" in name or "mal" in name: found_langs.append("Malayalam")
-    if "japanese" in name or "jap" in name: found_langs.append("Japanese")
-    
-    # Generic terms
-    if "dual" in name: 
-        if "Hindi" not in found_langs: found_langs.append("Hindi")
-        if "English" not in found_langs: found_langs.append("English")
-    if "multi" in name: found_langs.append("Multi Audio")
-
-    # Agar kuch nahi mila
-    if not found_langs:
-        return None
-    
-    # Unique karke comma string bana do (e.g., "Hindi, English")
-    return ", ".join(sorted(list(set(found_langs))))
-
 # ==================== UTILITY FUNCTIONS ====================
 def preprocess_query(query):
     """Clean and normalize user query"""
@@ -1226,26 +1194,20 @@ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
 
-async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id, language=None):
-    """Notify users with Language in Caption"""
-    # ... (Purana code same) ...
+async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
+    """Notify users who requested a movie"""
     logger.info(f"Attempting to notify users for movie: {movie_title}")
     conn = None
     cur = None
     notified_count = 0
 
-    # --- CAPTION LOGIC ---
-    lang_line = f"🔊 <b>Audio:</b> {language}\n" if language else ""
-    
     caption_text = (
-        f"🎬 <b>{movie_title}</b>\n"
-        f"{lang_line}" # Yahan Audio add kar diya
-        "➖➖➖➖➖➖➖➖➖➖\n"
-        "🔹 <b>Please drop the movie name...</b>\n" 
-        "➖➖➖➖➖➖➖➖➖➖\n"
-        "🔹 <b>Support group:</b> https://t.me/+2hFeRL4DYfBjZDQ1\n"
-    )
-    
+    f"🎬 <b>{movie_title}</b>\n\n"
+    "➖➖➖➖➖➖➖➖➖➖\n"
+    "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
+    "➖➖➖➖➖➖➖➖➖➖\n"
+    "🔹 <b>Support group:</b> https://t.me/+2hFeRL4DYfBjZDQ1\n"
+)
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
 
     try:
@@ -1948,14 +1910,14 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             return
 
         # 3. Movie Mil gayi - Send karein
-        movie_id = movies_found[0][0]
+        movie_id, title, url, file_id = movies_found[0]
         
         # Loading msg delete karein
         try: await status_msg.delete() 
         except: pass
 
         # Send the movie using your existing helper function
-        await deliver_movie_on_start(update, context, movie_id)
+        await send_movie_to_user(update, context, movie_id, title, url, file_id)
 
     except Exception as e:
         logger.error(f"Background Search Error: {e}")
@@ -1967,78 +1929,115 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 # ==================== CLEAN LOADING FUNCTION (FIXED) ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
     """
-    Shows movie qualities as a TEXT LIST (No Buttons), similar to Search Results.
+    Fetches and sends a movie with a clean 'Loading' animation.
+    No technical details shown to the user.
     """
     chat_id = update.effective_chat.id
-    bot_username = context.bot.username
-
-    conn = get_db_connection()
-    if not conn: return
-
+    
+    # 1. Loading Effect
+    status_msg = None
     try:
-        cur = conn.cursor()
+        status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
         
-        # 1. Movie Details
-        cur.execute("SELECT title, year, genre FROM movies WHERE id = %s", (movie_id,))
-        movie = cur.fetchone()
-        
-        if not movie:
-            await context.bot.send_message(chat_id, "❌ Movie not found.")
+        # Backup Auto-delete
+        track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
+    except:
+        pass
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            # User ko technical error mat dikhao, bas chupchap delete kar do
+            if status_msg: 
+                try: 
+                    await status_msg.delete() 
+                except: 
+                    pass
             return
 
-        title, year, genre = movie
-        
-        # 2. Files (Qualities) Fetch
-        # Note: Hum 'id' bhi le rahe hain taaki unique link bana sakein
-        cur.execute("""
-            SELECT id, quality, file_size 
-            FROM movie_files 
-            WHERE movie_id = %s 
-            ORDER BY id ASC
-        """, (movie_id,))
-        
-        files = cur.fetchall()
+        cur = conn.cursor()
+        cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
+        movie_data = cur.fetchone()
         cur.close()
         conn.close()
 
-        # 3. LIST BUILD KARO (Screenshot Style)
-        
-        # Header
-        list_text = f"📝 **Hey {update.effective_user.first_name} 😐🙃™ Your Requested Files Are Here**\n\n"
-        list_text += f"🎬 **{title} ({year})**\n"
-        if genre: list_text += f"🎭 {genre}\n"
-        list_text += "\n"
+        # 2. Movie milne ke baad turant Loading Msg delete karo
+        if status_msg:
+            try: 
+                await status_msg.delete()
+            except: 
+                pass
 
-        if not files:
-            list_text += "😕 No files uploaded yet for this movie."
+        if movie_data:
+            title, url, file_id = movie_data
+            # Movie bhejo
+            await send_movie_to_user(update, context, movie_id, title, url, file_id)
         else:
-            # Loop through files and create links
-            for idx, (row_id, quality, size) in enumerate(files, start=1):
-                # Size formatting
-                size_str = f"[{size}]" if size else ""
-                
-                # Deep Link to THIS bot with 'filesend_' payload
-                # Example: https://t.me/MyBot?start=filesend_55
-                link = f"https://t.me/{bot_username}?start=filesend_{row_id}"
-                
-                # Format: 1. [Size] Quality Name
-                list_text += f"**{idx}.** [{size_str} {quality} {title}]({link})\n\n"
-
-        list_text += "👇 **Click on the link above to download**"
-
-        # Message Send
-        msg = await context.bot.send_message(
-            chat_id=chat_id, 
-            text=list_text, 
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
-        
-        track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            # Agar movie nahi mili
+            fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
+            track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
 
     except Exception as e:
-        logger.error(f"Error in deliver_movie_on_start: {e}")
-        await context.bot.send_message(chat_id, "❌ Error retrieving movie details.")
+        logger.error(f"Error in deliver_movie: {e}")
+        if status_msg:
+            try: 
+                await status_msg.delete()
+            except: 
+                pass
+        if movie_data:
+            title, url, file_id = movie_data
+            await send_movie_to_user(update, context, movie_id, title, url, file_id)
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="❌ Movie not found. It may have been removed from our database."
+            )
+
+    except Exception as e:
+        logger.error(f"CRITICAL ERROR in deliver_movie: {e}", exc_info=True)
+        error_msg = "❌ Failed to retrieve movie. Please try again or use search."
+        if status_msg:
+            try:
+                await status_msg.edit_text(error_msg)
+            except:
+                pass
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=error_msg)
+            
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+# Add this at the top level
+from asyncio import Lock
+from collections import defaultdict
+
+user_processing_locks = defaultdict(Lock)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    
+    # === FSub Check (Smart Logic) ===
+    # Agar user Link (context.args) se aaya hai, to Fresh Check karo (Cache Ignore).
+    # Agar Normal /start hai, to Cache use karo (Fast Response).
+    force_check = True if context.args else False
+    
+    check = await is_user_member(context, user_id, force_fresh=force_check)
+    
+    if not check['is_member']:
+        msg = await update.message.reply_text(
+            get_join_message(check['channel'], check['group']),
+            reply_markup=get_join_keyboard(),
+            parse_mode='Markdown'
+        )
+        # 2 min baad delete kar do taaki chat gandi na ho
+        track_message_for_deletion(context, chat_id, msg.message_id, 120)
+        return
     # ==================
 
     logger.info(f"START called by user {user_id} with args: {context.args}")
@@ -2064,40 +2063,6 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         async with user_processing_locks[user_id]:
-
-            # --- CASE 0: SPECIFIC FILE DELIVERY (FROM LIST) ---
-            if payload.startswith("filesend_"):
-                try:
-                    # DB id of the file in movie_files table
-                    file_row_id = int(payload.split('_')[1])
-                    
-                    conn = get_db_connection()
-                    cur = conn.cursor()
-                    
-                    # File aur Movie details fetch karein
-                    cur.execute("""
-                        SELECT f.url, f.file_id, m.id, m.title 
-                        FROM movie_files f 
-                        JOIN movies m ON f.movie_id = m.id 
-                        WHERE f.id = %s
-                    """, (file_row_id,))
-                    
-                    result = cur.fetchone()
-                    cur.close()
-                    conn.close()
-                    
-                    if result:
-                        url, file_id, movie_id, title = result
-                        # File bhejo
-                        await send_movie_to_user(update, context, movie_id, title, url, file_id)
-                    else:
-                        await update.message.reply_text("❌ File expired or removed.")
-                        
-                except Exception as e:
-                    logger.error(f"Filesend Error: {e}")
-                    await update.message.reply_text("❌ Error getting file.")
-                return
-                
             # --- CASE 1: DIRECT MOVIE ID ---
             if payload.startswith("movie_"):
                 try:
@@ -2280,28 +2245,38 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search functionality matches screenshot list style"""
+    """Search for movies in the database"""
     try:
-        # Button click handle
+        # Agar ye button click se aya hai (cancel/back)
         if update.callback_query:
-            await update.callback_query.answer()
+            query = update.callback_query
+            await query.answer()
+            # Yahan hum kuch return nahi kar rahe, bas message bhej rahe hain
             return
 
+        # Agar message text nahi hai
         if not update.message or not update.message.text:
             return 
 
         query = update.message.text.strip()
         
-        # Menu buttons ignore
+        # Safety check
         if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
              return await main_menu_or_search(update, context)
 
         # 1. Search DB
         movies = get_movies_from_db(query, limit=10)
         
-        # 2. Not Found Handling (Corrected)
+        # 2. Not Found
         if not movies:
-            # Agar movie nahi mili to ye lamba message bhejo
+            if SEARCH_ERROR_GIFS:
+                try:
+                    gif = random.choice(SEARCH_ERROR_GIFS)
+                    msg_gif = await update.message.reply_animation(animation=gif)
+                    track_message_for_deletion(context, update.effective_chat.id, msg_gif.message_id, 60)
+                except:
+                    pass
+
             not_found_text = (
                 "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
                 "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
@@ -2324,55 +2299,32 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await update.message.reply_text(
                 text=not_found_text,
                 reply_markup=keyboard,
-                parse_mode='HTML', # HTML is safer
+                parse_mode='HTML',
                 disable_web_page_preview=True
             )
             # Auto Delete Not Found Msg
             track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-            return 
+            return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
-        # 3. List Generation (Found)
-        # HTML Header
-        user_name = html.escape(update.effective_user.first_name)
-        list_text = f"📝 <b>Hey {user_name} 😐🙃™ Your Requested Files Are Here</b>\n\n"
+        # 3. Found
+        context.user_data['search_results'] = movies
+        context.user_data['search_query'] = query
+
+        keyboard = create_movie_selection_keyboard(movies, page=0)
         
-        bot_username = context.bot.username
-        
-        for idx, movie in enumerate(movies, start=1):
-            # Tuple Unpacking (Make sure DB returns this order)
-            # Maan lijiye: 0=id, 1=title, 6=year/size
-            if len(movie) >= 2:
-                m_id = movie[0]
-                m_title = html.escape(movie[1]) # Special chars escape karein
-                
-                # Agar screenshot jaisa [Size] dikhana hai to DB se size fetch karein
-                # Filhal main Year use kar raha hu jaisa aapne likha tha
-                extra_info = movie[6] if len(movie) > 6 and movie[6] else "File"
-                
-                # Deep Link (Start parameter)
-                link = f"https://t.me/{bot_username}?start=movie_{m_id}"
-                
-                # Format: 1. [Year/Size] Name (Clickable)
-                # HTML Syntax: <a href='url'>Text</a>
-                list_text += f"<b>{idx}. [{extra_info}] <a href='{link}'>{m_title}</a></b>\n\n"
-
-        # Footer
-        list_text += "👇 <b>Click on the link to download</b>"
-
-        # Send as Text Message
         msg = await update.message.reply_text(
-            text=list_text,
-            parse_mode='HTML', # Markdown ki jagah HTML use karein
-            disable_web_page_preview=True
+            f"🎬 **Found {len(movies)} results for '{query}'**\n\n"
+            "👇 Select your movie below:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
         )
         
-        # Auto delete
         track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-        return
+        return # <--- YAHAN SE BHI MAIN_MENU HATA DIYA HAI
 
     except Exception as e:
-        # Logger use karein agar setup hai, warna print
-        print(f"Error in search_movies: {e}")
+        logger.error(f"Error in search_movies: {e}")
+        # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
         return
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3164,31 +3116,17 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves/Replaces in DB
-    Now with Language Detection! 🔥
     """
-    # Permission Check
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
 
     message = update.effective_message
-    if not (message.document or message.video): 
-        return
+    if not (message.document or message.video): return
 
     # Status message
     status = await message.reply_text("⏳ Processing... Uploading to Backup Channels...", quote=True)
 
-    # --- 1. Get File Info & Detect Language ---
-    file_name = message.document.file_name if message.document else (message.video.file_name or "Video.mp4")
-    file_size = message.document.file_size if message.document else message.video.file_size
-    file_size_str = get_readable_file_size(file_size)
-    
-    # 🔥 Language Detection from Filename
-    detected_lang = detect_languages_from_filename(file_name)
-    
-    # Generate Quality Label
-    label = generate_quality_label(file_name, file_size_str)
-
-    # --- 2. Get Channels ---
+    # 1. Get Channels
     channels = get_storage_channels()
     if not channels:
         await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
@@ -3197,7 +3135,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     backup_map = {}  # Store {channel_id: message_id}
     success_uploads = 0
 
-    # --- 3. Multi-Channel Upload Loop ---
+    # 2. Multi-Channel Upload Loop
     for chat_id in channels:
         try:
             sent = await message.copy(chat_id=chat_id)
@@ -3210,48 +3148,50 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("❌ Failed to upload to any channel.")
         return
 
-    # --- 4. Generate Main Link (From first channel) ---
+    # 3. Prepare DB Data
+    file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
+    file_size = message.document.file_size if message.document else message.video.file_size
+    file_size_str = get_readable_file_size(file_size)
+    label = generate_quality_label(file_name, file_size_str)
+    
+    # Generate Main Link (From first channel in list)
     main_channel_id = channels[0]
     main_msg_id = backup_map.get(str(main_channel_id))
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # --- 5. Save to DB with Language (WITH REPLACE LOGIC) 🛠️ ---
+    # 4. Save to DB (WITH REPLACE LOGIC) 🛠️
     conn = get_db_connection()
     if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages) 
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (movie_id, quality) 
-                DO UPDATE SET 
-                    url = EXCLUDED.url,
-                    file_size = EXCLUDED.file_size,
-                    backup_map = EXCLUDED.backup_map,
-                    languages = EXCLUDED.languages,
-                    file_id = NULL
-                """,
-                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), detected_lang)
-            )
-            conn.commit()
-            cur.close()
-        except Exception as e:
-            logger.error(f"DB Error: {e}")
-        finally:
-            conn.close()
+        cur = conn.cursor()
+        
+        # 👇 YEH HAI JAADU (Magic)
+        # Agar movie_id + quality same hai, to purana link hata ke naya daal dega
+        cur.execute(
+            """
+            INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (movie_id, quality) 
+            DO UPDATE SET 
+                url = EXCLUDED.url,
+                file_size = EXCLUDED.file_size,
+                backup_map = EXCLUDED.backup_map,
+                file_id = NULL  -- Link use kar rahe hain to File ID hata do
+            """,
+            (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
 
     BATCH_SESSION['file_count'] += 1
     
-    # --- 6. Success Message with All Info ---
+    # Message update logic to show if it was replaced (Optional check)
     await status.edit_text(
-        f"✅ **File Saved/Replaced!**\n\n"
-        f"📂 Backup Copies: {success_uploads}\n"
-        f"🏷 Quality: `{label}`\n"
-        f"🔊 Audio: **{detected_lang}**\n"
-        f"📦 Size: {file_size_str}\n"
-        f"🔢 Total Files: {BATCH_SESSION['file_count']}",
+        f"✅ **File Saved/Replaced!**\n"
+        f"📂 Copies: {success_uploads}\n"
+        f"🏷 Label: `{label}`\n"
+        f"🔢 Total: {BATCH_SESSION['file_count']}",
         parse_mode='Markdown'
     )
 
@@ -5179,7 +5119,7 @@ def main():
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
-            CommandHandler('start', start)
+            CommandHandler('start', start) # Agar user beech me start dabaye to reset ho jaye
         ],
         conversation_timeout=120, # ⚡ 2 Minutes Auto-Cancel
     )
