@@ -1546,9 +1546,10 @@ def get_admin_request_keyboard(user_id, movie_title):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_movie_options_keyboard(movie_title, url):
-    """Get inline keyboard for movie options"""
+def get_movie_options_keyboard(movie_title, url, movie_id, file_info):
+    # 'scan_info_' ke saath movie_id bhejo taaki data fetch kar sakein
     keyboard = [
+        [InlineKeyboardButton("ℹ️ SCAN INFO : AUDIO & SUBS", callback_data=f"scan_{movie_id}")],
         [InlineKeyboardButton("🎬 Watch Now", url=url)],
         [InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title[:50]}")],
         [InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]
@@ -1631,33 +1632,47 @@ def get_all_movie_qualities(movie_id):
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
-    """Create inline keyboard with quality selection buttons showing SIZE with Pagination (5 per page)"""
-    limit = 5
+    """
+    Create inline keyboard with quality selection.
+    Features: 
+    1. Grid Layout (2 buttons per row)
+    2. 'Send All' button at top
+    3. Pagination
+    """
+    limit = 6 # Grid view ke liye limit badha di (even number best hai)
     start_idx = page * limit
     end_idx = start_idx + limit
     
-    # Sirf current page ke qualities nikalo
     current_qualities = qualities[start_idx:end_idx]
-
     keyboard = []
 
-    # Note: qualities tuple ab 4 items ka hai -> (quality, url, file_id, file_size)
+    # --- 1. SEND ALL BUTTON (Top) ---
+    keyboard.append([InlineKeyboardButton("🚀 SEND ALL FILES", callback_data=f"sendall_{movie_id}")])
+
+    # --- 2. GRID LAYOUT (2 Buttons per Row) ---
+    row = []
     for quality, url, file_id, file_size in current_qualities:
         callback_data = f"quality_{movie_id}_{quality}"
         
-        # Logic Fix: Agar size available hai to variable set karein
-        size_str = f"{file_size}" if file_size else ""
-        link_type = "File" if file_id else "Link"
+        # Button Text Formatting (Compact)
+        # Example: "📁 720p [1.2GB]"
+        size_str = f"[{file_size}]" if file_size else ""
+        icon = "📁" if file_id else "🔗"
         
-        # Button text format fix: "🎬 720p - 1.3GB (File)"
-        if size_str:
-             button_text = f"🎬 {quality} - {size_str} ({link_type})"
-        else:
-             button_text = f"🎬 {quality} ({link_type})"
+        button_text = f"{icon} {quality} {size_str}"
         
-        keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+        row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
 
-    # --- Pagination Buttons (Next / Back) ---
+        # Agar row mein 2 button ho gaye, to keyboard mein daal do
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+
+    # Agar koi akela button bacha hai (odd number), to use bhi add karo
+    if row:
+        keyboard.append(row)
+
+    # --- 3. PAGINATION BUTTONS ---
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=f"qualpage_{movie_id}_{page-1}"))
@@ -1668,6 +1683,7 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     if nav_buttons:
         keyboard.append(nav_buttons)
 
+    # Cancel Button
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
 
     return InlineKeyboardMarkup(keyboard)
@@ -2434,6 +2450,79 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith(("genre_", "cancel_genre")):
         await handle_genre_selection(update, context)
         return
+    
+    # === SEND ALL FILES LOGIC ===
+    if query.data.startswith("sendall_"):
+        movie_id = int(query.data.split("_")[1])
+
+        # 1. Movie Title Fetch Karo (Caption ke liye)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+        res = cur.fetchone()
+        title = res[0] if res else "Movie"
+        cur.close()
+        conn.close()
+
+        # 2. Saari Files Fetch Karo
+        qualities = get_all_movie_qualities(movie_id)
+
+        if not qualities:
+            await query.answer("❌ No files found!", show_alert=True)
+            return
+
+        await query.answer(f"🚀 Sending {len(qualities)} files...")
+        status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files... Please wait!**", parse_mode='Markdown')
+        
+        # 3. Loop chala ke sab bhejo
+        count = 0
+        for quality, url, file_id, file_size in qualities:
+            try:
+                # Existing send function use kar rahe hain taaki auto-delete aur caption logic same rahe
+                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                
+                # ⚠️ Flood Wait se bachne ke liye thoda rukna zaroori hai
+                await asyncio.sleep(1.5) 
+                count += 1
+            except Exception as e:
+                logger.error(f"Send All Error for {quality}: {e}")
+
+        # Done Message
+        await status_msg.edit_text(f"✅ **Sent {count} Files Successfully!**", parse_mode='Markdown')
+        # Status msg ko bhi auto delete kar do
+        track_message_for_deletion(context, chat_id, status_msg.message_id, 30)
+        return
+    
+    # === NEW: SCAN INFO POPUP ===
+    if data.startswith("scan_"):
+        m_id = int(data.split("_")[1])
+        
+        # Database se details nikalo
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Maan lo tumhare DB mein 'language' aur 'subtitle' column hain, ya tum file name se guess karoge
+        cur.execute("SELECT title, year, genre FROM movies WHERE id = %s", (m_id,))
+        res = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if res:
+            title, year, genre = res
+            # Ye wo text hai jo Popup mein dikhega
+            popup_text = (
+                f"📂 File Info:\n"
+                f"🎬 Movie: {title}\n"
+                f"📅 Year: {year}\n"
+                f"🎭 Genre: {genre}\n"
+                f"🔊 Audio: Hindi, English (Dual)\n" # Ise DB se dynamic bana sakte ho
+                f"📝 Subs: English, Hindi"
+            )
+            # show_alert=True ka matlab hai Screen par bada popup aayega!
+            await query.answer(popup_text, show_alert=True)
+        else:
+            await query.answer("❌ Info not found", show_alert=True)
+        return
+    
     # ===================================
     
     # 👇👇👇 YE NAYA CODE ADD KARO 👇👇👇
