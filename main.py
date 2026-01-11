@@ -5179,7 +5179,7 @@ def main():
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
-            CommandHandler('start', start) # Agar user beech me start dabaye to reset ho jaye
+            CommandHandler('start', start)
         ],
         conversation_timeout=120, # ⚡ 2 Minutes Auto-Cancel
     )
