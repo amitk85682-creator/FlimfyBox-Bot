@@ -1948,14 +1948,14 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             return
 
         # 3. Movie Mil gayi - Send karein
-        movie_id, title, url, file_id = movies_found[0]
+        movie_id = movies_found[0][0]
         
         # Loading msg delete karein
         try: await status_msg.delete() 
         except: pass
 
         # Send the movie using your existing helper function
-        await send_movie_to_user(update, context, movie_id, title, url, file_id)
+        await deliver_movie_on_start(update, context, movie_id)
 
     except Exception as e:
         logger.error(f"Background Search Error: {e}")
@@ -1967,115 +1967,78 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 # ==================== CLEAN LOADING FUNCTION (FIXED) ====================
 async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
     """
-    Fetches and sends a movie with a clean 'Loading' animation.
-    No technical details shown to the user.
+    Shows movie qualities as a TEXT LIST (No Buttons), similar to Search Results.
     """
     chat_id = update.effective_chat.id
-    
-    # 1. Loading Effect
-    status_msg = None
-    try:
-        status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
-        
-        # Backup Auto-delete
-        track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
-    except:
-        pass
+    bot_username = context.bot.username
 
-    conn = None
+    conn = get_db_connection()
+    if not conn: return
+
     try:
-        conn = get_db_connection()
-        if not conn:
-            # User ko technical error mat dikhao, bas chupchap delete kar do
-            if status_msg: 
-                try: 
-                    await status_msg.delete() 
-                except: 
-                    pass
+        cur = conn.cursor()
+        
+        # 1. Movie Details
+        cur.execute("SELECT title, year, genre FROM movies WHERE id = %s", (movie_id,))
+        movie = cur.fetchone()
+        
+        if not movie:
+            await context.bot.send_message(chat_id, "❌ Movie not found.")
             return
 
-        cur = conn.cursor()
-        cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
-        movie_data = cur.fetchone()
+        title, year, genre = movie
+        
+        # 2. Files (Qualities) Fetch
+        # Note: Hum 'id' bhi le rahe hain taaki unique link bana sakein
+        cur.execute("""
+            SELECT id, quality, file_size 
+            FROM movie_files 
+            WHERE movie_id = %s 
+            ORDER BY id ASC
+        """, (movie_id,))
+        
+        files = cur.fetchall()
         cur.close()
         conn.close()
 
-        # 2. Movie milne ke baad turant Loading Msg delete karo
-        if status_msg:
-            try: 
-                await status_msg.delete()
-            except: 
-                pass
+        # 3. LIST BUILD KARO (Screenshot Style)
+        
+        # Header
+        list_text = f"📝 **Hey {update.effective_user.first_name} 😐🙃™ Your Requested Files Are Here**\n\n"
+        list_text += f"🎬 **{title} ({year})**\n"
+        if genre: list_text += f"🎭 {genre}\n"
+        list_text += "\n"
 
-        if movie_data:
-            title, url, file_id = movie_data
-            # Movie bhejo
-            await send_movie_to_user(update, context, movie_id, title, url, file_id)
+        if not files:
+            list_text += "😕 No files uploaded yet for this movie."
         else:
-            # Agar movie nahi mili
-            fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
-            track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
+            # Loop through files and create links
+            for idx, (row_id, quality, size) in enumerate(files, start=1):
+                # Size formatting
+                size_str = f"[{size}]" if size else ""
+                
+                # Deep Link to THIS bot with 'filesend_' payload
+                # Example: https://t.me/MyBot?start=filesend_55
+                link = f"https://t.me/{bot_username}?start=filesend_{row_id}"
+                
+                # Format: 1. [Size] Quality Name
+                list_text += f"**{idx}.** [{size_str} {quality} {title}]({link})\n\n"
 
-    except Exception as e:
-        logger.error(f"Error in deliver_movie: {e}")
-        if status_msg:
-            try: 
-                await status_msg.delete()
-            except: 
-                pass
-        if movie_data:
-            title, url, file_id = movie_data
-            await send_movie_to_user(update, context, movie_id, title, url, file_id)
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id, 
-                text="❌ Movie not found. It may have been removed from our database."
-            )
+        list_text += "👇 **Click on the link above to download**"
 
-    except Exception as e:
-        logger.error(f"CRITICAL ERROR in deliver_movie: {e}", exc_info=True)
-        error_msg = "❌ Failed to retrieve movie. Please try again or use search."
-        if status_msg:
-            try:
-                await status_msg.edit_text(error_msg)
-            except:
-                pass
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=error_msg)
-            
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
-
-# Add this at the top level
-from asyncio import Lock
-from collections import defaultdict
-
-user_processing_locks = defaultdict(Lock)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    # === FSub Check (Smart Logic) ===
-    # Agar user Link (context.args) se aaya hai, to Fresh Check karo (Cache Ignore).
-    # Agar Normal /start hai, to Cache use karo (Fast Response).
-    force_check = True if context.args else False
-    
-    check = await is_user_member(context, user_id, force_fresh=force_check)
-    
-    if not check['is_member']:
-        msg = await update.message.reply_text(
-            get_join_message(check['channel'], check['group']),
-            reply_markup=get_join_keyboard(),
-            parse_mode='Markdown'
+        # Message Send
+        msg = await context.bot.send_message(
+            chat_id=chat_id, 
+            text=list_text, 
+            parse_mode='Markdown',
+            disable_web_page_preview=True
         )
-        # 2 min baad delete kar do taaki chat gandi na ho
+        
         track_message_for_deletion(context, chat_id, msg.message_id, 120)
-        return
+
+    except Exception as e:
+        logger.error(f"Error in deliver_movie_on_start: {e}")
+        await context.bot.send_message(chat_id, "❌ Error retrieving movie details.")
     # ==================
 
     logger.info(f"START called by user {user_id} with args: {context.args}")
@@ -2101,6 +2064,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         async with user_processing_locks[user_id]:
+
+            # --- CASE 0: SPECIFIC FILE DELIVERY (FROM LIST) ---
+            if payload.startswith("filesend_"):
+                try:
+                    # DB id of the file in movie_files table
+                    file_row_id = int(payload.split('_')[1])
+                    
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    
+                    # File aur Movie details fetch karein
+                    cur.execute("""
+                        SELECT f.url, f.file_id, m.id, m.title 
+                        FROM movie_files f 
+                        JOIN movies m ON f.movie_id = m.id 
+                        WHERE f.id = %s
+                    """, (file_row_id,))
+                    
+                    result = cur.fetchone()
+                    cur.close()
+                    conn.close()
+                    
+                    if result:
+                        url, file_id, movie_id, title = result
+                        # File bhejo
+                        await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                    else:
+                        await update.message.reply_text("❌ File expired or removed.")
+                        
+                except Exception as e:
+                    logger.error(f"Filesend Error: {e}")
+                    await update.message.reply_text("❌ Error getting file.")
+                return
+                
             # --- CASE 1: DIRECT MOVIE ID ---
             if payload.startswith("movie_"):
                 try:
