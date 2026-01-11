@@ -63,6 +63,8 @@ except Exception:
 
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
+# Rate limiting lock for start command
+user_processing_locks = defaultdict(asyncio.Lock)
 # ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
 SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
@@ -5133,6 +5135,107 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Auto-delete (Optional - 2 min)
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles /start command including Deep Links (movie_id, filesend, query).
+    """
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    user_id = user.id
+    
+    # 1. Clear previous conversation states to prevent "stuck" bots
+    context.user_data.clear()
+    if hasattr(context, 'conversation') and context.conversation:
+        context.conversation = None
+
+    # 2. Check for Arguments (Deep Linking)
+    args = context.args
+    if args and len(args) > 0:
+        payload = args[0]
+        
+        # Lock processing for this user to prevent spam clicking
+        if user_processing_locks[user_id].locked():
+            await update.message.reply_text(
+                "⏳ Please wait! Your previous request is still processing...",
+                disable_notification=True
+            )
+            return
+
+        async with user_processing_locks[user_id]:
+            try:
+                # --- CASE A: SPECIFIC FILE DELIVERY (filesend_) ---
+                if payload.startswith("filesend_"):
+                    try:
+                        file_row_id = int(payload.split('_')[1])
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("""
+                            SELECT f.url, f.file_id, m.id, m.title 
+                            FROM movie_files f 
+                            JOIN movies m ON f.movie_id = m.id 
+                            WHERE f.id = %s
+                        """, (file_row_id,))
+                        result = cur.fetchone()
+                        cur.close()
+                        conn.close()
+                        
+                        if result:
+                            url, file_id, movie_id, title = result
+                            await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                        else:
+                            await update.message.reply_text("❌ File expired or removed.")
+                    except Exception as e:
+                        logger.error(f"Filesend Error: {e}")
+                        await update.message.reply_text("❌ Error getting file.")
+                    return
+
+                # --- CASE B: MOVIE ID (movie_) ---
+                elif payload.startswith("movie_"):
+                    try:
+                        movie_id = int(payload.split('_')[1])
+                        status_msg = await update.message.reply_text("⏳ Fetching movie details...", disable_notification=True)
+                        
+                        # Call the helper function defined in your code
+                        await deliver_movie_on_start(update, context, movie_id)
+                        
+                        try: await status_msg.delete()
+                        except: pass
+                    except Exception as e:
+                        logger.error(f"Movie Start Error: {e}")
+                        await update.message.reply_text("❌ Error fetching movie.")
+                    return
+
+                # --- CASE C: AUTO SEARCH (q_) ---
+                elif payload.startswith("q_"):
+                    try:
+                        query_text = payload[2:].replace("_", " ").strip()
+                        status_msg = await update.message.reply_text(f"🔎 Searching for: '{query_text}'...", disable_notification=True)
+                        
+                        # Call the background search helper
+                        await background_search_and_send(update, context, query_text, status_msg)
+                    except Exception as e:
+                        logger.error(f"Query Start Error: {e}")
+                    return
+
+            except Exception as e:
+                logger.error(f"Deep Link Critical Error: {e}")
+                await update.message.reply_text("❌ An error occurred processing the link.")
+                return
+
+    # 3. Normal Start (No Arguments) - Welcome Message
+    welcome_text = (
+        f"👋 **Hello {user.first_name}!**\n\n"
+        f"🎬 I am **FlimfyBox Bot**.\n"
+        f"I can help you find Movies and Web Series.\n\n"
+        f"👇 **Click a button below to start:**"
+    )
+    
+    await update.message.reply_text(
+        text=welcome_text,
+        reply_markup=get_main_keyboard(),
+        parse_mode='Markdown'
+    )
 
 # ==================== MAIN BOT FUNCTION ====================
 def main():
