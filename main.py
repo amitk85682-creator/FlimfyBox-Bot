@@ -2023,24 +2023,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     # === FSub Check (Smart Logic) ===
-    # Agar user Link (context.args) se aaya hai, to Fresh Check karo (Cache Ignore).
-    # Agar Normal /start hai, to Cache use karo (Fast Response).
+    # Check if coming from a Deep Link
     force_check = True if context.args else False
     
     check = await is_user_member(context, user_id, force_fresh=force_check)
     
     if not check['is_member']:
+        # ✅ NEW: Agar user ke paas Deep Link (args) tha, to use SAVE kar lo
+        if context.args:
+            context.user_data['pending_start_args'] = context.args
+
         msg = await update.message.reply_text(
             get_join_message(check['channel'], check['group']),
             reply_markup=get_join_keyboard(),
             parse_mode='Markdown'
         )
-        # 2 min baad delete kar do taaki chat gandi na ho
         track_message_for_deletion(context, chat_id, msg.message_id, 120)
         return
     # ==================
 
     logger.info(f"START called by user {user_id} with args: {context.args}")
+    context.user_data.clear()
     # ... (Baaki ka purana code wese hi rehne do) ...
 
     # 🚨 CRITICAL: Force clear any stuck conversation state
@@ -2556,21 +2559,55 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 👆👆👆 YAHAN TAK 👆👆👆
     
     
-    # === 1. VERIFY BUTTON LOGIC ===
+    # === 1. VERIFY BUTTON LOGIC (UPDATED) ===
     if data == "verify":
-        await query.answer("🔍 Checking membership...", show_alert=True)
-        # Force Fresh Check (Cache ignore karo)
+        await query.answer("🔍 Checking membership...", show_alert=False) # Alert False rakha taki user disturb na ho
+        
+        # Force Fresh Check
         check = await is_user_member(context, user_id, force_fresh=True)
         
         if check['is_member']:
-            await query.edit_message_text(
-                "✅ **Verified Successfully!**\n\n"
-                "You can now use the bot! 🎬\n"
-                "Click /start or search any movie.",
-                parse_mode='Markdown'
-            )
-            track_message_for_deletion(context, chat_id, query.message.message_id, 10)
+            # ✅ SCENARIO 1: Agar koi Deep Link pending tha (e.g. start=movie_123)
+            if 'pending_start_args' in context.user_data:
+                saved_args = context.user_data.pop('pending_start_args')
+                
+                # "Verified" wala msg delete kar do taaki clean lage
+                try: await query.message.delete()
+                except: pass
+                
+                # Start function ko manually call karo saved args ke saath
+                context.args = saved_args
+                await start(update, context)
+                return
+
+            # ✅ SCENARIO 2: Agar koi Text Search pending tha (e.g. "Kalki")
+            elif 'pending_search_query' in context.user_data:
+                saved_query = context.user_data.pop('pending_search_query')
+                
+                # "Verified" wala msg delete kar do
+                try: await query.message.delete()
+                except: pass
+                
+                # Search Movies ko call karne ke liye update object ko modify karein
+                # Hum current query message ko use karenge par text replace kar denge
+                update.message = query.message 
+                update.message.text = saved_query
+                
+                # User ko feedback do ki search shuru ho gaya
+                await search_movies(update, context)
+                return
+
+            # ✅ SCENARIO 3: Agar koi pending request nahi thi (Normal Verify)
+            else:
+                await query.edit_message_text(
+                    "✅ **Verified Successfully!**\n\n"
+                    "You can now use the bot! 🎬\n"
+                    "Click /start or search any movie.",
+                    parse_mode='Markdown'
+                )
+                track_message_for_deletion(context, chat_id, query.message.message_id, 10)
         else:
+            # Agar abhi bhi join nahi kiya
             try:
                 await query.edit_message_text(
                     get_join_message(check['channel'], check['group']),
@@ -4943,12 +4980,6 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles text messages in Private Chat:
-    1. Checks Membership (FSub)
-    2. Checks for Menu Buttons (Stats, Help, Genre, etc.)
-    3. If not a button, performs a Movie Search
-    """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
@@ -4956,6 +4987,10 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_chat.type == "private":
         check = await is_user_member(context, user_id)
         if not check['is_member']:
+            # ✅ NEW: User ne jo search kiya (e.g. "Kalki"), use SAVE kar lo
+            if update.message and update.message.text:
+                context.user_data['pending_search_query'] = update.message.text.strip()
+
             msg = await update.message.reply_text(
                 get_join_message(check['channel'], check['group']),
                 reply_markup=get_join_keyboard(),
