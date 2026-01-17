@@ -2022,19 +2022,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
+    # ✅ FIX 1: Message ko safe tarike se nikalein (Button aur Text dono ke liye)
+    message = update.effective_message 
+
     # === FSub Check (Smart Logic) ===
-    # Check if coming from a Deep Link
     force_check = True if context.args else False
     
     check = await is_user_member(context, user_id, force_fresh=force_check)
     
     if not check['is_member']:
-        # ✅ NEW: Agar user ke paas Deep Link (args) tha, to use SAVE kar lo
+        # Agar deep link (args) hain to unhe save kar lo
         if context.args:
             context.user_data['pending_start_args'] = context.args
 
-        msg = await update.message.reply_text(
-            get_join_message(check['channel'], check['group']),
+        # ✅ FIX 2: send_message use karein (reply_text fail ho sakta hai button par)
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=get_join_message(check['channel'], check['group']),
             reply_markup=get_join_keyboard(),
             parse_mode='Markdown'
         )
@@ -2043,130 +2047,85 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==================
 
     logger.info(f"START called by user {user_id} with args: {context.args}")
-    context.user_data.clear()
-    # ... (Baaki ka purana code wese hi rehne do) ...
 
-    # 🚨 CRITICAL: Force clear any stuck conversation state
+    # Purani states clear karein
     context.user_data.clear()
-    
-    # 🚨 CRITICAL: Force reset conversation state
     if hasattr(context, 'conversation') and context.conversation:
         context.conversation = None
 
-    # Deep link processing with user-level lock to prevent duplicates
+    # === DEEP LINK PROCESSING ===
     if context.args and len(context.args) > 0:
         payload = context.args[0]
         
-        # Check if user is already processing a request
+        # Check lock (taaki user spam na kare)
         if user_processing_locks[user_id].locked():
-            await update.message.reply_text(
-                "⏳ Please wait! Your previous request is still processing...",
-                disable_notification=True
+            await context.bot.send_message(
+                chat_id=chat_id, 
+                text="⏳ Please wait! Your previous request is still processing..."
             )
             return
 
         async with user_processing_locks[user_id]:
-            # --- CASE 1: DIRECT MOVIE ID ---
+            
+            # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
             if payload.startswith("movie_"):
                 try:
                     movie_id = int(payload.split('_')[1])
                     
-                    # Immediate feedback
-                    status_msg = await update.message.reply_text(
-                        f"🎬 Deep link detected!\n"
-                        f"Movie ID: {movie_id}\n"
-                        f"Fetching... Please wait ⏳",
-                        disable_notification=True
+                    # ✅ FIX 3: send_message use karein
+                    status_msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🎬 Deep link detected!\nMovie ID: {movie_id}\nFetching... Please wait ⏳"
                     )
                     
-                    # Process with detailed error capture
                     try:
                         await deliver_movie_on_start(update, context, movie_id)
                         
-                        # Success - delete status message
-                        try:
-                            await status_msg.delete()
-                        except:
-                            pass
-                            
+                        # Success hone par status msg delete karein
+                        try: await status_msg.delete() 
+                        except: pass
+                        
                         logger.info(f"✅ Deep link SUCCESS for user {user_id}, movie {movie_id}")
                         
                     except Exception as e:
-                        logger.error(f"❌ Deep link FAILED for user {user_id}: {e}")
-                        
-                        # Update status message with error
-                        error_text = (
-                            f"❌ Sorry, couldn't fetch the movie (ID: {movie_id}).\n\n"
-                            f"**Possible reasons:**\n"
-                            f"• Movie was removed from database\n"
-                            f"• Server connection timeout\n"
-                            f"• File is temporarily unavailable\n\n"
-                            f"**Try:**\n"
-                            f"• Use 🔍 Search button to find it manually\n"
-                            f"• Or wait 2 minutes and try this link again"
-                        )
-                        
-                        try:
-                            await status_msg.edit_text(
-                                error_text,
-                                parse_mode='Markdown'
-                            )
-                        except:
-                            await update.message.reply_text(
-                                error_text,
-                                parse_mode='Markdown'
-                            )
+                        logger.error(f"❌ Deep link FAILED: {e}")
+                        await status_msg.edit_text(f"❌ Error fetching movie: {e}")
                     
-                    return
-                    
-                except (IndexError, ValueError) as e:
-                    logger.error(f"Invalid movie link format: {e}")
-                    await update.message.reply_text(
-                        "❌ Invalid movie link format.\n"
-                        "Correct format: `/start movie_123`",
-                        parse_mode='Markdown'
-                    )
+                    return # Movie mil gayi, Welcome msg mat dikhao
+
+                except Exception as e:
+                    logger.error(f"Invalid movie link: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Invalid Link Format")
                     return
 
-            # --- CASE 2: AUTO SEARCH ---
+            # --- CASE 2: AUTO SEARCH (q_kalki) ---
+            # ✅ RESTORED: Ye logic maine wapas add kar di hai
             elif payload.startswith("q_"):
                 try:
                     query_text = payload[2:].replace("_", " ").strip()
                     
-                    # Immediate feedback
-                    status_msg = await update.message.reply_text(
-                        f"🔎 Deep link search detected!\n"
-                        f"Query: '{query_text}'\n"
-                        f"Searching... Please wait ⏳",
-                        disable_notification=True
+                    # ✅ FIX 4: send_message use karein
+                    status_msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🔎 Deep link search detected!\nQuery: '{query_text}'\nSearching... Please wait ⏳"
                     )
                     
-                    # Process with error capture
                     try:
+                        # Background search function call karein
                         await background_search_and_send(update, context, query_text, status_msg)
                         logger.info(f"✅ Deep link SEARCH SUCCESS for user {user_id}, query: {query_text}")
                         
                     except Exception as e:
-                        logger.error(f"❌ Deep link SEARCH FAILED for user {user_id}: {e}")
-                        
-                        error_text = (
-                            f"❌ Search failed for '{query_text}'.\n\n"
-                            f"**Try:**\n"
-                            f"• Use 🔍 Search button manually\n"
-                            f"• Check your spelling\n"
-                            f"• Request the movie using 🙋 Request button"
-                        )
-                        
-                        try:
-                            await status_msg.edit_text(error_text, parse_mode='Markdown')
-                        except:
-                            await update.message.reply_text(error_text, parse_mode='Markdown')
+                        logger.error(f"❌ Deep link SEARCH FAILED: {e}")
+                        error_text = f"❌ Search failed for '{query_text}'.\nTry searching manually."
+                        try: await status_msg.edit_text(error_text)
+                        except: await context.bot.send_message(chat_id=chat_id, text=error_text)
                     
-                    return
+                    return # Search ho gaya, Welcome msg mat dikhao
                     
                 except Exception as e:
                     logger.error(f"Deep link search error: {e}")
-                    await update.message.reply_text("❌ Error processing search link.")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Error processing search link.")
                     return
 
     # --- NORMAL WELCOME MESSAGE ---
@@ -2177,8 +2136,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👇 Use the buttons below to get started:
 """
-    msg = await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard(), parse_mode='HTML')
+    # ✅ FIX 5: Final Welcome Msg bhi safe tarike se bhejen
+    msg = await context.bot.send_message(
+        chat_id=chat_id, 
+        text=welcome_text, 
+        reply_markup=get_main_keyboard(), 
+        parse_mode='HTML'
+    )
     track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
+    return
     
     # ✅ Just return (No state needed for main menu)
     return
