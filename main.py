@@ -5075,39 +5075,17 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Auto-delete (Optional - 2 min)
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
 
-# ==================== MAIN BOT FUNCTION ====================
-def main():
-    """Run the Telegram bot"""
-    logger.info("Bot is starting...")
+# ==================== MULTI-BOT SETUP (REPLACES OLD MAIN) ====================
 
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("No Telegram bot token found. Exiting.")
-        return
-
-    try:
-        # 1. Setup tables (Updated function call)
-        setup_database()
-        
-        # 👇👇👇 YE LINE ADD KAREIN 👇👇👇
-        # 2. Migrate DB (Add new columns specifically)
-        migrate_add_imdb_columns()
-        # 👆👆👆 YAHAN TAK 👆👆👆
-
-        # 3. Fix column names (Old logic, optional)
-        try:
-            # fix_db_column_issue() # Agar ye function exist karta hai to rehne de
-            pass
-        except NameError:
-            pass 
-            
-    except Exception as e:
-        logger.error(f"Database setup failed but continuing: {e}")
-    
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).read_timeout(30).write_timeout(30).build()
-
+def register_handlers(application: Application):
+    """
+    यह फंक्शन हर बॉट पर लॉजिक (Handlers) सेट करेगा।
+    ताकि तीनों बॉट्स सेम काम करें।
+    """
     # -----------------------------------------------------------
     # 1. NEW REQUEST SYSTEM HANDLER (With 2 Min Timeout)
     # -----------------------------------------------------------
+    # नोट: ConversationHandler को हर बार नया बनाना जरूरी है
     request_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_request_flow, pattern="^request_")],
         states={
@@ -5120,31 +5098,23 @@ def main():
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
-            CommandHandler('start', start) # Agar user beech me start dabaye to reset ho jaye
+            CommandHandler('start', start)
         ],
-        conversation_timeout=120, # ⚡ 2 Minutes Auto-Cancel
+        conversation_timeout=120,
     )
     application.add_handler(request_conv_handler)
 
     # -----------------------------------------------------------
-    # 2. GLOBAL HANDLERS (Search, Menu, Start)
+    # 2. GLOBAL HANDLERS
     # -----------------------------------------------------------
-    
-    # Start Command
     application.add_handler(CommandHandler('start', start))
-
-    # Main Menu aur Search (Ye purane MAIN_MENU aur SEARCHING state ka kaam karega)
-    # Jab user Request flow me nahi hoga, to ye handler chalega
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
-
-    # -----------------------------------------------------------
-    # 3. OTHER CALLBACKS (Download, Quality, Admin)
-    # -----------------------------------------------------------
-    # Note: request_ aur confirm_ upar handle ho gaye hain, baaki sab yahan handle honge
+    
+    # Button Callback
     application.add_handler(CallbackQueryHandler(button_callback))
 
     # -----------------------------------------------------------
-    # 4. ADMIN COMMANDS
+    # 3. ADMIN & BATCH COMMANDS
     # -----------------------------------------------------------
     application.add_handler(CommandHandler("addmovie", add_movie))
     application.add_handler(CommandHandler("bulkadd", bulk_add_movies))
@@ -5154,25 +5124,25 @@ def main():
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
 
-    # ✅ NEW BATCH COMMANDS WITH MULTI-CHANNEL UPLOAD
+    # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
     application.add_handler(CommandHandler("batchid", batch_id_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     application.add_handler(CommandHandler("post", post_to_topic_command))
     
-    # ✅ NEW PM FILE LISTENER (Only Active during Batch)
-    # Note: Ise Group Handler se pehle rakhna
+    # PM Listener for Batch
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener))
 
-    # 1. Private Chat Handler (DM me "Not Found" bolega - Normal behavior)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
+    # -----------------------------------------------------------
+    # 4. GENRE & GROUP HANDLERS
+    # -----------------------------------------------------------
     application.add_handler(CommandHandler("genres", show_genre_selection))
-
-    # 2. Group Chat Handler (Group me movie nahi mili to CHUP rahega)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
       
-    # Notification Commands
+    # -----------------------------------------------------------
+    # 5. NOTIFICATION & STATS
+    # -----------------------------------------------------------
     application.add_handler(CommandHandler("notifyuser", notify_user_by_username))
     application.add_handler(CommandHandler("broadcast", broadcast_message))
     application.add_handler(CommandHandler("schedulenotify", schedule_notification))
@@ -5181,7 +5151,6 @@ def main():
     application.add_handler(CommandHandler("forwardto", forward_to_user))
     application.add_handler(CommandHandler("broadcastmedia", broadcast_with_media))
 
-    # User & Stats Commands
     application.add_handler(CommandHandler("userinfo", get_user_info))
     application.add_handler(CommandHandler("listusers", list_all_users))
     application.add_handler(CommandHandler("adminhelp", admin_help))
@@ -5190,15 +5159,88 @@ def main():
     # Error Handler
     application.add_error_handler(error_handler)
 
-    # Start Flask
+
+async def main():
+    """Main function to run MULTIPLE bots concurrently"""
+    logger.info("🚀 Starting Multi-Bot System...")
+
+    # 1. Database Setup (Ek baar run hoga)
+    try:
+        setup_database()
+        migrate_add_imdb_columns()
+    except Exception as e:
+        logger.error(f"DB Setup Error: {e}")
+
+    # 2. Get Tokens from ENV
+    # Yahan apne Environment Variables ke naam check kar lena
+    tokens = [
+        os.environ.get("TELEGRAM_BOT_TOKEN"),  # Bot 1 (Search Bot)
+        os.environ.get("BOT_TOKEN_2"),         # Bot 2 (Main Bot)
+        os.environ.get("BOT_TOKEN_3")          # Bot 3 (UrMovie Bot)
+    ]
+    
+    # Khali tokens filter karo
+    tokens = [t for t in tokens if t]
+
+    if not tokens:
+        logger.error("❌ No tokens found! Check Environment Variables.")
+        return
+
+    # 3. Initialize & Start All Bots
+    apps = []
+    logger.info(f"🤖 Found {len(tokens)} tokens. Initializing bots...")
+
+    for i, token in enumerate(tokens):
+        try:
+            logger.info(f"🔹 Initializing Bot {i+1}...")
+            
+            # Application Build
+            app = Application.builder().token(token).read_timeout(30).write_timeout(30).build()
+            
+            # Handlers Register karo (Ye important hai)
+            register_handlers(app)
+            
+            # Initialize & Start
+            await app.initialize()
+            await app.start()
+            
+            # Non-blocking Polling Start karo
+            await app.updater.start_polling(drop_pending_updates=True)
+            
+            apps.append(app)
+            
+            bot_info = await app.bot.get_me()
+            logger.info(f"✅ Bot {i+1} Started: @{bot_info.username}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to start Bot {i+1}: {e}")
+
+    if not apps:
+        logger.error("❌ No bots could be started.")
+        return
+
+    # 4. Start Flask Server (Background Thread)
+    # Flask ko alag thread me chalana zaroori hai
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    logger.info("Flask server started in a background thread.")
+    logger.info("🌐 Flask server started.")
 
-    # Run Bot
-    logger.info("Starting bot polling...")
-    application.run_polling()
+    # 5. Keep Script Alive
+    # Kyunki start_polling await nahi karta, humein script ko rok ke rakhna padega
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
+
+    # Cleanup (Jab script band ho)
+    for app in apps:
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == '__main__':
-    main()
+    try:
+        # Async loop start
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.error(f"Critical Error: {e}")
