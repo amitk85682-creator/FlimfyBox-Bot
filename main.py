@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, quote
 from collections import defaultdict
+from telegram.error import RetryAfter, TelegramError
 from typing import Optional
 
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
@@ -3532,6 +3533,69 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             conn.close()
 
+async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ... (Authentication check wahi rahega) ...
+
+    status_msg = await update.message.reply_text("🚀 **Safe Update Mode On...**\nStarting to fix buttons slowly to avoid ban.")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT movie_id, channel_id, message_id FROM channel_posts WHERE bot_username = %s", (old_bot,))
+    posts = cur.fetchall()
+    
+    total = len(posts)
+    success = 0
+    
+    for i, (m_id, ch_id, msg_id) in enumerate(posts):
+        try:
+            # 1. Logic to make new link (Same as before)
+            link_param = f"movie_{m_id}"
+            new_link = f"https://t.me/{new_bot}?start={link_param}"
+            
+            new_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 Download Server 1", url=new_link)],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            ])
+
+            # 2. EDIT COMMAND (With Safety)
+            await context.bot.edit_message_reply_markup(
+                chat_id=ch_id,
+                message_id=msg_id,
+                reply_markup=new_keyboard
+            )
+            
+            success += 1
+            
+            # ✅ SAFETY DELAY 1: Har edit ke baad 3 second ruko
+            # Isse Telegram ko lagega koi insaan dheere-dheere edit kar raha hai
+            await asyncio.sleep(3) 
+
+            # ✅ SAFETY DELAY 2: Har 50 posts ke baad thoda lamba break (10 seconds)
+            if success % 50 == 0:
+                await asyncio.sleep(10)
+                await status_msg.edit_text(f"☕ **Taking a coffee break...**\nUpdated: {success}/{total}")
+
+        except RetryAfter as e:
+            # 🚨 MOST IMPORTANT: Agar Telegram bole "Ruko", to hum rukenge
+            wait_time = e.retry_after + 5 # Jitna Telegram bole usse 5 sec zyada ruko
+            logger.warning(f"⚠️ FloodWait triggered! Sleeping for {wait_time} seconds...")
+            await status_msg.edit_text(f"⚠️ Telegram asked to wait. Sleeping for {wait_time}s...")
+            
+            await asyncio.sleep(wait_time)
+            
+            # Retry logic yahan laga sakte ho ya skip kar sakte ho
+            continue 
+
+        except TelegramError as e:
+            if "Message to edit not found" in str(e):
+                # Delete from DB if message doesn't exist
+                cur.execute("DELETE FROM channel_posts WHERE channel_id = %s AND message_id = %s", (ch_id, msg_id))
+                conn.commit()
+            else:
+                logger.error(f"Error editing {msg_id}: {e}")
+
+    await status_msg.edit_text(f"✅ **Mission Accomplished!**\nUpdated {success} posts safely.")
+
 async def bulk_add_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple movies at once"""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -4099,6 +4163,21 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
                 caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
+        if sent_msg:
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                # Hum save kar rahe hain ki is movie ka post is channel me is ID par hai
+                cur.execute(
+                    "INSERT INTO channel_posts (movie_id, channel_id, message_id, bot_username) VALUES (%s, %s, %s, %s)",
+                    (movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot") # Current Main Bot Username
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Failed to save post ID: {e}")
+        
         elif replied_message.text:
             media_type = "text"
             text_to_send = replied_message.text
@@ -5123,6 +5202,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
+    application.add_handler(CommandHandler("fixbuttons", update_buttons_command))
 
     # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
