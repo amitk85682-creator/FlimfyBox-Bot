@@ -3407,6 +3407,26 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             reply_markup=keyboard,
                             parse_mode='HTML'
                         )
+                    # 👇👇👇 YE WALA PART TUMHARE CODE ME MISSING THA 👇👇👇
+                    if sent_msg:
+                        try:
+                            # DB Connection kholo sirf save karne ke liye
+                            conn_save = get_db_connection()
+                            cur_save = conn_save.cursor()
+                            
+                            # Data Insert Karo
+                            cur_save.execute(
+                                "INSERT INTO channel_posts (movie_id, channel_id, message_id, bot_username) VALUES (%s, %s, %s, %s)",
+                                (movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot") 
+                            )
+                            conn_save.commit()
+                            cur_save.close()
+                            conn_save.close()
+                            logger.info(f"✅ Post saved to DB: MsgID {sent_msg.message_id}")
+                        except Exception as db_e:
+                            logger.error(f"Failed to save post to DB: {db_e}")
+                    # 👆👆👆 YAHAN TAK 👆👆👆
+                    
                     sent_count += 1
                 except Exception as post_error:
                     logger.error(f"Failed to post to {chat_id}: {post_error}")
