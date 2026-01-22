@@ -1230,14 +1230,15 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     text=f"🎉 Hey {first_name or username}! Your requested movie '{movie_title}' is now available!"
                 )
 
-                warning_msg = await context.bot.send_message(
+            try:
+                warning_msg = await context.bot.copy_message(
                     chat_id=user_id,
-                    text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
-                    parse_mode='Markdown'
+                    from_chat_id=-1002683355160,
+                    message_id=1769
                 )
-
-                sent_msg = None
-
+            except Exception:
+                warning_msg = None
+                
                 if isinstance(movie_url_or_file_id, str) and any(movie_url_or_file_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
                     sent_msg = await context.bot.send_document(
                         chat_id=user_id,
@@ -1690,8 +1691,8 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None):
-    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - UPDATED with Genre Display"""
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True):
+    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - UPDATED"""
     chat_id = update.effective_chat.id
 
     # --- 1. Fetch movie details including genre & year ---
@@ -1749,14 +1750,20 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
 
     try:
-        # Warning Message
-        warning_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text="⚠️ ❌👉This file automatically❗️deletes after 1 minute❗️so please forward it to another chat👈❌",
-            parse_mode='Markdown'
-        )
-
-        sent_msg = None
+        # =========================================================
+        # 🔥 MODIFIED: REPLACED TEXT WARNING WITH FILE FORWARD 🔥
+        # =========================================================
+        warning_msg = None
+        if send_warning:
+            try:
+                # Sirf File Copy Karega (Text Message Nahi)
+                warning_msg = await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=-1002683355160,  # Channel ID
+                    message_id=1769               # File Message ID
+                )
+            except Exception as e:
+                logger.error(f"Warning file send failed: {e}")
         
         # --- CAPTION UPDATE WITH GENRE, YEAR & LANGUAGE ---
         caption_text = (
@@ -1776,20 +1783,17 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # ==================================================================
         # 🚀 PRIORITY 1: TRY COPYING FROM CHANNEL LINK (Best for Thumbnails)
         # ==================================================================
-        # Agar URL hai aur wo Telegram ka link hai, to COPY karo.
         if url and ("t.me/c/" in url or "t.me/" in url) and "http" in url:
             try:
                 clean_url = url.strip()
                 parts = clean_url.rstrip('/').split('/')
                 msg_id = int(parts[-1])
                 
-                # Chat ID Nikalo (Private vs Public)
                 if "t.me/c/" in clean_url:
                     from_chat_id = int("-100" + parts[-2])
                 else:
                     from_chat_id = f"@{parts[-2]}"
 
-                # Copy Message (Thumbnail Safe Mode)
                 sent_msg = await context.bot.copy_message(
                     chat_id=chat_id,
                     from_chat_id=from_chat_id,
@@ -1800,7 +1804,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             except Exception as e:
                 logger.error(f"Copy link failed: {e}")
-                # Agar copy fail hua, to niche File ID try karega
 
         # ==================================================================
         # ⚠️ PRIORITY 2: TRY SENDING BY FILE ID (Fallback)
@@ -1808,7 +1811,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not sent_msg and file_id:
             clean_file_id = str(file_id).strip()
             try:
-                # Pehle Video ki tarah bhejo (Thumbnail bachane ke liye)
                 sent_msg = await context.bot.send_video(
                     chat_id=chat_id,
                     video=clean_file_id,
@@ -1817,7 +1819,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     reply_markup=join_keyboard
                 )
             except telegram.error.BadRequest:
-                # Agar Video fail ho (e.g. MKV file), to Document ki tarah bhejo
                 try:
                     sent_msg = await context.bot.send_document(
                         chat_id=chat_id,
@@ -1840,18 +1841,23 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 reply_markup=join_keyboard
             )
 
-        # Final Cleanup
+        # Final Cleanup (Auto Delete Logic)
+        messages_to_delete = []
         if sent_msg:
-            # Auto-Delete Schedule
+            messages_to_delete.append(sent_msg.message_id)
+        if warning_msg:
+            messages_to_delete.append(warning_msg.message_id)
+
+        if messages_to_delete:
             asyncio.create_task(
                 delete_messages_after_delay(
                     context,
                     chat_id,
-                    [sent_msg.message_id, warning_msg.message_id],
+                    messages_to_delete,
                     60
                 )
             )
-        else:
+        elif not sent_msg:
             await context.bot.send_message(chat_id=chat_id, text="❌ Error: File not found or Bot needs Admin rights in Source Channel.")
 
     except Exception as e:
@@ -2424,8 +2430,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === SEND ALL FILES LOGIC ===
     if query.data.startswith("sendall_"):
         movie_id = int(query.data.split("_")[1])
+        chat_id = update.effective_chat.id
 
-        # 1. Movie Title Fetch Karo (Caption ke liye)
+        # Movie Info Fetch
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
@@ -2434,32 +2441,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
         conn.close()
 
-        # 2. Saari Files Fetch Karo
         qualities = get_all_movie_qualities(movie_id)
-
         if not qualities:
             await query.answer("❌ No files found!", show_alert=True)
             return
 
         await query.answer(f"🚀 Sending {len(qualities)} files...")
-        status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files... Please wait!**", parse_mode='Markdown')
+        status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files...**", parse_mode='Markdown')
         
-        # 3. Loop chala ke sab bhejo
+        # 1. LOOP: FILES BHEJO (Warning = False)
+        # Yahan hum 'send_warning=False' pass kar rahe hain taaki har file ke sath warning na aye
         count = 0
         for quality, url, file_id, file_size in qualities:
             try:
-                # Existing send function use kar rahe hain taaki auto-delete aur caption logic same rahe
-                await send_movie_to_user(update, context, movie_id, title, url, file_id)
-                
-                # ⚠️ Flood Wait se bachne ke liye thoda rukna zaroori hai
+                await send_movie_to_user(
+                    update, context, movie_id, title, url, file_id, 
+                    send_warning=False  # 👈 IMPORTANT: Loop me warning mat bhejo
+                )
                 await asyncio.sleep(1.5) 
                 count += 1
             except Exception as e:
-                logger.error(f"Send All Error for {quality}: {e}")
+                logger.error(f"Send All Error: {e}")
 
-        # Done Message
-        await status_msg.edit_text(f"✅ **Sent {count} Files Successfully!**", parse_mode='Markdown')
-        # Status msg ko bhi auto delete kar do
+        # 2. END: WARNING FILE BHEJO (Ek hi baar)
+        try:
+            warning_msg = await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=-1002683355160, # Apka Channel ID
+                message_id=1769              # Warning File Message ID
+            )
+            # Is file ko bhi delete list me daalo
+            track_message_for_deletion(context, chat_id, warning_msg.message_id, 60)
+        except Exception as e:
+            logger.error(f"Failed to send final warning file: {e}")
+
+        await status_msg.edit_text(f"✅ **Sent {count} Files!**", parse_mode='Markdown')
         track_message_for_deletion(context, chat_id, status_msg.message_id, 30)
         return
     
