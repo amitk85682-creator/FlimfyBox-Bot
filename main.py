@@ -1229,6 +1229,9 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     chat_id=user_id,
                     text=f"🎉 Hey {first_name or username}! Your requested movie '{movie_title}' is now available!"
                 )
+            except Exception as e:
+                # This ensures if the notification fails, the code continues
+                print(f"Failed to send movie notification: {e}") 
 
             try:
                 warning_msg = await context.bot.copy_message(
