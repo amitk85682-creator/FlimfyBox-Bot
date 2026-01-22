@@ -1237,7 +1237,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 warning_msg = await context.bot.copy_message(
                     chat_id=user_id,
                     from_chat_id=-1002683355160,
-                    message_id=1769
+                    message_id=1773
                 )
             except Exception:
                 warning_msg = None
@@ -2471,7 +2471,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             warning_msg = await context.bot.copy_message(
                 chat_id=chat_id,
                 from_chat_id=-1002683355160, # Apka Channel ID
-                message_id=1769              # Warning File Message ID
+                message_id=1773              # Warning File Message ID
             )
             # Is file ko bhi delete list me daalo
             track_message_for_deletion(context, chat_id, warning_msg.message_id, 60)
