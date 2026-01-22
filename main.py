@@ -3056,21 +3056,33 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id != ADMIN_USER_ID: return
 
     if not context.args: 
-        await update.message.reply_text("❌ Usage: `/batch Name` or `/batchid tt123`")
+        await update.message.reply_text("❌ Usage: `/batch Name`")
         return
 
     # 1. Loading Message
-    status_msg = await update.message.reply_text("⏳ Fetching metadata...", parse_mode='Markdown')
+    status_msg = await update.message.reply_text("⏳ Checking database & metadata...", parse_mode='Markdown')
     
     query = " ".join(context.args).strip()
+    
+    # --- YAHAN CHANGE KIYA HAI (Smart Logic) ---
+    # Pehle metadata dhundo
     metadata = fetch_movie_metadata(query)
     
-    if not metadata: 
-        await status_msg.edit_text("❌ Metadata not found. Check Name or OMDb Key.")
-        return
-
-    # 8 Values Unpack
-    title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+    if metadata:
+        # Agar IMDb/OMDb par mil gayi, to Original Data use karo
+        title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+    else:
+        # Agar IMDb par NAHI mili, to Error mat do.
+        # Jo naam user ne diya hai, wahi use karo (Manual Mode)
+        title = query
+        year = 0
+        poster_url = None
+        genre = "Unknown"
+        imdb_id = None
+        rating = "N/A"
+        plot = "Custom Added"
+        category = "Custom"
+    # -------------------------------------------
     
     conn = get_db_connection()
     if not conn: return
@@ -3078,19 +3090,16 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cur = conn.cursor()
         
-        # 2. Movie Data Insert/Update
+        # 2. Movie Data Insert/Update (Ye Logic same rahega)
+        # Agar movie pehle se hai (ON CONFLICT), to bas update karega, naya nahi banayega
         cur.execute(
             """
             INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
             VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (title) DO UPDATE 
-            SET imdb_id = EXCLUDED.imdb_id,
-                poster_url = EXCLUDED.poster_url,
-                year = EXCLUDED.year,
-                genre = EXCLUDED.genre,
-                rating = EXCLUDED.rating,
-                description = EXCLUDED.description,
-                category = EXCLUDED.category
+            SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id), -- Purana ID safe rakho agar naya NULL hai
+                poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
+                year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END
             RETURNING id
             """,
             (title, imdb_id, poster_url, year, genre, rating, plot, category)
@@ -3098,34 +3107,37 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         movie_id = cur.fetchone()[0]
         conn.commit()
 
-        # 3. Check for OLD FILES (Kitni files pehle se hain?)
+        # 3. Check for OLD FILES
         cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
         file_count = cur.fetchone()[0]
         
         cur.close()
         conn.close()
 
-        # 4. Activate Batch Session (Ye har haal mein ON hoga)
+        # 4. Activate Batch Session
         BATCH_SESSION.update({
             'active': True,
             'movie_id': movie_id,
             'movie_title': title,
-            'file_count': 0, # Session ka count 0 se shuru hoga
+            'file_count': 0,
             'admin_id': user_id
         })
 
         # 5. Message Prepare Karo
         msg_text = (
-            f"🎬 **Batch Started:** {title} ({year})\n"
-            f"🏷 **Category:** {category}\n"
-            f"📂 **Existing Files in DB:** {file_count}\n\n"
-            f"🚀 **Send NEW files now!** (Bot is listening...)"
+            f"🎬 **Batch Started:** {title}\n"
+            f"📂 **Existing Files in DB:** {file_count}\n"
         )
+        
+        if not metadata:
+            msg_text += "⚠️ *Metadata not found (Custom Mode ON)*\n"
 
-        # 6. Logic: Agar purani files hain tabhi Delete Button dikhao
+        msg_text += "\n🚀 **Send NEW files now!** (Bot is listening...)"
+
+        # 6. Delete Button Logic
         reply_markup = None
         if file_count > 0:
-            msg_text += "\n\n⚠️ *Purani files mili hain. Agar sab delete karke fresh start karna hai to button dabayein:* 👇"
+            msg_text += "\n\n⚠️ *Purani files mili hain. Delete button niche hai:* 👇"
             keyboard = [[InlineKeyboardButton("🗑️ Delete OLD Files (Clean Slate)", callback_data=f"clearfiles_{movie_id}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
