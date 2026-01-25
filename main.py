@@ -2867,10 +2867,10 @@ def get_storage_channels():
     channels_str = os.environ.get('STORAGE_CHANNELS', '')
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
-def generate_quality_label(file_name, file_size_str):
+def generate_quality_label(file_name):
     """
-    Smart Logic to generate button label from filename
-    Example: "Thamma.2025.1080p.mkv" -> "1080p [1.2GB]"
+    Returns ONLY the Quality (e.g., '720p', 'S01E01 - 1080p')
+    File Size is NOT included here (it is stored separately in DB).
     """
     name_lower = file_name.lower()
     quality = "HD" # Default
@@ -2887,11 +2887,11 @@ def generate_quality_label(file_name, file_size_str):
     season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
     if season_match:
         episode_tag = season_match.group(0).upper()
-        # Format: S01E01 - 720p [200MB]
-        return f"{episode_tag} - {quality} [{file_size_str}]"
+        # Format: S01E01 - 720p
+        return f"{episode_tag} - {quality}"
         
-    # 3. Default Movie Format: 720p [1.2GB]
-    return f"{quality} [{file_size_str}]"
+    # 3. Default Movie Format: 720p
+    return quality
 
 def get_readable_file_size(size_in_bytes):
     """Converts bytes to readable format (MB, GB)"""
@@ -3187,7 +3187,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
     file_size = message.document.file_size if message.document else message.video.file_size
     file_size_str = get_readable_file_size(file_size)
-    label = generate_quality_label(file_name, file_size_str)
+    label = generate_quality_label(file_name)
     
     # Generate Main Link (From first channel in list)
     main_channel_id = channels[0]
