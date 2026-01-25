@@ -3150,6 +3150,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
+    Fixed: Prevents 'Cursor already closed' error.
     """
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
@@ -3189,7 +3190,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Calculate Size String
     file_size_str = get_readable_file_size(file_size)
     
-    # ✅ FIX: Define 'label' here so the NameError is gone
+    # Generate Label
     label = generate_quality_label(file_name, file_size_str)
     
     # Generate Main Link
@@ -3199,13 +3200,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
     # 4. Save to DB (Safe Connection Handling)
-    conn = get_db_connection()
-    if conn:
-        try:
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn:
             cur = conn.cursor()
             
-            # ✅ FIX: Using 'label' which now includes size (e.g. "HD [1GB]")
-            # This makes the quality unique, so DB won't crash on duplicate "HD"
+            # Insert Logic
             cur.execute(
                 """
                 INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
@@ -3220,8 +3221,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
             )
             conn.commit()
-            cur.close()
-            conn.close()
+            cur.close() # Cursor close karo
             
             BATCH_SESSION['file_count'] += 1
             
@@ -3232,13 +3232,16 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔢 Total: {BATCH_SESSION['file_count']}",
                 parse_mode='Markdown'
             )
-            
-        except Exception as e:
-            logger.error(f"DB Save Error: {e}")
-            await status.edit_text(f"❌ DB Save Failed: {e}")
-            if conn: 
-                try: conn.close()
-                except: pass
+    except Exception as e:
+        logger.error(f"DB Save Error: {e}")
+        await status.edit_text(f"❌ DB Save Failed: {e}")
+    finally:
+        # Connection close hamesha finally block me karo
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
         
         # 👇 YEH HAI JAADU (Magic)
         # Agar movie_id + quality same hai, to purana link hata ke naya daal dega
