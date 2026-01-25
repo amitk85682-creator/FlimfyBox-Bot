@@ -2890,8 +2890,9 @@ def generate_quality_label(file_name):
         # Format: S01E01 - 720p
         return f"{episode_tag} - {quality}"
         
-    # 3. Default Movie Format: 720p [1.2GB]
-    return f"{quality} [{file_size_str}]"
+    # 3. Default Movie Format: Just return the quality
+    # FIXED: Removed undefined `file_size_str` variable
+    return quality
 
 def get_readable_file_size(size_in_bytes):
     """Converts bytes to readable format (MB, GB)"""
