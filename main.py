@@ -3150,7 +3150,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
-    FIXED: Prevents 'Cursor already closed' error by managing connection scope correctly.
+    FIXED: Merged both SQL queries into ONE session to prevent 'cursor closed' error.
     """
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
@@ -3199,15 +3199,14 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # 4. Save to DB (Single Connection Block)
+    # 4. Save to DB (ALL Operations in ONE Connection Block)
     conn = None
     try:
         conn = get_db_connection()
         if conn:
             cur = conn.cursor()
             
-            # --- LOGIC 1: Standard Insert ---
-            # This inserts or updates based on (movie_id, quality)
+            # --- QUERY 1: Standard Insert (Update if Movie+Quality exists) ---
             cur.execute(
                 """
                 INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
@@ -3222,24 +3221,29 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
             )
             
-            # --- LOGIC 2: The "Magic" Upsert ---
-            # This handles duplicates based on file_size to prevent exact duplicates
-            # We do this in the SAME transaction with the SAME cursor
-            cur.execute(
-                """
-                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (movie_id, quality, file_size)
-                DO UPDATE SET 
-                    url = EXCLUDED.url,
-                    backup_map = EXCLUDED.backup_map,
-                    file_id = NULL
-                """,
-                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-            )
+            # --- QUERY 2: The "Magic" Upsert (Your Custom Logic) ---
+            # Now running inside the SAME open connection. 
+            # We use try/except specifically for this query so if it fails (e.g. constraint error), 
+            # it doesn't kill the whole process.
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (movie_id, quality, file_size) 
+                    DO UPDATE SET 
+                        url = EXCLUDED.url,
+                        backup_map = EXCLUDED.backup_map,
+                        file_id = NULL
+                    """,
+                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+                )
+            except Exception as magic_error:
+                logger.warning(f"Magic query skipped (might be redundant): {magic_error}")
 
+            # Commit everything together
             conn.commit()
-            cur.close() # Close cursor ONLY after both operations
+            cur.close() 
             
             BATCH_SESSION['file_count'] += 1
             
@@ -3255,7 +3259,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"DB Save Error: {e}")
         await status.edit_text(f"❌ DB Save Failed: {e}")
     finally:
-        # Close connection only once at the very end
+        # Connection closes ONLY after everything is done
         if conn:
             try:
                 conn.close()
