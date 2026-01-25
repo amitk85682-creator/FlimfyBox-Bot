@@ -5295,19 +5295,31 @@ async def main():
     """Main function to run MULTIPLE bots concurrently"""
     logger.info("🚀 Starting Multi-Bot System...")
 
-    # 1. Database Setup (Ek baar run hoga)
+    # =================================================================
+    # 1. Start Flask Server FIRST (To satisfy Render Port Requirement)
+    # =================================================================
+    # इसे सबसे ऊपर ले जाएं ताकि Render को तुरंत Port मिल जाए और Timeout न हो
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    logger.info("🌐 Flask server started immediately to prevent Timeout.")
+
+    # =================================================================
+    # 2. Database Setup (Ab ye araam se run ho sakta hai)
+    # =================================================================
     try:
         setup_database()
         migrate_add_imdb_columns()
     except Exception as e:
         logger.error(f"DB Setup Error: {e}")
 
-    # 2. Get Tokens from ENV
-    # Yahan apne Environment Variables ke naam check kar lena
+    # =================================================================
+    # 3. Get Tokens from ENV
+    # =================================================================
     tokens = [
-        os.environ.get("TELEGRAM_BOT_TOKEN"),  # Bot 1 (Search Bot)
-        os.environ.get("BOT_TOKEN_2"),         # Bot 2 (Main Bot)
-        os.environ.get("BOT_TOKEN_3")          # Bot 3 (UrMovie Bot)
+        os.environ.get("TELEGRAM_BOT_TOKEN"),  # Bot 1
+        os.environ.get("BOT_TOKEN_2"),         # Bot 2
+        os.environ.get("BOT_TOKEN_3")          # Bot 3
     ]
     
     # Khali tokens filter karo
@@ -5317,7 +5329,9 @@ async def main():
         logger.error("❌ No tokens found! Check Environment Variables.")
         return
 
-    # 3. Initialize & Start All Bots
+    # =================================================================
+    # 4. Initialize & Start All Bots
+    # =================================================================
     apps = []
     logger.info(f"🤖 Found {len(tokens)} tokens. Initializing bots...")
 
@@ -5328,7 +5342,7 @@ async def main():
             # Application Build
             app = Application.builder().token(token).read_timeout(30).write_timeout(30).build()
             
-            # Handlers Register karo (Ye important hai)
+            # Handlers Register karo
             register_handlers(app)
             
             # Initialize & Start
@@ -5350,15 +5364,9 @@ async def main():
         logger.error("❌ No bots could be started.")
         return
 
-    # 4. Start Flask Server (Background Thread)
-    # Flask ko alag thread me chalana zaroori hai
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    logger.info("🌐 Flask server started.")
-
+    # =================================================================
     # 5. Keep Script Alive
-    # Kyunki start_polling await nahi karta, humein script ko rok ke rakhna padega
+    # =================================================================
     stop_signal = asyncio.Event()
     await stop_signal.wait()
 
