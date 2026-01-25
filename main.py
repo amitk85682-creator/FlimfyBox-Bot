@@ -3150,7 +3150,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
-    Fixed: Prevents 'Cursor already closed' error.
+    FIXED: Prevents 'Cursor already closed' error by managing connection scope correctly.
     """
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
@@ -3199,14 +3199,15 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # 4. Save to DB (Safe Connection Handling)
+    # 4. Save to DB (Single Connection Block)
     conn = None
     try:
         conn = get_db_connection()
         if conn:
             cur = conn.cursor()
             
-            # Insert Logic
+            # --- LOGIC 1: Standard Insert ---
+            # This inserts or updates based on (movie_id, quality)
             cur.execute(
                 """
                 INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
@@ -3220,8 +3221,25 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """,
                 (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
             )
+            
+            # --- LOGIC 2: The "Magic" Upsert ---
+            # This handles duplicates based on file_size to prevent exact duplicates
+            # We do this in the SAME transaction with the SAME cursor
+            cur.execute(
+                """
+                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (movie_id, quality, file_size)
+                DO UPDATE SET 
+                    url = EXCLUDED.url,
+                    backup_map = EXCLUDED.backup_map,
+                    file_id = NULL
+                """,
+                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+            )
+
             conn.commit()
-            cur.close() # Cursor close karo
+            cur.close() # Close cursor ONLY after both operations
             
             BATCH_SESSION['file_count'] += 1
             
@@ -3232,11 +3250,12 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔢 Total: {BATCH_SESSION['file_count']}",
                 parse_mode='Markdown'
             )
+
     except Exception as e:
         logger.error(f"DB Save Error: {e}")
         await status.edit_text(f"❌ DB Save Failed: {e}")
     finally:
-        # Connection close hamesha finally block me karo
+        # Close connection only once at the very end
         if conn:
             try:
                 conn.close()
