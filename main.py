@@ -2869,7 +2869,7 @@ def get_storage_channels():
 
 def generate_quality_label(file_name, file_size_str):
     """
-    Returns ONLY the Quality (e.g., '720p', 'S01E01 - 1080p')
+    Generates a label like '720p [1.2GB]' or 'S01E01 - 1080p [500MB]'
     """
     name_lower = file_name.lower()
     quality = "HD" # Default
@@ -2886,9 +2886,11 @@ def generate_quality_label(file_name, file_size_str):
     season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
     if season_match:
         episode_tag = season_match.group(0).upper()
-        return f"{episode_tag} - {quality}"
+        # Returns: S01E01 - 720p [1.2GB]
+        return f"{episode_tag} - {quality} [{file_size_str}]"
         
-    return quality
+    # 3. Default Movie Format: 720p [1.2GB]
+    return f"{quality} [{file_size_str}]"
 
 def get_readable_file_size(size_in_bytes):
     """Converts bytes to readable format (MB, GB)"""
@@ -3187,30 +3189,23 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Calculate Size String
     file_size_str = get_readable_file_size(file_size)
     
-    # ✅ FIX: Generate a Unique Label (Quality + Size)
-    # This ensures "HD [1GB]" is different from "HD [500MB]" so both get saved
-    base_quality = generate_quality_label(file_name, "") # Get just "720p" or "HD"
+    # ✅ FIX: Define 'label' here so the NameError is gone
+    label = generate_quality_label(file_name, file_size_str)
     
-    # Clean up the base quality if it accidentally has brackets
-    base_quality = base_quality.split('[')[0].strip()
-    
-    # Final unique quality string for DB (e.g. "720p [1.2GB]")
-    final_quality_label = f"{base_quality} [{file_size_str}]"
-
     # Generate Main Link
     main_channel_id = channels[0]
     main_msg_id = backup_map.get(str(main_channel_id))
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # 4. Save to DB
+    # 4. Save to DB (Safe Connection Handling)
     conn = get_db_connection()
     if conn:
         try:
             cur = conn.cursor()
             
-            # ✅ FIX: The logic here ensures that if the EXACT same quality+size exists, it updates it.
-            # If the size is different, it creates a NEW row because 'final_quality_label' is different.
+            # ✅ FIX: Using 'label' which now includes size (e.g. "HD [1GB]")
+            # This makes the quality unique, so DB won't crash on duplicate "HD"
             cur.execute(
                 """
                 INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
@@ -3222,18 +3217,18 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     backup_map = EXCLUDED.backup_map,
                     file_id = NULL
                 """,
-                (BATCH_SESSION['movie_id'], final_quality_label, file_size_str, main_url, json.dumps(backup_map))
+                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
             )
             conn.commit()
-            cur.close() # Close cursor
-            conn.close() # Close connection immediately after commit
+            cur.close()
+            conn.close()
             
             BATCH_SESSION['file_count'] += 1
             
             await status.edit_text(
                 f"✅ **File Saved!**\n"
                 f"📂 Copies: {success_uploads}\n"
-                f"🏷 Label: `{final_quality_label}`\n"
+                f"🏷 Label: `{label}`\n"
                 f"🔢 Total: {BATCH_SESSION['file_count']}",
                 parse_mode='Markdown'
             )
