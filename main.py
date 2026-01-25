@@ -2867,10 +2867,10 @@ def get_storage_channels():
     channels_str = os.environ.get('STORAGE_CHANNELS', '')
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
-def generate_quality_label(file_name):
+def generate_quality_label(file_name, file_size_str):
     """
-    Returns ONLY the Quality (e.g., '720p', 'S01E01 - 1080p')
-    File Size is NOT included here (it is stored separately in DB).
+    Generate button label with Size.
+    Example: "720p [1.2GB]"
     """
     name_lower = file_name.lower()
     quality = "HD" # Default
@@ -2887,12 +2887,11 @@ def generate_quality_label(file_name):
     season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
     if season_match:
         episode_tag = season_match.group(0).upper()
-        # Format: S01E01 - 720p
-        return f"{episode_tag} - {quality}"
+        # Format: S01E01 - 720p [Size]
+        return f"{episode_tag} - {quality} [{file_size_str}]"
         
-    # 3. Default Movie Format: Just return the quality
-    # FIXED: Removed undefined `file_size_str` variable
-    return quality
+    # 3. Default Movie Format: 720p [Size]
+    return f"{quality} [{file_size_str}]"
 
 def get_readable_file_size(size_in_bytes):
     """Converts bytes to readable format (MB, GB)"""
@@ -3151,7 +3150,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn: conn.close()
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves/Replaces in DB
+    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
     """
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
@@ -3187,19 +3186,58 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Prepare DB Data
     file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
     file_size = message.document.file_size if message.document else message.video.file_size
-    file_size_str = get_readable_file_size(file_size)
-    label = generate_quality_label(file_name)
     
-    # Generate Main Link (From first channel in list)
+    # ✅ FIX: Calculate Size String FIRST
+    file_size_str = get_readable_file_size(file_size)
+    
+    # ✅ FIX: Pass Size String into function
+    label = generate_quality_label(file_name, file_size_str)
+    
+    # Generate Main Link
     main_channel_id = channels[0]
     main_msg_id = backup_map.get(str(main_channel_id))
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # 4. Save to DB (WITH REPLACE LOGIC) 🛠️
+    # 4. Save to DB
     conn = get_db_connection()
     if conn:
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
+            
+            # Ab kyunki Label mein Size hai (e.g. "720p [1GB]"), 
+            # Database ise alag quality manega aur error nahi dega.
+            cur.execute(
+                """
+                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (movie_id, quality) 
+                DO UPDATE SET 
+                    url = EXCLUDED.url,
+                    file_size = EXCLUDED.file_size,
+                    backup_map = EXCLUDED.backup_map,
+                    file_id = NULL
+                """,
+                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            BATCH_SESSION['file_count'] += 1
+            
+            await status.edit_text(
+                f"✅ **File Saved!**\n"
+                f"📂 Copies: {success_uploads}\n"
+                f"🏷 Label: `{label}`\n"
+                f"🔢 Total: {BATCH_SESSION['file_count']}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"DB Save Error: {e}")
+            await status.edit_text(f"❌ DB Save Failed: {e}")
+            if conn: conn.close()
         
         # 👇 YEH HAI JAADU (Magic)
         # Agar movie_id + quality same hai, to purana link hata ke naya daal dega
