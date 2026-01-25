@@ -2869,28 +2869,43 @@ def get_storage_channels():
 
 def generate_quality_label(file_name):
     """
-    Returns ONLY the Quality (e.g., '720p', 'S01E01 - 1080p')
-    File Size is NOT included here (it is stored separately in DB).
+    Generate unique quality labels to prevent database overwriting.
+    Handles: Resolution, Series (S01E01), and Parts (Part 1).
     """
     name_lower = file_name.lower()
-    quality = "HD" # Default
-    
-    # 1. Detect Quality
-    if "4k" in name_lower or "2160p" in name_lower: quality = "4K"
-    elif "1080p" in name_lower: quality = "1080p"
-    elif "720p" in name_lower: quality = "720p"
-    elif "480p" in name_lower: quality = "480p"
-    elif "360p" in name_lower: quality = "360p"
-    elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
-    
+    quality = "HD"  # Default fallback
+
+    # 1. Detect Resolution (More robust checks)
+    if "4k" in name_lower or "2160p" in name_lower:
+        quality = "4K"
+    elif "1080p" in name_lower:
+        quality = "1080p"
+    elif "720p" in name_lower:
+        quality = "720p"
+    elif "480p" in name_lower:
+        quality = "480p"
+    elif "360p" in name_lower:
+        quality = "360p"
+    elif "cam" in name_lower or "rip" in name_lower:
+        quality = "CamRip"
+
     # 2. Detect Series (S01E01)
     season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
     if season_match:
         episode_tag = season_match.group(0).upper()
-        # Format: S01E01 - 720p
+        # Output: "S01E01 - 720p"
         return f"{episode_tag} - {quality}"
-        
-    # 3. Default Movie Format: 720p
+
+    # 3. [NEW] Detect Parts (Important for files like .part001.mkv)
+    # यह चेक करेगा कि क्या फाइल में part1, part01, cd1 जैसा कुछ है
+    part_match = re.search(r'(part\s?0*(\d+)|cd\s?0*(\d+))', name_lower)
+    if part_match:
+        # number nikalega (e.g. part001 -> 1)
+        part_num = part_match.group(2) or part_match.group(3)
+        # Output: "720p - Part 1"
+        return f"{quality} - Part {part_num}"
+
+    # 4. Default Movie Format
     return quality
 
 def get_readable_file_size(size_in_bytes):
