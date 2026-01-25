@@ -2869,8 +2869,7 @@ def get_storage_channels():
 
 def generate_quality_label(file_name, file_size_str):
     """
-    Generate button label with Size.
-    Example: "720p [1.2GB]"
+    Returns ONLY the Quality (e.g., '720p', 'S01E01 - 1080p')
     """
     name_lower = file_name.lower()
     quality = "HD" # Default
@@ -2887,11 +2886,9 @@ def generate_quality_label(file_name, file_size_str):
     season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
     if season_match:
         episode_tag = season_match.group(0).upper()
-        # Format: S01E01 - 720p [Size]
-        return f"{episode_tag} - {quality} [{file_size_str}]"
+        return f"{episode_tag} - {quality}"
         
-    # 3. Default Movie Format: 720p [Size]
-    return f"{quality} [{file_size_str}]"
+    return quality
 
 def get_readable_file_size(size_in_bytes):
     """Converts bytes to readable format (MB, GB)"""
@@ -3187,12 +3184,19 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
     file_size = message.document.file_size if message.document else message.video.file_size
     
-    # ✅ FIX: Calculate Size String FIRST
+    # Calculate Size String
     file_size_str = get_readable_file_size(file_size)
     
-    # ✅ FIX: Pass Size String into function
-    label = generate_quality_label(file_name, file_size_str)
+    # ✅ FIX: Generate a Unique Label (Quality + Size)
+    # This ensures "HD [1GB]" is different from "HD [500MB]" so both get saved
+    base_quality = generate_quality_label(file_name, "") # Get just "720p" or "HD"
     
+    # Clean up the base quality if it accidentally has brackets
+    base_quality = base_quality.split('[')[0].strip()
+    
+    # Final unique quality string for DB (e.g. "720p [1.2GB]")
+    final_quality_label = f"{base_quality} [{file_size_str}]"
+
     # Generate Main Link
     main_channel_id = channels[0]
     main_msg_id = backup_map.get(str(main_channel_id))
@@ -3205,8 +3209,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             cur = conn.cursor()
             
-            # Ab kyunki Label mein Size hai (e.g. "720p [1GB]"), 
-            # Database ise alag quality manega aur error nahi dega.
+            # ✅ FIX: The logic here ensures that if the EXACT same quality+size exists, it updates it.
+            # If the size is different, it creates a NEW row because 'final_quality_label' is different.
             cur.execute(
                 """
                 INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
@@ -3218,18 +3222,18 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     backup_map = EXCLUDED.backup_map,
                     file_id = NULL
                 """,
-                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+                (BATCH_SESSION['movie_id'], final_quality_label, file_size_str, main_url, json.dumps(backup_map))
             )
             conn.commit()
-            cur.close()
-            conn.close()
+            cur.close() # Close cursor
+            conn.close() # Close connection immediately after commit
             
             BATCH_SESSION['file_count'] += 1
             
             await status.edit_text(
                 f"✅ **File Saved!**\n"
                 f"📂 Copies: {success_uploads}\n"
-                f"🏷 Label: `{label}`\n"
+                f"🏷 Label: `{final_quality_label}`\n"
                 f"🔢 Total: {BATCH_SESSION['file_count']}",
                 parse_mode='Markdown'
             )
@@ -3237,7 +3241,9 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"DB Save Error: {e}")
             await status.edit_text(f"❌ DB Save Failed: {e}")
-            if conn: conn.close()
+            if conn: 
+                try: conn.close()
+                except: pass
         
         # 👇 YEH HAI JAADU (Magic)
         # Agar movie_id + quality same hai, to purana link hata ke naya daal dega
