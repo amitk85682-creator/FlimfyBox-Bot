@@ -15,6 +15,7 @@ from urllib.parse import urlparse, urlunparse, quote
 from collections import defaultdict
 from telegram.error import RetryAfter, TelegramError
 from typing import Optional
+from psycopg2 import pool
 
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
 logging.basicConfig(
@@ -119,12 +120,12 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         cursor.execute(f"{query} WHERE id = %s", (BATCH_SESSION['movie_id'],))
     else:
         await update.message.reply_text("❌ Naam batao! Example: `/post Pushpa`")
-        conn.close()
+        close_db_connection(conn)
         return
 
     movie_data = cursor.fetchone()
     cursor.close()
-    conn.close()
+    close_db_connection(conn)
 
     if not movie_data:
         await update.message.reply_text("❌ Movie nahi mili.")
@@ -201,6 +202,20 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get('DATABASE_URL')
+    # 👇👇👇 START COPY HERE 👇👇👇
+db_pool = None
+try:
+    # Pool create kar rahe hain taki baar baar connection na banana pade
+    pool_url = FIXED_DATABASE_URL or DATABASE_URL
+    if pool_url:
+        db_pool = psycopg2.pool.SimpleConnectionPool(
+            1, 20, # Min 1, Max 20 connections
+            dsn=pool_url
+        )
+        logger.info("✅ Database Connection Pool Created!")
+except Exception as e:
+    logger.error(f"❌ Error creating pool: {e}")
+# 👆👆👆 END COPY HERE 👆👆👆
 BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
 BLOG_ID = os.environ.get('BLOG_ID')
 UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
@@ -257,6 +272,19 @@ if not TELEGRAM_BOT_TOKEN:
 if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable is not set")
     raise ValueError("DATABASE_URL is not set.")
+
+
+# 👇👇👇 START COPY HERE (Line 290 ke aas-paas paste karein) 👇👇👇
+import functools
+
+async def run_async(func, *args, **kwargs):
+    """
+    Ye function blocking code (jaise Database/Fuzzy search) ko
+    background thread me chalata hai taaki bot hang na ho.
+    """
+    func_partial = functools.partial(func, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(None, func_partial)
+# 👆👆👆 END COPY HERE 👆👆👆
 
 # ==================== UTILITY FUNCTIONS ====================
 def preprocess_query(query):
@@ -437,7 +465,7 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
         """, (user_id,))
         rows = cur.fetchall()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
         if not rows:
             return None
@@ -473,7 +501,7 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
     except Exception as e:
         logger.error(f"Error checking last similar request for user {user_id}: {e}")
         try:
-            conn.close()
+            close_db_connection(conn)
         except:
             pass
         return None
@@ -492,12 +520,12 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         cnt = result[0] if result else 0 
         
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         return cnt
     except Exception as e:
         logger.error(f"Error counting burst requests for user {user_id}: {e}")
         try:
-            conn.close()
+            close_db_connection(conn)
         except:
             pass
         return 0
@@ -635,7 +663,7 @@ def setup_database():
 
         conn.commit()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         logger.info("Database setup completed successfully")
     except Exception as e:
         logger.error(f"Error setting up database: {e}")
@@ -658,45 +686,37 @@ def migrate_add_imdb_columns():
         cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);')
         conn.commit()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         logger.info("✅ DB Migration: IMDb columns added successfully")
         return True
     except Exception as e:
         logger.error(f"Migration Error: {e}")
         if conn: 
-            conn.close()
+            close_db_connection(conn)
         return False
 
 
-def get_db_connection(max_retries=3):
-    """Get database connection with retry logic and timeout handling"""
-    for attempt in range(max_retries):
-        try:
-            conn_str = FIXED_DATABASE_URL or DATABASE_URL
-            if not conn_str:
-                logger.error("No database URL configured")
-                return None
-            
-            conn = psycopg2.connect(
-                conn_str,
-                connect_timeout=10,
-                options='-c statement_timeout=30000'
-            )
-            
-            cur = conn.cursor()
-            cur.execute("SELECT 1")
-            cur.close()
-            
-            return conn
-            
-        except Exception as e:
-            logger.error(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
-            if attempt == max_retries - 1:
-                return None
-            time.sleep(1)
-    
-    return None
+# 👇👇👇 START COPY HERE (New Function) 👇👇👇
+def get_db_connection():
+    """Pool se connection lene wala naya function"""
+    if not db_pool:
+        logger.error("Database pool is not ready.")
+        return None
+    try:
+        conn = db_pool.getconn()
+        return conn
+    except Exception as e:
+        logger.error(f"Error getting connection from pool: {e}")
+        return None
 
+def close_db_connection(conn):
+    """Connection ko wapas pool me dalne ke liye helper"""
+    if db_pool and conn:
+        try:
+            db_pool.putconn(conn)
+        except Exception:
+            pass
+# 👆👆👆 END COPY HERE 👆👆👆
 
 def update_movies_in_db():
     """Update movies from Blogger API"""
@@ -773,7 +793,7 @@ def update_movies_in_db():
 
     finally:
         if cur: cur.close()
-        if conn: conn.close()
+        if conn: close_db_connection(conn)
 
 
 def get_movies_from_db(user_query, limit=10):
@@ -799,7 +819,7 @@ def get_movies_from_db(user_query, limit=10):
         if exact_matches:
             logger.info(f"Found {len(exact_matches)} exact matches")
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return exact_matches
 
         cur.execute("""
@@ -815,7 +835,7 @@ def get_movies_from_db(user_query, limit=10):
         if alias_matches:
             logger.info(f"Found {len(alias_matches)} alias matches")
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return alias_matches
 
         cur.execute("SELECT id, title, url, file_id, imdb_id, poster_url, year, genre FROM movies")
@@ -823,7 +843,7 @@ def get_movies_from_db(user_query, limit=10):
 
         if not all_movies:
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return []
 
         movie_titles = [movie[1] for movie in all_movies]
@@ -836,7 +856,7 @@ def get_movies_from_db(user_query, limit=10):
         logger.info(f"Found {len(filtered_movies)} fuzzy matches")
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         return filtered_movies[:limit]
 
     except Exception as e:
@@ -845,7 +865,7 @@ def get_movies_from_db(user_query, limit=10):
     finally:
         if conn:
             try:
-                conn.close()
+                close_db_connection(conn)
             except:
                 pass
 
@@ -890,7 +910,7 @@ def get_movies_fast_sql(query: str, limit: int = 5):
     finally:
         if conn:
             try:
-                conn.close()
+                close_db_connection(conn)
             except:
                 pass
 
@@ -911,7 +931,7 @@ def get_movie_by_imdb_id(imdb_id: str):
         )
         result = cur.fetchone()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         return result
 
     except Exception as e:
@@ -920,7 +940,7 @@ def get_movie_by_imdb_id(imdb_id: str):
     finally:
         if conn:
             try:
-                conn.close()
+                close_db_connection(conn)
             except:
                 pass
 
@@ -960,7 +980,7 @@ def update_movie_metadata(movie_id: int, imdb_id: str = None, poster_url: str = 
         cur.execute(query, values)
         conn.commit()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         
         logger.info(f"✅ Updated metadata for movie ID: {movie_id}")
         return True
@@ -971,7 +991,7 @@ def update_movie_metadata(movie_id: int, imdb_id: str = None, poster_url: str = 
     finally:
         if conn:
             try:
-                conn.close()
+                close_db_connection(conn)
             except:
                 pass
 
@@ -992,13 +1012,13 @@ def store_user_request(user_id, username, first_name, movie_title, group_id=None
         """, (user_id, username, first_name, movie_title, group_id, message_id))
         conn.commit()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         return True
     except Exception as e:
         logger.error(f"Error storing user request: {e}")
         try:
             conn.rollback()
-            conn.close()
+            close_db_connection(conn)
         except:
             pass
         return False
@@ -1309,7 +1329,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
         return 0
     finally:
         if cur: cur.close()
-        if conn: conn.close()
+        if conn: close_db_connection(conn)
 
 async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     """Notify users in group when a requested movie becomes available"""
@@ -1370,7 +1390,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
         logger.error(f"Error in notify_in_group: {e}")
     finally:
         if cur: cur.close()
-        if conn: conn.close()
+        if conn: close_db_connection(conn)
 
 # ==================== NEW GENRE FUNCTIONS ====================
 
@@ -1397,7 +1417,7 @@ def get_all_genres_from_db():
         # Remove duplicates and return sorted list
         unique_genres = sorted(set(all_genres))
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         return unique_genres
         
     except Exception as e:
@@ -1405,7 +1425,7 @@ def get_all_genres_from_db():
         return []
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 
 
 def create_genre_selection_keyboard():
@@ -1456,7 +1476,7 @@ def get_movies_by_genre(genre: str, limit: int = 10):
         
         results = cur.fetchall()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
         return results
         
     except Exception as e:
@@ -1464,7 +1484,7 @@ def get_movies_by_genre(genre: str, limit: int = 10):
         return []
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 
 
 async def show_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1632,7 +1652,7 @@ def get_all_movie_qualities(movie_id):
         return []
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
@@ -1717,7 +1737,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         except Exception as e:
             logger.error(f"Error fetching genre: {e}")
         finally:
-            conn.close()
+            close_db_connection(conn)
     # ---------------------------------------------------
 
     # --- 2. Language Detection from FILES (Database) ---
@@ -1892,7 +1912,7 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             except Exception as db_e:
                 logger.error(f"Database error in exact match: {db_e}")
             finally:
-                if conn: conn.close()
+                if conn: close_db_connection(conn)
 
         movies_found = []
         if exact_movie:
@@ -1900,7 +1920,7 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
         else:
             # Agar exact nahi mila to hi Fuzzy Search karein (Slower process)
             # Assuming get_movies_from_db is your existing function
-            movies_found = get_movies_from_db(query_text, limit=1)
+            movies_found = await run_async(get_movies_from_db, query_text, limit=1)
 
         # 2. Result Handle karein
         if not movies_found:
@@ -1970,7 +1990,7 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
         cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
         movie_data = cur.fetchone()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
         # 2. Movie milne ke baad turant Loading Msg delete karo
         if status_msg:
@@ -2018,7 +2038,7 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
     finally:
         if conn:
             try:
-                conn.close()
+                close_db_connection(conn)
             except:
                 pass
 
@@ -2199,7 +2219,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error getting stats: {e}")
                 await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
             finally:
-                if conn: conn.close()
+                if conn: close_db_connection(conn)
 
             return MAIN_MENU
 
@@ -2244,7 +2264,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
              return await main_menu_or_search(update, context)
 
         # 1. Search DB
-        movies = get_movies_from_db(query, limit=10)
+        movies = await run_async(get_movies_from_db, query, limit=10)
         
         # 2. Not Found
         if not movies:
@@ -2442,7 +2462,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = cur.fetchone()
         title = res[0] if res else "Movie"
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
         qualities = get_all_movie_qualities(movie_id)
         if not qualities:
@@ -2493,7 +2513,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT title, year, genre FROM movies WHERE id = %s", (m_id,))
         res = cur.fetchone()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
         if res:
             title, year, genre = res
@@ -2530,7 +2550,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 deleted_count = cur.rowcount # Kitni delete hui
                 conn.commit()
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
                 
                 await query.answer(f"✅ {deleted_count} purani files delete ho gayi!", show_alert=True)
                 await query.edit_message_text(
@@ -2629,7 +2649,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
             movie = cur.fetchone()
             cur.close()
-            conn.close()
+            close_db_connection(conn)
 
             if not movie:
                 await query.edit_message_text("❌ Movie not found in database.")
@@ -2646,7 +2666,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result = cur.fetchone()
                 url, file_id = result if result else (None, None)  # ✅ Added safety check
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
 
                 await send_movie_to_user(update, context, movie_id, title, url, file_id)
                 return
@@ -2687,7 +2707,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
                 res = cur.fetchone()
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
                 
                 title = res[0] if res else "Movie"
                 qualities = get_all_movie_qualities(movie_id)
@@ -2732,7 +2752,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in the `movies` table. Please add it first.", parse_mode='Markdown')
 
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
             else:
                 await query.edit_message_text("❌ Database error during fulfillment.")
 
@@ -2747,7 +2767,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("DELETE FROM user_requests WHERE user_id = %s AND movie_title = %s", (user_id, movie_title))
                 conn.commit()
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
                 await query.edit_message_text(f"❌ DELETED: Request for '{movie_title}' from User ID {user_id} removed.", parse_mode='Markdown')
             else:
                 await query.edit_message_text("❌ Database error during deletion.")
@@ -2839,7 +2859,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (f'%{movie_title}%',))
             movie = cur.fetchone()
             cur.close()
-            conn.close()
+            close_db_connection(conn)
 
             if movie:
                 movie_id, title, url, file_id = movie
@@ -3136,7 +3156,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_count = cur.fetchone()[0]
         
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
         # 4. Activate Batch Session
         BATCH_SESSION.update({
@@ -3171,7 +3191,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Batch Error: {e}")
         await status_msg.edit_text(f"❌ DB Error: {e}")
-        if conn: conn.close()
+        if conn: close_db_connection(conn)
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
@@ -3267,7 +3287,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Connection closes ONLY after everything is done
         if conn:
             try:
-                conn.close()
+                close_db_connection(conn)
             except:
                 pass
     
@@ -3309,7 +3329,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             logger.error(f"Error saving aliases: {e}")
         finally:
-            conn.close()
+            close_db_connection(conn)
 
     # 2. Final Report
     report = (
@@ -3404,10 +3424,10 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if row:
                     movie_id = row[0]
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
             except Exception as e:
                 logger.error(f"Error finding movie ID: {e}")
-                if conn: conn.close()
+                if conn: close_db_connection(conn)
 
         # =========================================================
         # 🔗 LINK GENERATION
@@ -3633,7 +3653,7 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ek error aaya: {e}")
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 
 async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ... (Authentication check wahi rahega) ...
@@ -3759,7 +3779,7 @@ Movie3 file_id_here
                     )
 
                 conn.commit()
-                conn.close()
+                close_db_connection(conn)
 
                 success_count += 1
                 results.append(f"✅ {title}")
@@ -3830,7 +3850,7 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 
 async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all aliases for a movie"""
@@ -3873,7 +3893,7 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Error: {e}")
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -3950,7 +3970,7 @@ Failed: {failed_count}
         await update.message.reply_text(f"Error: {e}")
     finally:
         if conn:
-            conn.close()
+            close_db_connection(conn)
 
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
@@ -3974,7 +3994,7 @@ async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (f'%{movie_title}%',))
         movie_found = cur.fetchone()
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
         if movie_found:
             movie_id, title, url, file_id = movie_found
@@ -4017,7 +4037,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -4030,7 +4050,7 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(f"✅ Message sent to `@{target_username}` ({first_name})", parse_mode='Markdown')
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except telegram.error.Forbidden:
         await update.message.reply_text(f"❌ User blocked the bot.")
@@ -4065,7 +4085,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not all_users:
             await update.message.reply_text("No users found in database.")
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(all_users)} users...\n⏳ Please wait...")
@@ -4098,7 +4118,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in broadcast_message: {e}")
@@ -4137,7 +4157,7 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found.", parse_mode='Markdown')
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -4164,7 +4184,7 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except ValueError:
         await update.message.reply_text("❌ Invalid delay. Please provide number of minutes.")
@@ -4213,7 +4233,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -4276,7 +4296,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 conn.commit()
                 cur.close()
-                conn.close()
+                close_db_connection(conn)
             except Exception as e:
                 logger.error(f"Failed to save post ID: {e}")
         
@@ -4292,7 +4312,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         else:
             await update.message.reply_text("❌ Unsupported media type.")
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         if sent_msg and media_type != "text":
@@ -4312,7 +4332,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(confirmation, parse_mode='Markdown')
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except telegram.error.Forbidden:
         await update.message.reply_text(f"❌ User blocked the bot.")
@@ -4346,7 +4366,7 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
         if not all_users:
             await update.message.reply_text("No users found in database.")
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         status_msg = await update.message.reply_text(
@@ -4408,7 +4428,7 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in broadcast_with_media: {e}")
@@ -4458,7 +4478,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target_users:
             await update.message.reply_text(f"❌ No users found for '{query}'")
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         success_count = 0
@@ -4505,7 +4525,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in quick_notify: {e}")
@@ -4544,7 +4564,7 @@ async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found.", parse_mode='Markdown')
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -4554,7 +4574,7 @@ async def forward_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Forwarded to `@{target_username}` ({first_name})", parse_mode='Markdown')
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in forward_to_user: {e}")
@@ -4598,7 +4618,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user_info:
             await update.message.reply_text(f"❌ No data found for `@{target_username}`", parse_mode='Markdown')
             cur.close()
-            conn.close()
+            close_db_connection(conn)
             return
 
         user_id, username, first_name, total, fulfilled, last_request = user_info
@@ -4642,7 +4662,7 @@ async def get_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(info_text, parse_mode='Markdown')
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in get_user_info: {e}")
@@ -4718,7 +4738,7 @@ async def list_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(users_text, parse_mode='HTML')
 
         cur.close()
-        conn.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in list_all_users: {e}")
@@ -4798,7 +4818,7 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     finally:
         if cur: cur.close()
-        if conn: conn.close()
+        if conn: close_db_connection(conn)
 
 async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -4890,7 +4910,7 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
         await status_msg.edit_text(f"❌ Error: {e}")
     finally:
         if cur: cur.close()
-        if conn: conn.close()
+        if conn: close_db_connection(conn)
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -5193,7 +5213,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception as e:
                 logger.error(f"Stats Error: {e}")
             finally:
-                conn.close()
+                close_db_connection(conn)
         return
 
     # Handle 'Help' button
@@ -5233,7 +5253,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 3. 🚀 FAST SEARCH CALL (Sirf SQL Check)
     # Hum 5 results maang rahe hain taaki agar typos ho to best match mile
-    movies = get_movies_fast_sql(text, limit=5)
+    movies = await run_async(get_movies_fast_sql, text, limit=5)
 
     if not movies:
         # 🤫 Agar movie nahi mili, to YAHIN RUK JAO.
