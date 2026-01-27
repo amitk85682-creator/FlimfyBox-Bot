@@ -3110,7 +3110,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # --- YAHAN CHANGE KIYA HAI (Smart Logic) ---
     # Pehle metadata dhundo
-    metadata = fetch_movie_metadata(query)
+    metadata = await run_async(fetch_movie_metadata, query)
     
     if metadata:
         # Agar IMDb/OMDb par mil gayi, to Original Data use karo
