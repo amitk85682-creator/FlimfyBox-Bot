@@ -2907,14 +2907,39 @@ def get_readable_file_size(size_in_bytes):
 
 def generate_aliases_gemini(movie_title):
     """
-    Generates SEO aliases using Google Gemini (Free).
-    Returns a list of comma-separated aliases.
+    Generates SEO aliases using Google Gemini.
     """
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         logger.error("❌ GEMINI_API_KEY not found.")
         return []
 
+    try:
+        # Configure Gemini
+        genai.configure(api_key=api_key)
+        
+        # ✅ FIX: Use a stable model version (1.5-flash is reliable)
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        prompt = f"""
+        Generate 20 relevant search keywords/aliases for the movie: "{movie_title}".
+        Include typos, Hinglish spellings, and short forms.
+        Output ONLY comma-separated text. No numbering.
+        Example: kalki, kalki 2898, kalki hindi, culki movie
+        """
+
+        response = model.generate_content(prompt)
+        content = response.text
+        
+        # Clean and split by comma
+        aliases = [x.strip().lower() for x in content.split(',') if x.strip()]
+        
+        logger.info(f"✅ Generated {len(aliases)} aliases for '{movie_title}'")
+        return aliases
+
+    except Exception as e:
+        logger.error(f"❌ Gemini AI Error: {e}")
+        return []
     try:
         # Configure Gemini
         genai.configure(api_key=api_key)
@@ -3150,7 +3175,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
-    FIXED: Merged both SQL queries into ONE session to prevent 'cursor closed' error.
+    FIXED: Removed the code causing 'Connection already closed' error.
     """
     if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
         return
@@ -3199,14 +3224,15 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_id = str(main_channel_id).replace("-100", "")
     main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
 
-    # 4. Save to DB (ALL Operations in ONE Connection Block)
+    # 4. Save to DB
     conn = None
     try:
         conn = get_db_connection()
         if conn:
             cur = conn.cursor()
             
-            # --- QUERY 1: Standard Insert (Update if Movie+Quality exists) ---
+            # --- QUERY: Insert or Update ---
+            # Using ON CONFLICT logic correctly inside the main block
             cur.execute(
                 """
                 INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
@@ -3221,29 +3247,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
             )
             
-            # --- QUERY 2: The "Magic" Upsert (Your Custom Logic) ---
-            # Now running inside the SAME open connection. 
-            # We use try/except specifically for this query so if it fails (e.g. constraint error), 
-            # it doesn't kill the whole process.
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (movie_id, quality, file_size) 
-                    DO UPDATE SET 
-                        url = EXCLUDED.url,
-                        backup_map = EXCLUDED.backup_map,
-                        file_id = NULL
-                    """,
-                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-                )
-            except Exception as magic_error:
-                logger.warning(f"Magic query skipped (might be redundant): {magic_error}")
-
-            # Commit everything together
             conn.commit()
-            cur.close() 
+            cur.close()
             
             BATCH_SESSION['file_count'] += 1
             
@@ -3265,36 +3270,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.close()
             except:
                 pass
-        
-        # 👇 YEH HAI JAADU (Magic)
-        # Agar movie_id + quality same hai, to purana link hata ke naya daal dega
-        cur.execute(
-            """
-            INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (movie_id, quality, file_size)  -- 👈 Bas yahan 'file_size' add kar diya
-            DO UPDATE SET 
-                url = EXCLUDED.url,
-                backup_map = EXCLUDED.backup_map,
-                file_id = NULL
-            """,
-            (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-
-    BATCH_SESSION['file_count'] += 1
     
-    # Message update logic to show if it was replaced (Optional check)
-    await status.edit_text(
-        f"✅ **File Saved/Replaced!**\n"
-        f"📂 Copies: {success_uploads}\n"
-        f"🏷 Label: `{label}`\n"
-        f"🔢 Total: {BATCH_SESSION['file_count']}",
-        parse_mode='Markdown'
-    )
-
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Finishes session -> Generates AI Aliases -> Shows Report
@@ -3303,7 +3279,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     status_msg = await update.message.reply_text("🔄 **Generating AI Aliases... Please wait!** 🧠")
 
-    # 1. AI Generation (Claude)
+    # 1. AI Generation
     movie_title = BATCH_SESSION['movie_title']
     movie_id = BATCH_SESSION['movie_id']
     
@@ -3311,19 +3287,29 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     alias_count = 0
     conn = get_db_connection()
+    
     if conn and aliases:
-        cur = conn.cursor()
-        for alias in aliases:
-            try:
-                cur.execute(
-                    "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                    (movie_id, alias.lower())
-                )
-                alias_count += 1
-            except: pass
-        conn.commit()
-        cur.close()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            for alias in aliases:
+                # Ensure alias is not too long
+                if len(alias) > 255: continue
+                
+                try:
+                    cur.execute(
+                        "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
+                        (movie_id, alias)
+                    )
+                    alias_count += 1
+                except Exception as inner_e:
+                    logger.warning(f"Skipped alias '{alias}': {inner_e}")
+                    
+            conn.commit()
+            cur.close()
+        except Exception as e:
+            logger.error(f"Error saving aliases: {e}")
+        finally:
+            conn.close()
 
     # 2. Final Report
     report = (
