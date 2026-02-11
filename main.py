@@ -1148,7 +1148,7 @@ async def analyze_intent(message_text):
             return {"is_request": False, "content_title": None}
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name='gemini-2.5-flash')
+        model = genai.GenerativeModel(model_name='gemini-2.0-flash')
 
         prompt = f"""
         You are a 'Request Analyzer' for a Telegram bot named FlimfyBox Bot.
@@ -2927,19 +2927,24 @@ def get_readable_file_size(size_in_bytes):
 
 def generate_aliases_gemini(movie_title):
     """
-    Generates SEO aliases using Google Gemini.
+    Generates 50 SEO aliases using a detailed Search Query Analyst prompt.
     """
+    print(f"\n🚀 [DEBUG 1] Alias generation start hui: '{movie_title}' ke liye")
+    
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.error("❌ GEMINI_API_KEY not found.")
+        print("❌ [DEBUG 2] ERROR: GEMINI_API_KEY .env file me nahi mili!")
         return []
+        
+    print("✅ [DEBUG 3] API Key mil gayi. Model load kar rahe hain...")
 
     try:
         # Configure Gemini
         genai.configure(api_key=api_key)
         
-        # ✅ FIX: Use a stable model version (1.5-flash is reliable)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        # ✅ Using Gemini 2.0 Flash (as per current available stable naming, 
+        # change to 'gemini-1.5-flash' if 2.0 is not in your region yet)
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         prompt = f"""
         Generate 20 relevant search keywords/aliases for the movie: "{movie_title}".
@@ -2964,8 +2969,8 @@ def generate_aliases_gemini(movie_title):
         # Configure Gemini
         genai.configure(api_key=api_key)
         
-        # Use correct model name (gemini-2.5-flash is free & fast)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        # Use correct model name (gemini-2.0-flash is free & fast)
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Your Prompt
         prompt = f"""
@@ -3047,26 +3052,34 @@ Example output format:
 alias1, alias2, alias3, alias4, alias5...
 """
 
-        # Generate response using Gemini
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
-                max_output_tokens=1500,
-            )
-        )
+        print("⏳ [DEBUG 4] Google AI ko detailed request bhej rahe hain...")
+        response = model.generate_content(prompt)
         
-        # Extract text from response
-        content = response.text
+        print("📥 [DEBUG 5] AI se response aa gaya!")
         
+        try:
+            ai_text = response.text
+            # Print only first 100 chars to keep logs clean
+            print(f"🤖 [DEBUG 6] AI ne response diya (length: {len(ai_text)})")
+        except ValueError:
+            print(f"❌ [DEBUG 6.1] Safety Blocked! AI ne response block kar diya.")
+            return []
+
+        if not ai_text:
+            print("❌ [DEBUG 7] AI ka text khali hai.")
+            return []
+
         # Clean and split by comma
-        aliases = [x.strip() for x in content.split(',') if x.strip()]
+        aliases = [x.strip().lower() for x in ai_text.split(',') if x.strip()]
         
-        logger.info(f"✅ Generated {len(aliases)} aliases for '{movie_title}'")
+        # Agar list bahut badi ho jaye (kabhi AI extra bhej deta hai), toh limit to 50
+        aliases = aliases[:50]
+        
+        print(f"✅ [DEBUG 8] Total {len(aliases)} Aliases tayyar hain.")
         return aliases
 
     except Exception as e:
-        logger.error(f"❌ Gemini AI Error: {e}")
+        print(f"❌ [DEBUG 9] CRITICAL ERROR Gemini me: {e}")
         return []
 
 # ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
