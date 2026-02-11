@@ -1137,47 +1137,35 @@ def fetch_movie_metadata(query: str):
         logger.error(f"Metadata Error: {e}")
         return None
 # ==================== AI INTENT ANALYSIS ====================
+# 👇👇👇 START COPY HERE 👇👇👇
 async def analyze_intent(message_text):
-    """Analyze if the message is a movie request using AI"""
-    if not GEMINI_API_KEY:
-        return {"is_request": True, "content_title": message_text}
-
+    """
+    Bina AI (Gemini) ke message analyze karna.
+    Isse API limit waste nahi hogi!
+    """
     try:
-        movie_keywords = ["movie", "film", "series", "watch", "download", "see", "चलचित्र", "फिल्म", "सीरीज"]
-        if not any(keyword in message_text.lower() for keyword in movie_keywords):
+        text_lower = message_text.lower().strip()
+        
+        # 1. Agar message bahut lamba hai ya usme Link hai, toh reject kar do
+        if len(text_lower) > 60 or "http" in text_lower or "t.me" in text_lower:
             return {"is_request": False, "content_title": None}
 
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel(model_name='gemini-2.0-flash')
+        # 2. Agar chota message hai, toh usko direct Movie ka naam maan lo
+        # Faltu words hatane ki koshish (Optional)
+        words_to_remove = ["please", "plz", "bhai", "movie", "series", "chahiye", "give", "me"]
+        clean_name = text_lower
+        for word in words_to_remove:
+            clean_name = clean_name.replace(word, "").strip()
 
-        prompt = f"""
-        You are a 'Request Analyzer' for a Telegram bot named FlimfyBox Bot.
-        FlimfyBox Bot's ONLY purpose is to provide MOVIES and WEB SERIES. Nothing else.
-
-        Analyze the user's message below. Your task is to determine ONLY ONE THING:
-        Is the user asking for a movie or a web series?
-
-        - If the user IS asking for a movie or web series, respond with a JSON object:
-          {{"is_request": true, "content_title": "Name of the Movie/Series"}}
-
-        - If the user is talking about ANYTHING ELSE, respond with:
-          {{"is_request": false, "content_title": null}}
-
-        Do not explain yourself. Only provide the JSON.
-
-        User's Message: "{message_text}"
-        """
-
-        response = await model.generate_content_async(prompt)
-        json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        else:
+        if len(clean_name) < 2:
             return {"is_request": False, "content_title": None}
+
+        return {"is_request": True, "content_title": message_text.strip()}
 
     except Exception as e:
-        logger.error(f"Error in AI intent analysis: {e}")
-        return {"is_request": True, "content_title": message_text}
+        logger.error(f"Error in intent analysis: {e}")
+        return {"is_request": True, "content_title": message_text.strip()}
+# 👆👆👆 END COPY HERE 👆👆👆
 
 # ==================== NOTIFICATION FUNCTIONS ====================
 async def send_admin_notification(context, user, movie_title, group_info=None):
