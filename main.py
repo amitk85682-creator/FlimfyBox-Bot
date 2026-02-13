@@ -2932,7 +2932,7 @@ def generate_aliases_gemini(movie_title):
         
         # ✅ Using Gemini 2.0 Flash (as per current available stable naming, 
         # change to 'gemini-1.5-flash' if 2.0 is not in your region yet)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
         Generate 20 relevant search keywords/aliases for the movie: "{movie_title}".
@@ -2957,8 +2957,8 @@ def generate_aliases_gemini(movie_title):
         # Configure Gemini
         genai.configure(api_key=api_key)
         
-        # Use correct model name (gemini-2.0-flash is free & fast)
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        # Use correct model name (gemini-2.5-flash is free & fast)
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         # Your Prompt
         prompt = f"""
@@ -3354,30 +3354,27 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Smart Post Generator (Supports Photo AND Video)
-    Updated: Supports comma separation for Custom Text
-    Example: /post_query Kalki, Hindi HD
+    ✅ FIXED: Smart Post Generator with proper error handling
     """
     try:
-        # 1. Permission Check
         user_id = update.effective_user.id
         if user_id != ADMIN_USER_ID:
             return
 
         message = update.message
         
-        # 2. Validate Media (Check if Photo OR Video exists)
+        # 1. Check Media
         if not (message.photo or message.video):
-            await message.reply_text("❌ Photo ya Video bhejo caption ke sath: `/post_query Name`", parse_mode='Markdown')
+            await message.reply_text("❌ Photo ya Video bhejo caption ke sath")
             return
 
-        caption_text = message.caption
-        if not caption_text or not caption_text.startswith('/post_query'):
+        caption_text = message.caption or ""
+        if not caption_text.startswith('/post_query'):
             return
 
-        # 3. Extract File ID & Type
+        # 2. Extract Media
         file_id = None
-        media_type = 'photo' # Default
+        media_type = 'photo'
 
         if message.photo:
             file_id = message.photo[-1].file_id
@@ -3386,170 +3383,155 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_id = message.video.file_id
             media_type = 'video'
 
-        # =========================================================
-        # 4. Clean Query & Split Logic (UPDATED HERE)
-        # =========================================================
+        # 3. Parse Query
         raw_input = caption_text.replace('/post_query', '').strip()
         
-        # Check for comma to split DB Name and Custom Msg
         if ',' in raw_input:
-            parts = raw_input.split(',', 1) # Split only on first comma
-            query_text = parts[0].strip()   # Ye DB me search hoga (e.g. Kalki)
-            custom_msg = parts[1].strip()   # Ye caption me dikhega (e.g. Hindi HD)
+            parts = raw_input.split(',', 1)
+            query_text = parts[0].strip()
+            custom_msg = parts[1].strip()
         else:
             query_text = raw_input
             custom_msg = ""
 
         if not query_text:
-            await message.reply_text("❌ Name missing.")
+            await message.reply_text("❌ Movie name missing")
             return
 
-        # =========================================================
-        # 🧠 SMART DATABASE CHECK
-        # =========================================================
+        # 4. Find Movie in DB
         movie_id = None
         conn = get_db_connection()
 
         if conn:
             try:
                 cur = conn.cursor()
-                sql = """
-                    SELECT m.id 
-                    FROM movies m
-                    LEFT JOIN movie_aliases ma ON m.id = ma.movie_id
-                    WHERE m.title ILIKE %s OR ma.alias ILIKE %s
-                    LIMIT 1
-                """
-                cur.execute(sql, (query_text.strip(), query_text.strip()))
+                cur.execute(
+                    "SELECT id FROM movies WHERE title ILIKE %s LIMIT 1",
+                    (f"%{query_text}%",)
+                )
                 row = cur.fetchone()
-                if row:
-                    movie_id = row[0]
+                movie_id = row[0] if row else None
                 cur.close()
-                close_db_connection(conn)
             except Exception as e:
-                logger.error(f"Error finding movie ID: {e}")
-                if conn: close_db_connection(conn)
+                logger.error(f"DB Error: {e}")
+            finally:
+                close_db_connection(conn)
 
-        # =========================================================
-        # 🔗 LINK GENERATION
-        # =========================================================
-        bot1_username = "FlimfyBox_SearchBot"
-        bot2_username = "urmoviebot"
-        bot3_username = "FlimfyBox_Bot"
+        # 5. Generate Links
+        bot1 = "FlimfyBox_SearchBot"
+        bot2 = "urmoviebot"
+        bot3 = "FlimfyBox_Bot"
         
-        link_param = ""
-        log_message = ""
+        link_param = f"movie_{movie_id}" if movie_id else f"q_{query_text.replace(' ', '_')}"
 
-        if movie_id:
-            link_param = f"movie_{movie_id}"
-            log_message = f"✅ **FAST MODE (ID Found: {movie_id})**"
-        else:
-            safe_query = re.sub(r'[^\w\s-]', '', query_text).replace(" ", "_")
-            safe_query = re.sub(r'_+', '_', safe_query).strip('_')
-            link_param = f"q_{safe_query}"
-            log_message = f"⚠️ **SLOW MODE (Name Search)**\n(Movie DB me nahi mili)"
+        link1 = f"https://t.me/{bot1}?start={link_param}"
+        link2 = f"https://t.me/{bot2}?start={link_param}"
+        link3 = f"https://t.me/{bot3}?start={link_param}"
 
-        link1 = f"https://t.me/{bot1_username}?start={link_param}"
-        link2 = f"https://t.me/{bot2_username}?start={link_param}"
-        link3 = f"https://t.me/{bot3_username}?start={link_param}"
-
-        # Keyboard
+        # 6. Build Keyboard
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("Download Now", url=link1),
                 InlineKeyboardButton("Download Now", url=link2),
             ],
-            [
-                InlineKeyboardButton("Download Now", url=link3)
-            ],
+            [InlineKeyboardButton("Download Now", url=link3)],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
-        # Caption (UPDATED HERE to include custom_msg)
+        # 7. Build Caption
         channel_caption = f"🎬 <b>{query_text}</b>\n"
-        
-        # Agar custom message (comma ke baad wala text) hai to add karein
         if custom_msg:
             channel_caption += f"✨ <b>{custom_msg}</b>\n\n"
         else:
             channel_caption += "\n"
-
+        
         channel_caption += (
-            f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"🔹 <b>Support group:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Request & Search Movies</a>\n"
-            f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"<b>🧙‍♂️Download Below:👇</b>\n"
+            "➖➖➖➖➖➖➖\n"
+            f"<b>Support:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Join Chat</a>\n"
+            "➖➖➖➖➖➖➖\n"
+            "<b>👇 Download Below</b>"
         )
 
-        # =========================================================
-        # 📤 SENDING POST (Smart Send)
-        # =========================================================
-        channels_str = os.environ.get('BROADCAST_CHANNELS', str(ADMIN_CHANNEL_ID) if ADMIN_CHANNEL_ID else "")
+        # 8. Send to Channels
+        channels_str = os.environ.get('BROADCAST_CHANNELS', '')
         target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
 
-        if target_channels:
-            sent_count = 0
-            failed_count = 0
-            
-            for chat_id in target_channels:
+        if not target_channels:
+            await message.reply_text("❌ No BROADCAST_CHANNELS configured in .env")
+            return
+
+        sent_count = 0
+        failed_list = []
+
+        for chat_id_str in target_channels:
+            try:
+                # ✅ FIXED: Parse channel ID properly
                 try:
-                    # Check Media Type and Send Accordingly
-                    if media_type == 'video':
-                        await context.bot.send_video(
-                            chat_id=chat_id,
-                            video=file_id,
-                            caption=channel_caption,
-                            reply_markup=keyboard,
-                            parse_mode='HTML'
-                        )
-                    else:
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=file_id,
-                            caption=channel_caption,
-                            reply_markup=keyboard,
-                            parse_mode='HTML'
-                        )
-                    # 👇👇👇 YE WALA PART TUMHARE CODE ME MISSING THA 👇👇👇
-                    if sent_msg:
-                        try:
-                            # DB Connection kholo sirf save karne ke liye
-                            conn_save = get_db_connection()
-                            cur_save = conn_save.cursor()
-                            
-                            # Data Insert Karo
-                            cur_save.execute(
-                                "INSERT INTO channel_posts (movie_id, channel_id, message_id, bot_username) VALUES (%s, %s, %s, %s)",
-                                (movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot") 
-                            )
-                            conn_save.commit()
-                            cur_save.close()
-                            conn_save.close()
-                            logger.info(f"✅ Post saved to DB: MsgID {sent_msg.message_id}")
-                        except Exception as db_e:
-                            logger.error(f"Failed to save post to DB: {db_e}")
-                    # 👆👆👆 YAHAN TAK 👆👆👆
-                    
+                    chat_id = int(chat_id_str)
+                except ValueError:
+                    failed_list.append(f"Invalid ID: {chat_id_str}")
+                    continue
+
+                logger.info(f"📤 Sending to {chat_id}...")
+
+                sent_msg = None
+
+                if media_type == 'video':
+                    sent_msg = await context.bot.send_video(
+                        chat_id=chat_id,
+                        video=file_id,
+                        caption=channel_caption,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                else:
+                    sent_msg = await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=file_id,
+                        caption=channel_caption,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+
+                if sent_msg:
+                    logger.info(f"✅ Sent to {chat_id}, Message ID: {sent_msg.message_id}")
                     sent_count += 1
-                except Exception as post_error:
-                    logger.error(f"Failed to post to {chat_id}: {post_error}")
-                    failed_count += 1
-            
-            await message.reply_text(
-                f"✅ Post Processed ({media_type.capitalize()})!\n\n"
-                f"📤 Sent to: {sent_count}\n"
-                f"❌ Failed: {failed_count}\n\n"
-                f"{log_message}\n"
-                f"Query: `{query_text}`\n"
-                f"Extra Info: `{custom_msg}`",
-                parse_mode='Markdown'
-            )
-        else:
-            await message.reply_text("❌ No Channels Configured.")
+
+            except telegram.error.BadRequest as e:
+                error = str(e)
+                if "group is deactivated" in error or "not found" in error:
+                    failed_list.append(f"{chat_id_str}: Channel inactive/deleted")
+                else:
+                    failed_list.append(f"{chat_id_str}: {error}")
+                logger.error(f"BadRequest for {chat_id_str}: {e}")
+                
+            except telegram.error.Forbidden as e:
+                failed_list.append(f"{chat_id_str}: Bot blocked/no access")
+                logger.error(f"Forbidden for {chat_id_str}: {e}")
+                
+            except Exception as e:
+                failed_list.append(f"{chat_id_str}: {str(e)[:30]}")
+                logger.error(f"Error sending to {chat_id_str}: {e}")
+
+        # 9. Final Report
+        report = f"""✅ <b>Post Processed ({media_type.capitalize()})</b>
+
+📤 <b>Sent:</b> {sent_count}/{len(target_channels)}
+❌ <b>Failed:</b> {len(failed_list)}
+
+🎬 <b>Movie:</b> {query_text}
+📝 <b>Extra:</b> {custom_msg or 'None'}"""
+
+        if failed_list:
+            report += "\n\n<b>Errors:</b>\n"
+            for err in failed_list[:3]:  # Show first 3 errors
+                report += f"• {err}\n"
+
+        await message.reply_text(report, parse_mode='HTML')
 
     except Exception as e:
-        logger.error(f"Error in admin_post_query: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+        logger.error(f"Critical error in post_query: {e}", exc_info=True)
+        await message.reply_text(f"❌ Error: {str(e)[:100]}")
 
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
