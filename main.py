@@ -3317,18 +3317,28 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if len(alias) > 255: continue
                 
                 try:
+                    # ✅ FIX: SAVEPOINT create karein taaki ek error se pura loop na ruke
+                    cur.execute("SAVEPOINT sp_alias")
+                    
                     cur.execute(
                         "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
                         (movie_id, alias)
                     )
+                    
+                    # Agar success hua to savepoint release karein
+                    cur.execute("RELEASE SAVEPOINT sp_alias")
                     alias_count += 1
+                    
                 except Exception as inner_e:
+                    # ❌ FIX: Agar error aaye to sirf is alias ko rollback karein
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
                     logger.warning(f"Skipped alias '{alias}': {inner_e}")
                     
             conn.commit()
             cur.close()
         except Exception as e:
             logger.error(f"Error saving aliases: {e}")
+            if conn: conn.rollback()
         finally:
             close_db_connection(conn)
 
