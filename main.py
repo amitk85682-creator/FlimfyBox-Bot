@@ -2473,9 +2473,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         description = "Uploaded via Bot"
 
         if metadata:
-            # Metadata Unpacking (Ensure your fetch function returns 8 values or adjust here)
-            # Assuming format: (title, year, poster, genre, imdb_id, rating, plot, category)
-            # Agar format alag hai to yahan adjust karein
             try:
                 m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
                 poster_url = m_poster
@@ -2485,7 +2482,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rating = m_rating
                 description = m_plot
                 category = m_cat
-                # Title hum wahi rakhenge jo Admin ne Draft me set kiya hai (Safe side)
             except:
                 pass 
 
@@ -2513,26 +2509,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
 
             # 3. Upload Loop & File Saving
-            channels = get_storage_channels() # .env se channel list lo
+            channels = get_storage_channels()
             success_count = 0
             
             for file_data in files:
                 msg_obj = file_data['message_obj']
                 f_name = file_data['file_name']
                 f_size = file_data['file_size']
-                f_size_str = get_readable_file_size(f_size) # Helper function
+                f_size_str = get_readable_file_size(f_size)
                 
-                # Quality Label Generate (e.g. 720p [1.2GB])
-                # Note: 'generate_quality_label' function aapke code me hona chahiye
                 quality_label = generate_quality_label(f_name, f_size_str)
-                
                 backup_map = {}
                 main_url = ""
 
-                # Upload to Backup Channels
+                # Upload to Backups
                 for ch_id in channels:
                     try:
-                        # Copy Message (Fastest & Safest)
                         sent = await context.bot.copy_message(
                             chat_id=ch_id,
                             from_chat_id=user_id,
@@ -2540,7 +2532,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         backup_map[str(ch_id)] = sent.message_id
                         
-                        # Pehle channel ka link main bana lo
                         if not main_url:
                             clean_id = str(ch_id).replace("-100", "")
                             main_url = f"https://t.me/c/{clean_id}/{sent.message_id}"
@@ -2562,33 +2553,58 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     success_count += 1
 
             conn.commit()
+
+            # --- 4. AI ALIAS GENERATION (NEW ADDITION) ---
+            alias_msg = ""
+            try:
+                # User ko update do ki ab alias ban rahe hain
+                await query.edit_message_text(f"🧠 **Generating AI Aliases...**\n🎬 Movie: {movie_title}")
+                
+                # Gemini Call (Background me)
+                aliases = await run_async(generate_aliases_gemini, movie_title)
+                alias_count = 0
+                
+                if aliases:
+                    for alias in aliases:
+                        if len(alias) > 255: continue
+                        try:
+                            # SAVEPOINT Safety (Jo humne fix kiya tha)
+                            cur.execute("SAVEPOINT sp_alias")
+                            cur.execute(
+                                "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
+                                (movie_id, alias)
+                            )
+                            cur.execute("RELEASE SAVEPOINT sp_alias")
+                            alias_count += 1
+                        except Exception:
+                            cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
+                    
+                    conn.commit()
+                    alias_msg = f"🤖 **Aliases:** {alias_count} Added"
+                else:
+                    alias_msg = "🤖 **Aliases:** API Failed/No Data"
+
+            except Exception as e:
+                logger.error(f"Alias Generation Failed: {e}")
+                alias_msg = "🤖 **Aliases:** Error"
+
             
-            # 4. Final Output to Admin
+            # 5. Final Output to Admin
             final_code = f"/post_query {movie_title}"
             report = (
                 f"✅ **Batch Completed!**\n"
                 f"🎬 Movie: `{movie_title}`\n"
                 f"📂 Files Saved: {success_count}\n"
-                f"ℹ️ IMDb: {'✅ Found' if poster_url else '❌ Not Found'}\n\n"
+                f"ℹ️ IMDb: {'✅ Found' if poster_url else '❌ Not Found'}\n"
+                f"{alias_msg}\n\n"
                 f"👇 **Copy & Post This Code:**"
             )
 
-            # Agar Poster mila to uske sath code bhejo (Ready to Forward)
             if poster_url and "http" in poster_url:
-                await context.bot.send_photo(
-                    chat_id=user_id,
-                    photo=poster_url,
-                    caption=f"{report}\n`{final_code}`",
-                    parse_mode='Markdown'
-                )
+                await context.bot.send_photo(chat_id=user_id, photo=poster_url, caption=f"{report}\n`{final_code}`", parse_mode='Markdown')
             else:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"{report}\n`{final_code}`",
-                    parse_mode='Markdown'
-                )
+                await context.bot.send_message(chat_id=user_id, text=f"{report}\n`{final_code}`", parse_mode='Markdown')
 
-            # Cleanup
             del PENDING_DRAFTS[user_id]
 
         except Exception as e:
