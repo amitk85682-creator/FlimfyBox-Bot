@@ -2467,21 +2467,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # --- PROCESS START ---
         draft = PENDING_DRAFTS[user_id]
-        movie_title = draft['suggested_name']
-        manual_id = draft.get('manual_imdb_id') # <--- Check if ID exists
+        movie_title = draft['suggested_name'] # <--- Pehle ye purana naam tha
+        manual_id = draft.get('manual_imdb_id')
         files = draft['files']
         
-        await query.edit_message_text(f"🚀 **Processing...**\n⏳ Metadata fetching...")
+        await query.edit_message_text(f"🚀 **Processing...**\n⏳ Generating Landscape Thumbnails & Uploading...")
 
-        # 1. Fetch Metadata (Logic Change)
+        # 1. Fetch Metadata
         if manual_id:
-            # Agar ID set hai, to ID se dhundo (100% Accurate)
             metadata = await run_async(fetch_movie_metadata, manual_id)
         else:
-            # Nahi to Naam se dhundo
             metadata = await run_async(fetch_movie_metadata, movie_title)
         
-        # Default Values
         poster_url = None
         genre = "Unknown"
         year = 0
@@ -2500,8 +2497,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rating = m_rating
                 description = m_plot
                 category = m_cat
-            except:
-                pass 
+                
+                # 🔥 CRITICAL FIX: Movie Title Update Karo 🔥
+                # Agar IMDb se title mila hai, to wahi use karo!
+                if m_title:
+                    movie_title = f"{m_title} ({m_year})" if m_year else m_title
+            except Exception as e:
+                logger.error(f"Metadata Parse Error: {e}") 
+
+        # 🔥 STEP 1.1: Landscape Thumbnail Generate Karo 🔥
+        landscape_thumb = None
+        if poster_url:
+            landscape_thumb = await run_async(get_smart_thumbnail, poster_url)
 
         # 2. Database Entry (Movies Table)
         conn = get_db_connection()
@@ -2511,7 +2518,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
         try:
-            # Insert or Update Movie
             cur.execute(
                 """
                 INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
@@ -2526,7 +2532,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_id = cur.fetchone()[0]
             conn.commit()
 
-            # 3. Upload Loop & File Saving
+            # 3. Upload Loop (With Landscape Thumbnail)
             channels = get_storage_channels()
             success_count = 0
             
@@ -2536,6 +2542,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f_size = file_data['file_size']
                 f_size_str = get_readable_file_size(f_size)
                 
+                # File ID nikalo
+                file_id_to_send = msg_obj.document.file_id if msg_obj.document else msg_obj.video.file_id
+
+                # Branding Name (Ab ye clean movie_title use karega)
+                clean_title_for_file = re.sub(r'[^\w\s-]', '', movie_title).strip()
+                new_filename = f"[@FilmFyBox] {clean_title_for_file}.mkv"
+                
                 quality_label = generate_quality_label(f_name, f_size_str)
                 backup_map = {}
                 main_url = ""
@@ -2543,10 +2556,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Upload to Backups
                 for ch_id in channels:
                     try:
-                        sent = await context.bot.copy_message(
+                        # Reset Thumb Pointer (Important for Loop)
+                        if landscape_thumb:
+                            landscape_thumb.seek(0)
+
+                        # 🔥 Send with Landscape Thumbnail & Clean Name 🔥
+                        sent = await context.bot.send_document(
                             chat_id=ch_id,
-                            from_chat_id=user_id,
-                            message_id=msg_obj.message_id
+                            document=file_id_to_send,
+                            file_name=new_filename,     # Rename with IMDb Title
+                            thumbnail=landscape_thumb,  # Landscape Thumb
+                            caption=f"🎬 {movie_title}\n✨ @FilmFyBoxMoviesHD",
+                            parse_mode='Markdown'
                         )
                         backup_map[str(ch_id)] = sent.message_id
                         
@@ -2572,21 +2593,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             conn.commit()
 
-            # --- 4. AI ALIAS GENERATION (NEW ADDITION) ---
+            # --- 4. AI ALIAS GENERATION ---
             alias_msg = ""
             try:
-                # User ko update do ki ab alias ban rahe hain
                 await query.edit_message_text(f"🧠 **Generating AI Aliases...**\n🎬 Movie: {movie_title}")
-                
-                # Gemini Call (Background me)
                 aliases = await run_async(generate_aliases_gemini, movie_title)
                 alias_count = 0
-                
                 if aliases:
                     for alias in aliases:
                         if len(alias) > 255: continue
                         try:
-                            # SAVEPOINT Safety (Jo humne fix kiya tha)
                             cur.execute("SAVEPOINT sp_alias")
                             cur.execute(
                                 "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
@@ -2596,17 +2612,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             alias_count += 1
                         except Exception:
                             cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
-                    
                     conn.commit()
                     alias_msg = f"🤖 **Aliases:** {alias_count} Added"
                 else:
                     alias_msg = "🤖 **Aliases:** API Failed/No Data"
-
             except Exception as e:
                 logger.error(f"Alias Generation Failed: {e}")
                 alias_msg = "🤖 **Aliases:** Error"
 
-            
             # 5. Final Output to Admin
             final_code = f"/post_query {movie_title}"
             report = (
