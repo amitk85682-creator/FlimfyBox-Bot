@@ -2467,18 +2467,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # --- PROCESS START ---
         draft = PENDING_DRAFTS[user_id]
-        movie_title = draft['suggested_name'] # <--- Pehle ye purana naam tha
+        movie_title = draft['suggested_name'] # यह "कचरा" नाम हो सकता है
         manual_id = draft.get('manual_imdb_id')
         files = draft['files']
         
         await query.edit_message_text(f"🚀 **Processing...**\n⏳ Generating Landscape Thumbnails & Uploading...")
 
-        # 1. Fetch Metadata
+        # 1. Fetch Metadata (Metadata Check)
         if manual_id:
             metadata = await run_async(fetch_movie_metadata, manual_id)
         else:
             metadata = await run_async(fetch_movie_metadata, movie_title)
         
+        # Default Variables
         poster_url = None
         genre = "Unknown"
         year = 0
@@ -2489,6 +2490,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if metadata:
             try:
+                # Unpack Metadata
                 m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
                 poster_url = m_poster
                 year = m_year
@@ -2498,12 +2500,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 description = m_plot
                 category = m_cat
                 
-                # 🔥 CRITICAL FIX: Movie Title Update Karo 🔥
-                # Agar IMDb se title mila hai, to wahi use karo!
+                # ✅ FIX 1: Agar IMDb mila hai, to Naam REPLACE kar do
                 if m_title:
                     movie_title = f"{m_title} ({m_year})" if m_year else m_title
+                    
             except Exception as e:
-                logger.error(f"Metadata Parse Error: {e}") 
+                logger.error(f"Metadata Error: {e}")
+        else:
+            # ✅ FIX 2: Agar IMDb NAHI mila, to bhi naam Clean karo (Fallback)
+            # Faltu words hatane ka Regex
+            clean_fallback = re.sub(r'\b(480p|720p|1080p|2160p|hevc|x264|x265|10bit|hindi|dubbed|dual|audio|eng|sub|web-dl|webrip|hdr|remux|truehd|atmos|amzn|nf|dsnp|s\d+e\d+|complete|season|s\d+)\b', '', movie_title, flags=re.IGNORECASE)
+            clean_fallback = re.sub(r'[._-]', ' ', clean_fallback)
+            clean_fallback = re.sub(r'\s+', ' ', clean_fallback).strip()
+            # Agar naam 2 letter se bada hai, to use update kar do
+            if len(clean_fallback) > 2:
+                movie_title = clean_fallback
 
         # 🔥 STEP 1.1: Landscape Thumbnail Generate Karo 🔥
         landscape_thumb = None
@@ -2518,6 +2529,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         cur = conn.cursor()
         try:
+            # 3. Insert or Update Movie
             cur.execute(
                 """
                 INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
@@ -2532,7 +2544,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_id = cur.fetchone()[0]
             conn.commit()
 
-            # 3. Upload Loop (With Landscape Thumbnail)
+            # 4. Upload Loop (With Landscape Thumbnail)
             channels = get_storage_channels()
             success_count = 0
             
@@ -2542,10 +2554,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f_size = file_data['file_size']
                 f_size_str = get_readable_file_size(f_size)
                 
-                # File ID nikalo
+                # File ID selection
                 file_id_to_send = msg_obj.document.file_id if msg_obj.document else msg_obj.video.file_id
 
-                # Branding Name (Ab ye clean movie_title use karega)
+                # Branding Name (Clean Title Use karega)
                 clean_title_for_file = re.sub(r'[^\w\s-]', '', movie_title).strip()
                 new_filename = f"[@FilmFyBox] {clean_title_for_file}.mkv"
                 
@@ -2556,16 +2568,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Upload to Backups
                 for ch_id in channels:
                     try:
-                        # Reset Thumb Pointer (Important for Loop)
+                        # Reset Thumb Pointer
                         if landscape_thumb:
                             landscape_thumb.seek(0)
 
-                        # 🔥 Send with Landscape Thumbnail & Clean Name 🔥
+                        # 🔥 Send with Landscape Thumbnail 🔥
                         sent = await context.bot.send_document(
                             chat_id=ch_id,
                             document=file_id_to_send,
-                            file_name=new_filename,     # Rename with IMDb Title
-                            thumbnail=landscape_thumb,  # Landscape Thumb
+                            file_name=new_filename,
+                            thumbnail=landscape_thumb, 
                             caption=f"🎬 {movie_title}\n✨ @FilmFyBoxMoviesHD",
                             parse_mode='Markdown'
                         )
@@ -2593,7 +2605,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             conn.commit()
 
-            # --- 4. AI ALIAS GENERATION ---
+            # --- 5. AI ALIAS GENERATION ---
             alias_msg = ""
             try:
                 await query.edit_message_text(f"🧠 **Generating AI Aliases...**\n🎬 Movie: {movie_title}")
@@ -2617,16 +2629,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     alias_msg = "🤖 **Aliases:** API Failed/No Data"
             except Exception as e:
-                logger.error(f"Alias Generation Failed: {e}")
+                logger.error(f"Alias Gen Error: {e}")
                 alias_msg = "🤖 **Aliases:** Error"
 
-            # 5. Final Output to Admin
+            # 6. Final Output
             final_code = f"/post_query {movie_title}"
             report = (
                 f"✅ **Batch Completed!**\n"
                 f"🎬 Movie: `{movie_title}`\n"
                 f"📂 Files Saved: {success_count}\n"
-                f"ℹ️ IMDb: {'✅ Found' if poster_url else '❌ Not Found'}\n"
+                f"ℹ️ IMDb: {'✅ Found' if poster_url else '❌ Not Found (Cleaned)'}\n"
                 f"{alias_msg}\n\n"
                 f"👇 **Copy & Post This Code:**"
             )
