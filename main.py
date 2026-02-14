@@ -3559,7 +3559,7 @@ async def handle_draft_imdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     imdb_id = update.message.text.strip()
     
-    # Simple validation (tt + numbers)
+    # Simple validation
     if not imdb_id.startswith("tt"):
         await update.message.reply_text("❌ Invalid ID! `tt` se shuru honi chahiye (e.g. tt1234567).")
         return
@@ -3567,21 +3567,21 @@ async def handle_draft_imdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in PENDING_DRAFTS:
         # Draft me ID save kar lo
         PENDING_DRAFTS[user_id]['manual_imdb_id'] = imdb_id
+        
+        # State clear
         context.user_data['awaiting_draft_imdb'] = False
         
-        # Confirmation
-        current_name = PENDING_DRAFTS[user_id]['suggested_name']
-        count = len(PENDING_DRAFTS[user_id]['files'])
-        
+        # --- BUTTON NAME CHANGE ---
+        # Ab hum button par "Naam" nahi, "ID" dikhayenge taaki confirmation rahe
         keyboard = [
-            [InlineKeyboardButton(f"✅ PROCESS: {current_name}", callback_data="process_draft")],
+            [InlineKeyboardButton(f"✅ PROCESS NOW (Using ID: {imdb_id})", callback_data="process_draft")],
             [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
-            [InlineKeyboardButton(f"🔗 ID Set: {imdb_id}", callback_data="set_draft_imdb")],
+            [InlineKeyboardButton(f"🔗 ID Updated: {imdb_id}", callback_data="set_draft_imdb")],
             [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
         ]
         
         await update.message.reply_text(
-            f"✅ **IMDb ID Linked!**\n🆔 `{imdb_id}`\n\nAb 'Process' dabayenge to 100% sahi data aayega.",
+            f"✅ **IMDb ID Linked!**\n🆔 `{imdb_id}`\n\nAb Process dabane par bot **sidha IMDb se data uthayega**, purane naam ko ignore kar dega.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
