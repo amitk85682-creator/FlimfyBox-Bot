@@ -5322,6 +5322,10 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # अगर Admin रिनेम मोड में है, तो सर्च मत करो, सीधा रिनेम फंक्शन को भेजो
+    if context.user_data.get('awaiting_draft_rename'):
+        return await handle_draft_rename(update, context)
+    
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
