@@ -3482,66 +3482,70 @@ async def get_smart_thumbnail(poster_url):
 # 👆👆👆 YAHAN KHATAM 👆👆👆
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Step 1: Admin se file lo, par save mat karo.
-    Draft list me add karo aur action pucho.
-    """
+    """Admin se file receive karne wala function (Cleaner Logic)"""
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
 
-    # Check agar user filhal naam edit kar raha hai (Rename Mode)
+    # Rename Mode Check
     if context.user_data.get('awaiting_draft_rename'):
         return await handle_draft_rename(update, context)
 
     message = update.effective_message
     if not (message.document or message.video): return
 
-    # File Details nikalo
     file_name = message.document.file_name if message.document else (message.video.file_name or "Unknown")
     file_size = message.document.file_size if message.document else message.video.file_size
     
-    # 1. Name Guessing Logic (Smart Regex)
-    clean_name = re.sub(r'[._-]', ' ', file_name)
-    clean_name = re.sub(r'\b(480p|720p|1080p|2160p|hevc|x264|x265|10bit|hindi|dubbed|dual|audio|eng|sub|web-dl|bluray)\b', '', clean_name, flags=re.IGNORECASE)
+    # --- 🔥 NAME CLEANING (Ye "Backchodi" hatane ke liye hai) 🔥 ---
+    clean_name = file_name
+    
+    # 1. Sabse pehle brackets [...] hatao (Jisme channel name hota hai)
+    # Example: "[@ClipmateZone] Movie.mkv" -> " Movie.mkv"
+    clean_name = re.sub(r'\[.*?\]', '', clean_name)
+    
+    # 2. Dots, Underscore hatao
+    clean_name = re.sub(r'[._-]', ' ', clean_name)
+    
+    # 3. Year ke baad ka sab kuch uda do (Safe Game)
+    # Example: "Movie Name 2024 Dual Audio..." -> "Movie Name"
+    match = re.search(r'(.*?\b(19|20)\d{2}\b)', clean_name)
+    if match:
+        clean_name = match.group(1)
+
+    # 4. Faltu words ki list (Regex)
+    clean_name = re.sub(r'\b(480p|720p|1080p|2160p|hevc|x264|x265|10bit|hindi|dubbed|dual|audio|eng|sub|web-dl|webrip|web|hdrip|bluray|camrip|pre-dvdrip|s\d+e\d+|season|episode)\b', '', clean_name, flags=re.IGNORECASE)
+    
+    # 5. Extra spaces clean karo
     clean_name = re.sub(r'\s+', ' ', clean_name).strip()
 
-    # 2. Draft Check
+    # --- DRAFT LOGIC ---
     if user_id not in PENDING_DRAFTS:
-        PENDING_DRAFTS[user_id] = {
-            'files': [],
-            'suggested_name': clean_name,
-            'last_msg_id': None
-        }
+        PENDING_DRAFTS[user_id] = {'files': [], 'suggested_name': clean_name}
     
-    # List me add karo
     PENDING_DRAFTS[user_id]['files'].append({
-        'message_obj': message, # Pura message save kar rahe hain copy ke liye
+        'message_obj': message,
         'file_name': file_name,
         'file_size': file_size
     })
 
-    # Purana menu delete karo (taki chat clean rahe)
-    last_id = PENDING_DRAFTS[user_id].get('last_msg_id')
-    if last_id:
-        try: await context.bot.delete_message(chat_id=user_id, message_id=last_id)
-        except: pass
-
-    # 3. Naya Menu Dikhao
     count = len(PENDING_DRAFTS[user_id]['files'])
+    # Agar ye pehli file hai to clean name set karo
+    if count == 1:
+        PENDING_DRAFTS[user_id]['suggested_name'] = clean_name
+        
     current_name = PENDING_DRAFTS[user_id]['suggested_name']
 
     keyboard = [
         [InlineKeyboardButton(f"✅ PROCESS: {current_name}", callback_data="process_draft")],
         [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
-        [InlineKeyboardButton("🔗 Set IMDb ID", callback_data="set_draft_imdb")], # <--- NEW BUTTON
+        [InlineKeyboardButton("🔗 Set IMDb ID", callback_data="set_draft_imdb")],
         [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
     ]
 
-    status_text = (
-        f"📥 **Draft Staging Area**\n"
-        f"🔢 Total Files: **{count}**\n"
-        f"🎬 Target Movie: `{current_name}`\n\n"
-        f"👇 *Aur files bhejni hain to bhejo, ya Process dabao.*"
+    await message.reply_text(
+        f"📥 **Draft Staging ({count} Files)**\n🎬 Target: `{current_name}`\n👇 Aur files bhejo ya Process dabao.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
     sent_msg = await message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
