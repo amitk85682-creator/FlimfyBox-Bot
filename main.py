@@ -65,6 +65,7 @@ except Exception:
 
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
+PENDING_DRAFTS = {}  # यह "Temporary Memory" है जहाँ फाइलें जमा होंगी
 # ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
 SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
@@ -2433,6 +2434,172 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # --- DRAFT SYSTEM HANDLERS ---
+    if data == "edit_draft_name":
+        await query.answer()
+        await query.message.reply_text("✏️ **Send New Name:**\nAb agla message jo aap bhejenge wo movie ka naam mana jayega.")
+        context.user_data['awaiting_draft_rename'] = True
+        return
+
+    elif data == "clear_draft":
+        if user_id in PENDING_DRAFTS:
+            del PENDING_DRAFTS[user_id]
+        await query.message.delete()
+        await query.message.reply_text("🗑️ **Draft Cleared!** Start fresh.")
+        return
+
+    elif data == "process_draft":
+        if user_id not in PENDING_DRAFTS:
+            await query.answer("❌ Draft expire ho gaya!", show_alert=True)
+            return
+
+        # --- PROCESS START ---
+        draft = PENDING_DRAFTS[user_id]
+        movie_title = draft['suggested_name']
+        files = draft['files']
+        
+        await query.edit_message_text(f"🚀 **Processing Started...**\n🎬 Movie: {movie_title}\n📂 Files: {len(files)}\n\n⏳ Metadata fetching & Uploading...")
+
+        # 1. Fetch Metadata (IMDb/OMDb)
+        metadata = await run_async(fetch_movie_metadata, movie_title)
+        
+        # Default Values
+        poster_url = None
+        genre = "Unknown"
+        year = 0
+        imdb_id = None
+        rating = "N/A"
+        category = "Mixed"
+        description = "Uploaded via Bot"
+
+        if metadata:
+            # Metadata Unpacking (Ensure your fetch function returns 8 values or adjust here)
+            # Assuming format: (title, year, poster, genre, imdb_id, rating, plot, category)
+            # Agar format alag hai to yahan adjust karein
+            try:
+                m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
+                poster_url = m_poster
+                year = m_year
+                genre = m_genre
+                imdb_id = m_imdb
+                rating = m_rating
+                description = m_plot
+                category = m_cat
+                # Title hum wahi rakhenge jo Admin ne Draft me set kiya hai (Safe side)
+            except:
+                pass 
+
+        # 2. Database Entry (Movies Table)
+        conn = get_db_connection()
+        if not conn:
+            await query.message.reply_text("❌ DB Connection Failed!")
+            return
+
+        cur = conn.cursor()
+        try:
+            # Insert or Update Movie
+            cur.execute(
+                """
+                INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE 
+                SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
+                    poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url)
+                RETURNING id
+                """,
+                (movie_title, imdb_id, poster_url, year, genre, rating, description, category)
+            )
+            movie_id = cur.fetchone()[0]
+            conn.commit()
+
+            # 3. Upload Loop & File Saving
+            channels = get_storage_channels() # .env se channel list lo
+            success_count = 0
+            
+            for file_data in files:
+                msg_obj = file_data['message_obj']
+                f_name = file_data['file_name']
+                f_size = file_data['file_size']
+                f_size_str = get_readable_file_size(f_size) # Helper function
+                
+                # Quality Label Generate (e.g. 720p [1.2GB])
+                # Note: 'generate_quality_label' function aapke code me hona chahiye
+                quality_label = generate_quality_label(f_name, f_size_str)
+                
+                backup_map = {}
+                main_url = ""
+
+                # Upload to Backup Channels
+                for ch_id in channels:
+                    try:
+                        # Copy Message (Fastest & Safest)
+                        sent = await context.bot.copy_message(
+                            chat_id=ch_id,
+                            from_chat_id=user_id,
+                            message_id=msg_obj.message_id
+                        )
+                        backup_map[str(ch_id)] = sent.message_id
+                        
+                        # Pehle channel ka link main bana lo
+                        if not main_url:
+                            clean_id = str(ch_id).replace("-100", "")
+                            main_url = f"https://t.me/c/{clean_id}/{sent.message_id}"
+                            
+                    except Exception as e:
+                        logger.error(f"Upload failed for {ch_id}: {e}")
+
+                # Save File to DB
+                if main_url:
+                    cur.execute(
+                        """
+                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (movie_id, quality) 
+                        DO UPDATE SET url = EXCLUDED.url, backup_map = EXCLUDED.backup_map
+                        """,
+                        (movie_id, quality_label, f_size_str, main_url, json.dumps(backup_map))
+                    )
+                    success_count += 1
+
+            conn.commit()
+            
+            # 4. Final Output to Admin
+            final_code = f"/post_query {movie_title}"
+            report = (
+                f"✅ **Batch Completed!**\n"
+                f"🎬 Movie: `{movie_title}`\n"
+                f"📂 Files Saved: {success_count}\n"
+                f"ℹ️ IMDb: {'✅ Found' if poster_url else '❌ Not Found'}\n\n"
+                f"👇 **Copy & Post This Code:**"
+            )
+
+            # Agar Poster mila to uske sath code bhejo (Ready to Forward)
+            if poster_url and "http" in poster_url:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=poster_url,
+                    caption=f"{report}\n`{final_code}`",
+                    parse_mode='Markdown'
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"{report}\n`{final_code}`",
+                    parse_mode='Markdown'
+                )
+
+            # Cleanup
+            del PENDING_DRAFTS[user_id]
+
+        except Exception as e:
+            logger.error(f"Process Draft Error: {e}")
+            await query.message.reply_text(f"❌ Error: {e}")
+            conn.rollback()
+        finally:
+            cur.close()
+            close_db_connection(conn)
+        return
+    
     # === NEW: GENRE CALLBACK HANDLER ===
     if data.startswith(("genre_", "cancel_genre")):
         await handle_genre_selection(update, context)
@@ -3193,104 +3360,103 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Batch Error: {e}")
         await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: close_db_connection(conn)
+
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
-    FIXED: Removed the code causing 'Connection already closed' error.
+    Step 1: Admin se file lo, par save mat karo.
+    Draft list me add karo aur action pucho.
     """
-    if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
-        return
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID: return
+
+    # Check agar user filhal naam edit kar raha hai (Rename Mode)
+    if context.user_data.get('awaiting_draft_rename'):
+        return await handle_draft_rename(update, context)
 
     message = update.effective_message
     if not (message.document or message.video): return
 
-    # Status message
-    status = await message.reply_text("⏳ Processing... Uploading to Backup Channels...", quote=True)
-
-    # 1. Get Channels
-    channels = get_storage_channels()
-    if not channels:
-        await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
-        return
-
-    backup_map = {}  # Store {channel_id: message_id}
-    success_uploads = 0
-
-    # 2. Multi-Channel Upload Loop
-    for chat_id in channels:
-        try:
-            sent = await message.copy(chat_id=chat_id)
-            backup_map[str(chat_id)] = sent.message_id
-            success_uploads += 1
-        except Exception as e:
-            logger.error(f"Upload failed for {chat_id}: {e}")
-
-    if success_uploads == 0:
-        await status.edit_text("❌ Failed to upload to any channel.")
-        return
-
-    # 3. Prepare DB Data
-    file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
+    # File Details nikalo
+    file_name = message.document.file_name if message.document else (message.video.file_name or "Unknown")
     file_size = message.document.file_size if message.document else message.video.file_size
     
-    # Calculate Size String
-    file_size_str = get_readable_file_size(file_size)
-    
-    # Generate Label
-    label = generate_quality_label(file_name, file_size_str)
-    
-    # Generate Main Link
-    main_channel_id = channels[0]
-    main_msg_id = backup_map.get(str(main_channel_id))
-    clean_id = str(main_channel_id).replace("-100", "")
-    main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
+    # 1. Name Guessing Logic (Smart Regex)
+    clean_name = re.sub(r'[._-]', ' ', file_name)
+    clean_name = re.sub(r'\b(480p|720p|1080p|2160p|hevc|x264|x265|10bit|hindi|dubbed|dual|audio|eng|sub|web-dl|bluray)\b', '', clean_name, flags=re.IGNORECASE)
+    clean_name = re.sub(r'\s+', ' ', clean_name).strip()
 
-    # 4. Save to DB
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            
-            # --- QUERY: Insert or Update ---
-            # Using ON CONFLICT logic correctly inside the main block
-            cur.execute(
-                """
-                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (movie_id, quality) 
-                DO UPDATE SET 
-                    url = EXCLUDED.url,
-                    file_size = EXCLUDED.file_size,
-                    backup_map = EXCLUDED.backup_map,
-                    file_id = NULL
-                """,
-                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-            )
-            
-            conn.commit()
-            cur.close()
-            
-            BATCH_SESSION['file_count'] += 1
-            
-            await status.edit_text(
-                f"✅ **File Saved!**\n"
-                f"📂 Copies: {success_uploads}\n"
-                f"🏷 Label: `{label}`\n"
-                f"🔢 Total: {BATCH_SESSION['file_count']}",
-                parse_mode='Markdown'
-            )
+    # 2. Draft Check
+    if user_id not in PENDING_DRAFTS:
+        PENDING_DRAFTS[user_id] = {
+            'files': [],
+            'suggested_name': clean_name,
+            'last_msg_id': None
+        }
+    
+    # List me add karo
+    PENDING_DRAFTS[user_id]['files'].append({
+        'message_obj': message, # Pura message save kar rahe hain copy ke liye
+        'file_name': file_name,
+        'file_size': file_size
+    })
 
-    except Exception as e:
-        logger.error(f"DB Save Error: {e}")
-        await status.edit_text(f"❌ DB Save Failed: {e}")
-    finally:
-        # Connection closes ONLY after everything is done
-        if conn:
-            try:
-                close_db_connection(conn)
-            except:
-                pass
+    # Purana menu delete karo (taki chat clean rahe)
+    last_id = PENDING_DRAFTS[user_id].get('last_msg_id')
+    if last_id:
+        try: await context.bot.delete_message(chat_id=user_id, message_id=last_id)
+        except: pass
+
+    # 3. Naya Menu Dikhao
+    count = len(PENDING_DRAFTS[user_id]['files'])
+    current_name = PENDING_DRAFTS[user_id]['suggested_name']
+
+    keyboard = [
+        [InlineKeyboardButton(f"✅ PROCESS: {current_name}", callback_data="process_draft")],
+        [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
+        [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
+    ]
+
+    status_text = (
+        f"📥 **Draft Staging Area**\n"
+        f"🔢 Total Files: **{count}**\n"
+        f"🎬 Target Movie: `{current_name}`\n\n"
+        f"👇 *Aur files bhejni hain to bhejo, ya Process dabao.*"
+    )
+
+    sent_msg = await message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    PENDING_DRAFTS[user_id]['last_msg_id'] = sent_msg.message_id
+
+
+async def handle_draft_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Step 2: Agar admin ne naya naam bheja hai to update karo.
+    """
+    user_id = update.effective_user.id
+    new_name = update.message.text.strip()
+    
+    if user_id in PENDING_DRAFTS:
+        # Naam update karo
+        PENDING_DRAFTS[user_id]['suggested_name'] = new_name
+        
+        # State clear karo
+        context.user_data['awaiting_draft_rename'] = False
+        
+        # Menu wapas dikhao
+        count = len(PENDING_DRAFTS[user_id]['files'])
+        keyboard = [
+            [InlineKeyboardButton(f"✅ PROCESS: {new_name}", callback_data="process_draft")],
+            [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
+            [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
+        ]
+        
+        await update.message.reply_text(
+            f"✅ **Name Updated!**\n🎬 New Name: `{new_name}`\n🔢 Files: {count}\n\n👇 Ab Process dabayein:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text("❌ Koi active draft nahi mila.")
+        context.user_data['awaiting_draft_rename'] = False
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -5325,6 +5491,9 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("batchid", batch_id_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     application.add_handler(CommandHandler("post", post_to_topic_command))
+
+    # Listener handler (Documents/Video ke liye)
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO | filters.TEXT), pm_file_listener))
     
     # PM Listener for Batch
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener))
