@@ -16,6 +16,8 @@ from collections import defaultdict
 from telegram.error import RetryAfter, TelegramError
 from typing import Optional
 from psycopg2 import pool
+from PIL import Image, ImageFilter, ImageOps
+from io import BytesIO
 
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
 logging.basicConfig(
@@ -2441,6 +2443,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_draft_rename'] = True
         return
 
+    elif data == "set_draft_imdb":
+        await query.answer()
+        await query.message.reply_text(
+            "🔗 **Send IMDb ID:**\n"
+            "Example: `tt15462578`\n\n"
+            "Ab agla message IMDb ID mana jayega."
+        )
+        context.user_data['awaiting_draft_imdb'] = True
+        return
+    
     elif data == "clear_draft":
         if user_id in PENDING_DRAFTS:
             del PENDING_DRAFTS[user_id]
@@ -2456,12 +2468,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # --- PROCESS START ---
         draft = PENDING_DRAFTS[user_id]
         movie_title = draft['suggested_name']
+        manual_id = draft.get('manual_imdb_id') # <--- Check if ID exists
         files = draft['files']
         
-        await query.edit_message_text(f"🚀 **Processing Started...**\n🎬 Movie: {movie_title}\n📂 Files: {len(files)}\n\n⏳ Metadata fetching & Uploading...")
+        await query.edit_message_text(f"🚀 **Processing...**\n⏳ Metadata fetching...")
 
-        # 1. Fetch Metadata (IMDb/OMDb)
-        metadata = await run_async(fetch_movie_metadata, movie_title)
+        # 1. Fetch Metadata (Logic Change)
+        if manual_id:
+            # Agar ID set hai, to ID se dhundo (100% Accurate)
+            metadata = await run_async(fetch_movie_metadata, manual_id)
+        else:
+            # Nahi to Naam se dhundo
+            metadata = await run_async(fetch_movie_metadata, movie_title)
         
         # Default Values
         poster_url = None
@@ -3377,6 +3395,67 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: close_db_connection(conn)
 
+async def get_smart_thumbnail(poster_url):
+    """
+    Magic Function: 
+    1. Downloads Poster.
+    2. Creates a 16:9 Landscape Canvas (320x180).
+    3. Adds Blurred Background + Centered Poster.
+    """
+    try:
+        if not poster_url: return None
+        
+        # 1. Image Download
+        response = requests.get(poster_url, timeout=5)
+        if response.status_code != 200: return None
+        
+        img = Image.open(BytesIO(response.content)).convert("RGB")
+        
+        # --- LANDSCAPE LOGIC (16:9) ---
+        # Target Dimensions (Telegram Thumb Limit: 320px width)
+        # 16:9 Ratio of 320 width is approx 180 height
+        target_w, target_h = 320, 180
+        
+        # A. Background Create karo (Blur wala)
+        # Image ko itna bada karo ki width fit ho jaye
+        bg = img.copy()
+        bg_ratio = target_w / bg.width
+        bg_new_h = int(bg.height * bg_ratio)
+        bg = bg.resize((target_w, bg_new_h), Image.Resampling.LANCZOS)
+        
+        # Center Crop karo (taaki height 180 hi rahe)
+        left = 0
+        top = (bg_new_h - target_h) / 2
+        right = target_w
+        bottom = (bg_new_h + target_h) / 2
+        bg = bg.crop((left, top, right, bottom))
+        
+        # Blur Effect Lagao
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=3)) # 3-5 is good blur
+        
+        # B. Foreground (Main Poster)
+        # Isko height ke hisab se resize karo (taaki wo 180px height me fit aye)
+        fg = img.copy()
+        fg.thumbnail((target_w, target_h - 10)) # Thoda margin (padding) choda
+        
+        # C. Paste karo (Center mein)
+        # Background par Foreground chipkao
+        fg_x = (target_w - fg.width) // 2
+        fg_y = (target_h - fg.height) // 2
+        bg.paste(fg, (fg_x, fg_y))
+        
+        # 4. Save to Bytes
+        output = BytesIO()
+        bg.save(output, format='JPEG', quality=90)
+        output.seek(0)
+        return output
+        
+    except Exception as e:
+        logger.error(f"Landscape Thumb Error: {e}")
+        return None
+
+# 👆👆👆 YAHAN KHATAM 👆👆👆
+
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Step 1: Admin se file lo, par save mat karo.
@@ -3429,6 +3508,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton(f"✅ PROCESS: {current_name}", callback_data="process_draft")],
         [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
+        [InlineKeyboardButton("🔗 Set IMDb ID", callback_data="set_draft_imdb")], # <--- NEW BUTTON
         [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
     ]
 
@@ -3474,6 +3554,38 @@ async def handle_draft_rename(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Koi active draft nahi mila.")
         context.user_data['awaiting_draft_rename'] = False
     
+async def handle_draft_imdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """IMDb ID manually set karne ke liye"""
+    user_id = update.effective_user.id
+    imdb_id = update.message.text.strip()
+    
+    # Simple validation (tt + numbers)
+    if not imdb_id.startswith("tt"):
+        await update.message.reply_text("❌ Invalid ID! `tt` se shuru honi chahiye (e.g. tt1234567).")
+        return
+
+    if user_id in PENDING_DRAFTS:
+        # Draft me ID save kar lo
+        PENDING_DRAFTS[user_id]['manual_imdb_id'] = imdb_id
+        context.user_data['awaiting_draft_imdb'] = False
+        
+        # Confirmation
+        current_name = PENDING_DRAFTS[user_id]['suggested_name']
+        count = len(PENDING_DRAFTS[user_id]['files'])
+        
+        keyboard = [
+            [InlineKeyboardButton(f"✅ PROCESS: {current_name}", callback_data="process_draft")],
+            [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
+            [InlineKeyboardButton(f"🔗 ID Set: {imdb_id}", callback_data="set_draft_imdb")],
+            [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
+        ]
+        
+        await update.message.reply_text(
+            f"✅ **IMDb ID Linked!**\n🆔 `{imdb_id}`\n\nAb 'Process' dabayenge to 100% sahi data aayega.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Finishes session -> Generates AI Aliases -> Shows Report
@@ -5322,9 +5434,15 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # अगर Admin रिनेम मोड में है, तो सर्च मत करो, सीधा रिनेम फंक्शन को भेजो
+    
+    # Rename check
     if context.user_data.get('awaiting_draft_rename'):
         return await handle_draft_rename(update, context)
+        
+    # 👇👇👇 IMDb ID Check 👇👇👇
+    if context.user_data.get('awaiting_draft_imdb'):
+        return await handle_draft_imdb(update, context)
+    # 👆👆👆
     
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
