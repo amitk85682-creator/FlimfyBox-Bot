@@ -1033,7 +1033,7 @@ def is_valid_imdb_id(imdb_id: str) -> bool:
     """Validate IMDb ID format (tt1234567 or tt12345678)"""
     if not imdb_id:
         return False
-    return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
+    return bool(re.match(r'^tt\d{7,12}$', imdb_id.strip()))
 
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
@@ -1088,7 +1088,7 @@ def fetch_movie_metadata(query: str):
         if omdb_api_key:
             try:
                 url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
-                if re.match(r'^tt\d{7,8}$', query.strip()): # IMDb ID support
+                if re.match(r'^tt\d{7,12}$', query.strip()): # IMDb ID support
                     url = f"https://www.omdbapi.com/?i={query.strip()}&apikey={omdb_api_key}"
 
                 response = requests.get(url, timeout=10)
@@ -1112,7 +1112,7 @@ def fetch_movie_metadata(query: str):
                 logger.warning(f"OMDb Error: {e}")
 
         # 🔍 2. Cinemagoer Strategy (Fallback)
-        if re.match(r'^tt\d{7,8}$', query.strip()):
+        if re.match(r'^tt\d{7,12}$', query.strip()):
             movie = ia.get_movie(query.strip()[2:])
         else:
             movies = ia.search_movie(query)
@@ -2576,7 +2576,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         sent = await context.bot.send_document(
                             chat_id=ch_id,
                             document=file_id_to_send,
-                            file_name=new_filename,
+                            filename=new_filename,
                             thumbnail=landscape_thumb, 
                             caption=f"🎬 {movie_title}\n✨ @FilmFyBoxMoviesHD",
                             parse_mode='Markdown'
@@ -3314,7 +3314,7 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_valid_imdb_id(imdb_id):
             await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
             return
-    elif not re.match(r'^tt\d{7,8}$', imdb_id):
+    elif not re.match(r'^tt\d{7,12}$', imdb_id):
          await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
          return
         
