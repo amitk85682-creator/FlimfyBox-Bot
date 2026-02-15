@@ -3420,7 +3420,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: close_db_connection(conn)
 
-async def get_smart_thumbnail(poster_url):
+def get_smart_thumbnail(poster_url):
     """
     Magic Function: 
     1. Downloads Poster.
