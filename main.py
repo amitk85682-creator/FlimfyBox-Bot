@@ -16,8 +16,6 @@ from collections import defaultdict
 from telegram.error import RetryAfter, TelegramError
 from typing import Optional
 from psycopg2 import pool
-from PIL import Image, ImageFilter, ImageOps
-from io import BytesIO
 
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
 logging.basicConfig(
@@ -67,7 +65,6 @@ except Exception:
 
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
-PENDING_DRAFTS = {}  # यह "Temporary Memory" है जहाँ फाइलें जमा होंगी
 # ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
 SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
@@ -1033,7 +1030,7 @@ def is_valid_imdb_id(imdb_id: str) -> bool:
     """Validate IMDb ID format (tt1234567 or tt12345678)"""
     if not imdb_id:
         return False
-    return bool(re.match(r'^tt\d{7,12}$', imdb_id.strip()))
+    return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
 
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
@@ -1088,7 +1085,7 @@ def fetch_movie_metadata(query: str):
         if omdb_api_key:
             try:
                 url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
-                if re.match(r'^tt\d{7,12}$', query.strip()): # IMDb ID support
+                if re.match(r'^tt\d{7,8}$', query.strip()): # IMDb ID support
                     url = f"https://www.omdbapi.com/?i={query.strip()}&apikey={omdb_api_key}"
 
                 response = requests.get(url, timeout=10)
@@ -1112,7 +1109,7 @@ def fetch_movie_metadata(query: str):
                 logger.warning(f"OMDb Error: {e}")
 
         # 🔍 2. Cinemagoer Strategy (Fallback)
-        if re.match(r'^tt\d{7,12}$', query.strip()):
+        if re.match(r'^tt\d{7,8}$', query.strip()):
             movie = ia.get_movie(query.strip()[2:])
         else:
             movies = ia.search_movie(query)
@@ -2436,229 +2433,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
-    # --- DRAFT SYSTEM HANDLERS ---
-    if data == "edit_draft_name":
-        await query.answer()
-        await query.message.reply_text("✏️ **Send New Name:**\nAb agla message jo aap bhejenge wo movie ka naam mana jayega.")
-        context.user_data['awaiting_draft_rename'] = True
-        return
-
-    elif data == "set_draft_imdb":
-        await query.answer()
-        await query.message.reply_text(
-            "🔗 **Send IMDb ID:**\n"
-            "Example: `tt15462578`\n\n"
-            "Ab agla message IMDb ID mana jayega."
-        )
-        context.user_data['awaiting_draft_imdb'] = True
-        return
-    
-    elif data == "clear_draft":
-        if user_id in PENDING_DRAFTS:
-            del PENDING_DRAFTS[user_id]
-        await query.message.delete()
-        await query.message.reply_text("🗑️ **Draft Cleared!** Start fresh.")
-        return
-
-    elif data == "process_draft":
-        if user_id not in PENDING_DRAFTS:
-            await query.answer("❌ Draft expire ho gaya!", show_alert=True)
-            return
-
-        # --- PROCESS START ---
-        draft = PENDING_DRAFTS[user_id]
-        movie_title = draft['suggested_name'] # यह "कचरा" नाम हो सकता है
-        manual_id = draft.get('manual_imdb_id')
-        files = draft['files']
-        
-        await query.edit_message_text(f"🚀 **Processing...**\n⏳ Generating Landscape Thumbnails & Uploading...")
-
-        # 1. Fetch Metadata (Metadata Check)
-        if manual_id:
-            metadata = await run_async(fetch_movie_metadata, manual_id)
-        else:
-            metadata = await run_async(fetch_movie_metadata, movie_title)
-        
-        # Default Variables
-        poster_url = None
-        genre = "Unknown"
-        year = 0
-        imdb_id = None
-        rating = "N/A"
-        category = "Mixed"
-        description = "Uploaded via Bot"
-
-        if metadata:
-            try:
-                # Unpack Metadata
-                m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
-                poster_url = m_poster
-                year = m_year
-                genre = m_genre
-                imdb_id = m_imdb
-                rating = m_rating
-                description = m_plot
-                category = m_cat
-                
-                # ✅ FIX 1: Agar IMDb mila hai, to Naam REPLACE kar do
-                if m_title:
-                    movie_title = f"{m_title} ({m_year})" if m_year else m_title
-                    
-            except Exception as e:
-                logger.error(f"Metadata Error: {e}")
-        else:
-            # ✅ FIX 2: Agar IMDb NAHI mila, to bhi naam Clean karo (Fallback)
-            # Faltu words hatane ka Regex
-            clean_fallback = re.sub(r'\b(480p|720p|1080p|2160p|hevc|x264|x265|10bit|hindi|dubbed|dual|audio|eng|sub|web-dl|webrip|hdr|remux|truehd|atmos|amzn|nf|dsnp|s\d+e\d+|complete|season|s\d+)\b', '', movie_title, flags=re.IGNORECASE)
-            clean_fallback = re.sub(r'[._-]', ' ', clean_fallback)
-            clean_fallback = re.sub(r'\s+', ' ', clean_fallback).strip()
-            # Agar naam 2 letter se bada hai, to use update kar do
-            if len(clean_fallback) > 2:
-                movie_title = clean_fallback
-
-        # 🔥 STEP 1.1: Landscape Thumbnail Generate Karo 🔥
-        landscape_thumb = None
-        if poster_url:
-            landscape_thumb = await run_async(get_smart_thumbnail, poster_url)
-
-        # 2. Database Entry (Movies Table)
-        conn = get_db_connection()
-        if not conn:
-            await query.message.reply_text("❌ DB Connection Failed!")
-            return
-
-        cur = conn.cursor()
-        try:
-            # 3. Insert or Update Movie
-            cur.execute(
-                """
-                INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
-                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (title) DO UPDATE 
-                SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
-                    poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url)
-                RETURNING id
-                """,
-                (movie_title, imdb_id, poster_url, year, genre, rating, description, category)
-            )
-            movie_id = cur.fetchone()[0]
-            conn.commit()
-
-            # 4. Upload Loop (With Landscape Thumbnail)
-            channels = get_storage_channels()
-            success_count = 0
-            
-            for file_data in files:
-                msg_obj = file_data['message_obj']
-                f_name = file_data['file_name']
-                f_size = file_data['file_size']
-                f_size_str = get_readable_file_size(f_size)
-                
-                # File ID selection
-                file_id_to_send = msg_obj.document.file_id if msg_obj.document else msg_obj.video.file_id
-
-                # Branding Name (Clean Title Use karega)
-                clean_title_for_file = re.sub(r'[^\w\s-]', '', movie_title).strip()
-                new_filename = f"[@FilmFyBox] {clean_title_for_file}.mkv"
-                
-                quality_label = generate_quality_label(f_name, f_size_str)
-                backup_map = {}
-                main_url = ""
-
-                # Upload to Backups
-                for ch_id in channels:
-                    try:
-                        # Reset Thumb Pointer
-                        if landscape_thumb:
-                            landscape_thumb.seek(0)
-
-                        # 🔥 Send with Landscape Thumbnail 🔥
-                        sent = await context.bot.send_document(
-                            chat_id=ch_id,
-                            document=file_id_to_send,
-                            filename=new_filename,
-                            thumbnail=landscape_thumb, 
-                            caption=f"🎬 {movie_title}\n✨ @FilmFyBoxMoviesHD",
-                            parse_mode='Markdown'
-                        )
-                        backup_map[str(ch_id)] = sent.message_id
-                        
-                        if not main_url:
-                            clean_id = str(ch_id).replace("-100", "")
-                            main_url = f"https://t.me/c/{clean_id}/{sent.message_id}"
-                            
-                    except Exception as e:
-                        logger.error(f"Upload failed for {ch_id}: {e}")
-
-                # Save File to DB
-                if main_url:
-                    cur.execute(
-                        """
-                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (movie_id, quality) 
-                        DO UPDATE SET url = EXCLUDED.url, backup_map = EXCLUDED.backup_map
-                        """,
-                        (movie_id, quality_label, f_size_str, main_url, json.dumps(backup_map))
-                    )
-                    success_count += 1
-
-            conn.commit()
-
-            # --- 5. AI ALIAS GENERATION ---
-            alias_msg = ""
-            try:
-                await query.edit_message_text(f"🧠 **Generating AI Aliases...**\n🎬 Movie: {movie_title}")
-                aliases = await run_async(generate_aliases_gemini, movie_title)
-                alias_count = 0
-                if aliases:
-                    for alias in aliases:
-                        if len(alias) > 255: continue
-                        try:
-                            cur.execute("SAVEPOINT sp_alias")
-                            cur.execute(
-                                "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-                                (movie_id, alias)
-                            )
-                            cur.execute("RELEASE SAVEPOINT sp_alias")
-                            alias_count += 1
-                        except Exception:
-                            cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
-                    conn.commit()
-                    alias_msg = f"🤖 **Aliases:** {alias_count} Added"
-                else:
-                    alias_msg = "🤖 **Aliases:** API Failed/No Data"
-            except Exception as e:
-                logger.error(f"Alias Gen Error: {e}")
-                alias_msg = "🤖 **Aliases:** Error"
-
-            # 6. Final Output
-            final_code = f"/post_query {movie_title}"
-            report = (
-                f"✅ **Batch Completed!**\n"
-                f"🎬 Movie: `{movie_title}`\n"
-                f"📂 Files Saved: {success_count}\n"
-                f"ℹ️ IMDb: {'✅ Found' if poster_url else '❌ Not Found (Cleaned)'}\n"
-                f"{alias_msg}\n\n"
-                f"👇 **Copy & Post This Code:**"
-            )
-
-            if poster_url and "http" in poster_url:
-                await context.bot.send_photo(chat_id=user_id, photo=poster_url, caption=f"{report}\n`{final_code}`", parse_mode='Markdown')
-            else:
-                await context.bot.send_message(chat_id=user_id, text=f"{report}\n`{final_code}`", parse_mode='Markdown')
-
-            del PENDING_DRAFTS[user_id]
-
-        except Exception as e:
-            logger.error(f"Process Draft Error: {e}")
-            await query.message.reply_text(f"❌ Error: {e}")
-            conn.rollback()
-        finally:
-            cur.close()
-            close_db_connection(conn)
-        return
-    
     # === NEW: GENRE CALLBACK HANDLER ===
     if data.startswith(("genre_", "cancel_genre")):
         await handle_genre_selection(update, context)
@@ -3314,7 +3088,7 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_valid_imdb_id(imdb_id):
             await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
             return
-    elif not re.match(r'^tt\d{7,12}$', imdb_id):
+    elif not re.match(r'^tt\d{7,8}$', imdb_id):
          await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
          return
         
@@ -3419,202 +3193,105 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Batch Error: {e}")
         await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: close_db_connection(conn)
-
-def get_smart_thumbnail(poster_url):
-    """
-    Magic Function: 
-    1. Downloads Poster.
-    2. Creates a 16:9 Landscape Canvas (320x180).
-    3. Adds Blurred Background + Centered Poster.
-    """
-    try:
-        if not poster_url: return None
-        
-        # 1. Image Download
-        response = requests.get(poster_url, timeout=5)
-        if response.status_code != 200: return None
-        
-        img = Image.open(BytesIO(response.content)).convert("RGB")
-        
-        # --- LANDSCAPE LOGIC (16:9) ---
-        # Target Dimensions (Telegram Thumb Limit: 320px width)
-        # 16:9 Ratio of 320 width is approx 180 height
-        target_w, target_h = 320, 180
-        
-        # A. Background Create karo (Blur wala)
-        # Image ko itna bada karo ki width fit ho jaye
-        bg = img.copy()
-        bg_ratio = target_w / bg.width
-        bg_new_h = int(bg.height * bg_ratio)
-        bg = bg.resize((target_w, bg_new_h), Image.Resampling.LANCZOS)
-        
-        # Center Crop karo (taaki height 180 hi rahe)
-        left = 0
-        top = (bg_new_h - target_h) / 2
-        right = target_w
-        bottom = (bg_new_h + target_h) / 2
-        bg = bg.crop((left, top, right, bottom))
-        
-        # Blur Effect Lagao
-        bg = bg.filter(ImageFilter.GaussianBlur(radius=3)) # 3-5 is good blur
-        
-        # B. Foreground (Main Poster)
-        # Isko height ke hisab se resize karo (taaki wo 180px height me fit aye)
-        fg = img.copy()
-        fg.thumbnail((target_w, target_h - 10)) # Thoda margin (padding) choda
-        
-        # C. Paste karo (Center mein)
-        # Background par Foreground chipkao
-        fg_x = (target_w - fg.width) // 2
-        fg_y = (target_h - fg.height) // 2
-        bg.paste(fg, (fg_x, fg_y))
-        
-        # 4. Save to Bytes
-        output = BytesIO()
-        bg.save(output, format='JPEG', quality=90)
-        output.seek(0)
-        return output
-        
-    except Exception as e:
-        logger.error(f"Landscape Thumb Error: {e}")
-        return None
-
-# 👆👆👆 YAHAN KHATAM 👆👆👆
-
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin se file receive karne wala function (Cleaner Logic)"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID: return
-
-    # Rename Mode Check
-    if context.user_data.get('awaiting_draft_rename'):
-        return await handle_draft_rename(update, context)
+    """
+    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
+    FIXED: Removed the code causing 'Connection already closed' error.
+    """
+    if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
+        return
 
     message = update.effective_message
     if not (message.document or message.video): return
 
-    file_name = message.document.file_name if message.document else (message.video.file_name or "Unknown")
-    file_size = message.document.file_size if message.document else message.video.file_size
-    
-    # --- 🔥 NAME CLEANING (Ye "Backchodi" hatane ke liye hai) 🔥 ---
-    clean_name = file_name
-    
-    # 1. Sabse pehle brackets [...] hatao (Jisme channel name hota hai)
-    # Example: "[@ClipmateZone] Movie.mkv" -> " Movie.mkv"
-    clean_name = re.sub(r'\[.*?\]', '', clean_name)
-    
-    # 2. Dots, Underscore hatao
-    clean_name = re.sub(r'[._-]', ' ', clean_name)
-    
-    # 3. Year ke baad ka sab kuch uda do (Safe Game)
-    # Example: "Movie Name 2024 Dual Audio..." -> "Movie Name"
-    match = re.search(r'(.*?\b(19|20)\d{2}\b)', clean_name)
-    if match:
-        clean_name = match.group(1)
+    # Status message
+    status = await message.reply_text("⏳ Processing... Uploading to Backup Channels...", quote=True)
 
-    # 4. Faltu words ki list (Regex)
-    clean_name = re.sub(r'\b(480p|720p|1080p|2160p|hevc|x264|x265|10bit|hindi|dubbed|dual|audio|eng|sub|web-dl|webrip|web|hdrip|bluray|camrip|pre-dvdrip|s\d+e\d+|season|episode)\b', '', clean_name, flags=re.IGNORECASE)
-    
-    # 5. Extra spaces clean karo
-    clean_name = re.sub(r'\s+', ' ', clean_name).strip()
-
-    # --- DRAFT LOGIC ---
-    if user_id not in PENDING_DRAFTS:
-        PENDING_DRAFTS[user_id] = {'files': [], 'suggested_name': clean_name}
-    
-    PENDING_DRAFTS[user_id]['files'].append({
-        'message_obj': message,
-        'file_name': file_name,
-        'file_size': file_size
-    })
-
-    count = len(PENDING_DRAFTS[user_id]['files'])
-    # Agar ye pehli file hai to clean name set karo
-    if count == 1:
-        PENDING_DRAFTS[user_id]['suggested_name'] = clean_name
-        
-    current_name = PENDING_DRAFTS[user_id]['suggested_name']
-
-    keyboard = [
-        [InlineKeyboardButton(f"✅ PROCESS: {current_name}", callback_data="process_draft")],
-        [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
-        [InlineKeyboardButton("🔗 Set IMDb ID", callback_data="set_draft_imdb")],
-        [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
-    ]
-
-    await message.reply_text(
-        f"📥 **Draft Staging ({count} Files)**\n🎬 Target: `{current_name}`\n👇 Aur files bhejo ya Process dabao.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-    sent_msg = await message.reply_text(status_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-    PENDING_DRAFTS[user_id]['last_msg_id'] = sent_msg.message_id
-
-
-async def handle_draft_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Step 2: Agar admin ne naya naam bheja hai to update karo.
-    """
-    user_id = update.effective_user.id
-    new_name = update.message.text.strip()
-    
-    if user_id in PENDING_DRAFTS:
-        # Naam update karo
-        PENDING_DRAFTS[user_id]['suggested_name'] = new_name
-        
-        # State clear karo
-        context.user_data['awaiting_draft_rename'] = False
-        
-        # Menu wapas dikhao
-        count = len(PENDING_DRAFTS[user_id]['files'])
-        keyboard = [
-            [InlineKeyboardButton(f"✅ PROCESS: {new_name}", callback_data="process_draft")],
-            [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
-            [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
-        ]
-        
-        await update.message.reply_text(
-            f"✅ **Name Updated!**\n🎬 New Name: `{new_name}`\n🔢 Files: {count}\n\n👇 Ab Process dabayein:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text("❌ Koi active draft nahi mila.")
-        context.user_data['awaiting_draft_rename'] = False
-    
-async def handle_draft_imdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """IMDb ID manually set karne ke liye"""
-    user_id = update.effective_user.id
-    imdb_id = update.message.text.strip()
-    
-    # Simple validation
-    if not imdb_id.startswith("tt"):
-        await update.message.reply_text("❌ Invalid ID! `tt` se shuru honi chahiye (e.g. tt1234567).")
+    # 1. Get Channels
+    channels = get_storage_channels()
+    if not channels:
+        await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
         return
 
-    if user_id in PENDING_DRAFTS:
-        # Draft me ID save kar lo
-        PENDING_DRAFTS[user_id]['manual_imdb_id'] = imdb_id
-        
-        # State clear
-        context.user_data['awaiting_draft_imdb'] = False
-        
-        # --- BUTTON NAME CHANGE ---
-        # Ab hum button par "Naam" nahi, "ID" dikhayenge taaki confirmation rahe
-        keyboard = [
-            [InlineKeyboardButton(f"✅ PROCESS NOW (Using ID: {imdb_id})", callback_data="process_draft")],
-            [InlineKeyboardButton("✏️ Rename Title", callback_data="edit_draft_name")],
-            [InlineKeyboardButton(f"🔗 ID Updated: {imdb_id}", callback_data="set_draft_imdb")],
-            [InlineKeyboardButton("🗑️ Cancel All", callback_data="clear_draft")]
-        ]
-        
-        await update.message.reply_text(
-            f"✅ **IMDb ID Linked!**\n🆔 `{imdb_id}`\n\nAb Process dabane par bot **sidha IMDb se data uthayega**, purane naam ko ignore kar dega.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+    backup_map = {}  # Store {channel_id: message_id}
+    success_uploads = 0
 
+    # 2. Multi-Channel Upload Loop
+    for chat_id in channels:
+        try:
+            sent = await message.copy(chat_id=chat_id)
+            backup_map[str(chat_id)] = sent.message_id
+            success_uploads += 1
+        except Exception as e:
+            logger.error(f"Upload failed for {chat_id}: {e}")
+
+    if success_uploads == 0:
+        await status.edit_text("❌ Failed to upload to any channel.")
+        return
+
+    # 3. Prepare DB Data
+    file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
+    file_size = message.document.file_size if message.document else message.video.file_size
+    
+    # Calculate Size String
+    file_size_str = get_readable_file_size(file_size)
+    
+    # Generate Label
+    label = generate_quality_label(file_name, file_size_str)
+    
+    # Generate Main Link
+    main_channel_id = channels[0]
+    main_msg_id = backup_map.get(str(main_channel_id))
+    clean_id = str(main_channel_id).replace("-100", "")
+    main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
+
+    # 4. Save to DB
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            
+            # --- QUERY: Insert or Update ---
+            # Using ON CONFLICT logic correctly inside the main block
+            cur.execute(
+                """
+                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (movie_id, quality) 
+                DO UPDATE SET 
+                    url = EXCLUDED.url,
+                    file_size = EXCLUDED.file_size,
+                    backup_map = EXCLUDED.backup_map,
+                    file_id = NULL
+                """,
+                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+            )
+            
+            conn.commit()
+            cur.close()
+            
+            BATCH_SESSION['file_count'] += 1
+            
+            await status.edit_text(
+                f"✅ **File Saved!**\n"
+                f"📂 Copies: {success_uploads}\n"
+                f"🏷 Label: `{label}`\n"
+                f"🔢 Total: {BATCH_SESSION['file_count']}",
+                parse_mode='Markdown'
+            )
+
+    except Exception as e:
+        logger.error(f"DB Save Error: {e}")
+        await status.edit_text(f"❌ DB Save Failed: {e}")
+    finally:
+        # Connection closes ONLY after everything is done
+        if conn:
+            try:
+                close_db_connection(conn)
+            except:
+                pass
+    
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Finishes session -> Generates AI Aliases -> Shows Report
@@ -5463,16 +5140,6 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    
-    # Rename check
-    if context.user_data.get('awaiting_draft_rename'):
-        return await handle_draft_rename(update, context)
-        
-    # 👇👇👇 IMDb ID Check 👇👇👇
-    if context.user_data.get('awaiting_draft_imdb'):
-        return await handle_draft_imdb(update, context)
-    # 👆👆👆
-    
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
@@ -5658,9 +5325,6 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("batchid", batch_id_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     application.add_handler(CommandHandler("post", post_to_topic_command))
-
-    # Listener handler (Documents/Video ke liye)
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO | filters.TEXT), pm_file_listener))
     
     # PM Listener for Batch
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener))
