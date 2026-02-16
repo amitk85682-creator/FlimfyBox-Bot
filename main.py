@@ -65,6 +65,11 @@ except Exception:
 
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
+
+DEFAULT_POSTER = os.environ.get(
+    "DEFAULT_POSTER",
+    "https://i.imgur.com/6XK4F6K.png"  # fallback placeholder
+)
 # ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
 SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
@@ -563,31 +568,35 @@ def track_message_for_deletion(context, chat_id, message_id, delay=60):
 # ==================== DATABASE FUNCTIONS ====================
 
 def setup_database():
-    """Setup database tables and indexes - UPDATED with IMDb columns"""
+    """Setup database tables and indexes (UPDATED to match usage in code)"""
     try:
         conn_str = FIXED_DATABASE_URL or DATABASE_URL
         conn = psycopg2.connect(conn_str)
         cur = conn.cursor()
-        
-        cur.execute('CREATE EXTENSION IF NOT EXISTS pg_trgm;')
 
-        # ✅ UPDATED TABLE: Added imdb_id, poster_url, year, genre columns
-        cur.execute('''
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+
+        # Movies table (now matches the rest of your code)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL UNIQUE,
-                url TEXT NOT NULL,
+                url TEXT NOT NULL DEFAULT '',
                 file_id TEXT,
                 is_unreleased BOOLEAN DEFAULT FALSE,
+
                 imdb_id TEXT,
                 poster_url TEXT,
-                year INTEGER,
+                year INTEGER DEFAULT 0,
                 genre TEXT,
-                rating TEXT  -- 👈 Added Rating
-            )
-        ''')
+                rating TEXT,
 
-        cur.execute('''
+                description TEXT,
+                category TEXT
+            )
+        """)
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS movie_files (
                 id SERIAL PRIMARY KEY,
                 movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
@@ -595,13 +604,19 @@ def setup_database():
                 url TEXT,
                 file_id TEXT,
                 file_size TEXT,
+                backup_map JSONB DEFAULT '{}'::jsonb,
                 UNIQUE(movie_id, quality)
             )
-        ''')
+        """)
 
-        cur.execute('CREATE TABLE IF NOT EXISTS sync_info (id SERIAL PRIMARY KEY, last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP);')
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sync_info (
+                id SERIAL PRIMARY KEY,
+                last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-        cur.execute('''
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS user_requests (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL,
@@ -613,86 +628,107 @@ def setup_database():
                 group_id BIGINT,
                 message_id BIGINT
             )
-        ''')
+        """)
 
-        cur.execute('''
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS movie_aliases (
                 id SERIAL PRIMARY KEY,
                 movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
                 alias TEXT NOT NULL,
                 UNIQUE(movie_id, alias)
             )
-        ''')
+        """)
 
-        cur.execute('''
+        # Used in update_buttons_command + some admin flows
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS channel_posts (
+                id SERIAL PRIMARY KEY,
+                movie_id INTEGER,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                bot_username TEXT,
+                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(channel_id, message_id)
+            )
+        """)
+
+        # Used in list_all_users (your code queries user_activity)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_activity (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                chat_id BIGINT,
+                chat_type TEXT,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id)
+            )
+        """)
+
+        # Unique constraint for requests
+        cur.execute("""
             DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_requests_unique_constraint') THEN
-                ALTER TABLE user_requests ADD CONSTRAINT user_requests_unique_constraint UNIQUE (user_id, movie_title);
+                ALTER TABLE user_requests
+                ADD CONSTRAINT user_requests_unique_constraint UNIQUE (user_id, movie_title);
             END IF;
             END $$;
-        ''')
+        """)
 
-        # Add columns if they don't exist (for existing databases)
-        try:
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS file_id TEXT;")
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS is_unreleased BOOLEAN DEFAULT FALSE;")
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER;")
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
-            cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;") # 👈 Fix missing column
-            cur.execute("ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS message_id BIGINT;")
-        except Exception as e:
-            logger.info(f"Column addition note: {e}")
-
-        # ✅ Add backup_map column for Multi-Channel support
-        try:
-            cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS backup_map JSONB DEFAULT '{}'::jsonb;")
-        except Exception as e:
-            logger.info(f"Column backup_map note: {e}")
-
-        # Create indexes
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_title_trgm ON movies USING gin (title gin_trgm_ops);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias ON movie_aliases (alias);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movie_files_movie_id ON movie_files (movie_id);')
+        # Indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_title_trgm ON movies USING gin (title gin_trgm_ops);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias ON movie_aliases (alias);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_files_movie_id ON movie_files (movie_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_posts_movie_id ON channel_posts (movie_id);")
 
         conn.commit()
         cur.close()
         close_db_connection(conn)
-        logger.info("Database setup completed successfully")
+        logger.info("✅ Database setup completed successfully")
+
     except Exception as e:
-        logger.error(f"Error setting up database: {e}")
+        logger.error(f"❌ Error setting up database: {e}", exc_info=True)
         logger.info("Continuing without database setup...")
 
 
 def migrate_add_imdb_columns():
-    """One-time migration to add imdb_id column if not exists"""
+    """One-time migration to add missing columns safely"""
     conn = get_db_connection()
     if not conn:
         return False
     try:
         cur = conn.cursor()
+
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER DEFAULT 0;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;") # 👈 Important
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);')
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);')
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS description TEXT;")
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT;")
+
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
+
         conn.commit()
         cur.close()
         close_db_connection(conn)
-        logger.info("✅ DB Migration: IMDb columns added successfully")
+        logger.info("✅ DB Migration: Missing columns ensured")
         return True
+
     except Exception as e:
-        logger.error(f"Migration Error: {e}")
-        if conn: 
-            close_db_connection(conn)
+        logger.error(f"Migration Error: {e}", exc_info=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        close_db_connection(conn)
         return False
 
 
@@ -945,8 +981,16 @@ def get_movie_by_imdb_id(imdb_id: str):
                 pass
 
 
-def update_movie_metadata(movie_id: int, imdb_id: str = None, poster_url: str = None, year: int = None, genre: str = None):
-    """Update movie metadata in database"""
+def update_movie_metadata(
+    movie_id: int,
+    imdb_id: str = None,
+    poster_url: str = None,
+    year: int = None,
+    genre: str = None,
+    rating: str = None,
+    description: str = None,
+    category: str = None
+):
     conn = None
     try:
         conn = get_db_connection()
@@ -954,46 +998,39 @@ def update_movie_metadata(movie_id: int, imdb_id: str = None, poster_url: str = 
             return False
 
         cur = conn.cursor()
-        
-        updates = []
-        values = []
-        
-        if imdb_id:
-            updates.append("imdb_id = %s")
-            values.append(imdb_id)
-        if poster_url:
-            updates.append("poster_url = %s")
-            values.append(poster_url)
-        if year:
-            updates.append("year = %s")
-            values.append(year)
-        if genre:
-            updates.append("genre = %s")
-            values.append(genre)
-        
+        updates, values = [], []
+
+        def add(field, val):
+            updates.append(f"{field} = %s")
+            values.append(val)
+
+        if imdb_id: add("imdb_id", imdb_id)
+        if poster_url: add("poster_url", poster_url)
+        if year is not None: add("year", year)
+        if genre: add("genre", genre)
+        if rating: add("rating", rating)
+        if description: add("description", description)
+        if category: add("category", category)
+
         if not updates:
             return False
-        
+
         values.append(movie_id)
-        query = f"UPDATE movies SET {', '.join(updates)} WHERE id = %s"
-        
-        cur.execute(query, values)
+        cur.execute(f"UPDATE movies SET {', '.join(updates)} WHERE id = %s", values)
         conn.commit()
         cur.close()
-        close_db_connection(conn)
-        
-        logger.info(f"✅ Updated metadata for movie ID: {movie_id}")
         return True
 
     except Exception as e:
-        logger.error(f"Error updating movie metadata: {e}")
+        logger.error(f"Error updating movie metadata: {e}", exc_info=True)
+        try:
+            if conn: conn.rollback()
+        except Exception:
+            pass
         return False
     finally:
         if conn:
-            try:
-                close_db_connection(conn)
-            except:
-                pass
+            close_db_connection(conn)
 
 
 def store_user_request(user_id, username, first_name, movie_title, group_id=None, message_id=None):
@@ -1204,20 +1241,19 @@ Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
         logger.error(f"Error sending admin notification: {e}")
 
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
-    """Notify users who requested a movie"""
     logger.info(f"Attempting to notify users for movie: {movie_title}")
     conn = None
     cur = None
     notified_count = 0
 
     caption_text = (
-    f"🎬 <b>{movie_title}</b>\n\n"
-    "➖➖➖➖➖➖➖➖➖➖\n"
-    "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-    "➖➖➖➖➖➖➖➖➖➖\n"
-    "🔹 <b>Support group:</b> https://t.me/+2hFeRL4DYfBjZDQ1\n"
-)
-    join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+        f"🎬 <b>{movie_title}</b>\n\n"
+        "➖➖➖➖➖➖➖➖➖➖\n"
+        "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
+        "➖➖➖➖➖➖➖➖➖➖\n"
+        "🔹 <b>Support group:</b> https://t.me/+2hFeRL4DYfBjZDQ1\n"
+    )
+    join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
     try:
         conn = get_db_connection()
@@ -1233,33 +1269,47 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
         for user_id, username, first_name in users_to_notify:
             try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"🎉 Hey {first_name or username}! Your requested movie '{movie_title}' is now available!"
-                )
-            except Exception as e:
-                # This ensures if the notification fails, the code continues
-                print(f"Failed to send movie notification: {e}") 
-
-            try:
-                warning_msg = await context.bot.copy_message(
-                    chat_id=user_id,
-                    from_chat_id=-1002683355160,
-                    message_id=1773
-                )
-            except Exception:
-                warning_msg = None
-                
-                if isinstance(movie_url_or_file_id, str) and any(movie_url_or_file_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-                    sent_msg = await context.bot.send_document(
+                # Optional heads-up text
+                try:
+                    await context.bot.send_message(
                         chat_id=user_id,
-                        document=movie_url_or_file_id,
-                        caption=caption_text,
-                        parse_mode='HTML',
-                        reply_markup=join_keyboard
+                        text=f"🎉 Hey {first_name or username or 'there'}! Your requested movie '{movie_title}' is now available!"
                     )
-                elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("https://t.me/c/"):
-                    parts = movie_url_or_file_id.split('/')
+                except Exception:
+                    pass
+
+                warning_msg = None
+                try:
+                    warning_msg = await context.bot.copy_message(
+                        chat_id=user_id,
+                        from_chat_id=int(DUMP_CHANNEL_ID),
+                        message_id=1773
+                    )
+                except Exception:
+                    warning_msg = None
+
+                sent_msg = None
+
+                val = str(movie_url_or_file_id or "").strip()
+
+                # Telegram file_id heuristics (your existing logic)
+                is_file_id = any(val.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"])
+
+                if is_file_id:
+                    # try video then document
+                    try:
+                        sent_msg = await context.bot.send_video(
+                            chat_id=user_id, video=val, caption=caption_text,
+                            parse_mode='HTML', reply_markup=join_keyboard
+                        )
+                    except telegram.error.BadRequest:
+                        sent_msg = await context.bot.send_document(
+                            chat_id=user_id, document=val, caption=caption_text,
+                            parse_mode='HTML', reply_markup=join_keyboard
+                        )
+
+                elif val.startswith("https://t.me/c/"):
+                    parts = val.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     msg_id = int(parts[-1])
                     sent_msg = await context.bot.copy_message(
@@ -1270,31 +1320,34 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         parse_mode='HTML',
                         reply_markup=join_keyboard
                     )
-                elif isinstance(movie_url_or_file_id, str) and movie_url_or_file_id.startswith("http"):
-                    await context.bot.send_message(
+
+                elif val.startswith("http"):
+                    sent_msg = await context.bot.send_message(
                         chat_id=user_id,
-                        text=f"🎬 {movie_title} is now available!\n\n{caption_text}",
-                        reply_markup=get_movie_options_keyboard(movie_title, movie_url_or_file_id),
-                        parse_mode='HTML'
+                        text=f"{caption_text}\n\n<b>Link:</b> {val}",
+                        parse_mode='HTML',
+                        disable_web_page_preview=True,
+                        reply_markup=join_keyboard
                     )
+
                 else:
+                    # last fallback: try send as document
                     sent_msg = await context.bot.send_document(
                         chat_id=user_id,
-                        document=movie_url_or_file_id,
+                        document=val,
                         caption=caption_text,
                         parse_mode='HTML',
                         reply_markup=join_keyboard
                     )
 
+                # Auto delete both after 60 seconds
+                ids = []
                 if sent_msg:
-                    asyncio.create_task(
-                        delete_messages_after_delay(
-                            context,
-                            user_id,
-                            [sent_msg.message_id, warning_msg.message_id],
-                            60
-                        )
-                    )
+                    ids.append(sent_msg.message_id)
+                if warning_msg:
+                    ids.append(warning_msg.message_id)
+                if ids:
+                    asyncio.create_task(delete_messages_after_delay(context, user_id, ids, 60))
 
                 cur.execute(
                     "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
@@ -1302,22 +1355,27 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 )
                 conn.commit()
                 notified_count += 1
+
                 await asyncio.sleep(0.1)
 
             except telegram.error.Forbidden:
                 logger.error(f"User {user_id} blocked the bot")
                 continue
             except Exception as e:
-                logger.error(f"Error notifying user {user_id}: {e}")
+                logger.error(f"Error notifying user {user_id}: {e}", exc_info=True)
                 continue
 
         return notified_count
+
     except Exception as e:
-        logger.error(f"Error in notify_users_for_movie: {e}")
+        logger.error(f"Error in notify_users_for_movie: {e}", exc_info=True)
         return 0
     finally:
-        if cur: cur.close()
-        if conn: close_db_connection(conn)
+        if cur:
+            try: cur.close()
+            except Exception: pass
+        if conn:
+            close_db_connection(conn)
 
 async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     """Notify users in group when a requested movie becomes available"""
@@ -1559,18 +1617,22 @@ def get_admin_request_keyboard(user_id, movie_title):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_movie_options_keyboard(movie_title, url, movie_id, file_info):
-    # 'scan_info_' ke saath movie_id bhejo taaki data fetch kar sakein
-    keyboard = [
-        [InlineKeyboardButton("ℹ️ SCAN INFO : AUDIO & SUBS", callback_data=f"scan_{movie_id}")],
-        [InlineKeyboardButton("🎬 Watch Now", url=url)],
-        [InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title[:50]}")],
-        [InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]
-    ]
+def get_movie_options_keyboard(movie_title, url, movie_id=None, file_info=None):
+    keyboard = []
+
+    # Scan info only if movie_id is available
+    if movie_id is not None:
+        keyboard.append([InlineKeyboardButton("ℹ️ SCAN INFO : AUDIO & SUBS", callback_data=f"scan_{movie_id}")])
+
+    if url:
+        keyboard.append([InlineKeyboardButton("🎬 Watch Now", url=url)])
+
+    keyboard.append([InlineKeyboardButton("📥 Download", callback_data=f"download_{movie_title[:50]}")])
+    keyboard.append([InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)])
+
     return InlineKeyboardMarkup(keyboard)
 
 def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
-    """Create inline keyboard with movie selection buttons - FIXED for all sources"""
     start_idx = page * movies_per_page
     end_idx = start_idx + movies_per_page
     current_movies = movies[start_idx:end_idx]
@@ -1578,29 +1640,22 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
     keyboard = []
 
     for movie in current_movies:
-        # ✅ FIXED: Handle both 4-tuple and 6-tuple returns
-        if len(movie) >= 6:
-            # From get_movies_by_genre (6 values:  id, title, url, file_id, poster_url, year)
-            movie_id, title, url, file_id, poster_url, year = movie[: 6]
-        elif len(movie) >= 8:
-            # From get_movies_from_db (8 values: id, title, url, file_id, imdb_id, poster_url, year, genre)
+        # FIX: check 8-tuple before 6-tuple
+        if len(movie) >= 8:
             movie_id, title, url, file_id, imdb_id, poster_url, year, genre = movie[:8]
+        elif len(movie) >= 6:
+            movie_id, title, url, file_id, poster_url, year = movie[:6]
         else:
-            # Fallback for 4-tuple (id, title, url, file_id)
             movie_id, title = movie[0], movie[1]
-        
-        button_text = title if len(title) <= 40 else title[:37] + "..."
-        keyboard.append([InlineKeyboardButton(
-            f"🎬 {button_text}",
-            callback_data=f"movie_{movie_id}"
-        )])
 
-    nav_buttons = []
+        button_text = title if len(title) <= 40 else title[:37] + "..."
+        keyboard.append([InlineKeyboardButton(f"🎬 {button_text}", callback_data=f"movie_{movie_id}")])
+
     total_pages = (len(movies) + movies_per_page - 1) // movies_per_page
+    nav_buttons = []
 
     if page > 0:
-        nav_buttons. append(InlineKeyboardButton("◀️ Previous", callback_data=f"page_{page-1}"))
-
+        nav_buttons.append(InlineKeyboardButton("◀️ Previous", callback_data=f"page_{page-1}"))
     if end_idx < len(movies):
         nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"page_{page+1}"))
 
@@ -1608,7 +1663,6 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5):
         keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
-
     return InlineKeyboardMarkup(keyboard)
 
 def get_all_movie_qualities(movie_id):
@@ -3798,67 +3852,70 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             close_db_connection(conn)
 
 async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (Authentication check wahi rahega) ...
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
 
-    status_msg = await update.message.reply_text("🚀 **Safe Update Mode On...**\nStarting to fix buttons slowly to avoid ban.")
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /fixbuttons <old_bot_username> <new_bot_username>")
+        return
+
+    old_bot = context.args[0].lstrip("@")
+    new_bot = context.args[1].lstrip("@")
+
+    status_msg = await update.message.reply_text(
+        "🚀 **Safe Update Mode On...**\nStarting to fix buttons slowly to avoid ban.",
+        parse_mode='Markdown'
+    )
 
     conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ DB connection failed.")
+        return
+
     cur = conn.cursor()
-    cur.execute("SELECT movie_id, channel_id, message_id FROM channel_posts WHERE bot_username = %s", (old_bot,))
+    cur.execute(
+        "SELECT movie_id, channel_id, message_id FROM channel_posts WHERE bot_username = %s",
+        (old_bot,)
+    )
     posts = cur.fetchall()
-    
+
     total = len(posts)
     success = 0
-    
-    for i, (m_id, ch_id, msg_id) in enumerate(posts):
+
+    for (m_id, ch_id, msg_id) in posts:
         try:
-            # 1. Logic to make new link (Same as before)
             link_param = f"movie_{m_id}"
             new_link = f"https://t.me/{new_bot}?start={link_param}"
-            
+
             new_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📥 Download Server 1", url=new_link)],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
-            # 2. EDIT COMMAND (With Safety)
             await context.bot.edit_message_reply_markup(
                 chat_id=ch_id,
                 message_id=msg_id,
                 reply_markup=new_keyboard
             )
-            
-            success += 1
-            
-            # ✅ SAFETY DELAY 1: Har edit ke baad 3 second ruko
-            # Isse Telegram ko lagega koi insaan dheere-dheere edit kar raha hai
-            await asyncio.sleep(3) 
 
-            # ✅ SAFETY DELAY 2: Har 50 posts ke baad thoda lamba break (10 seconds)
+            success += 1
+            await asyncio.sleep(3)
             if success % 50 == 0:
                 await asyncio.sleep(10)
-                await status_msg.edit_text(f"☕ **Taking a coffee break...**\nUpdated: {success}/{total}")
+                await status_msg.edit_text(f"☕ Break...\nUpdated: {success}/{total}")
 
         except RetryAfter as e:
-            # 🚨 MOST IMPORTANT: Agar Telegram bole "Ruko", to hum rukenge
-            wait_time = e.retry_after + 5 # Jitna Telegram bole usse 5 sec zyada ruko
-            logger.warning(f"⚠️ FloodWait triggered! Sleeping for {wait_time} seconds...")
-            await status_msg.edit_text(f"⚠️ Telegram asked to wait. Sleeping for {wait_time}s...")
-            
-            await asyncio.sleep(wait_time)
-            
-            # Retry logic yahan laga sakte ho ya skip kar sakte ho
-            continue 
-
+            await asyncio.sleep(e.retry_after + 5)
+            continue
         except TelegramError as e:
             if "Message to edit not found" in str(e):
-                # Delete from DB if message doesn't exist
                 cur.execute("DELETE FROM channel_posts WHERE channel_id = %s AND message_id = %s", (ch_id, msg_id))
                 conn.commit()
-            else:
-                logger.error(f"Error editing {msg_id}: {e}")
+            logger.error(f"Error editing {msg_id}: {e}")
 
-    await status_msg.edit_text(f"✅ **Mission Accomplished!**\nUpdated {success} posts safely.")
+    cur.close()
+    close_db_connection(conn)
+    await status_msg.edit_text(f"✅ Updated {success}/{total} posts safely.", parse_mode='Markdown')
 
 async def bulk_add_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple movies at once"""
@@ -5002,10 +5059,8 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
 
                 # ✅ FETCH CORRECT METADATA (6 Values)
                 metadata = fetch_movie_metadata(title)
-                
-                # Unpack carefully
                 if metadata:
-                    new_title, year, poster_url, genre, imdb_id, rating = metadata
+                    new_title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
 
                     # Only update if we found something useful
                     if genre or poster_url or year > 0:
