@@ -3545,7 +3545,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Sirf 18+ Channel par post karne ke liye function (/post18)
+    Smart 18+ Post: Supports Caption/Reply AND Auto-IMDb Data
     """
     try:
         user_id = update.effective_user.id
@@ -3553,31 +3553,43 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         message = update.message
+        replied_msg = message.reply_to_message
         
-        # 1. Check Media
-        if not (message.photo or message.video):
-            await message.reply_text("❌ Photo ya Video bhejo caption ke sath")
+        # --- 1. MEDIA DETECTION (Reply vs Caption) ---
+        media_msg = None
+        command_text = ""
+
+        if replied_msg and (replied_msg.photo or replied_msg.video or replied_msg.document):
+            media_msg = replied_msg
+            command_text = message.text or ""
+        elif message.photo or message.video or message.document:
+            media_msg = message
+            command_text = message.caption or ""
+        else:
             return
 
-        caption_text = message.caption or ""
-        # Check command
-        if not caption_text.startswith('/post18'):
+        if not command_text.startswith('/post18'):
             return
 
-        # 2. Extract Media
+        # Status message (User ko dikhane ke liye ki kaam ho raha hai)
+        status_msg = await message.reply_text("⏳ **Fetching IMDb Data...**", parse_mode='Markdown')
+
+        # --- 2. EXTRACT FILE ID ---
         file_id = None
-        media_type = 'photo'
+        media_type = 'photo' # default
 
-        if message.photo:
-            file_id = message.photo[-1].file_id
+        if media_msg.photo:
+            file_id = media_msg.photo[-1].file_id
             media_type = 'photo'
-        elif message.video:
-            file_id = message.video.file_id
+        elif media_msg.video:
+            file_id = media_msg.video.file_id
             media_type = 'video'
+        elif media_msg.document:
+            file_id = media_msg.document.file_id
+            media_type = 'document'
 
-        # 3. Parse Query (Movie Name nikalna)
-        raw_input = caption_text.replace('/post18', '').strip()
-        
+        # --- 3. PARSE NAME ---
+        raw_input = command_text.replace('/post18', '').strip()
         if ',' in raw_input:
             parts = raw_input.split(',', 1)
             query_text = parts[0].strip()
@@ -3587,89 +3599,94 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             custom_msg = ""
 
         if not query_text:
-            await message.reply_text("❌ Name missing. Usage: /post18 Name")
+            await status_msg.edit_text("❌ Name missing. Usage: /post18 Name")
             return
 
-        # 4. DB mein Movie dhundo (Taaki Start link ban sake)
+        # --- 4. FETCH METADATA (IMDb LOGIC) ---
+        # Existing function ko call kar rahe hain
+        metadata = await run_async(fetch_movie_metadata, query_text)
+        
+        # Default Values
+        display_title = query_text
+        year = ""
+        rating = "N/A"
+        genre = "18+, Adult"
+        plot = "No description available."
+        
+        if metadata:
+            # Unpack 8 values (Jo aapke code mein pehle se defined hain)
+            m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
+            
+            display_title = m_title
+            if m_year: year = f"({m_year})"
+            if m_rating and m_rating != 'N/A': rating = f"{m_rating}/10"
+            if m_genre: genre = m_genre
+            if m_plot: plot = m_plot[:200] + "..." # Story lambi ho to chhota kar do
+
+        # --- 5. DB SEARCH (For Deep Link) ---
         movie_id = None
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                cur.execute(
-                    "SELECT id FROM movies WHERE title ILIKE %s LIMIT 1",
-                    (f"%{query_text}%",)
-                )
+                cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{query_text}%",))
                 row = cur.fetchone()
                 movie_id = row[0] if row else None
                 cur.close()
-            except Exception as e:
-                logger.error(f"DB Error: {e}")
+            except Exception:
+                pass
             finally:
                 close_db_connection(conn)
 
-        # 5. Links Generate Karo
-        # (Yahan aap apne bots ke username check kar lena)
-        bot1 = "FlimfyBox_SearchBot"
-        bot2 = "urmoviebot"
+        # --- 6. GENERATE BUTTONS ---
+        bot1 = "FlimfyBox_SearchBot" # Apne bot username check kar lena
         bot3 = "FlimfyBox_Bot"
         
         link_param = f"movie_{movie_id}" if movie_id else f"q_{query_text.replace(' ', '_')}"
 
-        link1 = f"https://t.me/{bot1}?start={link_param}"
-        link2 = f"https://t.me/{bot2}?start={link_param}"
-        link3 = f"https://t.me/{bot3}?start={link_param}"
-
-        # 6. Buttons
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("📥 Download Server 1", url=link1),
-                InlineKeyboardButton("📥 Download Server 2", url=link2),
+                InlineKeyboardButton("📥 Download Fast", url=f"https://t.me/{bot3}?start={link_param}"),
+                InlineKeyboardButton("📺 Watch Online", url=f"https://t.me/{bot1}?start={link_param}"),
             ],
-            [InlineKeyboardButton("⚡ Fast Download", url=link3)],
-            # Agar Adult channel ka link alag hai to yahan change kar sakte hain
-            [InlineKeyboardButton("🔞 Join Adult Channel", url="https://t.me/YOUR_ADULT_CHANNEL_LINK")]
+            [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/+AbCdEfGhIjKlMnOp")] # Link Badle
         ])
 
-        # 7. Caption
-        channel_caption = f"🔞 <b>{query_text}</b>\n"
+        # --- 7. BUILD FINAL CAPTION ---
+        channel_caption = (
+            f"🔞 <b>{display_title} {year}</b>\n\n"
+            f"⭐️ <b>Rating:</b> {rating}\n"
+            f"🎭 <b>Genre:</b> {genre}\n\n"
+            f"📜 <b>Story:</b> <i>{plot}</i>\n"
+        )
+        
         if custom_msg:
-            channel_caption += f"✨ <b>{custom_msg}</b>\n\n"
+            channel_caption += f"\n✨ <b>Note:</b> {custom_msg}\n"
         
         channel_caption += (
-            "➖➖➖➖➖➖➖\n"
+            "\n➖➖➖➖➖➖➖\n"
             "🔥 <b>Exclusive 18+ Content</b>\n"
             "➖➖➖➖➖➖➖\n"
-            "<b>👇 Download Below</b>"
+            "<b>👇 Download & Watch Below</b>"
         )
 
-        # 8. Send to ADULT CHANNEL
-        target_channel = os.environ.get('ADULT_CHANNEL_ID') # .env se ID lega
+        # --- 8. SEND TO ADULT CHANNEL ---
+        target_channel = os.environ.get('ADULT_CHANNEL_ID')
 
         if not target_channel:
-            await message.reply_text("❌ Error: .env file mein ADULT_CHANNEL_ID set nahi hai.")
+            await status_msg.edit_text("❌ Error: ADULT_CHANNEL_ID not set in .env")
             return
 
-        logger.info(f"📤 Sending 18+ post to {target_channel}...")
-
         if media_type == 'video':
-            await context.bot.send_video(
-                chat_id=target_channel,
-                video=file_id,
-                caption=channel_caption,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
+            await context.bot.send_video(chat_id=target_channel, video=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+        elif media_type == 'document':
+            await context.bot.send_document(chat_id=target_channel, document=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
         else:
-            await context.bot.send_photo(
-                chat_id=target_channel,
-                photo=file_id,
-                caption=channel_caption,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
+            await context.bot.send_photo(chat_id=target_channel, photo=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
 
-        await message.reply_text(f"✅ <b>Posted to Adult Channel!</b>\nMovie: {query_text}", parse_mode='HTML')
+        # Cleanup
+        await status_msg.delete()
+        await message.reply_text(f"✅ <b>Posted with IMDb Data!</b>\nMovie: {display_title}", parse_mode='HTML')
 
     except Exception as e:
         logger.error(f"Error in post18: {e}")
@@ -5449,7 +5466,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
-    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post18'), admin_post_18))
+    application.add_handler(MessageHandler(filters.Regex(r'^/post18'), admin_post_18))
     application.add_handler(CommandHandler("fixbuttons", update_buttons_command))
 
     # Batch Commands
