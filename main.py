@@ -122,96 +122,38 @@ SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
 # ================= CONFIGURATION =================
 FORUM_GROUP_ID = -1003696437312  # Apne Group ki ID
 
-# ==================== DYNAMIC TOPIC MANAGEMENT ====================
-
-async def get_or_create_topic_id(context, genre_text, description):
-    """
-    1. Pehle Static Mapping check karega.
-    2. Agar nahi mila, to DB check karega.
-    3. Agar DB me bhi nahi hai, to NAYA TOPIC banayega aur save karega.
-    """
+# Yahan Topic ID aur uske Keywords set karo
+# Bot in shabdon ko Genre ya Description me dhundega
+TOPIC_MAPPING = {
+    # Format:  Topic_ID:  ['keyword1', 'keyword2', 'keyword3']
     
-    # --- 1. STATIC MAPPING CHECK (Priority) ---
-    # Kuch main categories fix rakhna sahi rehta hai (jaise South/Bollywood)
-    text_to_check = (str(genre_text) + " " + str(description)).lower()
+    20: ['south', 'telugu', 'tamil', 'kannada', 'malayalam', 'allu arjun'], # South Topic (ID: 12)
+    32: ['hollywood', 'english', 'marvel', 'dc', 'disney'],                 # Hollywood Topic (ID: 34)
+    16: ['bollywood', 'hindi', 'khan', 'kapoor'],                           # Bollywood Topic (ID: 56)
+    18: ['series', 'season', 'episode', 'netflix', 'amazon'],               # Web Series Topic (ID: 78)
+    22: ['anime', 'cartoon', 'animation'],                                  # Anime Topic (ID: 90)
     
-    # Purana Mapping logic (Jo aapne diya tha)
-    STATIC_MAPPING = {
-        20: ['south', 'telugu', 'tamil', 'kannada', 'malayalam', 'allu arjun'],
-        32: ['hollywood', 'english', 'marvel', 'dc', 'disney'],
-        16: ['bollywood', 'hindi', 'khan', 'kapoor'],
-        18: ['series', 'season', 'episode', 'netflix', 'amazon'],
-        22: ['anime', 'cartoon', 'animation']
-    }
+    # Default Topic (Agar kuch match na ho to yahan jayega)
+    100: ['default'] 
+}
+# =================================================
 
-    for topic_id, keywords in STATIC_MAPPING.items():
+def get_auto_topic_id(genre, description):
+    """
+    Ye function movie ke data ko padhkar sahi Topic ID batata hai.
+    """
+    text_to_check = (str(genre) + " " + str(description)).lower()
+    
+    for topic_id, keywords in TOPIC_MAPPING.items():
         for word in keywords:
             if word in text_to_check:
                 return topic_id
-
-    # --- 2. AGAR STATIC NAHI MILA -> CREATE NEW TOPIC ---
     
-    # Genre ka pehla shabd uthao (Example: "Horror, Thriller" -> "Horror")
-    # Clean the genre name for the Topic Title
-    clean_genre = genre_text.split(',')[0].strip()
-    if len(clean_genre) < 3: 
-        clean_genre = "Other Movies" # Agar genre khali ho to fallback
-        
-    # Title Case (e.g., "horror" -> "Horror")
-    topic_name = clean_genre.title() 
-
-    conn = get_db_connection()
-    if not conn:
-        return 100 # DB fail ho to Default Topic
-
-    try:
-        cur = conn.cursor()
-        
-        # A. Check DB: Kya ye Topic pehle ban chuka hai?
-        cur.execute("SELECT topic_id FROM forum_topics WHERE genre_keyword = %s", (topic_name,))
-        result = cur.fetchone()
-        
-        if result:
-            # Agar mil gaya to wahi ID return karo
-            cur.close()
-            return result[0]
-            
-        # B. Create New Topic on Telegram
-        # Note: Bot ko "Manage Topics" admin permission honi chahiye
-        try:
-            new_topic = await context.bot.create_forum_topic(
-                chat_id=FORUM_GROUP_ID,
-                name=f"📂 {topic_name}" # Example: 📂 Horror
-            )
-            
-            new_topic_id = new_topic.message_thread_id
-            
-            # C. Save to DB for future use
-            cur.execute(
-                "INSERT INTO forum_topics (genre_keyword, topic_id) VALUES (%s, %s)",
-                (topic_name, new_topic_id)
-            )
-            conn.commit()
-            
-            logger.info(f"🆕 New Topic Created: {topic_name} (ID: {new_topic_id})")
-            cur.close()
-            return new_topic_id
-
-        except Exception as e:
-            logger.error(f"Failed to create topic '{topic_name}': {e}")
-            cur.close()
-            return 100 # Error aaye to Default Topic
-
-    except Exception as e:
-        logger.error(f"DB Error in Topic Logic: {e}")
-        return 100
-    finally:
-        close_db_connection(conn)
+    return 100 # Agar kuch samajh na aaye to Default Topic ID
 
 async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Fixed Version: Deep Link format ab 'movie_' use karega jo start handler me hai.
-    With Dynamic Topic Creation.
     """
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
@@ -243,17 +185,21 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     # Unpack 8 values
     movie_id, title, year, rating, genre, poster_url, description, category = movie_data
 
-    # ==================================================================
-    # 2. TOPIC SELECTION (UPDATED - DYNAMIC)
-    # ==================================================================
-    # Purana if/else logic hata diya hai.
-    # Ab ye function check karega ki topic hai ya nahi, aur naya bana dega.
-    try:
-        topic_id = await get_or_create_topic_id(context, genre, description)
-    except Exception as e:
-        logger.error(f"Topic creation failed: {e}")
-        topic_id = 100 # Fallback to default if error
-    # ==================================================================
+    # 2. TOPIC SELECTION
+    topic_id = 100 # Default
+    cat_lower = str(category).lower()
+
+    for tid, keywords in TOPIC_MAPPING.items():
+        if cat_lower in [k.lower() for k in keywords]: 
+            topic_id = tid
+            break
+            
+    if topic_id == 100:
+        if "south" in cat_lower: topic_id = 20
+        elif "hollywood" in cat_lower: topic_id = 1
+        elif "bollywood" in cat_lower: topic_id = 16
+        elif "anime" in cat_lower: topic_id = 22
+        elif "series" in cat_lower: topic_id = 18
 
     # 3. HANDLE MISSING DATA
     final_photo = poster_url if poster_url and poster_url != 'N/A' else DEFAULT_POSTER
@@ -266,11 +212,11 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"🎭 **Genre:** {genre}\n"
         f"🏷 **Category:** {category}\n\n"
         f"📜 **Story:** {short_desc}\n\n"
-        f"👇 **Click Below to Download** ㅤㅤㅤㅤ👇"
+        f"👇 **Click Below to Download** 👇"
     )
 
     # 5. 🔗 CORRECTED DEEP LINKS (movie_ prefix)
-    link_param = f"movie_{movie_id}" 
+    link_param = f"movie_{movie_id}"  # <--- YEH CHANGE KIYA HAI (Ab Start handler pakad lega)
     
     bot1_username = "FlimfyBox_SearchBot"
     bot2_username = "urmoviebot"
@@ -286,7 +232,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
             InlineKeyboardButton("📥 Download Now", url=link2)
         ],
         [
-            InlineKeyboardButton("📥 Download Now", url=link3)
+            InlineKeyboardButton("⚡Download Now", url=link3)
         ]
     ]
 
@@ -303,6 +249,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Post failed: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
+
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
