@@ -65,34 +65,31 @@ except Exception:
 
 def get_safe_font(text):
     """
-    Normal text ko Anti-Ban Fonts mein convert karta hai.
+    Normal text ko Anti-Ban Fonts (Squared Style) mein convert karta hai.
+    Fixed Version: No maketrans error.
     """
-    # Mapping for Squared Font (🄿🄰🄽🄲🄷🄱🄰🄻🄸)
-    squared_map = str.maketrans(
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        "31624598700123456789"  # Numbers (Simplified for demo, logic niche hai)
-    )
-    
-    # Hum manual dictionary use karenge reliable conversion ke liye
-    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    
-    # 1. Squared Style (Sabse Safe & Clean)
-    squared = "31624598700123456789" # Placeholder logic replaced below
-    
-    # Simple Logic for Squared (Box)
-    def to_squared(s):
-        result = ""
-        for char in s:
-            if 'a' <= char <= 'z':
-                result += chr(0x1F130 + ord(char) - ord('a'))
-            elif 'A' <= char <= 'Z':
-                result += chr(0x1F130 + ord(char) - ord('A'))
-            elif '0' <= char <= '9':
-                # Numbers ke liye alag range hoti hai, par hum bold use kar lenge
-                result += char 
-            else:
-                result += char
-        return result
+    if not text:
+        return ""
+
+    result = ""
+    for char in text:
+        # Lowercase (a-z) -> Squared (🅰-🆉)
+        if 'a' <= char <= 'z':
+            result += chr(0x1F130 + ord(char) - ord('a'))
+        
+        # Uppercase (A-Z) -> Squared (🅰-🆉)
+        elif 'A' <= char <= 'Z':
+            result += chr(0x1F130 + ord(char) - ord('A'))
+        
+        # Numbers (0-9) -> Bold/Normal (Squared numbers alag hote hain, simple rakhna safe hai)
+        elif '0' <= char <= '9':
+            result += char 
+            
+        # Spaces & Symbols -> Same rahenge
+        else:
+            result += char
+            
+    return result
 
     # 2. Double Struck (ℙ𝕒𝕟𝕔𝕙𝕓𝕒𝕝𝕚)
     def to_double_struck(s):
