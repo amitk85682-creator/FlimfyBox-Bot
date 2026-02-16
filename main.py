@@ -3543,6 +3543,138 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Critical error in post_query: {e}", exc_info=True)
         await message.reply_text(f"❌ Error: {str(e)[:100]}")
 
+async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sirf 18+ Channel par post karne ke liye function (/post18)
+    """
+    try:
+        user_id = update.effective_user.id
+        if user_id != ADMIN_USER_ID:
+            return
+
+        message = update.message
+        
+        # 1. Check Media
+        if not (message.photo or message.video):
+            await message.reply_text("❌ Photo ya Video bhejo caption ke sath")
+            return
+
+        caption_text = message.caption or ""
+        # Check command
+        if not caption_text.startswith('/post18'):
+            return
+
+        # 2. Extract Media
+        file_id = None
+        media_type = 'photo'
+
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            media_type = 'photo'
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = 'video'
+
+        # 3. Parse Query (Movie Name nikalna)
+        raw_input = caption_text.replace('/post18', '').strip()
+        
+        if ',' in raw_input:
+            parts = raw_input.split(',', 1)
+            query_text = parts[0].strip()
+            custom_msg = parts[1].strip()
+        else:
+            query_text = raw_input
+            custom_msg = ""
+
+        if not query_text:
+            await message.reply_text("❌ Name missing. Usage: /post18 Name")
+            return
+
+        # 4. DB mein Movie dhundo (Taaki Start link ban sake)
+        movie_id = None
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id FROM movies WHERE title ILIKE %s LIMIT 1",
+                    (f"%{query_text}%",)
+                )
+                row = cur.fetchone()
+                movie_id = row[0] if row else None
+                cur.close()
+            except Exception as e:
+                logger.error(f"DB Error: {e}")
+            finally:
+                close_db_connection(conn)
+
+        # 5. Links Generate Karo
+        # (Yahan aap apne bots ke username check kar lena)
+        bot1 = "FlimfyBox_SearchBot"
+        bot2 = "urmoviebot"
+        bot3 = "FlimfyBox_Bot"
+        
+        link_param = f"movie_{movie_id}" if movie_id else f"q_{query_text.replace(' ', '_')}"
+
+        link1 = f"https://t.me/{bot1}?start={link_param}"
+        link2 = f"https://t.me/{bot2}?start={link_param}"
+        link3 = f"https://t.me/{bot3}?start={link_param}"
+
+        # 6. Buttons
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📥 Download Server 1", url=link1),
+                InlineKeyboardButton("📥 Download Server 2", url=link2),
+            ],
+            [InlineKeyboardButton("⚡ Fast Download", url=link3)],
+            # Agar Adult channel ka link alag hai to yahan change kar sakte hain
+            [InlineKeyboardButton("🔞 Join Adult Channel", url="https://t.me/YOUR_ADULT_CHANNEL_LINK")]
+        ])
+
+        # 7. Caption
+        channel_caption = f"🔞 <b>{query_text}</b>\n"
+        if custom_msg:
+            channel_caption += f"✨ <b>{custom_msg}</b>\n\n"
+        
+        channel_caption += (
+            "➖➖➖➖➖➖➖\n"
+            "🔥 <b>Exclusive 18+ Content</b>\n"
+            "➖➖➖➖➖➖➖\n"
+            "<b>👇 Download Below</b>"
+        )
+
+        # 8. Send to ADULT CHANNEL
+        target_channel = os.environ.get('ADULT_CHANNEL_ID') # .env se ID lega
+
+        if not target_channel:
+            await message.reply_text("❌ Error: .env file mein ADULT_CHANNEL_ID set nahi hai.")
+            return
+
+        logger.info(f"📤 Sending 18+ post to {target_channel}...")
+
+        if media_type == 'video':
+            await context.bot.send_video(
+                chat_id=target_channel,
+                video=file_id,
+                caption=channel_caption,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            await context.bot.send_photo(
+                chat_id=target_channel,
+                photo=file_id,
+                caption=channel_caption,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+
+        await message.reply_text(f"✅ <b>Posted to Adult Channel!</b>\nMovie: {query_text}", parse_mode='HTML')
+
+    except Exception as e:
+        logger.error(f"Error in post18: {e}")
+        await message.reply_text(f"❌ Error: {str(e)}")
+
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add a movie manually (Supports Unreleased)"""
@@ -5317,6 +5449,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
+    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post18'), admin_post_18))
     application.add_handler(CommandHandler("fixbuttons", update_buttons_command))
 
     # Batch Commands
