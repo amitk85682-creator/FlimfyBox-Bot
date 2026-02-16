@@ -63,6 +63,55 @@ try:
 except Exception:
     FIXED_DATABASE_URL = None
 
+def get_safe_font(text):
+    """
+    Normal text ko Anti-Ban Fonts mein convert karta hai.
+    """
+    # Mapping for Squared Font (🄿🄰🄽🄲🄷🄱🄰🄻🄸)
+    squared_map = str.maketrans(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "31624598700123456789"  # Numbers (Simplified for demo, logic niche hai)
+    )
+    
+    # Hum manual dictionary use karenge reliable conversion ke liye
+    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    
+    # 1. Squared Style (Sabse Safe & Clean)
+    squared = "31624598700123456789" # Placeholder logic replaced below
+    
+    # Simple Logic for Squared (Box)
+    def to_squared(s):
+        result = ""
+        for char in s:
+            if 'a' <= char <= 'z':
+                result += chr(0x1F130 + ord(char) - ord('a'))
+            elif 'A' <= char <= 'Z':
+                result += chr(0x1F130 + ord(char) - ord('A'))
+            elif '0' <= char <= '9':
+                # Numbers ke liye alag range hoti hai, par hum bold use kar lenge
+                result += char 
+            else:
+                result += char
+        return result
+
+    # 2. Double Struck (ℙ𝕒𝕟𝕔𝕙𝕓𝕒𝕝𝕚)
+    def to_double_struck(s):
+        result = ""
+        for char in s:
+            if 'a' <= char <= 'z':
+                result += chr(0x1D552 + ord(char) - ord('a'))
+            elif 'A' <= char <= 'Z':
+                result += chr(0x1D538 + ord(char) - ord('A'))
+            elif '0' <= char <= '9':
+                result += char
+            else:
+                result += char
+        return result
+
+    # Aap yahan choose kar sakte hain konsa style chahiye
+    # Main abhi 'Squared' return kar raha hoon (Jo aapne pehla example diya)
+    return to_squared(text)
+
 # ==================== GLOBAL VARIABLES ====================
 background_tasks = set()
 
@@ -76,38 +125,96 @@ SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
 # ================= CONFIGURATION =================
 FORUM_GROUP_ID = -1003696437312  # Apne Group ki ID
 
-# Yahan Topic ID aur uske Keywords set karo
-# Bot in shabdon ko Genre ya Description me dhundega
-TOPIC_MAPPING = {
-    # Format:  Topic_ID:  ['keyword1', 'keyword2', 'keyword3']
-    
-    20: ['south', 'telugu', 'tamil', 'kannada', 'malayalam', 'allu arjun'], # South Topic (ID: 12)
-    32: ['hollywood', 'english', 'marvel', 'dc', 'disney'],                 # Hollywood Topic (ID: 34)
-    16: ['bollywood', 'hindi', 'khan', 'kapoor'],                           # Bollywood Topic (ID: 56)
-    18: ['series', 'season', 'episode', 'netflix', 'amazon'],               # Web Series Topic (ID: 78)
-    22: ['anime', 'cartoon', 'animation'],                                  # Anime Topic (ID: 90)
-    
-    # Default Topic (Agar kuch match na ho to yahan jayega)
-    100: ['default'] 
-}
-# =================================================
+# ==================== DYNAMIC TOPIC MANAGEMENT ====================
 
-def get_auto_topic_id(genre, description):
+async def get_or_create_topic_id(context, genre_text, description):
     """
-    Ye function movie ke data ko padhkar sahi Topic ID batata hai.
+    1. Pehle Static Mapping check karega.
+    2. Agar nahi mila, to DB check karega.
+    3. Agar DB me bhi nahi hai, to NAYA TOPIC banayega aur save karega.
     """
-    text_to_check = (str(genre) + " " + str(description)).lower()
     
-    for topic_id, keywords in TOPIC_MAPPING.items():
+    # --- 1. STATIC MAPPING CHECK (Priority) ---
+    # Kuch main categories fix rakhna sahi rehta hai (jaise South/Bollywood)
+    text_to_check = (str(genre_text) + " " + str(description)).lower()
+    
+    # Purana Mapping logic (Jo aapne diya tha)
+    STATIC_MAPPING = {
+        20: ['south', 'telugu', 'tamil', 'kannada', 'malayalam', 'allu arjun'],
+        32: ['hollywood', 'english', 'marvel', 'dc', 'disney'],
+        16: ['bollywood', 'hindi', 'khan', 'kapoor'],
+        18: ['series', 'season', 'episode', 'netflix', 'amazon'],
+        22: ['anime', 'cartoon', 'animation']
+    }
+
+    for topic_id, keywords in STATIC_MAPPING.items():
         for word in keywords:
             if word in text_to_check:
                 return topic_id
+
+    # --- 2. AGAR STATIC NAHI MILA -> CREATE NEW TOPIC ---
     
-    return 100 # Agar kuch samajh na aaye to Default Topic ID
+    # Genre ka pehla shabd uthao (Example: "Horror, Thriller" -> "Horror")
+    # Clean the genre name for the Topic Title
+    clean_genre = genre_text.split(',')[0].strip()
+    if len(clean_genre) < 3: 
+        clean_genre = "Other Movies" # Agar genre khali ho to fallback
+        
+    # Title Case (e.g., "horror" -> "Horror")
+    topic_name = clean_genre.title() 
+
+    conn = get_db_connection()
+    if not conn:
+        return 100 # DB fail ho to Default Topic
+
+    try:
+        cur = conn.cursor()
+        
+        # A. Check DB: Kya ye Topic pehle ban chuka hai?
+        cur.execute("SELECT topic_id FROM forum_topics WHERE genre_keyword = %s", (topic_name,))
+        result = cur.fetchone()
+        
+        if result:
+            # Agar mil gaya to wahi ID return karo
+            cur.close()
+            return result[0]
+            
+        # B. Create New Topic on Telegram
+        # Note: Bot ko "Manage Topics" admin permission honi chahiye
+        try:
+            new_topic = await context.bot.create_forum_topic(
+                chat_id=FORUM_GROUP_ID,
+                name=f"📂 {topic_name}" # Example: 📂 Horror
+            )
+            
+            new_topic_id = new_topic.message_thread_id
+            
+            # C. Save to DB for future use
+            cur.execute(
+                "INSERT INTO forum_topics (genre_keyword, topic_id) VALUES (%s, %s)",
+                (topic_name, new_topic_id)
+            )
+            conn.commit()
+            
+            logger.info(f"🆕 New Topic Created: {topic_name} (ID: {new_topic_id})")
+            cur.close()
+            return new_topic_id
+
+        except Exception as e:
+            logger.error(f"Failed to create topic '{topic_name}': {e}")
+            cur.close()
+            return 100 # Error aaye to Default Topic
+
+    except Exception as e:
+        logger.error(f"DB Error in Topic Logic: {e}")
+        return 100
+    finally:
+        close_db_connection(conn)
 
 async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Fixed Version: Deep Link format ab 'movie_' use karega jo start handler me hai.
+    With Dynamic Topic Creation.
     """
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
@@ -139,21 +246,17 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     # Unpack 8 values
     movie_id, title, year, rating, genre, poster_url, description, category = movie_data
 
-    # 2. TOPIC SELECTION
-    topic_id = 100 # Default
-    cat_lower = str(category).lower()
-
-    for tid, keywords in TOPIC_MAPPING.items():
-        if cat_lower in [k.lower() for k in keywords]: 
-            topic_id = tid
-            break
-            
-    if topic_id == 100:
-        if "south" in cat_lower: topic_id = 20
-        elif "hollywood" in cat_lower: topic_id = 1
-        elif "bollywood" in cat_lower: topic_id = 16
-        elif "anime" in cat_lower: topic_id = 22
-        elif "series" in cat_lower: topic_id = 18
+    # ==================================================================
+    # 2. TOPIC SELECTION (UPDATED - DYNAMIC)
+    # ==================================================================
+    # Purana if/else logic hata diya hai.
+    # Ab ye function check karega ki topic hai ya nahi, aur naya bana dega.
+    try:
+        topic_id = await get_or_create_topic_id(context, genre, description)
+    except Exception as e:
+        logger.error(f"Topic creation failed: {e}")
+        topic_id = 100 # Fallback to default if error
+    # ==================================================================
 
     # 3. HANDLE MISSING DATA
     final_photo = poster_url if poster_url and poster_url != 'N/A' else DEFAULT_POSTER
@@ -166,11 +269,11 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"🎭 **Genre:** {genre}\n"
         f"🏷 **Category:** {category}\n\n"
         f"📜 **Story:** {short_desc}\n\n"
-        f"👇 **Click Below to Download** 👇"
+        f"👇 **Click Below to Download** ㅤㅤㅤㅤ👇"
     )
 
     # 5. 🔗 CORRECTED DEEP LINKS (movie_ prefix)
-    link_param = f"movie_{movie_id}"  # <--- YEH CHANGE KIYA HAI (Ab Start handler pakad lega)
+    link_param = f"movie_{movie_id}" 
     
     bot1_username = "FlimfyBox_SearchBot"
     bot2_username = "urmoviebot"
@@ -182,11 +285,11 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     keyboard = [
         [
-            InlineKeyboardButton("📥 Download Server 1", url=link1),
-            InlineKeyboardButton("📥 Download Server 2", url=link2)
+            InlineKeyboardButton("📥 Download Now", url=link1),
+            InlineKeyboardButton("📥 Download Now", url=link2)
         ],
         [
-            InlineKeyboardButton("⚡ Fast Download (Server 3)", url=link3)
+            InlineKeyboardButton("📥 Download Now", url=link3)
         ]
     ]
 
@@ -3599,7 +3702,10 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Smart 18+ Post: Supports Caption/Reply AND Auto-IMDb Data
+    Final 18+ Post Logic:
+    - Single Bot (urmoviebot)
+    - 2 Buttons (Download & Watch)
+    - Anti-Ban Font Protection
     """
     try:
         user_id = update.effective_user.id
@@ -3609,7 +3715,7 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = update.message
         replied_msg = message.reply_to_message
         
-        # --- 1. MEDIA DETECTION (Reply vs Caption) ---
+        # --- 1. MEDIA DETECTION ---
         media_msg = None
         command_text = ""
 
@@ -3625,13 +3731,11 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not command_text.startswith('/post18'):
             return
 
-        # Status message (User ko dikhane ke liye ki kaam ho raha hai)
-        status_msg = await message.reply_text("⏳ **Fetching IMDb Data...**", parse_mode='Markdown')
+        status_msg = await message.reply_text("⏳ **Securing Text & Creating Links...**", parse_mode='Markdown')
 
         # --- 2. EXTRACT FILE ID ---
         file_id = None
-        media_type = 'photo' # default
-
+        media_type = 'photo'
         if media_msg.photo:
             file_id = media_msg.photo[-1].file_id
             media_type = 'photo'
@@ -3653,37 +3757,50 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             custom_msg = ""
 
         if not query_text:
-            await status_msg.edit_text("❌ Name missing. Usage: /post18 Name")
+            await status_msg.edit_text("❌ Name missing.")
             return
 
-        # --- 4. FETCH METADATA (IMDb LOGIC) ---
-        # Existing function ko call kar rahe hain
+        # --- 4. FETCH METADATA & APPLY FONT ---
         metadata = await run_async(fetch_movie_metadata, query_text)
         
-        # Default Values
-        display_title = query_text
+        # Original Title (Link banane ke liye Normal English chahiye)
+        original_title = query_text  
+        
+        # Display Title (Channel par ye Style wala dikhega taaki Ban na ho)
+        # Note: Make sure get_safe_font function is present in main.py
+        display_title = get_safe_font(query_text) 
+        
         year = ""
-        rating = "N/A"
-        genre = "18+, Adult"
-        plot = "No description available."
+        rating = ""
+        genre = "18+, Web Series"
+        
+        if custom_msg:
+            plot = custom_msg
+        else:
+            plot = "Full Uncut & Uncensored Episode. Watch & Download now in HD."
         
         if metadata:
-            # Unpack 8 values (Jo aapke code mein pehle se defined hain)
             m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
             
-            display_title = m_title
-            if m_year: year = f"({m_year})"
-            if m_rating and m_rating != 'N/A': rating = f"{m_rating}/10"
-            if m_genre: genre = m_genre
-            if m_plot: plot = m_plot[:200] + "..." # Story lambi ho to chhota kar do
+            # Agar IMDb title mila, to Normal aur Stylish dono update karo
+            if m_title and m_title != "N/A": 
+                original_title = m_title
+                display_title = get_safe_font(m_title) 
+                
+            if m_year and str(m_year) != "0": year = f"({m_year})"
+            if m_rating and m_rating != 'N/A': rating = f"⭐️ <b>Rating:</b> {m_rating}/10\n"
+            if m_genre and m_genre != "N/A": genre = m_genre
+            if not custom_msg and m_plot and m_plot != "N/A": 
+                plot = m_plot[:250] + "..."
 
-        # --- 5. DB SEARCH (For Deep Link) ---
+        # --- 5. DB SEARCH ---
         movie_id = None
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{query_text}%",))
+                # Search Hamesha ORIGINAL (Normal) title se hoga
+                cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{original_title}%",))
                 row = cur.fetchone()
                 movie_id = row[0] if row else None
                 cur.close()
@@ -3692,43 +3809,43 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 close_db_connection(conn)
 
-        # --- 6. GENERATE BUTTONS ---
-        bot1 = "FlimfyBox_SearchBot" # Apne bot username check kar lena
-        bot3 = "FlimfyBox_Bot"
+        # --- 6. BUTTONS (Modified for urmoviebot only) ---
+        target_bot = "urmoviebot"  # Sirf ye bot use hoga
         
-        link_param = f"movie_{movie_id}" if movie_id else f"q_{query_text.replace(' ', '_')}"
+        # Link Logic
+        safe_param_text = original_title.replace(' ', '_')
+        link_param = f"movie_{movie_id}" if movie_id else f"q_{safe_param_text}"
+        
+        # Final Link
+        bot_link = f"https://t.me/{target_bot}?start={link_param}"
 
+        # Layout: 
+        # Row 1: [Download Now] [Watch Online]
+        # Row 2: [Join Premium Channel]
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("📥 Download Fast", url=f"https://t.me/{bot3}?start={link_param}"),
-                InlineKeyboardButton("📺 Watch Online", url=f"https://t.me/{bot1}?start={link_param}"),
+                InlineKeyboardButton("📥 Download Now", url=bot_link),
+                InlineKeyboardButton("📺 Watch Online", url=bot_link)
             ],
-            [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/+AbCdEfGhIjKlMnOp")] # Link Badle
+            [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/Adult_Content_Originals")]
         ])
 
-        # --- 7. BUILD FINAL CAPTION ---
+        # --- 7. FINAL CAPTION ---
         channel_caption = (
-            f"🔞 <b>{display_title} {year}</b>\n\n"
-            f"⭐️ <b>Rating:</b> {rating}\n"
+            f"🔞 <b>{display_title} {year}</b>\n\n"  # Stylish Title
+            f"{rating}"
             f"🎭 <b>Genre:</b> {genre}\n\n"
             f"📜 <b>Story:</b> <i>{plot}</i>\n"
-        )
-        
-        if custom_msg:
-            channel_caption += f"\n✨ <b>Note:</b> {custom_msg}\n"
-        
-        channel_caption += (
-            "\n➖➖➖➖➖➖➖\n"
-            "🔥 <b>Exclusive 18+ Content</b>\n"
-            "➖➖➖➖➖➖➖\n"
-            "<b>👇 Download & Watch Below</b>"
+            f"\n➖➖➖➖➖➖➖\n"
+            f"🔥 <b>Exclusive 18+ Content</b>\n"
+            f"➖➖➖➖➖➖➖\n"
+            f"<b>👇 Download & Watch Below</b>"
         )
 
-        # --- 8. SEND TO ADULT CHANNEL ---
+        # --- 8. SEND TO CHANNEL ---
         target_channel = os.environ.get('ADULT_CHANNEL_ID')
-
         if not target_channel:
-            await status_msg.edit_text("❌ Error: ADULT_CHANNEL_ID not set in .env")
+            await status_msg.edit_text("❌ ADULT_CHANNEL_ID missing.")
             return
 
         if media_type == 'video':
@@ -3738,13 +3855,12 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await context.bot.send_photo(chat_id=target_channel, photo=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
 
-        # Cleanup
         await status_msg.delete()
-        await message.reply_text(f"✅ <b>Posted with IMDb Data!</b>\nMovie: {display_title}", parse_mode='HTML')
+        await message.reply_text(f"✅ <b>Posted via urmoviebot!</b>\nDisplay: {display_title}", parse_mode='HTML')
 
     except Exception as e:
-        logger.error(f"Error in post18: {e}")
-        await message.reply_text(f"❌ Error: {str(e)}")
+        logger.error(f"Post18 Error: {e}")
+        await message.reply_text(f"❌ Error: {e}")
 
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
