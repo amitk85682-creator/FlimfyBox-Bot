@@ -3646,51 +3646,54 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Final 18+ Post Logic:
-    - Single Bot (urmoviebot)
-    - 2 Buttons (Download & Watch)
-    - Anti-Ban Font Protection
+    Hybrid 18+ Post System:
+    1. Direct File (Ullu/Web Series) -> Sends File via Bot
+    2. TeraBox Link (External) -> Sends Link via Buttons
     """
     try:
         user_id = update.effective_user.id
         if user_id != ADMIN_USER_ID:
             return
 
+        # --- 1. DETECT INPUT TYPE ---
         message = update.message
         replied_msg = message.reply_to_message
         
-        # --- 1. MEDIA DETECTION ---
         media_msg = None
         command_text = ""
+        is_terabox_mode = False
+        terabox_link = ""
 
-        if replied_msg and (replied_msg.photo or replied_msg.video or replied_msg.document):
+        # Check: Kya ye Text Command hai? (TeraBox Link ke liye)
+        if message.text and message.text.startswith('/post18'):
+            command_text = message.text
+            # Format: /post18 Name | Link
+            if "|" in command_text:
+                is_terabox_mode = True
+                parts = command_text.split('|')
+                command_text = parts[0].strip() # Name extraction logic niche hoga
+                terabox_link = parts[1].strip()
+            # Agar reply karke link bheja hai
+            elif replied_msg and (replied_msg.text):
+                possible_link = replied_msg.text.strip()
+                if "http" in possible_link:
+                    is_terabox_mode = True
+                    terabox_link = possible_link
+
+        # Check: Kya ye Media Command hai? (Direct File ke liye)
+        elif message.caption and message.caption.startswith('/post18'):
+            media_msg = message
+            command_text = message.caption
+        elif replied_msg and (replied_msg.video or replied_msg.document or replied_msg.photo):
             media_msg = replied_msg
             command_text = message.text or ""
-        elif message.photo or message.video or message.document:
-            media_msg = message
-            command_text = message.caption or ""
-        else:
-            return
-
+        
         if not command_text.startswith('/post18'):
             return
 
-        status_msg = await message.reply_text("⏳ **Securing Text & Creating Links...**", parse_mode='Markdown')
+        status_msg = await message.reply_text("⏳ **Processing Content...**", parse_mode='Markdown')
 
-        # --- 2. EXTRACT FILE ID ---
-        file_id = None
-        media_type = 'photo'
-        if media_msg.photo:
-            file_id = media_msg.photo[-1].file_id
-            media_type = 'photo'
-        elif media_msg.video:
-            file_id = media_msg.video.file_id
-            media_type = 'video'
-        elif media_msg.document:
-            file_id = media_msg.document.file_id
-            media_type = 'document'
-
-        # --- 3. PARSE NAME ---
+        # --- 2. PARSE NAME ---
         raw_input = command_text.replace('/post18', '').strip()
         if ',' in raw_input:
             parts = raw_input.split(',', 1)
@@ -3701,82 +3704,35 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             custom_msg = ""
 
         if not query_text:
-            await status_msg.edit_text("❌ Name missing.")
+            await status_msg.edit_text("❌ Name missing! Use: `/post18 Name`")
             return
 
-        # --- 4. FETCH METADATA & APPLY FONT ---
+        # --- 3. FETCH METADATA ---
         metadata = await run_async(fetch_movie_metadata, query_text)
         
-        # Original Title (Link banane ke liye Normal English chahiye)
-        original_title = query_text  
-        
-        # Display Title (Channel par ye Style wala dikhega taaki Ban na ho)
-        # Note: Make sure get_safe_font function is present in main.py
-        display_title = get_safe_font(query_text) 
-        
+        display_title = get_safe_font(query_text) # Anti-Ban Font
+        original_title = query_text
         year = ""
         rating = ""
-        genre = "18+, Web Series"
-        
-        if custom_msg:
-            plot = custom_msg
-        else:
-            plot = "Full Uncut & Uncensored Episode. Watch & Download now in HD."
-        
+        genre = "18+, Adult"
+        plot = "Exclusive Content"
+
+        if custom_msg: plot = custom_msg
+
         if metadata:
             m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
-            
-            # Agar IMDb title mila, to Normal aur Stylish dono update karo
             if m_title and m_title != "N/A": 
                 original_title = m_title
-                display_title = get_safe_font(m_title) 
-                
+                display_title = get_safe_font(m_title)
             if m_year and str(m_year) != "0": year = f"({m_year})"
             if m_rating and m_rating != 'N/A': rating = f"⭐️ <b>Rating:</b> {m_rating}/10\n"
             if m_genre and m_genre != "N/A": genre = m_genre
             if not custom_msg and m_plot and m_plot != "N/A": 
                 plot = m_plot[:250] + "..."
 
-        # --- 5. DB SEARCH ---
-        movie_id = None
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                # Search Hamesha ORIGINAL (Normal) title se hoga
-                cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{original_title}%",))
-                row = cur.fetchone()
-                movie_id = row[0] if row else None
-                cur.close()
-            except Exception:
-                pass
-            finally:
-                close_db_connection(conn)
-
-        # --- 6. BUTTONS (Modified for urmoviebot only) ---
-        target_bot = "urmoviebot"  # Sirf ye bot use hoga
-        
-        # Link Logic
-        safe_param_text = original_title.replace(' ', '_')
-        link_param = f"movie_{movie_id}" if movie_id else f"q_{safe_param_text}"
-        
-        # Final Link
-        bot_link = f"https://t.me/{target_bot}?start={link_param}"
-
-        # Layout: 
-        # Row 1: [Download Now] [Watch Online]
-        # Row 2: [Join Premium Channel]
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("📥 Download Now", url=bot_link),
-                InlineKeyboardButton("📺 Watch Online", url=bot_link)
-            ],
-            [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/Adult_Content_Originals")]
-        ])
-
-        # --- 7. FINAL CAPTION ---
+        # --- 4. PREPARE CAPTION ---
         channel_caption = (
-            f"🔞 <b>{display_title} {year}</b>\n\n"  # Stylish Title
+            f"🔞 <b>{display_title} {year}</b>\n\n"
             f"{rating}"
             f"🎭 <b>Genre:</b> {genre}\n\n"
             f"📜 <b>Story:</b> <i>{plot}</i>\n"
@@ -3786,21 +3742,84 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>👇 Download & Watch Below</b>"
         )
 
-        # --- 8. SEND TO CHANNEL ---
         target_channel = os.environ.get('ADULT_CHANNEL_ID')
         if not target_channel:
-            await status_msg.edit_text("❌ ADULT_CHANNEL_ID missing.")
+            await status_msg.edit_text("❌ ADULT_CHANNEL_ID missing in .env")
             return
 
-        if media_type == 'video':
-            await context.bot.send_video(chat_id=target_channel, video=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
-        elif media_type == 'document':
-            await context.bot.send_document(chat_id=target_channel, document=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
-        else:
+        # ==========================================
+        # 🔥 MODE A: TERABOX POST (Link Based)
+        # ==========================================
+        if is_terabox_mode and terabox_link:
+            # Buttons: Seedha TeraBox Link par le jayenge
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📺 Watch Online (HD)", url=terabox_link),
+                    InlineKeyboardButton("📥 Download Fast", url=terabox_link)
+                ],
+                [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/Adult_Content_Originals")]
+            ])
+            
+            # Poster ke liye Metadata wala poster ya Default use karein
+            poster_to_use = m_poster if (metadata and m_poster) else "https://i.ibb.co/9h7Kj3n/default-18.jpg" # Apna default poster link lagayein
+
+            try:
+                await context.bot.send_photo(
+                    chat_id=target_channel,
+                    photo=poster_to_use,
+                    caption=channel_caption,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+                await status_msg.edit_text(f"✅ **TeraBox Link Posted!**\nMovie: {original_title}")
+            except Exception as e:
+                await status_msg.edit_text(f"❌ TeraBox Post Error: {e}")
+            return
+
+        # ==========================================
+        # 📂 MODE B: DIRECT FILE POST (Ullu/Series)
+        # ==========================================
+        
+        # 1. DB Search (For Bot Link)
+        movie_id = None
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{original_title}%",))
+                row = cur.fetchone()
+                movie_id = row[0] if row else None
+                cur.close()
+            except Exception: pass
+            finally: close_db_connection(conn)
+
+        # 2. Generate Bot Links
+        safe_param = original_title.replace(' ', '_')
+        link_param = f"movie_{movie_id}" if movie_id else f"q_{safe_param}"
+        bot_link = f"https://t.me/urmoviebot?start={link_param}"
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📥 Download Now", url=bot_link),
+                InlineKeyboardButton("📺 Watch Online", url=bot_link)
+            ],
+            [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/Adult_Content_Originals")]
+        ])
+
+        # 3. Send File to Channel
+        file_id = None
+        if media_msg.photo:
+            file_id = media_msg.photo[-1].file_id
             await context.bot.send_photo(chat_id=target_channel, photo=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+        elif media_msg.video:
+            file_id = media_msg.video.file_id
+            await context.bot.send_video(chat_id=target_channel, video=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+        elif media_msg.document:
+            file_id = media_msg.document.file_id
+            await context.bot.send_document(chat_id=target_channel, document=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
 
         await status_msg.delete()
-        await message.reply_text(f"✅ <b>Posted via urmoviebot!</b>\nDisplay: {display_title}", parse_mode='HTML')
+        await message.reply_text(f"✅ **Direct File Posted!**\nSaved: {original_title}", parse_mode='HTML')
 
     except Exception as e:
         logger.error(f"Post18 Error: {e}")
