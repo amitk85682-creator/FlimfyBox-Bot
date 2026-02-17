@@ -3647,8 +3647,9 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Hybrid 18+ Post System:
-    1. Direct File (Ullu/Web Series) -> Sends File via Bot
-    2. TeraBox Link (External) -> Sends Link via Buttons
+    - Supports Custom Poster (User uploaded photo)
+    - Supports TeraBox Links
+    - Supports Direct Files
     """
     try:
         user_id = update.effective_user.id
@@ -3664,36 +3665,58 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_terabox_mode = False
         terabox_link = ""
 
-        # Check: Kya ye Text Command hai? (TeraBox Link ke liye)
+        # A. Check Text Command (Reply case)
         if message.text and message.text.startswith('/post18'):
             command_text = message.text
-            # Format: /post18 Name | Link
+            # Agar reply kiya hai, to media wahan se uthao
+            if replied_msg and (replied_msg.photo or replied_msg.video or replied_msg.document):
+                media_msg = replied_msg
+            
+            # Check for Link (Name | Link format)
             if "|" in command_text:
                 is_terabox_mode = True
                 parts = command_text.split('|')
-                command_text = parts[0].strip() # Name extraction logic niche hoga
+                command_text = parts[0].strip()
                 terabox_link = parts[1].strip()
-            # Agar reply karke link bheja hai
-            elif replied_msg and (replied_msg.text):
-                possible_link = replied_msg.text.strip()
-                if "http" in possible_link:
-                    is_terabox_mode = True
-                    terabox_link = possible_link
+            # Check reply text for link
+            elif replied_msg and replied_msg.text and "http" in replied_msg.text:
+                 is_terabox_mode = True
+                 terabox_link = replied_msg.text.strip()
 
-        # Check: Kya ye Media Command hai? (Direct File ke liye)
+        # B. Check Caption Command (Direct Media case)
         elif message.caption and message.caption.startswith('/post18'):
             media_msg = message
             command_text = message.caption
-        elif replied_msg and (replied_msg.video or replied_msg.document or replied_msg.photo):
-            media_msg = replied_msg
-            command_text = message.text or ""
+            
+            if "|" in command_text:
+                is_terabox_mode = True
+                parts = command_text.split('|')
+                command_text = parts[0].strip()
+                terabox_link = parts[1].strip()
         
         if not command_text.startswith('/post18'):
             return
 
-        status_msg = await message.reply_text("⏳ **Processing Content...**", parse_mode='Markdown')
+        status_msg = await message.reply_text("⏳ **Processing...**", parse_mode='Markdown')
 
-        # --- 2. PARSE NAME ---
+        # --- 2. EXTRACT USER PHOTO (CUSTOM POSTER) ---
+        user_photo_id = None
+        user_video_id = None
+        
+        if media_msg:
+            if media_msg.photo:
+                user_photo_id = media_msg.photo[-1].file_id
+            elif media_msg.video:
+                user_video_id = media_msg.video.file_id
+            # Document handling if needed
+            elif media_msg.document:
+                 # Agar document image hai (mime type check kar sakte hain, but simple rakhte hain)
+                 if media_msg.document.mime_type and "image" in media_msg.document.mime_type:
+                     user_photo_id = media_msg.document.file_id
+                 else:
+                     user_video_id = media_msg.document.file_id # Assume video file
+
+        # --- 3. PARSE NAME ---
         raw_input = command_text.replace('/post18', '').strip()
         if ',' in raw_input:
             parts = raw_input.split(',', 1)
@@ -3707,10 +3730,10 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ Name missing! Use: `/post18 Name`")
             return
 
-        # --- 3. FETCH METADATA ---
+        # --- 4. FETCH METADATA ---
         metadata = await run_async(fetch_movie_metadata, query_text)
         
-        display_title = get_safe_font(query_text) # Anti-Ban Font
+        display_title = get_safe_font(query_text)
         original_title = query_text
         year = ""
         rating = ""
@@ -3730,7 +3753,7 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not custom_msg and m_plot and m_plot != "N/A": 
                 plot = m_plot[:250] + "..."
 
-        # --- 4. PREPARE CAPTION ---
+        # --- 5. PREPARE CAPTION ---
         channel_caption = (
             f"🔞 <b>{display_title} {year}</b>\n\n"
             f"{rating}"
@@ -3744,14 +3767,13 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         target_channel = os.environ.get('ADULT_CHANNEL_ID')
         if not target_channel:
-            await status_msg.edit_text("❌ ADULT_CHANNEL_ID missing in .env")
+            await status_msg.edit_text("❌ ADULT_CHANNEL_ID missing.")
             return
 
         # ==========================================
         # 🔥 MODE A: TERABOX POST (Link Based)
         # ==========================================
         if is_terabox_mode and terabox_link:
-            # Buttons: Seedha TeraBox Link par le jayenge
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("📺 Watch Online (HD)", url=terabox_link),
@@ -3760,19 +3782,45 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/Adult_Content_Originals")]
             ])
             
-            # Poster ke liye Metadata wala poster ya Default use karein
-            poster_to_use = m_poster if (metadata and m_poster) else "https://i.ibb.co/9h7Kj3n/default-18.jpg" # Apna default poster link lagayein
-
+            # POSTER LOGIC:
+            # 1. User ka photo
+            # 2. User ka video (thumb) - Mushkil hai, ignore for now
+            # 3. IMDb Poster
+            # 4. Default Poster
+            
             try:
-                await context.bot.send_photo(
-                    chat_id=target_channel,
-                    photo=poster_to_use,
-                    caption=channel_caption,
-                    reply_markup=keyboard,
-                    parse_mode='HTML'
-                )
+                if user_photo_id:
+                    # Case 1: User ne photo bheji hai
+                    await context.bot.send_photo(
+                        chat_id=target_channel,
+                        photo=user_photo_id,
+                        caption=channel_caption,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                elif user_video_id:
+                     # Case 2: User ne video bheji, usko hi bhej do caption ke sath
+                     await context.bot.send_video(
+                        chat_id=target_channel,
+                        video=user_video_id,
+                        caption=channel_caption,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                else:
+                    # Case 3: IMDb or Default
+                    poster_to_use = m_poster if (metadata and m_poster) else "https://i.ibb.co/9h7Kj3n/default-18.jpg"
+                    await context.bot.send_photo(
+                        chat_id=target_channel,
+                        photo=poster_to_use,
+                        caption=channel_caption,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+
                 await status_msg.edit_text(f"✅ **TeraBox Link Posted!**\nMovie: {original_title}")
             except Exception as e:
+                logger.error(f"TeraBox Post Error: {e}")
                 await status_msg.edit_text(f"❌ TeraBox Post Error: {e}")
             return
 
@@ -3780,7 +3828,7 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 📂 MODE B: DIRECT FILE POST (Ullu/Series)
         # ==========================================
         
-        # 1. DB Search (For Bot Link)
+        # 1. DB Search
         movie_id = None
         conn = get_db_connection()
         if conn:
@@ -3793,7 +3841,7 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception: pass
             finally: close_db_connection(conn)
 
-        # 2. Generate Bot Links
+        # 2. Bot Links
         safe_param = original_title.replace(' ', '_')
         link_param = f"movie_{movie_id}" if movie_id else f"q_{safe_param}"
         bot_link = f"https://t.me/urmoviebot?start={link_param}"
@@ -3806,17 +3854,16 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔞 Join Premium Channel", url="https://t.me/Adult_Content_Originals")]
         ])
 
-        # 3. Send File to Channel
-        file_id = None
-        if media_msg.photo:
-            file_id = media_msg.photo[-1].file_id
-            await context.bot.send_photo(chat_id=target_channel, photo=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
-        elif media_msg.video:
-            file_id = media_msg.video.file_id
-            await context.bot.send_video(chat_id=target_channel, video=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
-        elif media_msg.document:
-            file_id = media_msg.document.file_id
-            await context.bot.send_document(chat_id=target_channel, document=file_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+        # 3. Send File
+        if user_photo_id:
+            await context.bot.send_photo(chat_id=target_channel, photo=user_photo_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+        elif user_video_id:
+            await context.bot.send_video(chat_id=target_channel, video=user_video_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+        else:
+             # Agar direct file mode hai aur user ne media nahi diya (Reply text only)
+             # Toh poster use karo, lekin file ka kya? File missing hogi.
+             await status_msg.edit_text("❌ Error: Direct File mode ke liye Photo/Video attach karna zaroori hai.")
+             return
 
         await status_msg.delete()
         await message.reply_text(f"✅ **Direct File Posted!**\nSaved: {original_title}", parse_mode='HTML')
