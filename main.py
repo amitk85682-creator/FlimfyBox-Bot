@@ -6190,32 +6190,32 @@ async def main():
     logger.info("🚀 Starting Multi-Bot System...")
 
     # =================================================================
-    # 1. Start Flask Server FIRST (To satisfy Render Port Requirement)
+    # 1. Flask Server FIRST (Render timeout se bachao)
     # =================================================================
-    # इसे सबसे ऊपर ले जाएं ताकि Render को तुरंत Port मिल जाए और Timeout न हो
-    flask_thread = threading.Thread(target=run_flask)
+    flask_thread        = threading.Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    logger.info("🌐 Flask server started immediately to prevent Timeout.")
+    logger.info("🌐 Flask server started.")
 
     # =================================================================
-    # 2. Database Setup (Ab ye araam se run ho sakta hai)
+    # 2. Database Setup
     # =================================================================
     try:
         setup_database()
         migrate_add_imdb_columns()
-        migrate_channel_posts_for_restore()   # ✅ YE ADD KIYA GAYA HAI
+        migrate_content_type_for_restore()
     except Exception as e:
+        logger.error(f"❌ DB Setup Error: {e}")  # ← YE LINE ZAROORI HAI
 
     # =================================================================
     # 3. Get Tokens from ENV
     # =================================================================
     tokens = [
         os.environ.get("TELEGRAM_BOT_TOKEN"),  # Bot 1
-        os.environ.get("BOT_TOKEN_2"),         # Bot 2
-        os.environ.get("BOT_TOKEN_3")          # Bot 3
+        os.environ.get("BOT_TOKEN_2"),          # Bot 2
+        os.environ.get("BOT_TOKEN_3")           # Bot 3
     ]
-    
+
     # Khali tokens filter karo
     tokens = [t for t in tokens if t]
 
@@ -6232,25 +6232,26 @@ async def main():
     for i, token in enumerate(tokens):
         try:
             logger.info(f"🔹 Initializing Bot {i+1}...")
-            
-            # Application Build
-            app = Application.builder().token(token).read_timeout(30).write_timeout(30).build()
-            
-            # Handlers Register karo
+
+            app = (
+                Application.builder()
+                .token(token)
+                .read_timeout(30)
+                .write_timeout(30)
+                .build()
+            )
+
             register_handlers(app)
-            
-            # Initialize & Start
+
             await app.initialize()
             await app.start()
-            
-            # Non-blocking Polling Start karo
             await app.updater.start_polling(drop_pending_updates=True)
-            
+
             apps.append(app)
-            
+
             bot_info = await app.bot.get_me()
             logger.info(f"✅ Bot {i+1} Started: @{bot_info.username}")
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to start Bot {i+1}: {e}")
 
@@ -6264,14 +6265,17 @@ async def main():
     stop_signal = asyncio.Event()
     await stop_signal.wait()
 
-    # Cleanup (Jab script band ho)
+    # Cleanup
     for app in apps:
-        await app.stop()
-        await app.shutdown()
+        try:
+            await app.stop()
+            await app.shutdown()
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
+
 
 if __name__ == '__main__':
     try:
-        # Async loop start
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
