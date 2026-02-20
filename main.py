@@ -3947,12 +3947,6 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"      ━━━{year_display}━━━\n"
             f"╚═══════════════════════╝\n"
             f"\n"
-        )
-
-        # Rating (sirf tab show ho jab available ho)
-        
-        channel_caption += (
-           
             f"🔞 18+  |  💎 <b>Premium Quality</b>\n"
             f"🚨 <i>Only For Adults (18+)</i>"
             f"{link_section}"
