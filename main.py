@@ -153,24 +153,44 @@ def get_auto_topic_id(genre, description):
 
 async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Fixed Version: Deep Link format ab 'movie_' use karega jo start handler me hai.
+    Forum topic par post karo + DB mein save karo (Restore ke liye)
     """
     user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID: return
+    if user_id != ADMIN_USER_ID:
+        return
 
-    # 1. MOVIE SEARCH
-    movie_search_name = " ".join(context.args).strip()
+    # --- 1. MOVIE SEARCH ---
+    movie_search_name = " ".join(context.args).strip() if context.args else ""
+
     conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ Database connection failed.")
+        return
+
     cursor = conn.cursor()
-    
-    query = "SELECT id, title, year, rating, genre, poster_url, description, category FROM movies"
-    
+
+    query = """
+        SELECT id, title, year, rating, genre, 
+               poster_url, description, category 
+        FROM movies
+    """
+
     if movie_search_name:
-        cursor.execute(f"{query} WHERE title ILIKE %s", (f"%{movie_search_name}%",))
+        cursor.execute(
+            query + " WHERE title ILIKE %s LIMIT 1",
+            (f"%{movie_search_name}%",)
+        )
     elif BATCH_SESSION.get('active'):
-        cursor.execute(f"{query} WHERE id = %s", (BATCH_SESSION['movie_id'],))
+        cursor.execute(
+            query + " WHERE id = %s",
+            (BATCH_SESSION['movie_id'],)
+        )
     else:
-        await update.message.reply_text("❌ Naam batao! Example: `/post Pushpa`")
+        await update.message.reply_text(
+            "❌ Naam batao!\nExample: `/post Pushpa`",
+            parse_mode='Markdown'
+        )
+        cursor.close()
         close_db_connection(conn)
         return
 
@@ -179,33 +199,41 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     close_db_connection(conn)
 
     if not movie_data:
-        await update.message.reply_text("❌ Movie nahi mili.")
+        await update.message.reply_text("❌ Movie nahi mili database mein.")
         return
 
-    # Unpack 8 values
+    # --- 2. DATA UNPACK ---
     movie_id, title, year, rating, genre, poster_url, description, category = movie_data
 
-    # 2. TOPIC SELECTION
-    topic_id = 100 # Default
-    cat_lower = str(category).lower()
+    # --- 3. TOPIC SELECTION ---
+    topic_id  = 100
+    cat_lower = str(category or "").lower()
 
     for tid, keywords in TOPIC_MAPPING.items():
-        if cat_lower in [k.lower() for k in keywords]: 
+        if cat_lower in [k.lower() for k in keywords]:
             topic_id = tid
             break
-            
+
     if topic_id == 100:
-        if "south" in cat_lower: topic_id = 20
-        elif "hollywood" in cat_lower: topic_id = 1
+        if "south"      in cat_lower: topic_id = 20
+        elif "hollywood" in cat_lower: topic_id = 32
         elif "bollywood" in cat_lower: topic_id = 16
-        elif "anime" in cat_lower: topic_id = 22
-        elif "series" in cat_lower: topic_id = 18
+        elif "anime"     in cat_lower: topic_id = 22
+        elif "series"    in cat_lower: topic_id = 18
 
-    # 3. HANDLE MISSING DATA
-    final_photo = poster_url if poster_url and poster_url != 'N/A' else DEFAULT_POSTER
-    short_desc = (description[:150] + "...") if description else "Plot details unavailable."
+    # --- 4. MISSING DATA HANDLE ---
+    final_photo = (
+        poster_url
+        if poster_url and poster_url != 'N/A'
+        else DEFAULT_POSTER
+    )
+    short_desc = (
+        (description[:150] + "...")
+        if description
+        else "Plot details unavailable."
+    )
 
-    # 4. CAPTION
+    # --- 5. CAPTION ---
     caption = (
         f"🎬 **{title} ({year})**\n\n"
         f"⭐️ **Rating:** {rating}/10\n"
@@ -215,9 +243,8 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"👇 **Click Below to Download** 👇"
     )
 
-    # 5. 🔗 CORRECTED DEEP LINKS (movie_ prefix)
-    link_param = f"movie_{movie_id}"  # <--- YEH CHANGE KIYA HAI (Ab Start handler pakad lega)
-    
+    # --- 6. DEEP LINKS ---
+    link_param    = f"movie_{movie_id}"
     bot1_username = "FlimfyBox_SearchBot"
     bot2_username = "urmoviebot"
     bot3_username = "FlimfyBox_Bot"
@@ -226,56 +253,74 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     link2 = f"https://t.me/{bot2_username}?start={link_param}"
     link3 = f"https://t.me/{bot3_username}?start={link_param}"
 
-    keyboard = [
+    # Keyboard data (Restore ke liye save hoga)
+    keyboard_data = {
+        "inline_keyboard": [
+            [
+                {"text": "📥 Download Now", "url": link1},
+                {"text": "📥 Download Now", "url": link2}
+            ],
+            [
+                {"text": "⚡ Download Now", "url": link3}
+            ]
+        ]
+    }
+
+    keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📥 Download Now", url=link1),
             InlineKeyboardButton("📥 Download Now", url=link2)
         ],
         [
-            InlineKeyboardButton("⚡Download Now", url=link3)
+            InlineKeyboardButton("⚡ Download Now", url=link3)
         ]
-    ]
+    ])
 
+    # --- 7. POST SEND ---
     try:
-        bot_info = await context.bot.get_me()
-        inline_kb = InlineKeyboardMarkup(keyboard)
-        
         sent = await context.bot.send_photo(
-            chat_id=FORUM_GROUP_ID,
-            message_thread_id=topic_id,
-            photo=final_photo,
-            caption=caption,
-            parse_mode='Markdown',
-            reply_markup=inline_kb
-        )
-        
-        # Category se content_type decide karo
-        if any(x in cat_lower for x in ['adult', '18+', 'ullu', 'aagmaal']):
-            post_type = "adult"
-        elif any(x in cat_lower for x in ['series', 'season', 'episode']):
-            post_type = "series"
-        elif any(x in cat_lower for x in ['anime', 'cartoon']):
-            post_type = "anime"
-        else:
-            post_type = "movies"
-
-        save_post_to_db(
-            movie_id      = movie_id,
-            channel_id    = FORUM_GROUP_ID,
-            message_id    = sent.message_id,
-            bot_username  = bot_info.username,
-            caption       = caption,
-            media_file_id = final_photo,
-            media_type    = "photo",
-            keyboard_data = inline_kb,
-            topic_id      = topic_id,
-            content_type  = post_type    # ✅ Auto tag
+            chat_id            = FORUM_GROUP_ID,
+            message_thread_id  = topic_id,
+            photo              = final_photo,
+            caption            = caption,
+            parse_mode         = 'Markdown',
+            reply_markup       = keyboard
         )
 
-try:
-    await update.message.reply_text("Done!")
-  except Exception as e: # Indented too far!
-    print(e)
+        # --- 8. DB SAVE (Restore ke liye) ---
+        try:
+            bot_info = await context.bot.get_me()
+            save_post_to_db(
+                movie_id      = movie_id,
+                channel_id    = FORUM_GROUP_ID,
+                message_id    = sent.message_id,
+                bot_username  = bot_info.username,
+                caption       = caption,
+                media_file_id = final_photo,
+                media_type    = "photo",
+                keyboard_data = keyboard_data,
+                topic_id      = topic_id,
+                content_type  = (
+                    "adult"  if "adult"    in cat_lower else
+                    "series" if "series"   in cat_lower else
+                    "anime"  if "anime"    in cat_lower else
+                    "movies"
+                )
+            )
+            save_status = "💾 DB mein save hua ✅"
+        except Exception as save_err:
+            logger.warning(f"Post DB save failed (non-critical): {save_err}")
+            save_status = "⚠️ DB save nahi hua"
+
+        await update.message.reply_text(
+            f"✅ **{title}** posted in Topic `{topic_id}`\n"
+            f"{save_status}",
+            parse_mode='Markdown'
+        )
+
+    except Exception as e:
+        logger.error(f"Post failed: {e}")
+        await update.message.reply_text(f"❌ Post Error: {e}")
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
