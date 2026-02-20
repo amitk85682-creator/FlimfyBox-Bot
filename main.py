@@ -273,7 +273,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
         await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with Working Links and Saved to DB!")
-    except Exception as e:
+except Exception as e:
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
