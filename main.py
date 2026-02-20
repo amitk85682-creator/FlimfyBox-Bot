@@ -272,8 +272,10 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
             content_type  = post_type    # ✅ Auto tag
         )
 
-        await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with Working Links and Saved to DB!")
-except Exception as e:
+try:
+    await update.message.reply_text("Done!")
+  except Exception as e: # Indented too far!
+    print(e)
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
