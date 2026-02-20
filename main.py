@@ -3950,21 +3950,9 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # Rating (sirf tab show ho jab available ho)
-        if rating_str:
-            channel_caption += f"⭐️ <b>IMDb:</b> {rating_str}/10\n"
-
+        
         channel_caption += (
-            f"🎭 <b>Genre:</b> {genre_str}\n"
-            f"🔤 <b>Lang:</b> Hindi\n"
-            f"🔞 <b>For:</b> Adults Only (18+)\n"
-            f"\n"
-            f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            f"\n"
-            f"📖 <b>Story:</b>\n"
-            f"<i>{plot_str}</i>\n"
-            f"\n"
-            f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            f"\n"
+           
             f"🔞 18+  |  💎 <b>Premium Quality</b>\n"
             f"🚨 <i>Only For Adults (18+)</i>"
             f"{link_section}"
