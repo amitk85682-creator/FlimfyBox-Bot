@@ -237,18 +237,43 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     ]
 
     try:
-        await context.bot.send_photo(
+        bot_info = await context.bot.get_me()
+        inline_kb = InlineKeyboardMarkup(keyboard)
+        
+        sent = await context.bot.send_photo(
             chat_id=FORUM_GROUP_ID,
             message_thread_id=topic_id,
             photo=final_photo,
             caption=caption,
             parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=inline_kb
         )
-        await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with Working Links!")
+        
+        # Category se content_type decide karo
+        if any(x in cat_lower for x in ['adult', '18+', 'ullu', 'aagmaal']):
+            post_type = "adult"
+        elif any(x in cat_lower for x in ['series', 'season', 'episode']):
+            post_type = "series"
+        elif any(x in cat_lower for x in ['anime', 'cartoon']):
+            post_type = "anime"
+        else:
+            post_type = "movies"
+
+        save_post_to_db(
+            movie_id      = movie_id,
+            channel_id    = FORUM_GROUP_ID,
+            message_id    = sent.message_id,
+            bot_username  = bot_info.username,
+            caption       = caption,
+            media_file_id = final_photo,
+            media_type    = "photo",
+            keyboard_data = inline_kb,
+            topic_id      = topic_id,
+            content_type  = post_type    # ✅ Auto tag
+        )
+
+        await update.message.reply_text(f"✅ Posted **{title}** in Topic `{topic_id}` with Working Links and Saved to DB!")
     except Exception as e:
-        logger.error(f"Post failed: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
 
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -776,6 +801,85 @@ def migrate_add_imdb_columns():
         except Exception:
             pass
         close_db_connection(conn)
+        return False
+
+def migrate_content_type_for_restore():
+    """Channel posts mein content_type column add karo"""
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        # Ye column batayega ki post kis type ki hai
+        cur.execute("""
+            ALTER TABLE channel_posts 
+            ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT 'movies'
+        """)
+        # content_type ke values honge:
+        # 'movies'  -> Normal Movies
+        # 'adult'   -> 18+ Content  
+        # 'series'  -> Web Series
+        # 'anime'   -> Anime
+        conn.commit()
+        cur.close()
+        close_db_connection(conn)
+        print("✅ content_type column added!")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        if conn:
+            conn.rollback()
+            close_db_connection(conn)
+
+def save_post_to_db(
+    movie_id,
+    channel_id,
+    message_id,
+    bot_username,
+    caption,
+    media_file_id=None,
+    media_type="photo",
+    keyboard_data=None,
+    topic_id=None,
+    content_type="movies"    # ✅ NAYA: Default movies
+):
+    """
+    Post ka full data save karo.
+    content_type = 'movies' / 'adult' / 'series' / 'anime'
+    """
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO channel_posts 
+                (movie_id, channel_id, message_id, bot_username,
+                 caption, media_file_id, media_type, 
+                 keyboard_data, topic_id, content_type)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (channel_id, message_id) DO UPDATE SET
+                caption       = EXCLUDED.caption,
+                media_file_id = EXCLUDED.media_file_id,
+                media_type    = EXCLUDED.media_type,
+                keyboard_data = EXCLUDED.keyboard_data,
+                topic_id      = EXCLUDED.topic_id,
+                content_type  = EXCLUDED.content_type
+        """, (
+            movie_id, channel_id, message_id, bot_username,
+            caption, media_file_id, media_type,
+            json.dumps(keyboard_data) if keyboard_data else None,
+            topic_id,
+            content_type    # ✅ Save hoga
+        ))
+        conn.commit()
+        cur.close()
+        close_db_connection(conn)
+        return True
+    except Exception as e:
+        logger.error(f"Save post error: {e}")
+        if conn:
+            conn.rollback()
+            close_db_connection(conn)
         return False
 
 
@@ -3855,15 +3959,30 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         # 3. Send File
+        sent_post = None
         if user_photo_id:
-            await context.bot.send_photo(chat_id=target_channel, photo=user_photo_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+            sent_post = await context.bot.send_photo(chat_id=target_channel, photo=user_photo_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
         elif user_video_id:
-            await context.bot.send_video(chat_id=target_channel, video=user_video_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
+            sent_post = await context.bot.send_video(chat_id=target_channel, video=user_video_id, caption=channel_caption, reply_markup=keyboard, parse_mode='HTML')
         else:
-             # Agar direct file mode hai aur user ne media nahi diya (Reply text only)
-             # Toh poster use karo, lekin file ka kya? File missing hogi.
              await status_msg.edit_text("❌ Error: Direct File mode ke liye Photo/Video attach karna zaroori hai.")
              return
+
+        if sent_post:
+            # ✅ 18+ Post Save (Restore ke liye)
+            bot_info = await context.bot.get_me()
+            save_post_to_db(
+                movie_id      = movie_id or 0,
+                channel_id    = int(target_channel),
+                message_id    = sent_post.message_id,
+                bot_username  = bot_info.username,
+                caption       = channel_caption,
+                media_file_id = user_photo_id or user_video_id,
+                media_type    = "photo" if user_photo_id else "video",
+                keyboard_data = keyboard,
+                topic_id      = None,
+                content_type  = "adult"    # ✅ 18+ tag
+            )
 
         await status_msg.delete()
         await message.reply_text(f"✅ **Direct File Posted!**\nSaved: {original_title}", parse_mode='HTML')
@@ -5234,6 +5353,291 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         if cur: cur.close()
         if conn: close_db_connection(conn)
+
+async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /restore <new_channel_id> <content_type> [delay]
+
+    Examples:
+    /restore -100111111111 movies       -> Sirf movies restore
+    /restore -100222222222 adult        -> Sirf 18+ restore
+    /restore -100333333333 series 5     -> Series, 5 sec delay
+    /restore -100444444444 anime 3      -> Anime, 3 sec delay
+    /restore -100111111111 all 3        -> Sab kuch (careful!)
+    """
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+
+    # --- Argument Check ---
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "📋 <b>Restore Command Guide:</b>\n\n"
+            "<code>/restore &lt;channel_id&gt; &lt;type&gt; [delay]</code>\n\n"
+            "<b>Types Available:</b>\n"
+            "🎬 <code>movies</code>  - Normal movies\n"
+            "🔞 <code>adult</code>   - 18+ content\n"
+            "📺 <code>series</code>  - Web series\n"
+            "🎌 <code>anime</code>   - Anime\n"
+            "📦 <code>all</code>     - Everything\n\n"
+            "<b>Examples:</b>\n"
+            "<code>/restore -100123456789 movies</code>\n"
+            "<code>/restore -100987654321 adult 5</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    # --- Parse Arguments ---
+    try:
+        new_channel_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Channel ID galat hai!\n"
+            "Sahi format: <code>-100XXXXXXXXXX</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    content_type = context.args[1].lower().strip()
+
+    # Valid types check
+    valid_types = ['movies', 'adult', 'series', 'anime', 'all']
+    if content_type not in valid_types:
+        await update.message.reply_text(
+            f"❌ Type galat hai: <code>{content_type}</code>\n\n"
+            f"✅ Valid types: <code>{', '.join(valid_types)}</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    # Delay (default 3 sec)
+    delay = 3
+    if len(context.args) > 2:
+        try:
+            delay = int(context.args[2])
+            delay = max(2, min(delay, 30))  # 2 se 30 ke beech
+        except ValueError:
+            pass
+
+    # --- Database Se Posts Nikalo ---
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ Database error.")
+        return
+
+    cur = conn.cursor()
+
+    if content_type == "all":
+        cur.execute("""
+            SELECT id, movie_id, caption, media_file_id,
+                   media_type, keyboard_data, topic_id, content_type
+            FROM channel_posts
+            WHERE is_restored = FALSE OR is_restored IS NULL
+            ORDER BY posted_at ASC
+        """)
+    else:
+        cur.execute("""
+            SELECT id, movie_id, caption, media_file_id,
+                   media_type, keyboard_data, topic_id, content_type
+            FROM channel_posts
+            WHERE (is_restored = FALSE OR is_restored IS NULL)
+              AND content_type = %s
+            ORDER BY posted_at ASC
+        """, (content_type,))
+
+    posts = cur.fetchall()
+    cur.close()
+    close_db_connection(conn)
+
+    if not posts:
+        type_emoji = {
+            'movies': '🎬', 'adult': '🔞',
+            'series': '📺', 'anime': '🎌', 'all': '📦'
+        }
+        await update.message.reply_text(
+            f"{type_emoji.get(content_type, '📦')} "
+            f"<b>{content_type.upper()}</b> type ki koi bhi "
+            f"post restore ke liye nahi mili.",
+            parse_mode='HTML'
+        )
+        return
+
+    total = len(posts)
+    est_minutes = (total * delay) // 60
+
+    status_msg = await update.message.reply_text(
+        f"🔄 <b>Restore Starting...</b>\n\n"
+        f"📦 Type: <code>{content_type.upper()}</code>\n"
+        f"📊 Total Posts: <code>{total}</code>\n"
+        f"⏱ Delay: <code>{delay}</code> seconds\n"
+        f"⌛ Est. Time: ~<code>{est_minutes}</code> min\n\n"
+        f"<i>Please wait, do not stop the bot...</i>",
+        parse_mode='HTML'
+    )
+
+    success = 0
+    failed  = 0
+    skipped = 0
+
+    bot_info = await context.bot.get_me()
+    new_bot  = bot_info.username
+
+    for idx, (post_id, movie_id, caption, media_file_id,
+              media_type, keyboard_data_raw, topic_id, c_type) in enumerate(posts, 1):
+        try:
+            # 1. Keyboard Rebuild (Naye bot ke links ke saath)
+            new_keyboard = None
+            if keyboard_data_raw:
+                try:
+                    kd = (keyboard_data_raw
+                          if isinstance(keyboard_data_raw, dict)
+                          else json.loads(keyboard_data_raw))
+
+                    rebuilt_rows = []
+                    for row in kd.get("inline_keyboard", []):
+                        new_row = []
+                        for btn in row:
+                            new_url = btn.get("url", "")
+                            # Purane bot names replace karo
+                            for old_b in [
+                                "FlimfyBox_SearchBot",
+                                "urmoviebot",
+                                "FlimfyBox_Bot"
+                            ]:
+                                if old_b in new_url:
+                                    new_url = new_url.replace(old_b, new_bot)
+                            new_row.append(
+                                InlineKeyboardButton(btn["text"], url=new_url)
+                            )
+                        rebuilt_rows.append(new_row)
+
+                    if rebuilt_rows:
+                        new_keyboard = InlineKeyboardMarkup(rebuilt_rows)
+                except Exception as kb_err:
+                    logger.warning(f"Keyboard error post {post_id}: {kb_err}")
+
+            # 2. Post Bhejo
+            sent = None
+            extra = {}
+            if topic_id and topic_id != 100:
+                extra['message_thread_id'] = topic_id
+
+            if media_type == "photo" and media_file_id:
+                sent = await context.bot.send_photo(
+                    chat_id      = new_channel_id,
+                    photo        = media_file_id,
+                    caption      = caption or "",
+                    parse_mode   = 'Markdown',
+                    reply_markup = new_keyboard,
+                    **extra
+                )
+            elif media_type == "video" and media_file_id:
+                sent = await context.bot.send_video(
+                    chat_id      = new_channel_id,
+                    video        = media_file_id,
+                    caption      = caption or "",
+                    parse_mode   = 'Markdown',
+                    reply_markup = new_keyboard,
+                    **extra
+                )
+            elif caption:
+                sent = await context.bot.send_message(
+                    chat_id      = new_channel_id,
+                    text         = caption,
+                    parse_mode   = 'Markdown',
+                    reply_markup = new_keyboard,
+                    **extra
+                )
+            else:
+                skipped += 1
+                continue
+
+            # 3. DB Update
+            if sent:
+                conn2 = get_db_connection()
+                if conn2:
+                    try:
+                        cur2 = conn2.cursor()
+                        cur2.execute("""
+                            UPDATE channel_posts
+                            SET is_restored  = TRUE,
+                                restored_at  = NOW(),
+                                channel_id   = %s,
+                                message_id   = %s,
+                                bot_username = %s
+                            WHERE id = %s
+                        """, (new_channel_id, sent.message_id, new_bot, post_id))
+                        conn2.commit()
+                        cur2.close()
+                    except Exception as db_e:
+                        logger.error(f"DB update error: {db_e}")
+                    finally:
+                        close_db_connection(conn2)
+                success += 1
+
+            # 4. Progress (Har 10 posts pe update)
+            if idx % 10 == 0 or idx == total:
+                try:
+                    await status_msg.edit_text(
+                        f"🔄 <b>Restoring {content_type.upper()}...</b>\n\n"
+                        f"📊 Progress: <code>{idx}/{total}</code>\n"
+                        f"✅ Success:  <code>{success}</code>\n"
+                        f"❌ Failed:   <code>{failed}</code>\n"
+                        f"⏭ Skipped:  <code>{skipped}</code>",
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+
+            # 5. Delay (Telegram Flood se bachao)
+            await asyncio.sleep(delay)
+
+        except RetryAfter as e:
+            wait = e.retry_after + 5
+            logger.warning(f"Rate limited! Waiting {wait}s")
+            try:
+                await status_msg.edit_text(
+                    f"⏸ <b>Telegram ne slow kiya!</b>\n"
+                    f"Waiting <code>{wait}</code> seconds...\n"
+                    f"Progress: <code>{idx}/{total}</code>",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(wait)
+
+        except telegram.error.Forbidden:
+            await status_msg.edit_text(
+                f"❌ <b>Bot ko channel mein admin access nahi!</b>\n\n"
+                f"Steps:\n"
+                f"1. Channel open karo\n"
+                f"2. Bot ko Admin banao\n"
+                f"3. Dobara /restore karo"
+            )
+            return
+
+        except Exception as e:
+            failed += 1
+            logger.error(f"Restore failed post {post_id}: {e}")
+            await asyncio.sleep(1)
+
+    # Final Report
+    type_emoji = {
+        'movies': '🎬', 'adult': '🔞',
+        'series': '📺', 'anime': '🎌', 'all': '📦'
+    }
+    await status_msg.edit_text(
+        f"🎉 <b>Restore Complete!</b>\n\n"
+        f"{type_emoji.get(content_type,'📦')} Type: "
+        f"<code>{content_type.upper()}</code>\n"
+        f"📦 Total:   <code>{total}</code>\n"
+        f"✅ Success: <code>{success}</code>\n"
+        f"❌ Failed:  <code>{failed}</code>\n"
+        f"⏭ Skipped: <code>{skipped}</code>\n\n"
+        f"📢 New Channel: <code>{new_channel_id}</code>\n"
+        f"🤖 Bot: @{new_bot}",
+        parse_mode='HTML'
+    )
+
 async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin commands help"""
     if update.effective_user.id != ADMIN_USER_ID:
@@ -5649,6 +6053,7 @@ def register_handlers(application: Application):
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
     application.add_handler(MessageHandler(filters.Regex(r'^/post18'), admin_post_18))
     application.add_handler(CommandHandler("fixbuttons", update_buttons_command))
+    application.add_handler(CommandHandler("restore", restore_posts_command))
 
     # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
@@ -5705,8 +6110,8 @@ async def main():
     try:
         setup_database()
         migrate_add_imdb_columns()
+        migrate_channel_posts_for_restore()   # ✅ YE ADD KIYA GAYA HAI
     except Exception as e:
-        logger.error(f"DB Setup Error: {e}")
 
     # =================================================================
     # 3. Get Tokens from ENV
