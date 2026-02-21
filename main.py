@@ -3858,21 +3858,17 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message: return
     
-    # Agar Admin ne koi / command di hai (jaise /done18) to use skip karo
     if message.text and message.text.startswith('/'):
         return
 
-    # Text / Caption Nikalo
     text = message.caption if message.caption else message.text
     if not text: return
     
-    # Link dhundo
+    # ✅ FIX: Ab hum saare links dhoondh rahe hain
     links = re.findall(r'(https?://[^\s]+)', text)
     if not links or "terabox" not in text.lower():
-        # Agar Terabox link nahi hai to ignore karo
         return
 
-    # Media Type aur File ID nikalo
     media_type = 'text'
     file_id = None
     if message.photo:
@@ -3885,16 +3881,15 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         media_type = 'document'
         file_id = message.document.file_id
 
-    # Post ko Memory (Queue) me daal do
+    # ✅ FIX: 'link' ki jagah 'links' (Puri list) save kar rahe hain
     BATCH_18_SESSION['posts'].append({
         'media_type': media_type,
         'file_id': file_id,
-        'link': links[0],
+        'links': links,  
         'raw_text': text
     })
     
-    # Chota sa message taaki aapko pata chale ki add ho gaya
-    await message.reply_text(f"📥 Saved in Queue (Total: {len(BATCH_18_SESSION['posts'])})")
+    await message.reply_text(f"📥 Saved in Queue! (Found {len(links)} links. Total Posts: {len(BATCH_18_SESSION['posts'])})")
 
 
 async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3939,7 +3934,7 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"➖➖➖➖➖➖➖\n"
                 f"📺 <b>Watch Online & Download:</b>\n"
                 f"👉 {short_link}\n\n"
-                f"🔞 <b>Join Premium:</b> https://t.me/Adult_Content_Originals" 
+                f"🔞 <b>Join Premium:</b> https://t.me/+wcYoTQhIz-ZmOTY1" 
             )
 
             # 4. Post to Channel (reply_markup hata diya gaya hai)
@@ -4070,7 +4065,7 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔞 18+  |  💎 <b>Premium Quality</b>\n"
             f"🚨 <i>Only For Adults (18+)</i>"
             f"{link_section}\n\n"
-            f"🔞 <b>Join Premium:</b> https://t.me/Adult_Content_Originals" 
+            f"🔞 <b>Join Premium:</b> https://t.me/+wcYoTQhIz-ZmOTY1" 
         )
 
         target_channel = os.environ.get('ADULT_CHANNEL_ID')
