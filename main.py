@@ -6162,8 +6162,13 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("done18", batch18_done))
     application.add_handler(CommandHandler("cancel18", batch18_cancel))
     
-    # Ye handler hamesha on rahega, par andari logic se sirf Batch mode me hi act karega
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, batch18_listener))
+    # 🔞 18+ BATCH SYSTEM HANDLERS
+    application.add_handler(CommandHandler("batch18", batch18_start))
+    application.add_handler(CommandHandler("done18", batch18_done))
+    application.add_handler(CommandHandler("cancel18", batch18_cancel))
+    
+    # ✅ FIX: group=1 जोड़ा गया ताकि यह दूसरे फाइल्स को ब्लॉक न करे
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, batch18_listener), group=1)
     
     # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
@@ -6172,8 +6177,8 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     application.add_handler(CommandHandler("post", post_to_topic_command))
     
-    # PM Listener for Batch
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener))
+    # ✅ FIX: group=2 जोड़ा गया ताकि नॉर्मल बैच अपना काम कर सके
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener), group=2)
 
     # -----------------------------------------------------------
     # 4. GENRE & GROUP HANDLERS
