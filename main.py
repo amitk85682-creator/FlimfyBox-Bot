@@ -9,6 +9,7 @@ import requests
 import signal
 import sys
 import re
+import aiohttp
 # import anthropic  # Agar zaroorat ho toh uncomment karein
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, quote
@@ -66,26 +67,19 @@ except Exception:
 def get_safe_font(text):
     """
     Normal text ko Anti-Ban Fonts (Squared Style) mein convert karta hai.
-    Fixed Version: No maketrans error.
+    Clean & Fixed Version.
     """
     if not text:
         return ""
 
     result = ""
     for char in text:
-        # Lowercase (a-z) -> Squared (🅰-🆉)
         if 'a' <= char <= 'z':
             result += chr(0x1F130 + ord(char) - ord('a'))
-        
-        # Uppercase (A-Z) -> Squared (🅰-🆉)
         elif 'A' <= char <= 'Z':
             result += chr(0x1F130 + ord(char) - ord('A'))
-        
-        # Numbers (0-9) -> Bold/Normal (Squared numbers alag hote hain, simple rakhna safe hai)
         elif '0' <= char <= '9':
             result += char 
-            
-        # Spaces & Symbols -> Same rahenge
         else:
             result += char
             
@@ -110,6 +104,8 @@ def get_safe_font(text):
     return to_squared(text)
 
 # ==================== GLOBAL VARIABLES ====================
+BATCH_18_SESSION = {'active': False, 'admin_id': None, 'posts': []}
+
 background_tasks = set()
 
 DEFAULT_POSTER = os.environ.get(
@@ -3795,16 +3791,203 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Critical error in post_query: {e}", exc_info=True)
         await message.reply_text(f"❌ Error: {str(e)[:100]}")
 
-async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Premium 18+ Post - Style 1 (Dark Luxury)
+# ==========================================
+# 🚀 AUTO MASS-FORWARD & LINK SHORTENER
+# ==========================================
+
+async def shorten_link(long_url):
+    """GPLinks API se link chota karke Earning link banata hai."""
+    api_key = os.environ.get('GPLINKS_API_KEY')
+    if not api_key:
+        return long_url # Agar API key nahi hai, toh purana link hi chalne do
+        
+    api_url = f"https://gplinks.in/api?api={api_key}&url={long_url}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                data = await resp.json()
+                if data.get("status") == "success":
+                    return data.get("shortenedUrl")
+    except Exception as e:
+        print(f"Shortener Error: {e}")
+    return long_url
+
+
+# ==========================================
+# 🚀 18+ MASS-FORWARD BATCH SYSTEM (SAFE)
+# ==========================================
+
+async def shorten_link(long_url):
+    """GPLinks API se link chota karke Earning link banata hai."""
+    api_key = os.environ.get('GPLINKS_API_KEY')
+    if not api_key:
+        return long_url
+        
+    api_url = f"https://gplinks.in/api?api={api_key}&url={long_url}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                data = await resp.json()
+                if data.get("status") == "success":
+                    return data.get("shortenedUrl")
+    except Exception as e:
+        logger.error(f"Shortener Error: {e}")
+    return long_url
+
+async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Batch Session On Karega"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        return
+        
+    BATCH_18_SESSION['active'] = True
+    BATCH_18_SESSION['admin_id'] = update.effective_user.id
+    BATCH_18_SESSION['posts'] = [] # Purani queue clear
     
-    Commands:
-    /post18 Movie Name
-    /post18 Movie Name, Custom Story
-    /post18 Movie Name | https://link
-    /post18 Movie Name, Custom Story | https://link
-    """
+    await update.message.reply_text(
+        "✅ **18+ Batch Mode STARTED!**\n\n"
+        "👉 Ab aap ek sath 10, 20 ya 50 posts (jisme Terabox link ho) is bot ko **Forward** karein.\n\n"
+        "👉 Jab sab forward kar lein, toh `/done18` bhejein!",
+        parse_mode='Markdown'
+    )
+
+async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sirf tab chalega jab Batch18 ON hoga, aur posts ko Queue me save karega"""
+    if not BATCH_18_SESSION['active'] or update.effective_user.id != BATCH_18_SESSION['admin_id']:
+        return
+
+    message = update.message
+    if not message: return
+    
+    # Agar Admin ne koi / command di hai (jaise /done18) to use skip karo
+    if message.text and message.text.startswith('/'):
+        return
+
+    # Text / Caption Nikalo
+    text = message.caption if message.caption else message.text
+    if not text: return
+    
+    # Link dhundo
+    links = re.findall(r'(https?://[^\s]+)', text)
+    if not links or "terabox" not in text.lower():
+        # Agar Terabox link nahi hai to ignore karo
+        return
+
+    # Media Type aur File ID nikalo
+    media_type = 'text'
+    file_id = None
+    if message.photo:
+        media_type = 'photo'
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        media_type = 'video'
+        file_id = message.video.file_id
+    elif message.document:
+        media_type = 'document'
+        file_id = message.document.file_id
+
+    # Post ko Memory (Queue) me daal do
+    BATCH_18_SESSION['posts'].append({
+        'media_type': media_type,
+        'file_id': file_id,
+        'link': links[0],
+        'raw_text': text
+    })
+    
+    # Chota sa message taaki aapko pata chale ki add ho gaya
+    await message.reply_text(f"📥 Saved in Queue (Total: {len(BATCH_18_SESSION['posts'])})")
+
+
+async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Queue ko process karke Channel par post karega with Sleep"""
+    if not BATCH_18_SESSION['active'] or update.effective_user.id != BATCH_18_SESSION['admin_id']:
+        return
+        
+    posts = BATCH_18_SESSION['posts']
+    if not posts:
+        await update.message.reply_text("❌ Queue khali thi. Session off kar diya.")
+        BATCH_18_SESSION['active'] = False
+        return
+
+    target_channel = os.environ.get('ADULT_CHANNEL_ID')
+    if not target_channel:
+        await update.message.reply_text("❌ Error: ADULT_CHANNEL_ID missing in .env")
+        return
+
+    status_msg = await update.message.reply_text(f"🚀 **Processing {len(posts)} Posts...**\nIsme thoda time lagega, kripya wait karein...")
+    
+    success_count = 0
+    failed_count = 0
+
+    for i, post in enumerate(posts, 1):
+        try:
+            # 1. Title nikalna aur clean karna
+            lines = post['raw_text'].strip().split('\n')
+            original_title = lines[0].strip()
+            clean_title = re.sub(r'http\S+', '', original_title).strip() 
+            if len(clean_title) < 2:
+                clean_title = "Exclusive Content"
+                
+            display_title = get_safe_font(clean_title)
+
+            # 2. Shorten Link (GPLinks API se)
+            short_link = await shorten_link(post['link'])
+
+            # 3. Caption Banao (Bina Buttons Ke - Seedha Text Mein Link)
+            channel_caption = (
+                f"🔞 <b>{display_title}</b>\n\n"
+                f"🔥 <b>Exclusive 18+ Web Series & Leaks</b>\n"
+                f"➖➖➖➖➖➖➖\n"
+                f"📺 <b>Watch Online & Download:</b>\n"
+                f"👉 {short_link}\n\n"
+                f"🔞 <b>Join Premium:</b> https://t.me/Adult_Content_Originals" 
+            )
+
+            # 4. Post to Channel (reply_markup hata diya gaya hai)
+            if post['media_type'] == 'photo':
+                await context.bot.send_photo(chat_id=target_channel, photo=post['file_id'], caption=channel_caption, parse_mode='HTML')
+            elif post['media_type'] == 'video':
+                await context.bot.send_video(chat_id=target_channel, video=post['file_id'], caption=channel_caption, parse_mode='HTML')
+            elif post['media_type'] == 'document':
+                 await context.bot.send_document(chat_id=target_channel, document=post['file_id'], caption=channel_caption, parse_mode='HTML')
+            elif post['media_type'] == 'text':
+                 await context.bot.send_message(chat_id=target_channel, text=channel_caption, parse_mode='HTML')
+
+            success_count += 1
+
+            # Har 5 post ke baad status update karo taaki lag na lage
+            if i % 5 == 0:
+                try: await status_msg.edit_text(f"🚀 Processing: {i}/{len(posts)}\n✅ Success: {success_count}")
+                except: pass
+
+            # 🛑 SABSE ZAROORI: 3 Second ka Gap taaki Telegram FloodWait na de
+            await asyncio.sleep(3)
+
+        except Exception as e:
+            logger.error(f"18+ Batch Post Error: {e}")
+            failed_count += 1
+
+    # Final Report
+    await status_msg.edit_text(
+        f"🎉 **Batch Complete!**\n\n"
+        f"✅ Posted Successfully: {success_count}\n"
+        f"❌ Failed: {failed_count}\n\n"
+        f"Session automatically OFF ho gaya hai."
+    )
+
+    # Session Reset
+    BATCH_18_SESSION['active'] = False
+    BATCH_18_SESSION['posts'] = []
+    BATCH_18_SESSION['admin_id'] = None
+
+async def batch18_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Galti se Start ho jaye to Cancel karne ke liye"""
+    if update.effective_user.id == BATCH_18_SESSION.get('admin_id'):
+        BATCH_18_SESSION['active'] = False
+        BATCH_18_SESSION['posts'] = []
+        await update.message.reply_text("🛑 18+ Batch Cancelled & Queue Cleared!")
+
+async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Premium 18+ Post - Single Item (Fixed Crash)"""
     try:
         user_id = update.effective_user.id
         if user_id != ADMIN_USER_ID:
@@ -3815,132 +3998,69 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         media_msg    = None
         command_text = ""
-        embed_link   = ""  # Caption mein embed hoga
+        embed_link   = "" 
 
-        # --- A. Text Command (Reply ke saath) ---
         if message.text and message.text.startswith('/post18'):
             command_text = message.text
-            if replied_msg and (
-                replied_msg.photo or
-                replied_msg.video or
-                replied_msg.document
-            ):
+            if replied_msg and (replied_msg.photo or replied_msg.video or replied_msg.document):
                 media_msg = replied_msg
-
-        # --- B. Caption Command (Direct Media ke saath) ---
         elif message.caption and message.caption.startswith('/post18'):
             media_msg    = message
             command_text = message.caption
 
-        if not command_text.startswith('/post18'):
-            return
+        if not command_text.startswith('/post18'): return
 
-        status_msg = await message.reply_text(
-            "⏳ <b>Processing Premium Post...</b>",
-            parse_mode='HTML'
-        )
+        status_msg = await message.reply_text("⏳ <b>Processing Premium Post...</b>", parse_mode='HTML')
 
-        # -----------------------------------------------
-        # 1. LINK EXTRACT (| separator se)
-        # -----------------------------------------------
         if "|" in command_text:
             parts        = command_text.split('|', 1)
             command_text = parts[0].strip()
             embed_link   = parts[1].strip()
 
-        # -----------------------------------------------
-        # 2. MEDIA EXTRACT
-        # -----------------------------------------------
-        user_photo_id = None
-        user_video_id = None
-
+        user_photo_id, user_video_id = None, None
         if media_msg:
-            if media_msg.photo:
-                user_photo_id = media_msg.photo[-1].file_id
-            elif media_msg.video:
-                user_video_id = media_msg.video.file_id
+            if media_msg.photo: user_photo_id = media_msg.photo[-1].file_id
+            elif media_msg.video: user_video_id = media_msg.video.file_id
             elif media_msg.document:
                 mime = getattr(media_msg.document, 'mime_type', '') or ''
-                if "image" in mime:
-                    user_photo_id = media_msg.document.file_id
-                else:
-                    user_video_id = media_msg.document.file_id
+                if "image" in mime: user_photo_id = media_msg.document.file_id
+                else: user_video_id = media_msg.document.file_id
 
-        # -----------------------------------------------
-        # 3. MOVIE NAME & CUSTOM CAPTION PARSE
-        # -----------------------------------------------
         raw_input = command_text.replace('/post18', '').strip()
-
         if ',' in raw_input:
-            parts       = raw_input.split(',', 1)
-            query_text  = parts[0].strip()
-            custom_msg  = parts[1].strip()
+            parts = raw_input.split(',', 1)
+            query_text, custom_msg = parts[0].strip(), parts[1].strip()
         else:
-            query_text = raw_input
-            custom_msg = ""
+            query_text, custom_msg = raw_input, ""
 
         if not query_text:
-            await status_msg.edit_text(
-                "❌ Movie name missing!\n"
-                "Example: <code>/post18 Movie Name</code>",
-                parse_mode='HTML'
-            )
+            await status_msg.edit_text("❌ Movie name missing!")
             return
 
-        # -----------------------------------------------
-        # 4. METADATA FETCH (IMDb/OMDb se)
-        # -----------------------------------------------
         metadata = await run_async(fetch_movie_metadata, query_text)
 
-        # Default Values
-        display_title = f"<b>{query_text.upper()}</b>"
-        year_str      = ""
-        rating_str    = ""
-        genre_str     = "Romance, Drama"
-        plot_str      = custom_msg or "Ek aisi kahani jo aapko screen se chipka degi..."
-        imdb_poster   = None
+        display_title = f"<b>{get_safe_font(query_text)}</b>"
+        year_str, rating_str, genre_str = "", "", "Romance, Drama"
+        plot_str = custom_msg or "Exclusive Full HD Episode."
+        imdb_poster = None
 
         if metadata:
             m_title, m_year, m_poster, m_genre, m_imdb, m_rating, m_plot, m_cat = metadata
+            if m_title and m_title != "N/A": display_title = f"<b>{get_safe_font(m_title)}</b>"
+            if m_year and str(m_year) != "0": year_str = str(m_year)
+            if m_genre and m_genre != "N/A": genre_str = m_genre
+            if not custom_msg and m_plot and m_plot != "N/A": plot_str = m_plot[:220] + "..."
+            if m_poster and m_poster != "N/A": imdb_poster = m_poster
 
-            if m_title and m_title != "N/A":
-                display_title = f"<b>{m_title.upper()}</b>"
-
-            if m_year and str(m_year) != "0":
-                year_str = str(m_year)
-
-            if m_rating and m_rating != 'N/A':
-                rating_str = m_rating
-
-            if m_genre and m_genre != "N/A":
-                genre_str = m_genre
-
-            # Custom msg hai to wo use ho, nahi to IMDb plot
-            if custom_msg:
-                plot_str = custom_msg
-            elif m_plot and m_plot != "N/A":
-                plot_str = m_plot[:220] + "..."
-
-            if m_poster and m_poster != "N/A":
-                imdb_poster = m_poster
-
-        # -----------------------------------------------
-        # 5. INLINE LINK SECTION (Button nahi, Caption mein)
-        # -----------------------------------------------
         link_section = ""
         if embed_link:
+            short_link = await shorten_link(embed_link) # Naya GPLink integration
             link_section = (
                 f"\n┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n"
-                f'📥 <a href="{embed_link}"><b>𝗗𝗼𝘄𝗻𝗹𝗼𝗮𝗱 𝗡𝗼𝘄</b></a>'
-                f'  •  '
-                f'📺 <a href="{embed_link}"><b>𝗪𝗮𝘁𝗰𝗵 𝗢𝗻𝗹𝗶𝗻𝗲</b></a>'
+                f'📺 <b>Watch Online & Download:</b>\n👉 {short_link}'
             )
 
-        # -----------------------------------------------
-        # 6. PREMIUM CAPTION BUILD — STYLE 1
-        # -----------------------------------------------
         year_display = f" ({year_str})" if year_str else ""
-
         channel_caption = (
             f"╔═══════════════════════╗\n"
             f"      🔥 {display_title} 🔥\n"
@@ -3949,124 +4069,33 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n"
             f"🔞 18+  |  💎 <b>Premium Quality</b>\n"
             f"🚨 <i>Only For Adults (18+)</i>"
-            f"{link_section}"
+            f"{link_section}\n\n"
+            f"🔞 <b>Join Premium:</b> https://t.me/Adult_Content_Originals" 
         )
 
-        # -----------------------------------------------
-        # 7. TARGET CHANNEL CHECK
-        # -----------------------------------------------
         target_channel = os.environ.get('ADULT_CHANNEL_ID')
         if not target_channel:
-            await status_msg.edit_text(
-                "❌ <b>ADULT_CHANNEL_ID</b> .env mein set nahi hai!",
-                parse_mode='HTML'
-            )
+            await status_msg.edit_text("❌ ADULT_CHANNEL_ID missing!")
             return
 
-        # -----------------------------------------------
-        # 8. MOVIE ID (DB se, Restore ke liye)
-        # -----------------------------------------------
-        movie_id = None
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT id FROM movies WHERE title ILIKE %s LIMIT 1",
-                    (f"%{query_text}%",)
-                )
-                row = cur.fetchone()
-                movie_id = row[0] if row else None
-                cur.close()
-            except Exception:
-                pass
-            finally:
-                close_db_connection(conn)
-
-        # -----------------------------------------------
-        # 9. POST SEND KARO
-        # -----------------------------------------------
-        sent_post    = None
         poster_final = user_photo_id or imdb_poster or DEFAULT_POSTER
+        sent_post = None
 
-        # Note: reply_markup = None (Links caption mein hain)
         try:
             if user_video_id:
-                sent_post = await context.bot.send_video(
-                    chat_id    = int(target_channel),
-                    video      = user_video_id,
-                    caption    = channel_caption,
-                    parse_mode = 'HTML'
-                )
+                sent_post = await context.bot.send_video(chat_id=int(target_channel), video=user_video_id, caption=channel_caption, parse_mode='HTML')
             else:
-                sent_post = await context.bot.send_photo(
-                    chat_id    = int(target_channel),
-                    photo      = poster_final,
-                    caption    = channel_caption,
-                    parse_mode = 'HTML'
-                )
-
-        except telegram.error.Forbidden:
-            await status_msg.edit_text(
-                f"❌ Bot ko <code>{target_channel}</code> mein "
-                f"Admin access nahi hai!",
-                parse_mode='HTML'
-            )
-            return
+                sent_post = await context.bot.send_photo(chat_id=int(target_channel), photo=poster_final, caption=channel_caption, parse_mode='HTML')
         except Exception as post_err:
-            await status_msg.edit_text(
-                f"❌ Post failed:\n<code>{post_err}</code>",
-                parse_mode='HTML'
-            )
+            await status_msg.edit_text(f"❌ Post failed:\n<code>{post_err}</code>", parse_mode='HTML')
             return
 
-        # -----------------------------------------------
-        # 10. DB SAVE (Restore ke liye)
-        # -----------------------------------------------
-        if sent_post:
-            try:
-                bot_info = await context.bot.get_me()
-                save_post_to_db(
-                    movie_id      = movie_id or 0,
-                    channel_id    = int(target_channel),
-                    message_id    = sent_post.message_id,
-                    bot_username  = bot_info.username,
-                    caption       = channel_caption,
-                    media_file_id = poster_final,
-                    media_type    = "video" if user_video_id else "photo",
-                    keyboard_data = None,
-                    topic_id      = None,
-                    content_type  = "adult"
-                )
-            except Exception as save_err:
-                logger.warning(f"Post save error (non-critical): {save_err}")
-
-        # -----------------------------------------------
-        # 11. SUCCESS REPORT
-        # -----------------------------------------------
-        link_status = (
-            "🔗 Link caption mein embed hua"
-            if embed_link
-            else "⚠️ Koi link nahi diya (Sirf post)"
-        )
-
-        await status_msg.edit_text(
-            f"✅ <b>Premium Post Done!</b>\n\n"
-            f"🎬 Movie: <b>{query_text}</b>\n"
-            f"{link_status}\n"
-            f"📢 Channel: <code>{target_channel}</code>",
-            parse_mode='HTML'
-        )
+        await status_msg.edit_text(f"✅ <b>Premium Post Done!</b>\n🎬 Movie: <b>{query_text}</b>", parse_mode='HTML')
 
     except Exception as e:
-        logger.error(f"Post18 Critical Error: {e}", exc_info=True)
-        try:
-            await message.reply_text(
-                f"❌ Error: <code>{str(e)[:150]}</code>",
-                parse_mode='HTML'
-            )
-        except Exception:
-            pass
+        logger.error(f"Post18 Critical Error: {e}")
+        try: await message.reply_text(f"❌ Error: {e}")
+        except: pass
 # ==================== ADMIN COMMANDS ====================
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to add a movie manually (Supports Unreleased)"""
@@ -6131,6 +6160,16 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("fixbuttons", update_buttons_command))
     application.add_handler(CommandHandler("restore", restore_posts_command))
 
+    # ==========================================
+    # 🔞 18+ BATCH SYSTEM HANDLERS
+    # ==========================================
+    application.add_handler(CommandHandler("batch18", batch18_start))
+    application.add_handler(CommandHandler("done18", batch18_done))
+    application.add_handler(CommandHandler("cancel18", batch18_cancel))
+    
+    # Ye handler hamesha on rahega, par andari logic se sirf Batch mode me hi act karega
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, batch18_listener))
+    
     # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
