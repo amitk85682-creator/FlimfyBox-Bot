@@ -432,7 +432,7 @@ async def check_rate_limit(user_id):
     return True
 
 async def get_movie_name_from_image(context, file_id):
-    """File ke andar embedded cover poster ko download karke Gemini se read karwata hai"""
+    """File ke cover ko Google Lens (Visual Match) ki tarah scan karta hai"""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: return "UNKNOWN"
@@ -447,20 +447,22 @@ async def get_movie_name_from_image(context, file_id):
         # 2. Format set karo
         image_parts = [{"mime_type": "image/jpeg", "data": image_bytes}]
         
-        # 3. Naya, Powerful Prompt (Sirf Poster Reading ke liye)
+        # 3. 🚀 NAYA PROMPT (VISUAL MATCH + TEXT READING) 🚀
         prompt = """
-        This is a movie or web series poster/cover. 
-        Please READ the largest text written on this image.
-        What is the exact title of the movie or series shown in this poster?
-        Reply ONLY with the Title (and Year if clearly visible). Do not write anything else.
-        Even if the image is small or low quality, try your absolute best to read the main title.
+        Act as a Reverse Image Search engine like Google Lens.
+        This image is a thumbnail, cover, or screenshot from a Movie, Anime or TV/Web Series.
+        Analyze the characters, actors, visual style, scenes, AND any text written on it.
+        Identify the exact name of the Movie or Series shown in this image.
+        Reply ONLY with the exact Title. 
+        Do NOT write any explanations, punctuation, or extra words.
+        If you absolutely cannot identify it, reply with 'UNKNOWN'.
         """
 
         # 4. Call Gemini
         response = await run_async(model.generate_content, [prompt, image_parts[0]])
         
         text = response.text.strip()
-        # Faltu symbols hatao jo AI kabhi kabhi laga deta hai
+        # Faltu symbols hatao
         text = text.replace('*', '').replace('"', '').replace("'", "")
         
         if not text or len(text) < 2 or "UNKNOWN" in text.upper():
