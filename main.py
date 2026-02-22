@@ -17,6 +17,10 @@ from collections import defaultdict
 from telegram.error import RetryAfter, TelegramError
 from typing import Optional
 from psycopg2 import pool
+from io import BytesIO
+
+# Naya Lock banaya Auto-Batch ke liye
+auto_batch_lock = asyncio.Lock()
 
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
 logging.basicConfig(
@@ -426,6 +430,45 @@ async def check_rate_limit(user_id):
 
     user_last_request[user_id] = now
     return True
+
+async def get_movie_name_from_image(context, file_id):
+    """File ka thumbnail download karke Gemini se movie ka naam nikalta hai"""
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key: return "UNKNOWN"
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.5-flash')
+
+        # 1. Telegram se image download karo (Bytes mein)
+        new_file = await context.bot.get_file(file_id)
+        image_bytes = await new_file.download_as_bytearray()
+
+        # 2. Gemini ke liye image format set karo
+        image_parts = [{"mime_type": "image/jpeg", "data": image_bytes}]
+        
+        # 3. Prompt
+        prompt = """
+        Look at this movie or web series poster/thumbnail. 
+        Identify the correct name of the movie/series.
+        Reply ONLY with the exact Title (and release year if possible). 
+        Do not add any extra text, punctuation, or description.
+        If you absolutely cannot identify it, reply with 'UNKNOWN'.
+        Example: Lucky The Superstar
+        """
+
+        # 4. Call Gemini in background
+        response = await run_async(model.generate_content, [prompt, image_parts[0]])
+        
+        text = response.text.strip()
+        if not text or "UNKNOWN" in text.upper():
+            return "UNKNOWN"
+            
+        return text
+
+    except Exception as e:
+        logger.error(f"Gemini Image Error: {e}")
+        return "UNKNOWN"
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
@@ -3443,102 +3486,175 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn: close_db_connection(conn)
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Listens for files in Admin PM -> Uploads to ALL Channels -> Saves to DB
-    FIXED: Removed the code causing 'Connection already closed' error.
+    Smart Auto-Batch Listener: 
     """
-    if not BATCH_SESSION['active'] or update.effective_user.id != BATCH_SESSION['admin_id']:
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
+        return
+
+    # 🛑 THE FIX: Agar 18+ Batch ON hai, toh Auto-Batch ko yahi rok do!
+    if BATCH_18_SESSION.get('active'):
         return
 
     message = update.effective_message
-    if not (message.document or message.video): return
-
-    # Status message
-    status = await message.reply_text("⏳ Processing... Uploading to Backup Channels...", quote=True)
-
-    # 1. Get Channels
-    channels = get_storage_channels()
-    if not channels:
-        await status.edit_text("❌ No STORAGE_CHANNELS found in .env")
+    if not (message.document or message.video or message.photo): 
         return
 
-    backup_map = {}  # Store {channel_id: message_id}
-    success_uploads = 0
 
-    # 2. Multi-Channel Upload Loop
-    for chat_id in channels:
-        try:
-            sent = await message.copy(chat_id=chat_id)
-            backup_map[str(chat_id)] = sent.message_id
-            success_uploads += 1
-        except Exception as e:
-            logger.error(f"Upload failed for {chat_id}: {e}")
+    # 🛑 THE MAGIC LOCK: Taala lagao taaki doosri files wait karein
+    async with auto_batch_lock:
+        
+        # ==========================================
+        # 🤖 PHASE 1: AUTO-BATCH INITIALIZATION
+        # ==========================================
+        if not BATCH_SESSION.get('active'):
+            status_msg = await message.reply_text("🔍 Auto-detecting movie from thumbnail...", quote=True)
+            
+            # 1. Thumbnail ya Photo nikalo
+            img_file_id = None
+            if message.photo: 
+                img_file_id = message.photo[-1].file_id
+            elif message.video and message.video.thumbnail: 
+                img_file_id = message.video.thumbnail.file_id
+            elif message.document and message.document.thumbnail: 
+                img_file_id = message.document.thumbnail.file_id
 
-    if success_uploads == 0:
-        await status.edit_text("❌ Failed to upload to any channel.")
-        return
+            # Agar thumbnail hi nahi hai (jaise rar file)
+            if not img_file_id:
+                await status_msg.edit_text("❌ No thumbnail found in this file. Please start manual `/batch Name` first.")
+                return
 
-    # 3. Prepare DB Data
-    file_name = message.document.file_name if message.document else (message.video.file_name or "Video")
-    file_size = message.document.file_size if message.document else message.video.file_size
-    
-    # Calculate Size String
-    file_size_str = get_readable_file_size(file_size)
-    
-    # Generate Label
-    label = generate_quality_label(file_name, file_size_str)
-    
-    # Generate Main Link
-    main_channel_id = channels[0]
-    main_msg_id = backup_map.get(str(main_channel_id))
-    clean_id = str(main_channel_id).replace("-100", "")
-    main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
+            # 2. Gemini ko bhejo
+            movie_name = await get_movie_name_from_image(context, img_file_id)
+            
+            if movie_name == "UNKNOWN":
+                await status_msg.edit_text("❌ Gemini couldn't identify the movie. Please start manual `/batch Name` first.")
+                return
+                
+            await status_msg.edit_text(f"🧠 Gemini detected: **{movie_name}**\n⏳ Fetching IMDb details...")
 
-    # 4. Save to DB
-    conn = None
-    try:
+            # 3. IMDb se baki details nikalo (Aapka purana function)
+            metadata = await run_async(fetch_movie_metadata, movie_name)
+            
+            if metadata:
+                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+            else:
+                title = movie_name
+                year, poster_url, imdb_id = 0, None, None
+                genre, rating, plot, category = "Unknown", "N/A", "Auto Added via AI", "Movies"
+
+            # 4. Save to Database & Setup Session
+            conn = get_db_connection()
+            if not conn: return
+            
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
+                    ON CONFLICT (title) DO UPDATE 
+                    SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id)
+                    RETURNING id
+                    """,
+                    (title, imdb_id, poster_url, year, genre, rating, plot, category)
+                )
+                movie_id = cur.fetchone()[0]
+                conn.commit()
+                
+                cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                file_count = cur.fetchone()[0]
+                
+                cur.close()
+                close_db_connection(conn)
+
+                # BATCH ON KAR DIYA! Ab aage ki files seedha yahan aayengi
+                BATCH_SESSION.update({
+                    'active': True,
+                    'movie_id': movie_id,
+                    'movie_title': title,
+                    'file_count': file_count,
+                    'admin_id': user_id
+                })
+                
+                await status_msg.edit_text(f"✅ **Auto-Batch Started: {title}**\nFiles are now saving in background...")
+            
+            except Exception as db_e:
+                logger.error(f"Auto-Batch DB Error: {db_e}")
+                if conn: close_db_connection(conn)
+                return
+
+        # ==========================================
+        # 📤 PHASE 2: UPLOAD & SAVE (Runs for all files)
+        # ==========================================
+        # Uploading progress dikhane ke liye
+        upload_status = await message.reply_text("⏳ Uploading to Backup Channels...", quote=True)
+
+        channels = get_storage_channels()
+        if not channels:
+            await upload_status.edit_text("❌ No STORAGE_CHANNELS found in .env")
+            return
+
+        backup_map = {}
+        success_uploads = 0
+
+        # Multi-Channel Upload
+        for chat_id in channels:
+            try:
+                sent = await message.copy(chat_id=chat_id)
+                backup_map[str(chat_id)] = sent.message_id
+                success_uploads += 1
+            except Exception as e:
+                logger.error(f"Upload failed for {chat_id}: {e}")
+
+        if success_uploads == 0:
+            await upload_status.edit_text("❌ Failed to upload to any channel.")
+            return
+
+        # Prepare File Data
+        file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "Photo")
+        file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
+        
+        file_size_str = get_readable_file_size(file_size)
+        label = generate_quality_label(file_name, file_size_str)
+        
+        main_channel_id = channels[0]
+        main_msg_id = backup_map.get(str(main_channel_id))
+        clean_id = str(main_channel_id).replace("-100", "")
+        main_url = f"https://t.me/c/{clean_id}/{main_msg_id}"
+
+        # Save File to DB
         conn = get_db_connection()
         if conn:
-            cur = conn.cursor()
-            
-            # --- QUERY: Insert or Update ---
-            # Using ON CONFLICT logic correctly inside the main block
-            cur.execute(
-                """
-                INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (movie_id, quality) 
-                DO UPDATE SET 
-                    url = EXCLUDED.url,
-                    file_size = EXCLUDED.file_size,
-                    backup_map = EXCLUDED.backup_map,
-                    file_id = NULL
-                """,
-                (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-            )
-            
-            conn.commit()
-            cur.close()
-            
-            BATCH_SESSION['file_count'] += 1
-            
-            await status.edit_text(
-                f"✅ **File Saved!**\n"
-                f"📂 Copies: {success_uploads}\n"
-                f"🏷 Label: `{label}`\n"
-                f"🔢 Total: {BATCH_SESSION['file_count']}",
-                parse_mode='Markdown'
-            )
-
-    except Exception as e:
-        logger.error(f"DB Save Error: {e}")
-        await status.edit_text(f"❌ DB Save Failed: {e}")
-    finally:
-        # Connection closes ONLY after everything is done
-        if conn:
             try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (movie_id, quality) 
+                    DO UPDATE SET 
+                        url = EXCLUDED.url,
+                        file_size = EXCLUDED.file_size,
+                        backup_map = EXCLUDED.backup_map,
+                        file_id = NULL
+                    """,
+                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+                )
+                conn.commit()
+                cur.close()
+                
+                BATCH_SESSION['file_count'] += 1
+                await upload_status.edit_text(
+                    f"✅ **Saved:** `{label}`\n"
+                    f"🔢 Total Files: {BATCH_SESSION['file_count']}",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"DB Save Error: {e}")
+                await upload_status.edit_text(f"❌ DB Save Failed: {e}")
+            finally:
                 close_db_connection(conn)
-            except:
-                pass
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -6161,11 +6277,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("batch18", batch18_start))
     application.add_handler(CommandHandler("done18", batch18_done))
     application.add_handler(CommandHandler("cancel18", batch18_cancel))
-    
-    # 🔞 18+ BATCH SYSTEM HANDLERS
-    application.add_handler(CommandHandler("batch18", batch18_start))
-    application.add_handler(CommandHandler("done18", batch18_done))
-    application.add_handler(CommandHandler("cancel18", batch18_cancel))
+
     
     # ✅ FIX: group=1 जोड़ा गया ताकि यह दूसरे फाइल्स को ब्लॉक न करे
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, batch18_listener), group=1)
@@ -6178,7 +6290,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("post", post_to_topic_command))
     
     # ✅ FIX: group=2 जोड़ा गया ताकि नॉर्मल बैच अपना काम कर सके
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), pm_file_listener), group=2)
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO | filters.PHOTO), pm_file_listener), group=2)
 
     # -----------------------------------------------------------
     # 4. GENRE & GROUP HANDLERS
