@@ -432,7 +432,7 @@ async def check_rate_limit(user_id):
     return True
 
 async def get_movie_name_from_image(context, file_id):
-    """File ka thumbnail download karke Gemini se movie ka naam nikalta hai"""
+    """File ke andar embedded cover poster ko download karke Gemini se read karwata hai"""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: return "UNKNOWN"
@@ -440,28 +440,30 @@ async def get_movie_name_from_image(context, file_id):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.5-flash')
 
-        # 1. Telegram se image download karo (Bytes mein)
+        # 1. Cover/Thumbnail download (Bytes mein)
         new_file = await context.bot.get_file(file_id)
         image_bytes = await new_file.download_as_bytearray()
 
-        # 2. Gemini ke liye image format set karo
+        # 2. Format set karo
         image_parts = [{"mime_type": "image/jpeg", "data": image_bytes}]
         
-        # 3. Prompt
+        # 3. Naya, Powerful Prompt (Sirf Poster Reading ke liye)
         prompt = """
-        Look at this movie or web series poster/thumbnail. 
-        Identify the correct name of the movie/series.
-        Reply ONLY with the exact Title (and release year if possible). 
-        Do not add any extra text, punctuation, or description.
-        If you absolutely cannot identify it, reply with 'UNKNOWN'.
-        Example: Lucky The Superstar
+        This is a movie or web series poster/cover. 
+        Please READ the largest text written on this image.
+        What is the exact title of the movie or series shown in this poster?
+        Reply ONLY with the Title (and Year if clearly visible). Do not write anything else.
+        Even if the image is small or low quality, try your absolute best to read the main title.
         """
 
-        # 4. Call Gemini in background
+        # 4. Call Gemini
         response = await run_async(model.generate_content, [prompt, image_parts[0]])
         
         text = response.text.strip()
-        if not text or "UNKNOWN" in text.upper():
+        # Faltu symbols hatao jo AI kabhi kabhi laga deta hai
+        text = text.replace('*', '').replace('"', '').replace("'", "")
+        
+        if not text or len(text) < 2 or "UNKNOWN" in text.upper():
             return "UNKNOWN"
             
         return text
@@ -3505,12 +3507,12 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with auto_batch_lock:
         
         # ==========================================
-        # 🤖 PHASE 1: AUTO-BATCH INITIALIZATION
+        # 🤖 PHASE 1: AUTO-BATCH INITIALIZATION (COVER ONLY)
         # ==========================================
         if not BATCH_SESSION.get('active'):
-            status_msg = await message.reply_text("🔍 Auto-detecting movie from thumbnail...", quote=True)
+            status_msg = await message.reply_text("🔍 Scanning the file's Cover/Poster...", quote=True)
             
-            # 1. Thumbnail ya Photo nikalo
+            # 1. File ke andar wala Cover (Thumbnail) nikalo
             img_file_id = None
             if message.photo: 
                 img_file_id = message.photo[-1].file_id
@@ -3519,21 +3521,21 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif message.document and message.document.thumbnail: 
                 img_file_id = message.document.thumbnail.file_id
 
-            # Agar thumbnail hi nahi hai (jaise rar file)
+            # Agar file mein sach mein koi cover nahi hai
             if not img_file_id:
-                await status_msg.edit_text("❌ No thumbnail found in this file. Please start manual `/batch Name` first.")
+                await status_msg.edit_text("❌ Is file mein koi Cover Poster embed nahi hai. Please manual `/batch Name` use karein.")
                 return
 
-            # 2. Gemini ko bhejo
+            # 2. Sirf Cover se Name Nikalo (No captions used)
             movie_name = await get_movie_name_from_image(context, img_file_id)
             
             if movie_name == "UNKNOWN":
-                await status_msg.edit_text("❌ Gemini couldn't identify the movie. Please start manual `/batch Name` first.")
+                await status_msg.edit_text("❌ Gemini poster se naam read nahi kar paya. Please start manual `/batch Name` first.")
                 return
                 
-            await status_msg.edit_text(f"🧠 Gemini detected: **{movie_name}**\n⏳ Fetching IMDb details...")
+            await status_msg.edit_text(f"🧠 AI read from Poster: **{movie_name}**\n⏳ Fetching IMDb details...")
 
-            # 3. IMDb se baki details nikalo (Aapka purana function)
+            # 3. IMDb se baki details nikalo
             metadata = await run_async(fetch_movie_metadata, movie_name)
             
             if metadata:
