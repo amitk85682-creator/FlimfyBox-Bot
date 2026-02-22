@@ -3925,7 +3925,7 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             display_title = get_safe_font(clean_title)
 
             # 2. Shorten Link (GPLinks API se)
-            short_link = await shorten_link(post['link'])
+            short_link = await shorten_link(post['links'][0])
 
             # 3. Caption Banao (Bina Buttons Ke - Seedha Text Mein Link)
             channel_caption = (
