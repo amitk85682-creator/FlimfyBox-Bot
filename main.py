@@ -431,8 +431,8 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
-async def get_movie_name_from_image(context, file_id):
-    """Sirf Photo ko Google Lens ki tarah scan karega, no filename, no caption"""
+async def get_movie_name_from_caption(caption_text):
+    """Sirf Caption ko Gemini ke paas bhej kar Movie/Series ka clean name nikalega (Bina kisi hardcoded filter ke)"""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: return "UNKNOWN"
@@ -440,18 +440,17 @@ async def get_movie_name_from_image(context, file_id):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.5-flash')
 
-        new_file = await context.bot.get_file(file_id)
-        image_bytes = await new_file.download_as_bytearray()
-        image_parts = [{"mime_type": "image/jpeg", "data": image_bytes}]
+        # Gemini Prompt - Ye prompt smart tareeke se sirf naam nikalega
+        prompt = f"""
+        Act as an expert Movie and TV Series identifier. 
+        I will give you a raw telegram caption. Your job is to extract ONLY the real Movie or Web Series title (and release year if present).
+        Ignore all emojis, video qualities (1080p, 4k, 720p), file sizes, languages (Hindi, Dual Audio), and promotional links.
+        Reply ONLY with the clean Title. Do not write any explanations or extra words.
         
-        prompt = """
-        Act as a Reverse Image Search engine. Look at this Movie or Web Series poster.
-        Identify the exact name of the Movie or Series.
-        Reply ONLY with the exact Title (and release year if possible). 
-        Do not write any explanations.
+        Raw Caption: "{caption_text}"
         """
 
-        # Safety filter off taaki horror poster block na ho
+        # Safety filters off taaki adult/horror/action movies block na hon
         from google.generativeai.types import HarmCategory, HarmBlockThreshold
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -460,14 +459,14 @@ async def get_movie_name_from_image(context, file_id):
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
 
-        response = await run_async(model.generate_content, [prompt, image_parts[0]], safety_settings=safety_settings)
+        response = await run_async(model.generate_content, prompt, safety_settings=safety_settings)
         text = response.text.strip().replace('*', '').replace('"', '')
         
         if not text or len(text) < 2 or "UNKNOWN" in text.upper(): return "UNKNOWN"
         return text
 
     except Exception as e:
-        logger.error(f"Gemini Error: {e}")
+        logger.error(f"Gemini Text Extraction Error: {e}")
         return "UNKNOWN"
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
@@ -610,6 +609,30 @@ def escape_markdown_v2(text: str) -> str:
     """Escapes special characters for Markdown V2 formatting."""
     # Use the simplest escape for characters that commonly break parsing
     return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+
+async def send_multi_bot_message(target_user_id, text_message, parse_mode='HTML'):
+    """Teeno bots se message bhejkar try karega, jo chal jaye wahi sahi."""
+    # Apne .env wale tokens yahan laayein
+    tokens = [
+        os.environ.get("TELEGRAM_BOT_TOKEN"),
+        os.environ.get("BOT_TOKEN_2"),
+        os.environ.get("BOT_TOKEN_3")
+    ]
+    tokens = [t for t in tokens if t] # Khali tokens hata do
+    
+    for token in tokens:
+        try:
+            # Temporary bot instance banayega aur message bhejega
+            temp_bot = telegram.Bot(token=token)
+            await temp_bot.send_message(chat_id=target_user_id, text=text_message, parse_mode=parse_mode)
+            return True # Success ho gaya, function khatam
+        except telegram.error.Forbidden:
+            continue # User ne ye bot block kiya hai, agle bot par jao
+        except Exception as e:
+            logger.error(f"Multi-bot send error: {e}")
+            continue
+            
+    return False # Teeno bots se fail ho gaya
 
 def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: int = REQUEST_COOLDOWN_MINUTES):
     """Look up the user's most recent request that is sufficiently similar to title"""
@@ -1443,36 +1466,35 @@ async def analyze_intent(message_text):
 
 # ==================== NOTIFICATION FUNCTIONS ====================
 async def send_admin_notification(context, user, movie_title, group_info=None):
-    """Send notification to admin channel about a new request"""
-    if not REQUEST_CHANNEL_ID:
-        return
+    """Send notification to admin channel about a new request with Lifetime Buttons"""
+    if not REQUEST_CHANNEL_ID: return
 
     try:
-        # ESCAPE the movie title and username BEFORE putting it into the message string
         safe_movie_title = movie_title.replace('<', '&lt;').replace('>', '&gt;')
         safe_username = user.username if user.username else 'N/A'
         safe_first_name = (user.first_name or 'Unknown').replace('<', '&lt;').replace('>', '&gt;')
 
-        user_info = f"User: {safe_first_name}"
-        if user.username:
-            user_info += f" (@{safe_username})"
-        user_info += f" (ID: {user.id})"
+        message = f"🎬 New Movie Request! 🎬\n\n"
+        message += f"Movie: <b>{safe_movie_title}</b>\n"
+        message += f"User: {safe_first_name} (ID: <code>{user.id}</code>)\n"
+        if user.username: message += f"Username: @{safe_username}\n"
+        message += f"From: {'Group: '+str(group_info) if group_info else 'Private Message'}\n"
+        message += f"Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
 
-        group_info_text = f"From Group: {group_info}" if group_info else "Via Private Message"
-
-        message = f"""
-🎬 New Movie Request! 🎬
-
-Movie: <b>{safe_movie_title}</b>
-{user_info}
-{group_info_text}
-Time: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}
-"""
+        # ⚡ LIFETIME BUTTONS LOGIC
+        # Telegram me button data limit 64 bytes hoti hai, isliye title chota kiya hai
+        short_title = safe_movie_title[:15].replace('_', ' ') 
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Movie Add Kar Di Gai Hai", callback_data=f"reqA_{user.id}_{short_title}")],
+            [InlineKeyboardButton("❌ Nahi Mili", callback_data=f"reqN_{user.id}_{short_title}")]
+        ])
 
         await context.bot.send_message(
-            chat_id=REQUEST_CHANNEL_ID, 
-            text=message, 
-            parse_mode='HTML'
+            chat_id=REQUEST_CHANNEL_ID,
+            text=message,
+            parse_mode='HTML',
+            reply_markup=keyboard
         )
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
@@ -2724,6 +2746,54 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # === ADMIN REQUEST BUTTONS (Add/Not Found) ===
+    if data.startswith("reqA_") or data.startswith("reqN_"):
+        await query.answer("🔄 Sending message to user...", show_alert=False)
+        parts = data.split('_', 2)
+        action = parts[0]
+        target_user_id = int(parts[1])
+        movie_title = parts[2]
+
+        # User ka naam DB se nikalo taaki message personal lage
+        conn = get_db_connection()
+        first_name = "User"
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT first_name FROM user_requests WHERE user_id = %s LIMIT 1", (target_user_id,))
+                res = cur.fetchone()
+                if res: first_name = res[0] or "User"
+            except: pass
+            finally: close_db_connection(conn)
+
+        if action == "reqA_":
+            user_msg = (
+                f"🎉 <b>Good News!</b> 👋\n\n"
+                f"Hello <b>{first_name}!</b> आपकी Requested Movie अब उपलब्ध है।\n\n"
+                f"🎬 File: <b>{movie_title}</b>\n\n"
+                f"इसे पाने के लिए अभी बॉट में मूवी का नाम टाइप करें और एन्जॉय करें! 😊\n\n"
+                f"━━━━━━━━━━━━━━━━━━━\nRegards, <b>@ownermahi</b>"
+            )
+            btn_status = "✅ User Notified: Added"
+        else:
+            user_msg = (
+                f"😔 <b>Update!</b> 👋\n\n"
+                f"Hello <b>{first_name}!</b> आपकी Requested File (<b>{movie_title}</b>) अभी हमें कहीं नहीं मिल पाई है।\n\n"
+                f"जैसे ही यह अवेलेबल होगी, हम आपको जरूर बताएंगे।\n\n"
+                f"━━━━━━━━━━━━━━━━━━━\nRegards, <b>@ownermahi</b>"
+            )
+            btn_status = "❌ User Notified: Not Found"
+
+        # Multi-bot send
+        success = await send_multi_bot_message(target_user_id, user_msg)
+        
+        if success:
+            # Button hata do aur Admin ko updated status dikhao
+            await query.edit_message_text(f"{query.message.text}\n\n{btn_status} 📩", parse_mode='HTML')
+        else:
+            await query.answer("❌ Failed! User ne sabhi bots block kar diye hain.", show_alert=True)
+        return
+    
     # === NEW: GENRE CALLBACK HANDLER ===
     if data.startswith(("genre_", "cancel_genre")):
         await handle_genre_selection(update, context)
@@ -3495,27 +3565,28 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with auto_batch_lock:
         
         # ==========================================
-        # 🤖 PHASE 1: START BATCH (SIRF PHOTO SE)
+        # 🤖 PHASE 1: START BATCH (CAPTION SE - REAL TIME AI)
         # ==========================================
         if not BATCH_SESSION.get('active'):
-            # Agar user ne pehle photo nahi bheji (direct MKV bhej di)
-            if not message.photo:
-                await message.reply_text("❌ **Batch Off Hai!**\nPehle mujhe movie ka **POSTER (Photo)** bhejo taaki main batch start kar saku.")
+            
+            # Message me caption ya text hona zaroori hai batch start karne ke liye
+            raw_caption = message.caption or message.text
+            if not raw_caption:
+                await message.reply_text("❌ **Batch Off Hai!**\nPehle koi Movie ka File/Photo with **CAPTION** bhejo taaki AI uska naam samajh sake.")
                 return
                 
-            status_msg = await message.reply_text("🔍 Poster scan kar raha hoon...", quote=True)
+            status_msg = await message.reply_text("🧠 Caption padh kar movie ka naam nikal raha hoon...", quote=True)
             
-            # Photo ka ID nikalo aur Gemini ko bhejo
-            img_file_id = message.photo[-1].file_id
-            movie_name = await get_movie_name_from_image(context, img_file_id)
+            # Caption ko Gemini ke paas bhejo (Bina kisi code filter ke)
+            movie_name = await get_movie_name_from_caption(raw_caption)
             
             if movie_name == "UNKNOWN":
-                await status_msg.edit_text("❌ Poster samajh nahi aaya. Please manual `/batch Name` use karein.")
+                await status_msg.edit_text("❌ AI Caption samajh nahi paya. Please manual `/batch Name` use karein.")
                 return
                 
-            await status_msg.edit_text(f"🧠 Poster Match: **{movie_name}**\n⏳ Internet se data nikal raha hoon...")
+            await status_msg.edit_text(f"🧠 AI Match: **{movie_name}**\n⏳ Internet se data nikal raha hoon...")
 
-            # Internet (IMDb) se data nikalo
+            # Internet (IMDb/OMDb) se data nikalo
             metadata = await run_async(fetch_movie_metadata, movie_name)
             
             if metadata:
@@ -3556,15 +3627,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"DB Error: {e}")
                 finally:
                     close_db_connection(conn)
-            return  # Pehla step yahan khatam (Photo ka kaam ho gaya)
+            return  # Pehla step yahan khatam (Caption check ka kaam ho gaya)
 
         # ==========================================
-        # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho)
+        # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho) - NO CHANGES HERE
         # ==========================================
-        # Agar galti se photo bhej di batch on me, to use ignore karo
-        if message.photo: return 
-
         upload_status = await message.reply_text("⏳ Uploading file...", quote=True)
+        # ... (Baaki ka Phase 2 ka code aapka same rahega)
 
         channels = get_storage_channels()
         if not channels:
@@ -4272,6 +4341,78 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if conn:
             close_db_connection(conn)
+
+ASK_MOVIE, ASK_USER = range(20, 22) # Naye states
+
+async def notify_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 1: Admin types /notify"""
+    if update.effective_user.id != ADMIN_USER_ID: return ConversationHandler.END
+    
+    await update.message.reply_text("🎬 <b>Smart Notify Started!</b>\n\n👉 सबसे पहले मुझे <b>Movie / Series</b> का नाम बताइए:", parse_mode='HTML')
+    return ASK_MOVIE
+
+async def notify_ask_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: Admin gives Movie Name"""
+    # Cancel command check
+    if update.message.text == '/cancel':
+        await update.message.reply_text("❌ Notify Cancelled.")
+        return ConversationHandler.END
+        
+    context.user_data['notify_movie'] = update.message.text
+    await update.message.reply_text("👤 <b>अब User का Username या User ID बताइए:</b>\n(जैसे @username या 123456789)", parse_mode='HTML')
+    return ASK_USER
+
+async def notify_ask_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 3: Admin gives Username/ID -> Bot sends Template using Multi-Bot"""
+    if update.message.text == '/cancel':
+        await update.message.reply_text("❌ Notify Cancelled.")
+        return ConversationHandler.END
+
+    user_input = update.message.text.replace('@', '').strip()
+    movie_name = context.user_data.get('notify_movie', 'Movie')
+
+    # Find user ID from DB
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ DB Error!")
+        return ConversationHandler.END
+
+    try:
+        cur = conn.cursor()
+        if user_input.isdigit(): # ID di hai
+            cur.execute("SELECT first_name FROM user_requests WHERE user_id = %s LIMIT 1", (int(user_input),))
+            target_user_id = int(user_input)
+            res = cur.fetchone()
+            first_name = res[0] if res else "User"
+        else: # Username diya hai
+            cur.execute("SELECT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1", (user_input,))
+            res = cur.fetchone()
+            if not res:
+                await update.message.reply_text(f"❌ '{user_input}' database me nahi mila. ID try karein.")
+                return ConversationHandler.END
+            target_user_id, first_name = res
+
+        # 🎨 Beautiful Template
+        msg = (
+            f"🎉 <b>Good News!</b> 👋\n\n"
+            f"Hello <b>{first_name}!</b> आपकी Requested File अब उपलब्ध है।\n\n"
+            f"🎬 File: <b>{movie_name}</b>\n\n"
+            f"इसे पाने के लिए अभी बॉट में मूवी का नाम टाइप करें और एन्जॉय करें! 😊\n\n"
+            f"━━━━━━━━━━━━━━━━━━━\nRegards, <b>@ownermahi</b>"
+        )
+
+        # Multi-bot send function call karo
+        success = await send_multi_bot_message(target_user_id, msg)
+
+        if success:
+            await update.message.reply_text(f"✅ <b>Perfect!</b> Notification successfully {first_name} ko bhej di gayi hai.", parse_mode='HTML')
+        else:
+            await update.message.reply_text("❌ <b>Fail!</b> User ne teeno bots ko block kar diya hai.", parse_mode='HTML')
+
+    finally:
+        close_db_connection(conn)
+
+    return ConversationHandler.END
 
 async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -6209,6 +6350,17 @@ def register_handlers(application: Application):
     )
     application.add_handler(request_conv_handler)
 
+    notify_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("notify", notify_start)],
+        states={
+            ASK_MOVIE: [MessageHandler(filters.TEXT & ~filters.COMMAND, notify_ask_movie)],
+            ASK_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, notify_ask_user)]
+        },
+        fallbacks=[CommandHandler('cancel', notify_ask_user)], # Dummy fallback to catch /cancel
+        conversation_timeout=120
+    )
+    application.add_handler(notify_conv_handler)
+    
     # -----------------------------------------------------------
     # 2. GLOBAL HANDLERS
     # -----------------------------------------------------------
@@ -6223,7 +6375,6 @@ def register_handlers(application: Application):
     # -----------------------------------------------------------
     application.add_handler(CommandHandler("addmovie", add_movie))
     application.add_handler(CommandHandler("bulkadd", bulk_add_movies))
-    application.add_handler(CommandHandler("notify", notify_manually))
     application.add_handler(CommandHandler("addalias", add_alias))
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
