@@ -460,7 +460,7 @@ async def check_rate_limit(user_id):
     return True
 
 async def get_movie_name_from_caption(caption_text):
-    """Caption se Title, Year aur Language nikalega JSON format me."""
+    """Caption se Title, Year aur Language nikalega JSON format me (Bulletproof Regex Version)."""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: return {"title": "UNKNOWN", "year": "", "language": ""}
@@ -471,12 +471,11 @@ async def get_movie_name_from_caption(caption_text):
         prompt = f"""
         Act as an expert Movie and TV Series identifier. 
         Extract the exact Movie or Web Series title, release year, and primary language from the raw caption.
-        Ignore video qualities (1080p, 4k), file sizes, and promotional links.
+        Ignore video qualities (1080p, 4k), file sizes, audio formats (AAC, DDP), file extensions (.mkv, .mp4), and promotional links.
         
-        Respond ONLY with a valid JSON object. Do not add markdown blocks.
+        Respond ONLY with a valid JSON object. Do not add any conversational text or markdown blocks.
         Format: {{"title": "Clean Movie Name", "year": "Release Year", "language": "Hindi/English/Tamil etc."}}
         If year or language is not found, leave them as blank strings "".
-        If it says Dual Audio or Multi Audio, try to detect the main language (e.g., Hindi).
         
         Raw Caption: "{caption_text}"
         """
@@ -490,12 +489,26 @@ async def get_movie_name_from_caption(caption_text):
         }
 
         response = await run_async(model.generate_content, prompt, safety_settings=safety_settings)
-        text = response.text.strip().replace("```json", "").replace("```", "").strip()
         
-        data = json.loads(text)
-        if not data.get("title") or len(data.get("title")) < 2:
+        # 🚀 PRO LEVEL JSON EXTRACTION (Regex se sirf {} ke andar ka data nikalega)
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        
+        if match:
+            clean_json_str = match.group(0) # Sirf JSON wala hissa
+            data = json.loads(clean_json_str) # Ab error nahi aayega
+            
+            # Galti se agar AI ne .mkv laga diya ho, toh usko hata do
+            title = data.get("title", "").replace(".mkv", "").replace(".mp4", "").strip()
+            
+            if not title or len(title) < 2 or title.upper() == "UNKNOWN":
+                return {"title": "UNKNOWN", "year": "", "language": ""}
+                
+            data["title"] = title
+            return data
+            
+        else:
+            logger.error(f"Gemini outputted invalid format: {response.text}")
             return {"title": "UNKNOWN", "year": "", "language": ""}
-        return data
 
     except Exception as e:
         logger.error(f"Gemini JSON Extraction Error: {e}")
@@ -3302,11 +3315,11 @@ def get_readable_file_size(size_in_bytes):
         return "Unknown"
     return "Unknown"
 
-def generate_aliases_gemini(movie_title):
+def generate_aliases_gemini(movie_title, year="", category=""):
     """
-    Generates 50 SEO aliases using a detailed Search Query Analyst prompt.
+    Generates 50 SEO aliases using Year and Category context.
     """
-    print(f"\n🚀 [DEBUG 1] Alias generation start hui: '{movie_title}' ke liye")
+    print(f"\n🚀 [DEBUG 1] Alias generation start hui: '{movie_title}' ({year} - {category}) ke liye")
     
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -3316,140 +3329,60 @@ def generate_aliases_gemini(movie_title):
     print("✅ [DEBUG 3] API Key mil gayi. Model load kar rahe hain...")
 
     try:
-        # Configure Gemini
         genai.configure(api_key=api_key)
-        
-        # ✅ Using Gemini 2.0 Flash (as per current available stable naming, 
-        # change to 'gemini-1.5-flash' if 2.0 is not in your region yet)
         model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
-        Generate 20 relevant search keywords/aliases for the movie: "{movie_title}".
-        Include typos, Hinglish spellings, and short forms.
-        Output ONLY comma-separated text. No numbering.
-        Example: kalki, kalki 2898, kalki hindi, culki movie
+        Act as a Search Query Analyst, SEO Expert, and User Behavior Specialist.
+
+        I need an exhaustive list of "Aliases," "Keywords," and "Search Terms" for the movie/web series: "{movie_title}".
+
+        **CONTEXT (Important for Accuracy):**
+        - Release Year: {year}
+        - Industry/Language: {category}
+
+        Generate a list that covers ALL possible ways a human might type this query — including mistakes, regional variations, voice search patterns, and intent-based searches. Do NOT summarize; list every variation explicitly.
+
+        ---
+
+        ## OUTPUT CATEGORIES:
+        1. Official & Structural Variations (e.g., Movie Name {year})
+        2. Acronyms & Short Forms
+        3. Phonetic & Spelling Mistakes (Hinglish/Regional errors)
+        4. Keyboard Slips & Fat-finger Errors
+        5. Platform & Intent-Based Searches (Download, Hindi dubbed)
+        6. Regional Transliteration Variations (Based on {category})
+
+        ---
+        ## OUTPUT FORMAT:
+        Provide exactly 50 comma-separated aliases only. No explanations, no categories, no numbering. Just plain comma-separated text.
         """
 
-        response = model.generate_content(prompt)
-        content = response.text
-        
-        # Clean and split by comma
-        aliases = [x.strip().lower() for x in content.split(',') if x.strip()]
-        
-        logger.info(f"✅ Generated {len(aliases)} aliases for '{movie_title}'")
-        return aliases
-
-    except Exception as e:
-        logger.error(f"❌ Gemini AI Error: {e}")
-        return []
-    try:
-        # Configure Gemini
-        genai.configure(api_key=api_key)
-        
-        # Use correct model name (gemini-2.5-flash is free & fast)
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # Your Prompt
-        prompt = f"""
-Act as a Search Query Analyst, SEO Expert, and User Behavior Specialist.
-
-I need an exhaustive list of "Aliases," "Keywords," and "Search Terms" for the movie/web series: "{movie_title}".
-
-**CONTEXT (if available):**
-- Release Year:
-- Language:
-- Platform (Netflix/Prime/Hotstar etc.):
-- Director/Lead Actors:
-- Genre:
-
-Generate a list that covers ALL possible ways a human might type this query — including mistakes, regional variations, voice search patterns, and intent-based searches. Do NOT summarize; list every variation explicitly.
-
----
-
-## OUTPUT CATEGORIES (8 Categories):
-
-### 1. Official & Structural Variations:
-- Full official title with punctuation
-- Subtitle variations (with/without colon, dash)
-- Season/Episode notations (Season 1, S01, S1, Part 1, Vol 1, Chapter 1)
-- Year combinations (Movie Name 2025)
-- Language-specific official titles (Hindi/Tamil/Telugu titles)
-- Franchise naming (Part 1, Part 2, Sequel name)
-
-### 2. Acronyms & Short Forms:
-- First letter acronyms (DDLJ, GOT, BB3)
-- Common fan abbreviations
-- Lazy typing shortcuts
-- Social media hashtag formats (#MovieName)
-
-### 3. Phonetic & Spelling Mistakes (CRITICAL SECTION):
-Focus on how someone would TYPE if they only HEARD the name:
-- Hinglish/Regional phonetic errors
-- Vowel swaps: a↔e, i↔e, u↔o, aa↔a
-- Consonant confusion: ph↔f, sh↔s, th↔t, ch↔c, kh↔k, dh↔d
-- Double letter errors (single→double, double→single)
-- Silent letter omissions
-- Regional accent-based spellings (South Indian, Punjabi, Bengali pronunciation)
-
-### 4. Keyboard Slips & Fat-finger Errors:
-- Adjacent QWERTY key mistakes (a↔s, i↔o, n↔m)
-- Skipped letters (typing too fast)
-- Double-pressed keys
-- Mobile swipe keyboard errors
-- Spacebar errors (no space, extra space, wrong space position)
-
-### 5. Platform & Intent-Based Searches:
-- "[Movie] watch online"
-- "[Movie] download"
-- "[Movie] Netflix/Prime/Hotstar"
-- "[Movie] full movie"
-- "[Movie] Hindi dubbed"
-- "[Movie] trailer"
-- "[Movie] review"
-
-### 6. Voice Search & Conversational Queries:
-- "Play [Movie name]"
-- "Show me [Movie name]"
-- "I want to watch [Movie name]"
-
-### 7. Cast & Crew Combinations:
-- "[Actor name] new movie"
-- "[Director] latest film"
-
-### 8. Regional & Transliteration Variations:
-- Devanagari to Roman transliteration errors
-- Tamil/Telugu/Kannada phonetic spellings
-
----
-
-## OUTPUT FORMAT:
-Provide exactly 50 comma-separated aliases only. No explanations, no categories, no numbering. Just plain comma-separated text.
-
-Example output format:
-alias1, alias2, alias3, alias4, alias5...
-"""
-
         print("⏳ [DEBUG 4] Google AI ko detailed request bhej rahe hain...")
-        response = model.generate_content(prompt)
+        
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+
+        response = model.generate_content(prompt, safety_settings=safety_settings)
         
         print("📥 [DEBUG 5] AI se response aa gaya!")
         
         try:
             ai_text = response.text
-            # Print only first 100 chars to keep logs clean
-            print(f"🤖 [DEBUG 6] AI ne response diya (length: {len(ai_text)})")
         except ValueError:
             print(f"❌ [DEBUG 6.1] Safety Blocked! AI ne response block kar diya.")
             return []
 
         if not ai_text:
-            print("❌ [DEBUG 7] AI ka text khali hai.")
             return []
 
         # Clean and split by comma
         aliases = [x.strip().lower() for x in ai_text.split(',') if x.strip()]
-        
-        # Agar list bahut badi ho jaye (kabhi AI extra bhej deta hai), toh limit to 50
         aliases = aliases[:50]
         
         print(f"✅ [DEBUG 8] Total {len(aliases)} Aliases tayyar hain.")
