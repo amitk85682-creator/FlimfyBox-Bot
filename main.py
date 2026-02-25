@@ -461,8 +461,7 @@ async def check_rate_limit(user_id):
 
 async def get_movie_name_from_caption(caption_text):
     """
-    🎯 IMPROVED: Gemini se Movie Name, Year, Language extract karta hai
-    Ab complex captions bhi handle karega!
+    🎯 SUPER STRICT: Sirf ACTUAL movie name extract karta hai
     """
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": ""}
@@ -471,44 +470,52 @@ async def get_movie_name_from_caption(caption_text):
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: 
             logger.error("❌ GEMINI_API_KEY missing!")
-            return {"title": "UNKNOWN", "year": "", "language": ""}
+            return await fallback_extraction(caption_text)
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')  # Stable model
+        model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🎯 SIMPLIFIED & FOCUSED PROMPT
-        prompt = f"""You are a Movie/TV Show name extractor. 
+        # 🎯 SUPER STRICT PROMPT
+        prompt = f"""You are extracting the REAL movie/show name from a file caption.
 
-From the text below, extract ONLY these 3 things:
-1. TITLE: The actual movie or TV show name (clean, no file extensions, no quality tags)
-2. YEAR: Release year if mentioned (4 digits like 2024, 2023)
-3. LANGUAGE: Primary language (Hindi, English, Tamil, Telugu, Korean, etc.)
+CAPTION: "{caption_text}"
 
-IGNORE everything else like: 1080p, 720p, 480p, HDRip, WEB-DL, x264, x265, HEVC, AAC, ESub, .mkv, .mp4, file sizes (GB, MB), URLs, channel names.
+RULES (VERY IMPORTANT):
+1. Extract ONLY the actual movie/show name that you would search on Google or IMDb
+2. The name is usually at the BEGINNING of the caption, BEFORE the year
+3. STOP extracting when you see ANY of these (these are NOT part of movie name):
+   - Year in brackets like (2017) or just 2017
+   - Quality tags: 480p, 720p, 1080p, 2160p, 4K, HDRip, WebRip, WEB-DL, BluRay, DVDRip
+   - Language words when used as tags: Hindi, English, Tamil, Telugu, Dual Audio
+   - Technical terms: x264, x265, HEVC, AAC, ESub, mkv, mp4
+   - Genre words used as labels: Bollywood Movie, Hollywood Movie, South Movie
+   - Channel names starting with @
 
-TEXT: "{caption_text}"
+EXAMPLES:
+- "Commando 2 (2017) 480p Hindi WebRip Bollywood Movie" → title: "Commando 2"
+- "Pushpa The Rise 2021 1080p Hindi" → title: "Pushpa The Rise"  
+- "Money Heist S01E01 720p NF WEB-DL" → title: "Money Heist"
+- "Kantara (2022) Hindi Dubbed 1080p" → title: "Kantara"
+- "The Kashmir Files 2022 480p" → title: "The Kashmir Files"
+- "RRR.2022.1080p.NF.WEB-DL.Hindi" → title: "RRR"
+- "Jawan 2023 Hindi 720p WebRip" → title: "Jawan"
 
-Reply in this EXACT JSON format only, nothing else:
-{{"title": "Movie Name Here", "year": "2024", "language": "Hindi"}}
+RESPOND WITH ONLY THIS JSON (no extra text):
+{{"title": "EXACT MOVIE NAME ONLY", "year": "YYYY", "language": "Hindi/English/etc"}}
 
-If year not found, use empty string "".
-If language not found, use empty string "".
-NEVER return "UNKNOWN" for title - always try to extract something."""
+For language, detect from: Hindi, English, Tamil, Telugu, Kannada, Malayalam, Korean, Japanese, Dual Audio, Multi Audio"""
 
-        # API Call
         response = await run_async(model.generate_content, prompt)
         
         if not response or not response.text:
-            logger.warning("Gemini returned empty response")
+            logger.warning("Gemini empty response")
             return await fallback_extraction(caption_text)
         
         text = response.text.strip()
-        logger.info(f"Gemini Raw Response: {text}")
+        logger.info(f"Gemini Raw: {text}")
         
-        # Clean JSON extraction
+        # Clean JSON
         text = text.replace("```json", "").replace("```", "").strip()
-        
-        # Find JSON object in response
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
@@ -523,15 +530,33 @@ NEVER return "UNKNOWN" for title - always try to extract something."""
         year = data.get("year", "").strip()
         language = data.get("language", "").strip()
         
-        # Clean title
-        title = re.sub(r'\.(mkv|mp4|avi|mov)$', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'\s*(1080p|720p|480p|2160p|4k|HDRip|WEB-DL|BluRay).*', '', title, flags=re.IGNORECASE)
-        title = title.strip()
+        # 🧹 EXTRA CLEANING (Safety net)
+        # Remove any remaining junk that Gemini might have included
+        junk_words = [
+            'hindi', 'english', 'tamil', 'telugu', 'kannada', 'malayalam',
+            'dubbed', 'webrip', 'web-dl', 'bluray', 'hdrip', 'dvdrip',
+            'bollywood', 'hollywood', 'south', 'movie', 'film',
+            '480p', '720p', '1080p', '2160p', '4k',
+            'x264', 'x265', 'hevc', 'aac', 'mkv', 'mp4', 'esub'
+        ]
+        
+        title_words = title.split()
+        clean_words = []
+        for word in title_words:
+            if word.lower() not in junk_words:
+                clean_words.append(word)
+            else:
+                break  # Junk word aate hi stop karo
+        
+        title = ' '.join(clean_words).strip()
+        
+        # Remove trailing year if still present
+        title = re.sub(r'\s*\(?\d{4}\)?$', '', title).strip()
         
         if not title or len(title) < 2:
             return await fallback_extraction(caption_text)
         
-        logger.info(f"✅ Extracted: Title='{title}', Year='{year}', Lang='{language}'")
+        logger.info(f"✅ Final: Title='{title}', Year='{year}', Lang='{language}'")
         return {"title": title, "year": year, "language": language}
 
     except Exception as e:
@@ -541,59 +566,76 @@ NEVER return "UNKNOWN" for title - always try to extract something."""
 
 async def fallback_extraction(caption_text):
     """
-    🛡️ FALLBACK: Jab Gemini fail ho, Regex se extract karo
+    🛡️ SMART FALLBACK: Regex-based extraction when AI fails
     """
     try:
         text = caption_text.strip()
+        original_text = text
         
-        # Remove common junk
-        text = re.sub(r'https?://\S+', '', text)  # URLs
-        text = re.sub(r'@\w+', '', text)  # Mentions
-        text = re.sub(r'#\w+', '', text)  # Hashtags
-        text = re.sub(r'\[.*?\]', '', text)  # [Text in brackets]
-        text = re.sub(r'\(.*?\)', '', text)  # (Text in parentheses) - but save year first
+        # 1. Extract Year FIRST (save it)
+        year_match = re.search(r'[\(\[]?(19|20)\d{2}[\)\]]?', text)
+        year = ""
+        if year_match:
+            year = re.search(r'(19|20)\d{2}', year_match.group(0)).group(0)
         
-        # Extract Year
-        year_match = re.search(r'\b(19|20)\d{2}\b', caption_text)
-        year = year_match.group(0) if year_match else ""
-        
-        # Extract Language
-        lang = ""
-        lang_patterns = {
-            'hindi': 'Hindi', 'english': 'English', 'tamil': 'Tamil',
-            'telugu': 'Telugu', 'kannada': 'Kannada', 'malayalam': 'Malayalam',
-            'korean': 'Korean', 'japanese': 'Japanese', 'dual': 'Dual Audio',
-            'multi': 'Multi Audio'
-        }
-        text_lower = caption_text.lower()
-        for pattern, lang_name in lang_patterns.items():
-            if pattern in text_lower:
-                lang = lang_name
+        # 2. Extract Language
+        language = ""
+        lang_patterns = [
+            (r'\b(hindi)\b', 'Hindi'),
+            (r'\b(english)\b', 'English'),
+            (r'\b(tamil)\b', 'Tamil'),
+            (r'\b(telugu)\b', 'Telugu'),
+            (r'\b(kannada)\b', 'Kannada'),
+            (r'\b(malayalam)\b', 'Malayalam'),
+            (r'\b(korean)\b', 'Korean'),
+            (r'\b(japanese)\b', 'Japanese'),
+            (r'\b(dual\s*audio)\b', 'Dual Audio'),
+            (r'\b(multi\s*audio)\b', 'Multi Audio'),
+        ]
+        text_lower = text.lower()
+        for pattern, lang_name in lang_patterns:
+            if re.search(pattern, text_lower):
+                language = lang_name
                 break
         
-        # Clean title
-        title = re.sub(r'\b(19|20)\d{2}\b', '', text)  # Remove year
-        title = re.sub(r'\b(1080p|720p|480p|2160p|4k|HDRip|WEB-DL|BluRay|x264|x265|HEVC|AAC|ESub|DDP|Atmos)\b', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'\b\d+(\.\d+)?\s*(GB|MB|gb|mb)\b', '', title)  # File sizes
-        title = re.sub(r'\.(mkv|mp4|avi|mov)\b', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'[_\.\-]+', ' ', title)  # Replace separators with space
-        title = re.sub(r'\s+', ' ', title).strip()  # Multiple spaces to single
+        # 3. Get title - everything BEFORE the year or quality tag
+        # Split by year first
+        if year:
+            parts = re.split(r'[\(\[]?' + year + r'[\)\]]?', text, maxsplit=1)
+            title = parts[0] if parts else text
+        else:
+            title = text
         
-        # Get first meaningful part (usually movie name)
-        parts = title.split()
-        if len(parts) > 6:
-            title = ' '.join(parts[:6])  # First 6 words usually have the name
+        # 4. Remove everything after quality tags
+        quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv)\b'
+        title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
         
-        title = title.strip()
+        # 5. Clean up
+        title = re.sub(r'https?://\S+', '', title)  # URLs
+        title = re.sub(r'@\w+', '', title)  # @mentions
+        title = re.sub(r'#\w+', '', title)  # hashtags
+        title = re.sub(r'[_\.\-]+', ' ', title)  # separators to space
+        title = re.sub(r'\s+', ' ', title).strip()  # multiple spaces
+        
+        # 6. Remove trailing junk words
+        junk_words = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'movie', 'film', 'bollywood', 'hollywood', 'south']
+        words = title.split()
+        clean_words = []
+        for word in words:
+            if word.lower() in junk_words:
+                break
+            clean_words.append(word)
+        
+        title = ' '.join(clean_words).strip()
         
         if len(title) >= 2:
-            logger.info(f"✅ Fallback Extracted: Title='{title}', Year='{year}', Lang='{lang}'")
-            return {"title": title, "year": year, "language": lang}
+            logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}'")
+            return {"title": title, "year": year, "language": language}
         
         return {"title": "UNKNOWN", "year": "", "language": ""}
         
     except Exception as e:
-        logger.error(f"Fallback extraction failed: {e}")
+        logger.error(f"Fallback failed: {e}")
         return {"title": "UNKNOWN", "year": "", "language": ""}
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
