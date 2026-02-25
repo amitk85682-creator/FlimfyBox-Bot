@@ -460,52 +460,140 @@ async def check_rate_limit(user_id):
     return True
 
 async def get_movie_name_from_caption(caption_text):
-    """Crash-proof version of Gemini Extraction."""
+    """
+    🎯 IMPROVED: Gemini se Movie Name, Year, Language extract karta hai
+    Ab complex captions bhi handle karega!
+    """
+    if not caption_text or len(caption_text.strip()) < 2:
+        return {"title": "UNKNOWN", "year": "", "language": ""}
+    
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: 
-            print("❌ ERROR: GEMINI_API_KEY is missing in Render Environment!")
+            logger.error("❌ GEMINI_API_KEY missing!")
             return {"title": "UNKNOWN", "year": "", "language": ""}
 
         genai.configure(api_key=api_key)
-        
-        # 🔥 FIX 1: Model downgrade kiya '1.5-flash' par taaki purani library crash na ho
-        model = genai.GenerativeModel('gemini-2.5-flash') 
+        model = genai.GenerativeModel('gemini-2.0-flash')  # Stable model
 
-        prompt = f"""
-        Extract the exact Movie or Web Series title, release year, and primary language from this raw caption.
-        Ignore video qualities (1080p, 4k), file sizes, audio formats (AAC, DDP, x264, ESub), file extensions (.mkv, .mp4), and promotional links.
-        
-        Return ONLY a valid JSON object. No markdown, no quotes, no extra text.
-        Format: {{"title": "Clean Movie Name", "year": "Release Year", "language": "Language"}}
-        
-        Raw Caption: "{caption_text}"
-        """
+        # 🎯 SIMPLIFIED & FOCUSED PROMPT
+        prompt = f"""You are a Movie/TV Show name extractor. 
 
-        # 🔥 FIX 2: Sab extra settings hata di (safety, mime_type) jo error de rahi thi
+From the text below, extract ONLY these 3 things:
+1. TITLE: The actual movie or TV show name (clean, no file extensions, no quality tags)
+2. YEAR: Release year if mentioned (4 digits like 2024, 2023)
+3. LANGUAGE: Primary language (Hindi, English, Tamil, Telugu, Korean, etc.)
+
+IGNORE everything else like: 1080p, 720p, 480p, HDRip, WEB-DL, x264, x265, HEVC, AAC, ESub, .mkv, .mp4, file sizes (GB, MB), URLs, channel names.
+
+TEXT: "{caption_text}"
+
+Reply in this EXACT JSON format only, nothing else:
+{{"title": "Movie Name Here", "year": "2024", "language": "Hindi"}}
+
+If year not found, use empty string "".
+If language not found, use empty string "".
+NEVER return "UNKNOWN" for title - always try to extract something."""
+
+        # API Call
         response = await run_async(model.generate_content, prompt)
         
-        text = response.text.strip()
+        if not response or not response.text:
+            logger.warning("Gemini returned empty response")
+            return await fallback_extraction(caption_text)
         
-        # Clean up JSON (Kachra hatane ke liye)
+        text = response.text.strip()
+        logger.info(f"Gemini Raw Response: {text}")
+        
+        # Clean JSON extraction
         text = text.replace("```json", "").replace("```", "").strip()
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        
+        # Find JSON object in response
+        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
-            
-        data = json.loads(text)
-        title = data.get("title", "").replace(".mkv", "").replace(".mp4", "").strip()
         
-        if not title or len(title) < 2 or title.upper() == "UNKNOWN":
-            return {"title": "UNKNOWN", "year": "", "language": ""}
-            
-        data["title"] = title
-        return data
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning(f"JSON parse failed: {text}")
+            return await fallback_extraction(caption_text)
+        
+        title = data.get("title", "").strip()
+        year = data.get("year", "").strip()
+        language = data.get("language", "").strip()
+        
+        # Clean title
+        title = re.sub(r'\.(mkv|mp4|avi|mov)$', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s*(1080p|720p|480p|2160p|4k|HDRip|WEB-DL|BluRay).*', '', title, flags=re.IGNORECASE)
+        title = title.strip()
+        
+        if not title or len(title) < 2:
+            return await fallback_extraction(caption_text)
+        
+        logger.info(f"✅ Extracted: Title='{title}', Year='{year}', Lang='{language}'")
+        return {"title": title, "year": year, "language": language}
 
     except Exception as e:
-        # 🔥 FIX 3: Ab agar fail hoga toh Render ke Logs me seedha reason likha aayega
-        print(f"❌ GEMINI CRITICAL ERROR: {e}")
-        logger.error(f"Gemini Error: {e}")
+        logger.error(f"❌ Gemini Error: {e}")
+        return await fallback_extraction(caption_text)
+
+
+async def fallback_extraction(caption_text):
+    """
+    🛡️ FALLBACK: Jab Gemini fail ho, Regex se extract karo
+    """
+    try:
+        text = caption_text.strip()
+        
+        # Remove common junk
+        text = re.sub(r'https?://\S+', '', text)  # URLs
+        text = re.sub(r'@\w+', '', text)  # Mentions
+        text = re.sub(r'#\w+', '', text)  # Hashtags
+        text = re.sub(r'\[.*?\]', '', text)  # [Text in brackets]
+        text = re.sub(r'\(.*?\)', '', text)  # (Text in parentheses) - but save year first
+        
+        # Extract Year
+        year_match = re.search(r'\b(19|20)\d{2}\b', caption_text)
+        year = year_match.group(0) if year_match else ""
+        
+        # Extract Language
+        lang = ""
+        lang_patterns = {
+            'hindi': 'Hindi', 'english': 'English', 'tamil': 'Tamil',
+            'telugu': 'Telugu', 'kannada': 'Kannada', 'malayalam': 'Malayalam',
+            'korean': 'Korean', 'japanese': 'Japanese', 'dual': 'Dual Audio',
+            'multi': 'Multi Audio'
+        }
+        text_lower = caption_text.lower()
+        for pattern, lang_name in lang_patterns.items():
+            if pattern in text_lower:
+                lang = lang_name
+                break
+        
+        # Clean title
+        title = re.sub(r'\b(19|20)\d{2}\b', '', text)  # Remove year
+        title = re.sub(r'\b(1080p|720p|480p|2160p|4k|HDRip|WEB-DL|BluRay|x264|x265|HEVC|AAC|ESub|DDP|Atmos)\b', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\b\d+(\.\d+)?\s*(GB|MB|gb|mb)\b', '', title)  # File sizes
+        title = re.sub(r'\.(mkv|mp4|avi|mov)\b', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'[_\.\-]+', ' ', title)  # Replace separators with space
+        title = re.sub(r'\s+', ' ', title).strip()  # Multiple spaces to single
+        
+        # Get first meaningful part (usually movie name)
+        parts = title.split()
+        if len(parts) > 6:
+            title = ' '.join(parts[:6])  # First 6 words usually have the name
+        
+        title = title.strip()
+        
+        if len(title) >= 2:
+            logger.info(f"✅ Fallback Extracted: Title='{title}', Year='{year}', Lang='{lang}'")
+            return {"title": title, "year": year, "language": lang}
+        
+        return {"title": "UNKNOWN", "year": "", "language": ""}
+        
+    except Exception as e:
+        logger.error(f"Fallback extraction failed: {e}")
         return {"title": "UNKNOWN", "year": "", "language": ""}
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
@@ -3311,76 +3399,136 @@ def get_readable_file_size(size_in_bytes):
 
 def generate_aliases_gemini(movie_title, year="", category=""):
     """
-    Generates 50 SEO aliases using Year and Category context.
+    🎯 FIXED: AI se 50 search aliases generate karta hai
     """
-    print(f"\n🚀 [DEBUG 1] Alias generation start hui: '{movie_title}' ({year} - {category}) ke liye")
+    logger.info(f"🚀 Generating aliases for: '{movie_title}' ({year}) [{category}]")
+    
+    if not movie_title or movie_title == "UNKNOWN":
+        logger.warning("Empty movie title, skipping alias generation")
+        return []
     
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("❌ [DEBUG 2] ERROR: GEMINI_API_KEY .env file me nahi mili!")
+        logger.error("❌ GEMINI_API_KEY missing!")
         return []
-        
-    print("✅ [DEBUG 3] API Key mil gayi. Model load kar rahe hain...")
 
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
-        prompt = f"""
-        Act as a Search Query Analyst, SEO Expert, and User Behavior Specialist.
+        # 🎯 SIMPLER, MORE EFFECTIVE PROMPT
+        prompt = f"""Generate 50 search aliases for the movie/show: "{movie_title}"
+Year: {year if year else "N/A"}
+Category: {category if category else "N/A"}
 
-        I need an exhaustive list of "Aliases," "Keywords," and "Search Terms" for the movie/web series: "{movie_title}".
+Include these types of variations:
+1. Common misspellings (typos people make)
+2. With and without year
+3. Hindi transliterations if applicable
+4. Short forms and abbreviations
+5. With "movie", "film", "download" keywords
+6. Without spaces, with hyphens
+7. Regional language spellings
 
-        **CONTEXT (Important for Accuracy):**
-        - Release Year: {year}
-        - Industry/Language: {category}
+IMPORTANT: Return ONLY comma-separated aliases, nothing else.
+Example format: alias1, alias2, alias3, alias4
 
-        Generate a list that covers ALL possible ways a human might type this query — including mistakes, regional variations, voice search patterns, and intent-based searches. Do NOT summarize; list every variation explicitly.
+Do not include numbering, bullets, or explanations. Just plain comma-separated text."""
 
-        ---
-
-        ## OUTPUT CATEGORIES:
-        1. Official & Structural Variations (e.g., Movie Name {year})
-        2. Acronyms & Short Forms
-        3. Phonetic & Spelling Mistakes (Hinglish/Regional errors)
-        4. Keyboard Slips & Fat-finger Errors
-        5. Platform & Intent-Based Searches (Download, Hindi dubbed)
-        6. Regional Transliteration Variations (Based on {category})
-
-        ---
-        ## OUTPUT FORMAT:
-        Provide exactly 50 comma-separated aliases only. No explanations, no categories, no numbering. Just plain comma-separated text.
-        """
-
-        print("⏳ [DEBUG 4] Google AI ko detailed request bhej rahe hain...")
-        
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        # Safety settings to avoid blocks
         safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
         }
 
         response = model.generate_content(prompt, safety_settings=safety_settings)
         
-        print("📥 [DEBUG 5] AI se response aa gaya!")
+        # Check if response was blocked
+        if not response or not response.parts:
+            logger.warning("Gemini response was empty or blocked")
+            return generate_basic_aliases(movie_title, year)
         
         try:
-            ai_text = response.text
-        except ValueError:
-            print(f"❌ [DEBUG 6.1] Safety Blocked! AI ne response block kar diya.")
-            return []
-
-        if not ai_text:
-            return []
-
-        # Clean and split by comma
-        aliases = [x.strip().lower() for x in ai_text.split(',') if x.strip()]
-        aliases = aliases[:50]
+            ai_text = response.text.strip()
+        except ValueError as e:
+            logger.warning(f"Response blocked by safety: {e}")
+            return generate_basic_aliases(movie_title, year)
         
-        print(f"✅ [DEBUG 8] Total {len(aliases)} Aliases tayyar hain.")
+        if not ai_text:
+            logger.warning("Empty response from Gemini")
+            return generate_basic_aliases(movie_title, year)
+        
+        logger.info(f"Gemini Alias Response (first 200 chars): {ai_text[:200]}")
+        
+        # Parse aliases
+        aliases = []
+        for item in ai_text.split(','):
+            alias = item.strip().lower()
+            # Clean each alias
+            alias = re.sub(r'^\d+[\.\)]\s*', '', alias)  # Remove numbering
+            alias = alias.strip('"\'')  # Remove quotes
+            alias = alias.strip()
+            
+            if alias and len(alias) >= 2 and len(alias) <= 100:
+                aliases.append(alias)
+        
+        # Remove duplicates and limit to 50
+        aliases = list(dict.fromkeys(aliases))[:50]
+        
+        logger.info(f"✅ Generated {len(aliases)} aliases")
         return aliases
+
+    except Exception as e:
+        logger.error(f"❌ Alias Generation Error: {e}")
+        return generate_basic_aliases(movie_title, year)
+
+
+def generate_basic_aliases(movie_title, year=""):
+    """
+    🛡️ FALLBACK: Basic aliases without AI
+    """
+    if not movie_title:
+        return []
+    
+    aliases = []
+    title_lower = movie_title.lower().strip()
+    title_no_space = title_lower.replace(" ", "")
+    title_hyphen = title_lower.replace(" ", "-")
+    title_underscore = title_lower.replace(" ", "_")
+    
+    # Basic variations
+    aliases.extend([
+        title_lower,
+        title_no_space,
+        title_hyphen,
+        title_underscore,
+        f"{title_lower} movie",
+        f"{title_lower} film",
+        f"{title_lower} download",
+        f"{title_lower} hindi",
+        f"{title_lower} full movie",
+    ])
+    
+    # With year
+    if year:
+        aliases.extend([
+            f"{title_lower} {year}",
+            f"{title_lower} ({year})",
+            f"{title_no_space}{year}",
+        ])
+    
+    # Common typos (first/last letter swap, double letters)
+    if len(title_lower) > 3:
+        # Remove vowels
+        no_vowels = re.sub(r'[aeiou]', '', title_lower)
+        if no_vowels and no_vowels != title_lower:
+            aliases.append(no_vowels)
+    
+    aliases = list(dict.fromkeys(aliases))[:20]
+    logger.info(f"✅ Generated {len(aliases)} basic aliases (fallback)")
+    return aliases
 
     except Exception as e:
         print(f"❌ [DEBUG 9] CRITICAL ERROR Gemini me: {e}")
@@ -3509,6 +3657,9 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Batch Error: {e}")
         await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: close_db_connection(conn)
+
+
+
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
@@ -3520,70 +3671,70 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with auto_batch_lock:
         
         # ==========================================
-        # 🤖 PHASE 1: START BATCH (CAPTION SE)
+        # 🤖 PHASE 1: START BATCH
         # ==========================================
         if not BATCH_SESSION.get('active'):
             
             raw_caption = message.caption or message.text
             if not raw_caption:
-                await message.reply_text("❌ **Batch Off Hai!**\nFile ke sath **CAPTION** mein movie ka naam likho.")
+                await message.reply_text("❌ **Batch Off!**\nFile ke sath CAPTION mein movie naam likho.", parse_mode='Markdown')
                 return
             
-            clean_caption = raw_caption.strip()
+            status_msg = await message.reply_text("🧠 Caption analyze kar raha hoon...", quote=True)
             
-            # 🔥 NEW FIX: Simple Caption Detection
-            # Agar caption simple hai (sirf naam), to AI SKIP karo
-            is_complex_caption = any(x in clean_caption.lower() for x in [
-                '1080p', '720p', '480p', '2160p', '4k',
-                '.mkv', '.mp4', '.avi', 
-                'gb', 'mb', 'http', 'www', 't.me',
-                'x264', 'x265', 'hevc', 'aac', 'esub'
-            ])
+            # 🎯 AI se Name, Year, Language nikalo
+            ai_data = await get_movie_name_from_caption(raw_caption)
             
-            status_msg = await message.reply_text("🧠 Processing...", quote=True)
+            movie_name = ai_data.get("title", "UNKNOWN")
+            movie_year = ai_data.get("year", "")
+            movie_lang = ai_data.get("language", "")
             
-            if is_complex_caption:
-                # Complex caption hai (file info etc.), AI use karo
-                ai_data = await get_movie_name_from_caption(raw_caption)
-                movie_name = ai_data.get("title", "UNKNOWN")
-                movie_year = ai_data.get("year", "")
-                movie_lang = ai_data.get("language", "")
-            else:
-                # ✅ Simple caption hai, DIRECT use karo (No AI needed!)
-                movie_name = clean_caption
-                movie_year = ""
-                movie_lang = ""
-                
-                # Try to extract year if present (e.g., "Relationship Goals 2024")
-                import re
-                year_match = re.search(r'\b(19|20)\d{2}\b', clean_caption)
-                if year_match:
-                    movie_year = year_match.group(0)
-                    movie_name = clean_caption.replace(movie_year, "").strip()
-            
-            if not movie_name or movie_name == "UNKNOWN" or len(movie_name) < 2:
-                await status_msg.edit_text("❌ Movie naam samajh nahi aaya. `/batch Name` use karein.")
+            if movie_name == "UNKNOWN" or len(movie_name) < 2:
+                await status_msg.edit_text(
+                    "❌ Movie naam extract nahi ho paya.\n\n"
+                    "**Manual Method:**\n"
+                    "`/batch Movie Name`\n\n"
+                    "Example: `/batch Chhichhore`",
+                    parse_mode='Markdown'
+                )
                 return
             
-            lang_display = f" | {movie_lang}" if movie_lang else ""
+            # Display what we found
+            info_parts = [f"🎬 **{movie_name}**"]
+            if movie_year: info_parts.append(f"📅 {movie_year}")
+            if movie_lang: info_parts.append(f"🔊 {movie_lang}")
+            
             await status_msg.edit_text(
-                f"🎬 Detected: **{movie_name}** ({movie_year}){lang_display}\n"
-                f"⏳ Fetching metadata...",
+                f"✅ Detected:\n{' | '.join(info_parts)}\n\n⏳ Metadata fetch kar raha hoon...",
                 parse_mode='Markdown'
             )
 
-            # Internet (IMDb/OMDb) se data nikalo
+            # 🎯 Metadata fetch karo (Year aur Language PASS kar rahe hain!)
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
-            
-            # ... BAAKI CODE SAME RAHEGA ...
             
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if movie_year.isdigit() else 0), None, None
-                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", "Movies"
+                # Fallback: Jo AI ne diya wahi use karo
+                title = movie_name
+                year = int(movie_year) if movie_year and movie_year.isdigit() else 0
+                poster_url, imdb_id = None, None
+                genre, rating, plot = "Unknown", "N/A", "Auto Added"
+                
+                # Category guess karo language se
+                lang_lower = movie_lang.lower() if movie_lang else ""
+                if any(x in lang_lower for x in ['hindi', 'bollywood']):
+                    category = "Bollywood"
+                elif any(x in lang_lower for x in ['tamil', 'telugu', 'kannada', 'malayalam']):
+                    category = "South"
+                elif any(x in lang_lower for x in ['english', 'hollywood']):
+                    category = "Hollywood"
+                elif any(x in lang_lower for x in ['korean', 'japanese', 'anime']):
+                    category = "Anime"
+                else:
+                    category = "Movies"
 
-            # ... DB Insert aur Batch Start ka code same rahega ...
+            # Database Insert
             conn = get_db_connection()
             if conn:
                 try:
@@ -3593,7 +3744,10 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
                         VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
                         ON CONFLICT (title) DO UPDATE 
-                        SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id)
+                        SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
+                            poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
+                            year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
+                            category = COALESCE(EXCLUDED.category, movies.category)
                         RETURNING id
                         """,
                         (title, imdb_id, poster_url, year, genre, rating, plot, category)
@@ -3606,16 +3760,33 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.close()
 
                     BATCH_SESSION.update({
-                        'active': True, 'movie_id': movie_id, 'movie_title': title, 
-                        'file_count': file_count, 'admin_id': user_id
+                        'active': True, 
+                        'movie_id': movie_id, 
+                        'movie_title': title, 
+                        'file_count': file_count, 
+                        'admin_id': user_id,
+                        'year': str(year) if year else movie_year,  # Save for later
+                        'category': category
                     })
                     
-                    await status_msg.edit_text(f"✅ **Batch Started: {title}**\n\n🚀 **Ab apni saari .mkv ya Video files bhejna shuru karo!**")
+                    await status_msg.edit_text(
+                        f"✅ **Batch Started!**\n\n"
+                        f"🎬 Movie: **{title}**\n"
+                        f"📅 Year: {year if year else 'N/A'}\n"
+                        f"🏷️ Category: {category}\n"
+                        f"📂 Existing Files: {file_count}\n\n"
+                        f"🚀 **Ab apni files bhejna shuru karo!**\n"
+                        f"Jab ho jaye: `/done`",
+                        parse_mode='Markdown'
+                    )
+                    
                 except Exception as e:
                     logger.error(f"DB Error: {e}")
+                    await status_msg.edit_text(f"❌ Database Error: {e}")
                 finally:
                     close_db_connection(conn)
-            return  # Pehla step yahan khatam (Caption check ka kaam ho gaya)
+            return
+
 
         # ==========================================
         # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho) - NO CHANGES HERE
@@ -3675,18 +3846,20 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 close_db_connection(conn)
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Finishes session -> Generates AI Aliases -> Shows Report
-    """
-    if not BATCH_SESSION['active']: return
+    """Batch complete + AI Aliases generate"""
+    if not BATCH_SESSION.get('active'): 
+        await update.message.reply_text("❌ Koi batch active nahi hai!")
+        return
 
-    status_msg = await update.message.reply_text("🔄 **Generating AI Aliases... Please wait!** 🧠")
+    status_msg = await update.message.reply_text("🔄 **Batch complete kar raha hoon...**\n🧠 AI Aliases generate ho rahe hain...", parse_mode='Markdown')
 
-    # 1. AI Generation
-    movie_title = BATCH_SESSION['movie_title']
-    movie_id = BATCH_SESSION['movie_id']
+    movie_title = BATCH_SESSION.get('movie_title', '')
+    movie_id = BATCH_SESSION.get('movie_id')
+    movie_year = BATCH_SESSION.get('year', '')
+    movie_category = BATCH_SESSION.get('category', '')
     
-    aliases = generate_aliases_gemini(movie_title)
+    # 🎯 AI Aliases generate karo (Year aur Category pass kar rahe hain!)
+    aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
     
     alias_count = 0
     conn = get_db_connection()
@@ -3695,54 +3868,48 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             cur = conn.cursor()
             for alias in aliases:
-                # Ensure alias is not too long
-                if len(alias) > 255: continue
+                if not alias or len(alias) > 255:
+                    continue
                 
                 try:
-                    # ✅ FIX: SAVEPOINT create karein taaki ek error se pura loop na ruke
                     cur.execute("SAVEPOINT sp_alias")
-                    
                     cur.execute(
                         "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-                        (movie_id, alias)
+                        (movie_id, alias.lower().strip())
                     )
-                    
-                    # Agar success hua to savepoint release karein
                     cur.execute("RELEASE SAVEPOINT sp_alias")
                     alias_count += 1
-                    
                 except Exception as inner_e:
-                    # ❌ FIX: Agar error aaye to sirf is alias ko rollback karein
                     cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
-                    logger.warning(f"Skipped alias '{alias}': {inner_e}")
+                    logger.warning(f"Alias skip '{alias}': {inner_e}")
                     
             conn.commit()
             cur.close()
         except Exception as e:
-            logger.error(f"Error saving aliases: {e}")
+            logger.error(f"Alias save error: {e}")
             if conn: conn.rollback()
         finally:
             close_db_connection(conn)
 
-    # 2. Final Report
+    # Final Report
+    channels_count = len(get_storage_channels())
     report = (
-        f"🎉 **Batch Completed Successfully!**\n\n"
+        f"🎉 **Batch Completed!**\n\n"
         f"🎬 **Movie:** `{movie_title}`\n"
-        f"📂 **Files Saved:** {BATCH_SESSION['file_count']}\n"
-        f"🤖 **AI Aliases Added:** {alias_count}\n\n"
-        f"✅ *All backups secured across {len(get_storage_channels())} channels.*"
+        f"📅 **Year:** {movie_year if movie_year else 'N/A'}\n"
+        f"🏷️ **Category:** {movie_category}\n"
+        f"📂 **Files Saved:** {BATCH_SESSION.get('file_count', 0)}\n"
+        f"🤖 **AI Aliases:** {alias_count}\n\n"
+        f"✅ Backups: {channels_count} channels"
     )
 
     await status_msg.edit_text(report, parse_mode='Markdown')
     
     # Reset Session
-    BATCH_SESSION['active'] = False
-    BATCH_SESSION['movie_id'] = None
-    BATCH_SESSION['movie_title'] = None
-    BATCH_SESSION['file_count'] = 0
-    BATCH_SESSION['admin_id'] = None
-
-# 👇👇👇 FIXED 3-BOT FUNCTION 👇👇👇
+    BATCH_SESSION.update({
+        'active': False, 'movie_id': None, 'movie_title': None,
+        'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
+    })
 
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
