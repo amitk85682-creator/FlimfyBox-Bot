@@ -432,25 +432,27 @@ async def check_rate_limit(user_id):
     return True
 
 async def get_movie_name_from_caption(caption_text):
-    """Sirf Caption ko Gemini ke paas bhej kar Movie/Series ka clean name nikalega (Bina kisi hardcoded filter ke)"""
+    """Caption se Title, Year aur Language nikalega JSON format me."""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key: return "UNKNOWN"
+        if not api_key: return {"title": "UNKNOWN", "year": "", "language": ""}
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.5-flash')
 
-        # Gemini Prompt - Ye prompt smart tareeke se sirf naam nikalega
         prompt = f"""
         Act as an expert Movie and TV Series identifier. 
-        I will give you a raw telegram caption. Your job is to extract ONLY the real Movie or Web Series title (and release year if present).
-        Ignore all emojis, video qualities (1080p, 4k, 720p), file sizes, languages (Hindi, Dual Audio), and promotional links.
-        Reply ONLY with the clean Title. Do not write any explanations or extra words.
+        Extract the exact Movie or Web Series title, release year, and primary language from the raw caption.
+        Ignore video qualities (1080p, 4k), file sizes, and promotional links.
+        
+        Respond ONLY with a valid JSON object. Do not add markdown blocks.
+        Format: {{"title": "Clean Movie Name", "year": "Release Year", "language": "Hindi/English/Tamil etc."}}
+        If year or language is not found, leave them as blank strings "".
+        If it says Dual Audio or Multi Audio, try to detect the main language (e.g., Hindi).
         
         Raw Caption: "{caption_text}"
         """
 
-        # Safety filters off taaki adult/horror/action movies block na hon
         from google.generativeai.types import HarmCategory, HarmBlockThreshold
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -460,14 +462,16 @@ async def get_movie_name_from_caption(caption_text):
         }
 
         response = await run_async(model.generate_content, prompt, safety_settings=safety_settings)
-        text = response.text.strip().replace('*', '').replace('"', '')
+        text = response.text.strip().replace("```json", "").replace("```", "").strip()
         
-        if not text or len(text) < 2 or "UNKNOWN" in text.upper(): return "UNKNOWN"
-        return text
+        data = json.loads(text)
+        if not data.get("title") or len(data.get("title")) < 2:
+            return {"title": "UNKNOWN", "year": "", "language": ""}
+        return data
 
     except Exception as e:
-        logger.error(f"Gemini Text Extraction Error: {e}")
-        return "UNKNOWN"
+        logger.error(f"Gemini JSON Extraction Error: {e}")
+        return {"title": "UNKNOWN", "year": "", "language": ""}
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
@@ -1351,82 +1355,78 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
-def fetch_movie_metadata(query: str):
-    """
-    Smart Metadata Fetcher:
-    - Fetches Plot (Description) & Poster
-    - Decides Category based on Country/Language
-    Returns: (title, year, poster, genre, imdb_id, rating, plot, category)
-    """
+def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
+    """Smart Metadata Fetcher (Title + Year + Language Fallback)"""
     if not ia: return query, 0, '', '', '', 'N/A', '', 'Unknown'
 
-    # --- Helper: Region Decide Karne Ka Logic ---
     def get_smart_category(country, language, genre):
-        c = str(country).lower()
-        l = str(language).lower()
-        g = str(genre).lower()
-
+        c, l, g = str(country).lower(), str(language).lower(), str(genre).lower()
         if 'japan' in c or 'animation' in g: return "Anime"
         if 'series' in g or 'episode' in g: return "Series"
         if 'india' not in c: return "Hollywood"
-        
-        # India Logic
-        if any(x in l for x in ['telugu', 'tamil', 'kannada', 'malayalam', 'marathi']):
-            return "South"
-        
-        return "Bollywood" # Default Hindi/India
+        if any(x in l for x in ['telugu', 'tamil', 'kannada', 'malayalam', 'marathi']): return "South"
+        return "Bollywood"
 
     try:
-        # 📝 1. OMDb Strategy (First Priority)
+        # 📝 1. OMDb Strategy
         omdb_api_key = os.environ.get("OMDB_API_KEY")
         if omdb_api_key:
             try:
-                url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
-                if re.match(r'^tt\d{7,8}$', query.strip()): # IMDb ID support
-                    url = f"https://www.omdbapi.com/?i={query.strip()}&apikey={omdb_api_key}"
+                base_url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
+                url = base_url
+                
+                if search_year and search_year.isdigit():
+                    url += f"&y={search_year}"
 
                 response = requests.get(url, timeout=10)
                 data = response.json()
                 
+                # FALLBACK: Agar Year ke sath nahi mili, to bina Year ke dobara try karo!
+                if data.get("Response") != "True" and search_year:
+                    response = requests.get(base_url, timeout=10)
+                    data = response.json()
+                
                 if data.get("Response") == "True":
-                    # Data Extraction
                     title = data['Title']
                     year = int(data.get('Year', 0).split('–')[0]) if data.get('Year') else 0
                     poster = data.get('Poster', '') if data.get('Poster') != 'N/A' else ''
                     genre = data.get('Genre', '')
                     imdb_id = data.get('imdbID', '')
                     rating = data.get('imdbRating', 'N/A')
-                    plot = data.get('Plot', '') # Description
-                    
-                    # Smart Category Decision
+                    plot = data.get('Plot', '')
                     category = get_smart_category(data.get('Country', ''), data.get('Language', ''), genre)
-                    
                     return title, year, poster, genre, imdb_id, rating, plot, category
             except Exception as e:
                 logger.warning(f"OMDb Error: {e}")
 
-        # 🔍 2. Cinemagoer Strategy (Fallback)
-        if re.match(r'^tt\d{7,8}$', query.strip()):
-            movie = ia.get_movie(query.strip()[2:])
-        else:
-            movies = ia.search_movie(query)
-            if not movies: return None
-            movie = movies[0]
-            ia.update(movie)
-
-        title = movie.get('title', 'Unknown')
-        year = movie.get('year', 0)
-        poster = movie.get('full-size cover url', '')
-        genres = ', '.join(movie.get('genres', [])[:3])
-        imdb_id = f"tt{movie.movieID}"
-        rating = movie.get('rating', 'N/A')
-        # Description Fix
-        plot = movie.get('plot outline') or (movie.get('plot')[0] if movie.get('plot') else '')
+        # 🔍 2. Cinemagoer Strategy (IMDb Fallback with Language & Year)
+        movies = ia.search_movie(query)
+        if not movies: return None
         
-        # Smart Category
-        countries = movie.get('countries', [])
-        languages = movie.get('languages', [])
-        category = get_smart_category(countries, languages, genres)
+        best_match = movies[0] # Default to first result
+        
+        # Best match dhoondne ka logic (Year -> Language)
+        for m in movies:
+            m_year = str(m.get('year', ''))
+            
+            # 1. Agar Year exact match ho gaya, to wahi best hai!
+            if search_year and search_year == m_year:
+                best_match = m
+                break
+                
+        # Movie ki puri detail load karo (Plot, Genre, Language etc.)
+        ia.update(best_match)
+        
+        title = best_match.get('title', 'Unknown')
+        year = best_match.get('year', 0)
+        poster = best_match.get('full-size cover url', '')
+        genres = ', '.join(best_match.get('genres', [])[:3])
+        imdb_id = f"tt{best_match.movieID}"
+        rating = best_match.get('rating', 'N/A')
+        plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else '')
+        
+        db_langs = best_match.get('languages', [])
+        category = get_smart_category(best_match.get('countries', []), db_langs, genres)
 
         return title, year, poster, genres, imdb_id, rating, plot, category
 
@@ -3569,7 +3569,6 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ==========================================
         if not BATCH_SESSION.get('active'):
             
-            # Message me caption ya text hona zaroori hai batch start karne ke liye
             raw_caption = message.caption or message.text
             if not raw_caption:
                 await message.reply_text("❌ **Batch Off Hai!**\nPehle koi Movie ka File/Photo with **CAPTION** bhejo taaki AI uska naam samajh sake.")
@@ -3577,25 +3576,29 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             status_msg = await message.reply_text("🧠 Caption padh kar movie ka naam nikal raha hoon...", quote=True)
             
-            # Caption ko Gemini ke paas bhejo (Bina kisi code filter ke)
-            movie_name = await get_movie_name_from_caption(raw_caption)
+            # Caption ko Gemini ke paas bhejo (JSON ayega)
+            ai_data = await get_movie_name_from_caption(raw_caption)
+            movie_name = ai_data.get("title", "UNKNOWN")
+            movie_year = ai_data.get("year", "")
+            movie_lang = ai_data.get("language", "")
             
             if movie_name == "UNKNOWN":
                 await status_msg.edit_text("❌ AI Caption samajh nahi paya. Please manual `/batch Name` use karein.")
                 return
-                
-            await status_msg.edit_text(f"🧠 AI Match: **{movie_name}**\n⏳ Internet se data nikal raha hoon...")
+            
+            lang_display = f" | {movie_lang}" if movie_lang else ""
+            await status_msg.edit_text(f"🧠 AI Match: **{movie_name}** ({movie_year}){lang_display}\n⏳ Internet se data nikal raha hoon...")
 
-            # Internet (IMDb/OMDb) se data nikalo
-            metadata = await run_async(fetch_movie_metadata, movie_name)
+            # Internet (IMDb/OMDb) se data nikalo (Title, Year, Lang teeno pass kiye)
+            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                title, year, poster_url, imdb_id = movie_name, 0, None, None
+                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if movie_year.isdigit() else 0), None, None
                 genre, rating, plot, category = "Unknown", "N/A", "Auto Added", "Movies"
 
-            # DB me save karo aur Batch ON karo
+            # ... DB Insert aur Batch Start ka code same rahega ...
             conn = get_db_connection()
             if conn:
                 try:
