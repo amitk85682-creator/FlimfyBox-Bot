@@ -460,58 +460,52 @@ async def check_rate_limit(user_id):
     return True
 
 async def get_movie_name_from_caption(caption_text):
-    """Caption se Title, Year aur Language nikalega JSON format me (Bulletproof Regex Version)."""
+    """Crash-proof version of Gemini Extraction."""
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key: return {"title": "UNKNOWN", "year": "", "language": ""}
+        if not api_key: 
+            print("❌ ERROR: GEMINI_API_KEY is missing in Render Environment!")
+            return {"title": "UNKNOWN", "year": "", "language": ""}
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # 🔥 FIX 1: Model downgrade kiya '1.5-flash' par taaki purani library crash na ho
+        model = genai.GenerativeModel('gemini-2.5-flash') 
 
         prompt = f"""
-        Act as an expert Movie and TV Series identifier. 
-        Extract the exact Movie or Web Series title, release year, and primary language from the raw caption.
-        Ignore video qualities (1080p, 4k), file sizes, audio formats (AAC, DDP), file extensions (.mkv, .mp4), and promotional links.
+        Extract the exact Movie or Web Series title, release year, and primary language from this raw caption.
+        Ignore video qualities (1080p, 4k), file sizes, audio formats (AAC, DDP, x264, ESub), file extensions (.mkv, .mp4), and promotional links.
         
-        Respond ONLY with a valid JSON object. Do not add any conversational text or markdown blocks.
-        Format: {{"title": "Clean Movie Name", "year": "Release Year", "language": "Hindi/English/Tamil etc."}}
-        If year or language is not found, leave them as blank strings "".
+        Return ONLY a valid JSON object. No markdown, no quotes, no extra text.
+        Format: {{"title": "Clean Movie Name", "year": "Release Year", "language": "Language"}}
         
         Raw Caption: "{caption_text}"
         """
 
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
-        response = await run_async(model.generate_content, prompt, safety_settings=safety_settings)
+        # 🔥 FIX 2: Sab extra settings hata di (safety, mime_type) jo error de rahi thi
+        response = await run_async(model.generate_content, prompt)
         
-        # 🚀 PRO LEVEL JSON EXTRACTION (Regex se sirf {} ke andar ka data nikalega)
-        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        text = response.text.strip()
         
+        # Clean up JSON (Kachra hatane ke liye)
+        text = text.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\{.*\}', text, re.DOTALL)
         if match:
-            clean_json_str = match.group(0) # Sirf JSON wala hissa
-            data = json.loads(clean_json_str) # Ab error nahi aayega
+            text = match.group(0)
             
-            # Galti se agar AI ne .mkv laga diya ho, toh usko hata do
-            title = data.get("title", "").replace(".mkv", "").replace(".mp4", "").strip()
-            
-            if not title or len(title) < 2 or title.upper() == "UNKNOWN":
-                return {"title": "UNKNOWN", "year": "", "language": ""}
-                
-            data["title"] = title
-            return data
-            
-        else:
-            logger.error(f"Gemini outputted invalid format: {response.text}")
+        data = json.loads(text)
+        title = data.get("title", "").replace(".mkv", "").replace(".mp4", "").strip()
+        
+        if not title or len(title) < 2 or title.upper() == "UNKNOWN":
             return {"title": "UNKNOWN", "year": "", "language": ""}
+            
+        data["title"] = title
+        return data
 
     except Exception as e:
-        logger.error(f"Gemini JSON Extraction Error: {e}")
+        # 🔥 FIX 3: Ab agar fail hoga toh Render ke Logs me seedha reason likha aayega
+        print(f"❌ GEMINI CRITICAL ERROR: {e}")
+        logger.error(f"Gemini Error: {e}")
         return {"title": "UNKNOWN", "year": "", "language": ""}
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
