@@ -417,14 +417,36 @@ async def run_async(func, *args, **kwargs):
 # 👆👆👆 END COPY HERE 👆👆👆
 
 # ==================== UTILITY FUNCTIONS ====================
+
+async def get_poster_bytes(url):
+    """
+    Amazon/IMDb se fake browser (User-Agent) ban kar image download karta hai,
+    taaki 'Region Block' wala error na aaye.
+    """
+    if not url or url == 'N/A':
+        return None
+        
+    try:
+        # Fake browser details taaki Amazon block na kare
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Referer': 'https://www.imdb.com/'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    return BytesIO(image_data) # Image ko bytes me convert kar diya
+        return None
+    except Exception as e:
+        logger.error(f"Error downloading poster: {e}")
+        return None
+
 def preprocess_query(query):
     """Clean and normalize user query"""
     query = re.sub(r'[^\w\s-]', '', query)
-    query = ' '.join(query.split())
-    stop_words = ['movie', 'film', 'full', 'download', 'watch', 'online', 'free']
-    words = query.lower().split()
-    words = [w for w in words if w not in stop_words]
-    return ' '.join(words).strip()
 
 async def check_rate_limit(user_id):
     """Check if user is rate limited"""
