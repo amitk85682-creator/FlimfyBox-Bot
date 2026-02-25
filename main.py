@@ -276,12 +276,18 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         ]
     ])
 
-    # --- 7. POST SEND ---
+    # --- 7. POST SEND (Anti-Block Mode) ---
     try:
+        # Pehle image download karne ki koshish karo
+        downloaded_poster = await get_poster_bytes(final_photo)
+        
+        # Agar download fail ho jaye, tabhi URL use karo (Fallback)
+        photo_to_send = downloaded_poster if downloaded_poster else final_photo
+
         sent = await context.bot.send_photo(
             chat_id            = FORUM_GROUP_ID,
             message_thread_id  = topic_id,
-            photo              = final_photo,
+            photo              = photo_to_send,
             caption            = caption,
             parse_mode         = 'Markdown',
             reply_markup       = keyboard
