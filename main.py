@@ -3530,9 +3530,6 @@ def generate_basic_aliases(movie_title, year=""):
     logger.info(f"✅ Generated {len(aliases)} basic aliases (fallback)")
     return aliases
 
-    except Exception as e:
-        print(f"❌ [DEBUG 9] CRITICAL ERROR Gemini me: {e}")
-        return []
 
 # ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
 
