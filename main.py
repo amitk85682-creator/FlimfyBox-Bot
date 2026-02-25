@@ -3520,32 +3520,62 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with auto_batch_lock:
         
         # ==========================================
-        # 🤖 PHASE 1: START BATCH (CAPTION SE - REAL TIME AI)
+        # 🤖 PHASE 1: START BATCH (CAPTION SE)
         # ==========================================
         if not BATCH_SESSION.get('active'):
             
             raw_caption = message.caption or message.text
             if not raw_caption:
-                await message.reply_text("❌ **Batch Off Hai!**\nPehle koi Movie ka File/Photo with **CAPTION** bhejo taaki AI uska naam samajh sake.")
+                await message.reply_text("❌ **Batch Off Hai!**\nFile ke sath **CAPTION** mein movie ka naam likho.")
                 return
+            
+            clean_caption = raw_caption.strip()
+            
+            # 🔥 NEW FIX: Simple Caption Detection
+            # Agar caption simple hai (sirf naam), to AI SKIP karo
+            is_complex_caption = any(x in clean_caption.lower() for x in [
+                '1080p', '720p', '480p', '2160p', '4k',
+                '.mkv', '.mp4', '.avi', 
+                'gb', 'mb', 'http', 'www', 't.me',
+                'x264', 'x265', 'hevc', 'aac', 'esub'
+            ])
+            
+            status_msg = await message.reply_text("🧠 Processing...", quote=True)
+            
+            if is_complex_caption:
+                # Complex caption hai (file info etc.), AI use karo
+                ai_data = await get_movie_name_from_caption(raw_caption)
+                movie_name = ai_data.get("title", "UNKNOWN")
+                movie_year = ai_data.get("year", "")
+                movie_lang = ai_data.get("language", "")
+            else:
+                # ✅ Simple caption hai, DIRECT use karo (No AI needed!)
+                movie_name = clean_caption
+                movie_year = ""
+                movie_lang = ""
                 
-            status_msg = await message.reply_text("🧠 Caption padh kar movie ka naam nikal raha hoon...", quote=True)
+                # Try to extract year if present (e.g., "Relationship Goals 2024")
+                import re
+                year_match = re.search(r'\b(19|20)\d{2}\b', clean_caption)
+                if year_match:
+                    movie_year = year_match.group(0)
+                    movie_name = clean_caption.replace(movie_year, "").strip()
             
-            # Caption ko Gemini ke paas bhejo (JSON ayega)
-            ai_data = await get_movie_name_from_caption(raw_caption)
-            movie_name = ai_data.get("title", "UNKNOWN")
-            movie_year = ai_data.get("year", "")
-            movie_lang = ai_data.get("language", "")
-            
-            if movie_name == "UNKNOWN":
-                await status_msg.edit_text("❌ AI Caption samajh nahi paya. Please manual `/batch Name` use karein.")
+            if not movie_name or movie_name == "UNKNOWN" or len(movie_name) < 2:
+                await status_msg.edit_text("❌ Movie naam samajh nahi aaya. `/batch Name` use karein.")
                 return
             
             lang_display = f" | {movie_lang}" if movie_lang else ""
-            await status_msg.edit_text(f"🧠 AI Match: **{movie_name}** ({movie_year}){lang_display}\n⏳ Internet se data nikal raha hoon...")
+            await status_msg.edit_text(
+                f"🎬 Detected: **{movie_name}** ({movie_year}){lang_display}\n"
+                f"⏳ Fetching metadata...",
+                parse_mode='Markdown'
+            )
 
-            # Internet (IMDb/OMDb) se data nikalo (Title, Year, Lang teeno pass kiye)
+            # Internet (IMDb/OMDb) se data nikalo
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
+            
+            # ... BAAKI CODE SAME RAHEGA ...
             
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
