@@ -3707,7 +3707,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not (message.document or message.video or message.photo): return
 
+    # 🎯 FIX: Agar caption mein /post_query hai toh batch start mat karo
+    caption = message.caption or ""
+    if caption.startswith('/post_query'):
+        return  # admin_post_query function handle karega
+
     async with auto_batch_lock:
+        # ... baaki ka code same rahega ...
         
         # ==========================================
         # 🤖 PHASE 1: START BATCH
