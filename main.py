@@ -3451,9 +3451,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation"""
-    msg = await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
-    track_message_for_deletion(update.effective_chat.id, msg.message_id, 60)
-    return MAIN_MENU
+    # Pending data clear karo
+    context.user_data.pop('temp_request_name', None)
+    context.user_data.pop('pending_request', None)
+    context.user_data.pop('awaiting_request', None)
+    
+    msg = await update.message.reply_text(
+        "❌ Cancelled.", 
+        reply_markup=get_main_keyboard()
+    )
+    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 30)
+    return ConversationHandler.END
 
 # ==================== NEW MULTI-CHANNEL BACKUP FUNCTIONS ====================
 
@@ -6504,13 +6512,68 @@ async def handle_request_name_input(update: Update, context: ContextTypes.DEFAUL
     chat_id = update.effective_chat.id
     
     # User ka message delete karne ke liye (Clean Chat)
-    track_message_for_deletion(context, chat_id, update.message.message_id, 120)
+    track_message_for_deletion(context, chat_id, update.message.message_id, 30)
 
-    # Safety: Check if user tried to send a command or menu button
-    if user_name_input.startswith('/') or user_name_input in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
-        msg = await update.message.reply_text("❌ Request Process Cancelled. Back to menu.")
-        track_message_for_deletion(context, chat_id, msg.message_id, 60)
+    # ============================================================
+    # ✅ FIX: Menu buttons aur commands ko BLOCK karo
+    # ============================================================
+    MENU_BUTTONS = [
+        '🔍 Search Movies',
+        '📂 Browse by Genre', 
+        '🙋 Request Movie',
+        '📊 My Stats', 
+        '❓ Help'
+    ]
+    
+    # Agar user ne menu button dabaya
+    if user_name_input in MENU_BUTTONS:
+        context.user_data.pop('temp_request_name', None)
+        
+        msg = await update.message.reply_text(
+            "❌ Request cancelled.\n\n"
+            "Movie ka naam type karo, buttons mat dabao.",
+            reply_markup=get_main_keyboard()
+        )
+        track_message_for_deletion(context, chat_id, msg.message_id, 30)
+        
+        # Agar unhone Stats/Help/Search dabaya to wahi handle karo
+        if user_name_input == '📊 My Stats':
+            await main_menu_or_search(update, context)
+        elif user_name_input == '🔍 Search Movies':
+            await main_menu_or_search(update, context)
+        elif user_name_input == '📂 Browse by Genre':
+            await show_genre_selection(update, context)
+            
         return ConversationHandler.END
+    
+    # Agar command hai (/start, /help etc.)
+    if user_name_input.startswith('/'):
+        context.user_data.pop('temp_request_name', None)
+        msg = await update.message.reply_text(
+            "❌ Request cancelled.",
+            reply_markup=get_main_keyboard()
+        )
+        track_message_for_deletion(context, chat_id, msg.message_id, 30)
+        return ConversationHandler.END
+    
+    # Agar message bahut chota hai (1-2 characters)
+    if len(user_name_input) < 3:
+        msg = await update.message.reply_text(
+            "⚠️ Movie ka naam bahut chota hai!\n"
+            "Sahi naam likho (kam se kam 3 characters)."
+        )
+        track_message_for_deletion(context, chat_id, msg.message_id, 30)
+        return WAITING_FOR_NAME  # Same state mein raho
+    
+    # Agar URL hai (koi link bheja)
+    if 'http' in user_name_input or 't.me' in user_name_input:
+        msg = await update.message.reply_text(
+            "⚠️ Link mat bhejo!\n"
+            "Sirf movie ka naam type karo."
+        )
+        track_message_for_deletion(context, chat_id, msg.message_id, 30)
+        return WAITING_FOR_NAME  # Same state mein raho
+    # ============================================================
 
     # Name ko temporary memory me rakho
     context.user_data['temp_request_name'] = user_name_input
@@ -6531,7 +6594,6 @@ async def handle_request_name_input(update: Update, context: ContextTypes.DEFAUL
         parse_mode='HTML'
     )
     
-    # ⚡ Ye Confirmation message 60 seconds me delete ho jayega
     track_message_for_deletion(context, chat_id, msg.message_id, 60)
     
     return CONFIRMATION
@@ -6779,21 +6841,29 @@ def register_handlers(application: Application):
     # -----------------------------------------------------------
     # नोट: ConversationHandler को हर बार नया बनाना जरूरी है
     request_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_request_flow, pattern="^request_")],
-        states={
-            WAITING_FOR_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_request_name_input)
-            ],
-            CONFIRMATION: [
-                CallbackQueryHandler(handle_confirmation_callback, pattern="^confirm_")
-            ]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel),
-            CommandHandler('start', start)
+    entry_points=[CallbackQueryHandler(start_request_flow, pattern="^request_")],
+    states={
+        WAITING_FOR_NAME: [
+            # ✅ Commands aur normal text dono handle honge
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_request_name_input)
         ],
-        conversation_timeout=120,
-    )
+        CONFIRMATION: [
+            CallbackQueryHandler(handle_confirmation_callback, pattern="^confirm_")
+        ]
+    },
+    fallbacks=[
+        CommandHandler('cancel', cancel),
+        CommandHandler('start', start),
+        # ✅ Menu buttons bhi fallback trigger karein
+        MessageHandler(
+            filters.Regex(
+                r'^(🔍 Search Movies|📂 Browse by Genre|🙋 Request Movie|📊 My Stats|❓ Help)$'
+            ),
+            cancel  # Conversation end + main menu
+        )
+    ],
+    conversation_timeout=120,
+)
     application.add_handler(request_conv_handler)
 
     notify_conv_handler = ConversationHandler(
