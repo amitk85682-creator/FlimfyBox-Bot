@@ -2911,6 +2911,67 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # ==========================================
+    # 🤖 AI CAPTION CONFIRM/CANCEL BUTTONS
+    # ==========================================
+    if data.startswith("ai_confirm_"):
+        action = data.replace("ai_confirm_", "")
+        
+        if action == "cancel":
+            # Pending data clear karo
+            context.user_data.pop('pending_ai_data', None)
+            await query.edit_message_text(
+                "❌ **Batch Cancelled!**\n\n"
+                "Dobara file bhejo sahi caption ke saath,\n"
+                "ya `/batch Movie Name` command use karo.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        elif action == "manual":
+            # User ko manual input dene ko kaho
+            context.user_data['awaiting_manual_batch_name'] = True
+            await query.edit_message_text(
+                "✏️ **Manual Movie Name:**\n\n"
+                "Ab sirf movie ka sahi naam type karke bhejo.\n"
+                "Example: `Chhichhore 2019`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        elif action == "yes":
+            # Confirmed! Metadata fetch karo
+            pending = context.user_data.get('pending_ai_data')
+            if not pending:
+                await query.edit_message_text("❌ Session expire ho gaya. Dobara file bhejo.")
+                return
+            
+            movie_name = pending['movie_name']
+            movie_year = pending['movie_year']
+            movie_lang = pending['movie_lang']
+            
+            await query.edit_message_text(
+                f"⏳ **Metadata fetch kar raha hoon...**\n\n"
+                f"🎬 {movie_name}",
+                parse_mode='Markdown'
+            )
+            
+            # Metadata fetch
+            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
+            
+            await _finalize_batch_start(
+                context=context,
+                status_msg=query.message,
+                movie_name=movie_name,
+                movie_year=movie_year,
+                movie_lang=movie_lang,
+                metadata=metadata,
+                user_id=query.from_user.id
+            )
+            
+            context.user_data.pop('pending_ai_data', None)
+            return
+    
     # === ADMIN REQUEST BUTTONS (Add/Not Found) ===
     if data.startswith("reqA_") or data.startswith("reqN_"):
         await query.answer("🔄 Sending message to user...", show_alert=False)
@@ -3697,7 +3758,116 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(f"❌ DB Error: {e}")
         if conn: close_db_connection(conn)
 
+async def _finalize_batch_start(
+    context,
+    status_msg,
+    movie_name: str,
+    movie_year: str,
+    movie_lang: str,
+    metadata,
+    user_id: int
+):
+    """
+    Batch start karne ka common logic.
+    batch_add_command aur pm_file_listener dono yahi use karte hain.
+    """
+    # Metadata process karo
+    if metadata:
+        title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+    else:
+        title = movie_name
+        year = int(movie_year) if movie_year and movie_year.isdigit() else 0
+        poster_url, imdb_id = None, None
+        genre, rating, plot = "Unknown", "N/A", "Auto Added"
+        
+        lang_lower = movie_lang.lower() if movie_lang else ""
+        if any(x in lang_lower for x in ['hindi', 'bollywood']):
+            category = "Bollywood"
+        elif any(x in lang_lower for x in ['tamil', 'telugu', 'kannada', 'malayalam']):
+            category = "South"
+        elif any(x in lang_lower for x in ['english', 'hollywood']):
+            category = "Hollywood"
+        elif any(x in lang_lower for x in ['korean', 'japanese', 'anime']):
+            category = "Anime"
+        else:
+            category = "Movies"
 
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ Database connection failed.")
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
+            ON CONFLICT (title) DO UPDATE 
+            SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
+                poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
+                year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
+                category = COALESCE(EXCLUDED.category, movies.category)
+            RETURNING id
+            """,
+            (title, imdb_id, poster_url, year, genre, rating, plot, category)
+        )
+        movie_id = cur.fetchone()[0]
+        conn.commit()
+        
+        # ✅ FIX 1: Existing files check karo (same as batch_add_command)
+        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+        file_count = cur.fetchone()[0]
+        cur.close()
+
+        # Batch Session activate karo
+        BATCH_SESSION.update({
+            'active': True, 
+            'movie_id': movie_id, 
+            'movie_title': title, 
+            'file_count': file_count,   # ← Existing count se shuru
+            'admin_id': user_id,
+            'year': str(year) if year else movie_year,
+            'category': category
+        })
+        
+        # ✅ FIX 1: Message aur Delete button logic (same as batch_add_command)
+        msg_text = (
+            f"✅ **Batch Started!**\n\n"
+            f"🎬 Movie: **{title}**\n"
+            f"📅 Year: {year if year else 'N/A'}\n"
+            f"🏷️ Category: {category}\n"
+            f"📂 Existing Files in DB: {file_count}\n\n"
+        )
+        
+        if not metadata:
+            msg_text += "⚠️ *Metadata not found (Custom Mode ON)*\n\n"
+        
+        msg_text += "🚀 **Ab apni files bhejna shuru karo!**\nJab ho jaye: `/done`"
+        
+        # Delete button sirf tab dikhao jab purani files hon
+        reply_markup = None
+        if file_count > 0:
+            msg_text += "\n\n⚠️ *Purani files mili hain. Delete button niche hai:* 👇"
+            keyboard = [[
+                InlineKeyboardButton(
+                    "🗑️ Delete OLD Files (Clean Slate)", 
+                    callback_data=f"clearfiles_{movie_id}"
+                )
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await status_msg.edit_text(
+            msg_text, 
+            parse_mode='Markdown', 
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"_finalize_batch_start Error: {e}")
+        await status_msg.edit_text(f"❌ Database Error: {e}")
+    finally:
+        close_db_connection(conn)
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -3707,42 +3877,40 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not (message.document or message.video or message.photo): return
 
-    # 🎯 FIX: Agar caption mein /post_query hai toh batch start mat karo
     caption = message.caption or ""
     if caption.startswith('/post_query'):
-        return  # admin_post_query function handle karega
+        return
 
     async with auto_batch_lock:
         # ... baaki ka code same rahega ...
         
         # ==========================================
-        # 🤖 PHASE 1: START BATCH
+        # 🤖 PHASE 1: START BATCH (Jab Batch OFF ho)
         # ==========================================
-        if not BATCH_SESSION.get('active'):
-            
-            raw_caption = message.caption or message.text
-            if not raw_caption:
-                await message.reply_text("❌ **Batch Off!**\nFile ke sath CAPTION mein movie naam likho.", parse_mode='Markdown')
-                return
-            
-            status_msg = await message.reply_text("🧠 Caption analyze kar raha hoon...", quote=True)
-            
-            # 🎯 AI se Name, Year, Language nikalo
-            ai_data = await get_movie_name_from_caption(raw_caption)
-            
-            movie_name = ai_data.get("title", "UNKNOWN")
-            movie_year = ai_data.get("year", "")
-            movie_lang = ai_data.get("language", "")
-            
-            if movie_name == "UNKNOWN" or len(movie_name) < 2:
-                await status_msg.edit_text(
-                    "❌ Movie naam extract nahi ho paya.\n\n"
-                    "**Manual Method:**\n"
-                    "`/batch Movie Name`\n\n"
-                    "Example: `/batch Chhichhore`",
-                    parse_mode='Markdown'
-                )
-                return
+        
+        raw_caption = message.caption or message.text
+        if not raw_caption:
+            await message.reply_text("❌ **Batch Off!**\nFile ke sath CAPTION mein movie naam likho.", parse_mode='Markdown')
+            return
+        
+        status_msg = await message.reply_text("🧠 Caption analyze kar raha hoon...", quote=True)
+        
+        # 🎯 AI se Name, Year, Language nikalo
+        ai_data = await get_movie_name_from_caption(raw_caption)
+        
+        movie_name = ai_data.get("title", "UNKNOWN")
+        movie_year = ai_data.get("year", "")
+        movie_lang = ai_data.get("language", "")
+        
+        if movie_name == "UNKNOWN" or len(movie_name) < 2:
+            await status_msg.edit_text(
+                "❌ Movie naam extract nahi ho paya.\n\n"
+                "**Manual Method:**\n"
+                "`/batch Movie Name`\n\n"
+                "Example: `/batch Chhichhore`",
+                parse_mode='Markdown'
+            )
+            return
             
             # Display what we found
             info_parts = [f"🎬 **{movie_name}**"]
@@ -3833,62 +4001,100 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
 
-        # ==========================================
-        # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho) - NO CHANGES HERE
-        # ==========================================
-        upload_status = await message.reply_text("⏳ Uploading file...", quote=True)
-        # ... (Baaki ka Phase 2 ka code aapka same rahega)
-
-        channels = get_storage_channels()
-        if not channels:
-            await upload_status.edit_text("❌ No STORAGE_CHANNELS found")
-            return
-
-        backup_map = {}
-        success_uploads = 0
-
-        for chat_id in channels:
-            try:
-                sent = await message.copy(chat_id=chat_id)
-                backup_map[str(chat_id)] = sent.message_id
-                success_uploads += 1
-            except Exception as e:
-                logger.error(f"Upload failed: {e}")
-
-        if success_uploads == 0:
-            await upload_status.edit_text("❌ Upload fail ho gaya.")
-            return
-
-        file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
-        file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
+        # ============================================================
+        # ✅ FIX 2: GEMINI RESULT CONFIRM KARNE KA OPTION
+        # ============================================================
+        info_parts = [f"🎬 **{movie_name}**"]
+        if movie_year: info_parts.append(f"📅 {movie_year}")
+        if movie_lang: info_parts.append(f"🔊 {movie_lang}")
         
-        file_size_str = get_readable_file_size(file_size)
-        label = generate_quality_label(file_name, file_size_str)
+        # Confirm/Cancel/Manual keyboard dikhao
+        confirm_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Sahi Hai, Aage Badho", callback_data=f"ai_confirm_yes"),
+                InlineKeyboardButton("❌ Cancel", callback_data="ai_confirm_cancel")
+            ],
+            [
+                InlineKeyboardButton("✏️ Manual Name Dena Hai", callback_data="ai_confirm_manual")
+            ]
+        ])
         
-        main_channel_id = channels[0]
-        main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
+        # AI result context mein save karo
+        context.user_data['pending_ai_data'] = {
+            'movie_name': movie_name,
+            'movie_year': movie_year,
+            'movie_lang': movie_lang,
+            'file_message_id': message.message_id,  # Original file message ID save
+        }
+        
+        await status_msg.edit_text(
+            f"🤖 **AI ne ye detect kiya:**\n\n"
+            f"{' | '.join(info_parts)}\n\n"
+            f"Kya yeh sahi hai?",
+            reply_markup=confirm_keyboard,
+            parse_mode='Markdown'
+        )
+        
+        # ==========================================
+        # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho)
+        # ==========================================
+        if BATCH_SESSION.get('active'):
+            upload_status = await message.reply_text("⏳ Uploading file...", quote=True)
 
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
-                    """,
-                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
-                )
-                conn.commit()
-                cur.close()
-                BATCH_SESSION['file_count'] += 1
-                await upload_status.edit_text(f"✅ **Saved:** `{label}`\n🔢 Total Files: {BATCH_SESSION['file_count']}", parse_mode='Markdown')
-            except Exception as e:
-                await upload_status.edit_text(f"❌ DB Save Failed: {e}")
-            finally:
-                close_db_connection(conn)
+            channels = get_storage_channels()
+            if not channels:
+                await upload_status.edit_text("❌ No STORAGE_CHANNELS found")
+                return
+
+            backup_map = {}
+            success_uploads = 0
+
+            for chat_id in channels:
+                try:
+                    sent = await message.copy(chat_id=chat_id)
+                    backup_map[str(chat_id)] = sent.message_id
+                    success_uploads += 1
+                except Exception as e:
+                    logger.error(f"Upload failed: {e}")
+
+            if success_uploads == 0:
+                await upload_status.edit_text("❌ Upload fail ho gaya.")
+                return
+
+            file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
+            file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
+            
+            file_size_str = get_readable_file_size(file_size)
+            label = generate_quality_label(file_name, file_size_str)
+            
+            main_channel_id = channels[0]
+            main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
+
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                        url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                        """,
+                        (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+                    )
+                    conn.commit()
+                    cur.close()
+                    BATCH_SESSION['file_count'] += 1
+                    await upload_status.edit_text(
+                        f"✅ **Saved:** `{label}`\n🔢 Total Files: {BATCH_SESSION['file_count']}", 
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    await upload_status.edit_text(f"❌ DB Save Failed: {e}")
+                finally:
+                    close_db_connection(conn)
+            return
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Batch complete + AI Aliases generate"""
@@ -6394,6 +6600,46 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    
+    # ============================================================
+    # ✅ FIX: Manual Batch Name Input Handler
+    # ============================================================
+    if context.user_data.get('awaiting_manual_batch_name'):
+        manual_name = update.message.text.strip()
+        
+        # Check karo koi command/button to nahi daba
+        if not manual_name.startswith('/') and manual_name not in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
+            context.user_data.pop('awaiting_manual_batch_name', None)
+            
+            status_msg = await update.message.reply_text(
+                f"⏳ **'{manual_name}' ke liye metadata fetch kar raha hoon...**",
+                parse_mode='Markdown'
+            )
+            
+            # Year aur lang agar pending data mein hai to use karo
+            pending = context.user_data.pop('pending_ai_data', {})
+            movie_year = pending.get('movie_year', '')
+            movie_lang = pending.get('movie_lang', '')
+            
+            metadata = await run_async(fetch_movie_metadata, manual_name, movie_year, movie_lang)
+            
+            await _finalize_batch_start(
+                context=context,
+                status_msg=status_msg,
+                movie_name=manual_name,
+                movie_year=movie_year,
+                movie_lang=movie_lang,
+                metadata=metadata,
+                user_id=user_id
+            )
+            return
+        else:
+            # User ne command/button dabaya - manual mode cancel
+            context.user_data.pop('awaiting_manual_batch_name', None)
+            context.user_data.pop('pending_ai_data', None)
+    # ============================================================
+    
+    # ... baaki ka main_menu_or_search code same rahega ...
     
     # === 1. FSub Check (Only in Private Chat) ===
     if update.effective_chat.type == "private":
