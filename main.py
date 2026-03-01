@@ -3890,45 +3890,166 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     async with auto_batch_lock:
-        # ... baaki ka code same rahega ...
-        
+
+        # ==========================================
+        # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho)
+        # ==========================================
+        # ✅ FIX: Phase 2 check SABSE PEHLE karo
+        if BATCH_SESSION.get('active'):
+            upload_status = await message.reply_text("⏳ Uploading file...", quote=True)
+
+            channels = get_storage_channels()
+            if not channels:
+                await upload_status.edit_text("❌ No STORAGE_CHANNELS found")
+                return
+
+            backup_map = {}
+            success_uploads = 0
+
+            for ch_id in channels:
+                try:
+                    sent = await message.copy(chat_id=ch_id)
+                    backup_map[str(ch_id)] = sent.message_id
+                    success_uploads += 1
+                except Exception as e:
+                    logger.error(f"Upload failed to {ch_id}: {e}")
+
+            if success_uploads == 0:
+                await upload_status.edit_text("❌ Upload fail ho gaya.")
+                return
+
+            file_name = (
+                message.document.file_name if message.document 
+                else (message.video.file_name if message.video else "File")
+            )
+            file_size = (
+                message.document.file_size if message.document 
+                else (message.video.file_size if message.video else 0)
+            )
+            
+            file_size_str = get_readable_file_size(file_size)
+            label = generate_quality_label(file_name, file_size_str)
+            
+            main_channel_id = channels[0]
+            main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
+
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                            url = EXCLUDED.url, 
+                            file_size = EXCLUDED.file_size, 
+                            backup_map = EXCLUDED.backup_map, 
+                            file_id = NULL
+                        """,
+                        (
+                            BATCH_SESSION['movie_id'], 
+                            label, 
+                            file_size_str, 
+                            main_url, 
+                            json.dumps(backup_map)
+                        )
+                    )
+                    conn.commit()
+                    cur.close()
+                    BATCH_SESSION['file_count'] += 1
+                    await upload_status.edit_text(
+                        f"✅ **Saved:** `{label}`\n"
+                        f"🔢 Total Files: {BATCH_SESSION['file_count']}", 
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    await upload_status.edit_text(f"❌ DB Save Failed: {e}")
+                finally:
+                    close_db_connection(conn)
+            
+            return  # ← Phase 2 yahan KHATAM, Phase 1 bilkul nahi chalega
+
         # ==========================================
         # 🤖 PHASE 1: START BATCH (Jab Batch OFF ho)
         # ==========================================
-        
         raw_caption = message.caption or message.text
         if not raw_caption:
-            await message.reply_text("❌ **Batch Off!**\nFile ke sath CAPTION mein movie naam likho.", parse_mode='Markdown')
+            await message.reply_text(
+                "❌ **Batch Off!**\n"
+                "File ke sath CAPTION mein movie naam likho.\n\n"
+                "Ya `/batch Movie Name` use karo.",
+                parse_mode='Markdown'
+            )
             return
         
-        status_msg = await message.reply_text("🧠 Caption analyze kar raha hoon...", quote=True)
+        status_msg = await message.reply_text(
+            "🧠 Caption analyze kar raha hoon...", 
+            quote=True
+        )
         
-        # 🎯 AI se Name, Year, Language nikalo
+        # AI se Name, Year, Language nikalo
         ai_data = await get_movie_name_from_caption(raw_caption)
         
         movie_name = ai_data.get("title", "UNKNOWN")
         movie_year = ai_data.get("year", "")
         movie_lang = ai_data.get("language", "")
         
+        # ✅ FIX Bug 1: {} issue - f-string sahi se banao
+        detected_parts = []
+        if movie_name and movie_name != "UNKNOWN":
+            detected_parts.append(f"🎬 **{movie_name}**")
+        if movie_year:
+            detected_parts.append(f"📅 {movie_year}")
+        if movie_lang:
+            detected_parts.append(f"🔊 {movie_lang}")
+        
         if movie_name == "UNKNOWN" or len(movie_name) < 2:
             await status_msg.edit_text(
                 "❌ Movie naam extract nahi ho paya.\n\n"
-                "**Manual Method:**\n"
+                "**Manual Method use karo:**\n"
                 "`/batch Movie Name`\n\n"
                 "Example: `/batch Chhichhore`",
                 parse_mode='Markdown'
             )
             return
-            
-            # Display what we found
-            info_parts = [f"🎬 **{movie_name}**"]
-            if movie_year: info_parts.append(f"📅 {movie_year}")
-            if movie_lang: info_parts.append(f"🔊 {movie_lang}")
-            
-            await status_msg.edit_text(
-                f"✅ Detected:\n{' | '.join(info_parts)}\n\n⏳ Metadata fetch kar raha hoon...",
-                parse_mode='Markdown'
-            )
+        
+        # AI result context mein save karo
+        context.user_data['pending_ai_data'] = {
+            'movie_name': movie_name,
+            'movie_year': movie_year,
+            'movie_lang': movie_lang,
+        }
+        
+        # ✅ FIX Bug 1: Clean display string
+        display_text = " | ".join(detected_parts)
+        
+        confirm_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "✅ Sahi Hai, Aage Badho", 
+                    callback_data="ai_confirm_yes"
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel", 
+                    callback_data="ai_confirm_cancel"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "✏️ Manual Name Dena Hai", 
+                    callback_data="ai_confirm_manual"
+                )
+            ]
+        ])
+        
+        await status_msg.edit_text(
+            f"🤖 **AI ne ye detect kiya:**\n\n"
+            f"{display_text}\n\n"
+            f"Kya yeh sahi hai?",
+            reply_markup=confirm_keyboard,
+            parse_mode='Markdown'
+        )
 
             # 🎯 Metadata fetch karo (Year aur Language PASS kar rahe hain!)
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
