@@ -3079,6 +3079,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 👆👆👆 YAHAN TAK 👆👆👆
     
     
+    # === CANCEL BATCH LOGIC ===
+    if query.data == "cancel_batch":
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Sirf Admin ke liye!", show_alert=True)
+            return
+
+        # Session ko off kar do taaki aur files save na hon
+        BATCH_SESSION.update({
+            'active': False, 'movie_id': None, 'movie_title': None,
+            'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
+        })
+
+        await query.answer("🛑 Batch Stopped!", show_alert=True)
+        await query.edit_message_text(
+            "❌ **Batch Stopped & Cancelled.**\n\n"
+            "Aap chaho to manually sahi naam dekar naya batch start kar sakte ho:\n"
+            "`/batch Sahi Movie Name`",
+            parse_mode='Markdown'
+        )
+        return
+        
     # === 1. VERIFY BUTTON LOGIC (UPDATED) ===
     if data == "verify":
         await query.answer("🔍 Checking membership...", show_alert=False) # Alert False rakha taki user disturb na ho
@@ -3682,12 +3703,14 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg_text += "\n🚀 **Send NEW files now!** (Bot is listening...)"
 
-        # 6. Delete Button Logic
-        reply_markup = None
+        # 6. Delete Button Logic & Cancel Button
+        keyboard = []
         if file_count > 0:
             msg_text += "\n\n⚠️ *Purani files mili hain. Delete button niche hai:* 👇"
-            keyboard = [[InlineKeyboardButton("🗑️ Delete OLD Files (Clean Slate)", callback_data=f"clearfiles_{movie_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files (Clean Slate)", callback_data=f"clearfiles_{movie_id}")])
+            
+        keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         # 7. Final Message Send
         await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=reply_markup)
@@ -3814,6 +3837,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         'category': category
                     })
                     
+                    # ✅ FIXED: Delete Old Files & Cancel Batch Buttons added
+                    keyboard = []
+                    if file_count > 0:
+                        keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
+                    keyboard.append([InlineKeyboardButton("❌ Cancel Batch (Wrong Name)", callback_data="cancel_batch")])
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
                     await status_msg.edit_text(
                         f"✅ **Batch Started!**\n\n"
                         f"🎬 Movie: **{title}**\n"
@@ -3822,7 +3852,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"📂 Existing Files: {file_count}\n\n"
                         f"🚀 **Ab apni files bhejna shuru karo!**\n"
                         f"Jab ho jaye: `/done`",
-                        parse_mode='Markdown'
+                        parse_mode='Markdown',
+                        reply_markup=reply_markup
                     )
                     
                 except Exception as e:
@@ -6300,10 +6331,14 @@ async def handle_request_name_input(update: Update, context: ContextTypes.DEFAUL
     # User ka message delete karne ke liye (Clean Chat)
     track_message_for_deletion(context, chat_id, update.message.message_id, 120)
 
-    # Safety: Check if user tried to send a command or menu button
-    if user_name_input.startswith('/') or user_name_input in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
-        msg = await update.message.reply_text("❌ Request Process Cancelled. Back to menu.")
-        track_message_for_deletion(context, chat_id, msg.message_id, 60)
+    # ✅ FIXED: Safety Check - Agar user ne koi Menu Button daba diya
+    MENU_BUTTONS = ['🔍 Search Movies', '📂 Browse by Genre', '🙋 Request Movie', '📊 My Stats', '❓ Help']
+
+    if user_name_input.startswith('/') or user_name_input in MENU_BUTTONS:
+        msg = await update.message.reply_text("❌ **Request Process Cancelled.**")
+        track_message_for_deletion(context, chat_id, msg.message_id, 10)
+        # Us button ka original function chala do
+        await main_menu_or_search(update, context)
         return ConversationHandler.END
 
     # Name ko temporary memory me rakho
@@ -6427,13 +6462,11 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Handle 'Request Movie' button (Guidance)
     elif query_text == '🙋 Request Movie':
-        msg = await update.message.reply_text("Click the button below to request:", reply_markup=get_main_keyboard())
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🙋 Request A Movie", callback_data="request_manual")]
+        ])
+        msg = await update.message.reply_text("👇 **Click the button below to start your request:**", reply_markup=keyboard, parse_mode='Markdown')
         track_message_for_deletion(context, chat_id, msg.message_id, 60)
-        return
-
-    # === NEW: Handle 'Browse by Genre' button ===
-    elif query_text == '📂 Browse by Genre':
-        await show_genre_selection(update, context)
         return
     # ============================================
 
