@@ -885,33 +885,45 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
             pass
         return 0
 
-# ==================== FIXED AUTO-DELETE FUNCTIONS ====================
+# ==================== DATABASE-BACKED AUTO-DELETE FUNCTIONS ====================
+
+async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
+    """Messages ko DB me save karta hai taaki restart hone par bhi yaad rahe"""
+    try:
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+        
+        # Exact time calculate karo kab delete karna hai
+        delete_time = datetime.now() + timedelta(seconds=delay)
+        
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                for msg_id in message_ids:
+                    cur.execute(
+                        "INSERT INTO auto_delete_queue (bot_username, chat_id, message_id, delete_at) VALUES (%s, %s, %s, %s)",
+                        (bot_username, chat_id, msg_id, delete_time)
+                    )
+                conn.commit()
+                cur.close()
+            except Exception as e:
+                logger.error(f"Error saving to delete queue: {e}")
+            finally:
+                close_db_connection(conn)
+    except Exception as e:
+        logger.error(f"Failed to get bot info for delete queue: {e}")
 
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
-    """Delete messages after specified delay using Background Tasks"""
-    try:
-        await asyncio.sleep(delay)
-        for msg_id in message_ids:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                logger.info(f"🗑️ Deleted message {msg_id}")
-            except Exception:
-                pass # Message shayad pehle hi delete ho gaya ho
-    except Exception as e:
-        logger.error(f"Error in delete task: {e}")
+    """Old function ab sidha DB me save karega (No sleep)"""
+    await add_messages_to_db_queue(context, chat_id, message_ids, delay)
 
 def track_message_for_deletion(context, chat_id, message_id, delay=60):
-    """
-    Schedules a message for deletion using asyncio tasks.
-    IMPORTANT: Requires 'context' as the first argument.
-    """
+    """Synchronous code se DB me entry dalne ke liye helper"""
     if not message_id: return
     
-    # Task create karein
-    task = asyncio.create_task(
-        delete_messages_after_delay(context, chat_id, [message_id], delay)
-    )
-    # Global set me add karein taki task beech me na ruke
+    # Task create karein taaki bot hang na ho
+    task = asyncio.create_task(add_messages_to_db_queue(context, chat_id, [message_id], delay))
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
 
@@ -946,6 +958,19 @@ def setup_database():
             )
         """)
 
+        # 👇👇👇 NAYA TABLE: Auto-Delete Queue ke liye 👇👇👇
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auto_delete_queue (
+                id SERIAL PRIMARY KEY,
+                bot_username TEXT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                delete_at TIMESTAMP NOT NULL
+            )
+        """)
+        # Faster search ke liye index (Taki DB slow na ho)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_delete_at ON auto_delete_queue (bot_username, delete_at);")
+        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS movie_files (
                 id SERIAL PRIMARY KEY,
@@ -2184,41 +2209,50 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True):
-    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - UPDATED"""
+# 👇 Parameter me 'pre_fetched_meta=None' add kiya hai
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None):
+    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED"""
     chat_id = update.effective_chat.id
 
-    # --- 1. Fetch movie details including genre, year & LANGUAGE ---
-    conn = get_db_connection()
+    # --- 1. Fetch movie details (Genre, Year, Language) ---
     genre = ""
     year = ""
     lang_display = ""
     
-    if conn:
-        try:
-            cur = conn.cursor()
-            # 👇 NAYA: language bhi select kar rahe hain
-            cur.execute("SELECT genre, year, language FROM movies WHERE id = %s", (movie_id,))
-            result = cur.fetchone()
-            if result:
-                db_genre, db_year, db_lang = result
-                if db_genre and db_genre != 'Unknown':
-                    genre = f"🎭 <b>Genre:</b> {db_genre}\n"
-                if db_year and db_year > 0:
-                    year = f"📅 <b>Year:</b> {db_year}\n"
-                if db_lang and db_lang.strip():
-                    lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
-            cur.close()
-        except Exception as e:
-            logger.error(f"Error fetching movie info: {e}")
-        finally:
-            close_db_connection(conn)
-    # ---------------------------------------------------
+    # ✅ OPTIMIZATION: Agar data pehle se diya gaya hai, to DB connect mat karo
+    if pre_fetched_meta:
+        db_genre = pre_fetched_meta.get('genre')
+        db_year = pre_fetched_meta.get('year')
+        db_lang = pre_fetched_meta.get('language')
+        
+        if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
+        if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
+        if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
     
-    all_qualities = get_all_movie_qualities(movie_id)
+    # Agar data nahi diya gaya (Single file download), tabhi DB open karo
+    else:
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT genre, year, language FROM movies WHERE id = %s", (movie_id,))
+                result = cur.fetchone()
+                if result:
+                    db_genre, db_year, db_lang = result
+                    if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
+                    if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
+                    if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+                cur.close()
+            except Exception as e:
+                logger.error(f"Error fetching movie info: {e}")
+            finally:
+                close_db_connection(conn)
+    # ---------------------------------------------------
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
-    # ... (iske aage aapka code same rahega)
+    if not url and not file_id:
+        all_qualities = get_all_movie_qualities(movie_id)
+        # ... aage ka code same rahega
     
     langs = set()
     for q in all_qualities:
@@ -2975,19 +3009,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_genre_selection(update, context)
         return
     
-    # === SEND ALL FILES LOGIC ===
+    # === SEND ALL FILES LOGIC (HIGHLY OPTIMIZED) ===
     if query.data.startswith("sendall_"):
         movie_id = int(query.data.split("_")[1])
         chat_id = update.effective_chat.id
 
-        # Movie Info Fetch
+        # ✅ FAST FETCH: Ek hi bar mein sab nikal lo
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+        cur.execute("SELECT title, genre, year, language FROM movies WHERE id = %s", (movie_id,))
         res = cur.fetchone()
-        title = res[0] if res else "Movie"
         cur.close()
         close_db_connection(conn)
+
+        if res:
+            title, db_genre, db_year, db_lang = res
+            pre_fetched_meta = {'genre': db_genre, 'year': db_year, 'language': db_lang}
+        else:
+            title = "Movie"
+            pre_fetched_meta = {}
 
         qualities = get_all_movie_qualities(movie_id)
         if not qualities:
@@ -2997,16 +3037,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"🚀 Sending {len(qualities)} files...")
         status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files...**", parse_mode='Markdown')
         
-        # 1. LOOP: FILES BHEJO (Warning = False)
-        # Yahan hum 'send_warning=False' pass kar rahe hain taaki har file ke sath warning na aye
+        # 1. LOOP: FILES BHEJO (Bina DB query ke)
         count = 0
         for quality, url, file_id, file_size in qualities:
             try:
                 await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
-                    send_warning=False  # 👈 IMPORTANT: Loop me warning mat bhejo
+                    send_warning=False,
+                    pre_fetched_meta=pre_fetched_meta  # 👈 Yahan data pass kar diya!
                 )
-                await asyncio.sleep(1.5) 
+                
+                # DB query ka overhead khatam ho gaya, isliye thoda fast (1.2s) kar sakte hain
+                await asyncio.sleep(1.2) 
                 count += 1
             except Exception as e:
                 logger.error(f"Send All Error: {e}")
@@ -3018,7 +3060,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 from_chat_id=-1002683355160, # Apka Channel ID
                 message_id=1773              # Warning File Message ID
             )
-            # Is file ko bhi delete list me daalo
             track_message_for_deletion(context, chat_id, warning_msg.message_id, 60)
         except Exception as e:
             logger.error(f"Failed to send final warning file: {e}")
@@ -6567,6 +6608,53 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Auto-delete (Optional - 2 min)
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
 
+async def auto_delete_worker(app: Application):
+    """
+    Background worker jo har 5 second me DB check karega, 
+    messages delete karega aur fir DB se bhi entry uda dega (Self-Cleaning).
+    """
+    try:
+        bot_info = await app.bot.get_me()
+        bot_username = bot_info.username
+    except Exception as e:
+        logger.error(f"Worker bot info error: {e}")
+        return
+
+    logger.info(f"🧹 Auto-Delete Worker Started for @{bot_username}")
+
+    while True:
+        try:
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                # 1. Wo messages dhoondo jinka time pura ho chuka hai
+                cur.execute(
+                    "SELECT id, chat_id, message_id FROM auto_delete_queue WHERE bot_username = %s AND delete_at <= NOW() LIMIT 50",
+                    (bot_username,)
+                )
+                rows = cur.fetchall()
+                
+                for row in rows:
+                    row_id, chat_id, msg_id = row
+                    
+                    # 2. Telegram se file delete karo
+                    try:
+                        await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                    except Exception:
+                        pass # File pehle hi delete ho chuki hai ya bot block hai
+                        
+                    # 3. DB se turant delete karo (TAAKI DB CLEAN RAHE!)
+                    cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
+                    conn.commit()
+                    
+                cur.close()
+                close_db_connection(conn)
+        except Exception as e:
+            logger.error(f"Auto-delete worker error: {e}")
+            
+        # Har 5 second me database check karega
+        await asyncio.sleep(5)
+
 # ==================== MULTI-BOT SETUP (REPLACES OLD MAIN) ====================
 
 def register_handlers(application: Application):
@@ -6737,6 +6825,7 @@ async def main():
             await app.initialize()
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
+            asyncio.create_task(auto_delete_worker(app))
 
             apps.append(app)
 
