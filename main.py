@@ -2211,7 +2211,7 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
 # ==================== HELPER FUNCTION ====================
 # 👇 Parameter me 'pre_fetched_meta=None' add kiya hai
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None):
-    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED"""
+    """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
     # --- 1. Fetch movie details (Genre, Year, Language) ---
@@ -2252,26 +2252,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
         all_qualities = get_all_movie_qualities(movie_id)
-        # ... aage ka code same rahega
-    
-    langs = set()
-    for q in all_qualities:
-        quality_str = q[0] # Example: "720p (Dual Audio) [1.2GB]"
-        # Jo bhi text bracket (...) ke andar hai, usko extract karo
-        match = re.search(r'\((.*?)\)', quality_str)
-        if match:
-            lang_text = match.group(1).strip()
-            if lang_text:
-                langs.add(lang_text)
-                
-    lang_display = ""
-    if langs:
-        lang_display = f"🔊 <b>Language:</b> {', '.join(sorted(langs))}\n"
-    # ---------------------------------------------------
-    # ---------------------------------------------------
-
-    # 1. Multi-Quality Check (Agar direct link/file nahi hai)
-    if not url and not file_id:
         if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
             
@@ -2284,7 +2264,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     try:
         # =========================================================
-        # 🔥 MODIFIED: REPLACED TEXT WARNING WITH FILE FORWARD 🔥
+        # 🔥 WARNING FILE LOGIC
         # =========================================================
         warning_msg = None
         if send_warning:
@@ -2301,9 +2281,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # --- CAPTION UPDATE WITH GENRE, YEAR & LANGUAGE ---
         caption_text = (
             f"🎬 <b>{title}</b>\n"
-            f"{year}"        # Year added
-            f"{genre}"       # Genre added
-            f"{lang_display}"  # Language
+            f"{year}"        
+            f"{genre}"       
+            f"{lang_display}"  
             f"\n🔗 <b>JOIN »</b> <a href='{FILMFYBOX_CHANNEL_URL}'>FilmfyBox</a>\n\n"
             f"🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
             f"🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
@@ -2312,10 +2292,10 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
-
         # ==================================================================
-        # 🚀 PRIORITY 1: TRY COPYING FROM CHANNEL LINK (Best for Thumbnails)
+        # 🚀 PRIORITY 1: TRY COPYING FROM CHANNEL LINK
         # ==================================================================
+        sent_msg = None
         if url and ("t.me/c/" in url or "t.me/" in url) and "http" in url:
             try:
                 clean_url = url.strip()
@@ -2364,7 +2344,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     logger.error(f"Send Document failed: {e}")
 
         # ==================================================================
-        # 🌐 PRIORITY 3: EXTERNAL LINK (If everything else fails)
+        # 🌐 PRIORITY 3: EXTERNAL LINK
         # ==================================================================
         if not sent_msg and url and "http" in url and "t.me" not in url:
              sent_msg = await context.bot.send_message(
@@ -2382,14 +2362,10 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             messages_to_delete.append(warning_msg.message_id)
 
         if messages_to_delete:
-            asyncio.create_task(
-                delete_messages_after_delay(
-                    context,
-                    chat_id,
-                    messages_to_delete,
-                    60
-                )
-            )
+            # ✅ DB-Backed Auto Delete call karega
+            track_message_for_deletion(context, chat_id, messages_to_delete[0], 60) # Note: Isse hum queue me add karte hain
+            if len(messages_to_delete) > 1:
+                track_message_for_deletion(context, chat_id, messages_to_delete[1], 60)
         elif not sent_msg:
             await context.bot.send_message(chat_id=chat_id, text="❌ Error: File not found or Bot needs Admin rights in Source Channel.")
 
