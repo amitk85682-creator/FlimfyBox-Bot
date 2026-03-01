@@ -501,9 +501,9 @@ EXAMPLES:
 - "Jawan 2023 Hindi 720p WebRip" → title: "Jawan"
 
 RESPOND WITH ONLY THIS JSON (no extra text):
-{{"title": "EXACT MOVIE NAME ONLY", "year": "YYYY", "language": "Hindi/English/etc"}}
+{{"title": "EXACT MOVIE NAME ONLY", "year": "YYYY", "language": "Exact audio text from caption"}}
 
-For language, detect from: Hindi, English, Tamil, Telugu, Kannada, Malayalam, Korean, Japanese, Dual Audio, Multi Audio"""
+For language, extract the exact audio information written in the caption (e.g., "Dual Audio", "Hindi ORG - English", "Gujarati"). If none is found, leave it blank."""
 
         response = await run_async(model.generate_content, prompt)
         
@@ -1062,6 +1062,9 @@ def migrate_add_imdb_columns():
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS description TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT;")
+        
+        # 👇👇👇 NAYI LINE: Language column add karein 👇👇👇
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS language TEXT;")
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
@@ -1073,6 +1076,7 @@ def migrate_add_imdb_columns():
         return True
 
     except Exception as e:
+        # .... baaki ka code same rahega
         logger.error(f"Migration Error: {e}", exc_info=True)
         try:
             conn.rollback()
@@ -2184,46 +2188,52 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - UPDATED"""
     chat_id = update.effective_chat.id
 
-    # --- 1. Fetch movie details including genre & year ---
+    # --- 1. Fetch movie details including genre, year & LANGUAGE ---
     conn = get_db_connection()
     genre = ""
     year = ""
+    lang_display = ""
+    
     if conn:
         try:
             cur = conn.cursor()
-            cur.execute("SELECT genre, year FROM movies WHERE id = %s", (movie_id,))
+            # 👇 NAYA: language bhi select kar rahe hain
+            cur.execute("SELECT genre, year, language FROM movies WHERE id = %s", (movie_id,))
             result = cur.fetchone()
             if result:
-                db_genre, db_year = result
-                if db_genre:
+                db_genre, db_year, db_lang = result
+                if db_genre and db_genre != 'Unknown':
                     genre = f"🎭 <b>Genre:</b> {db_genre}\n"
                 if db_year and db_year > 0:
                     year = f"📅 <b>Year:</b> {db_year}\n"
+                if db_lang and db_lang.strip():
+                    lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
             cur.close()
         except Exception as e:
-            logger.error(f"Error fetching genre: {e}")
+            logger.error(f"Error fetching movie info: {e}")
         finally:
             close_db_connection(conn)
     # ---------------------------------------------------
-
-    # --- 2. Language Detection from FILES (Database) ---
+    
     all_qualities = get_all_movie_qualities(movie_id)
+
+    # 1. Multi-Quality Check (Agar direct link/file nahi hai)
+    # ... (iske aage aapka code same rahega)
     
-    combined_file_text = " ".join([q[0].lower() for q in all_qualities])
-    
-    langs = []
-    if "hind" in combined_file_text: langs.append("Hindi")
-    if "eng" in combined_file_text: langs.append("English")
-    if "tam" in combined_file_text: langs.append("Tamil")
-    if "tel" in combined_file_text: langs.append("Telugu")
-    if "kan" in combined_file_text: langs.append("Kannada")
-    if "mal" in combined_file_text: langs.append("Malayalam")
-    if "dual" in combined_file_text: langs.append("Dual Audio")
-    if "multi" in combined_file_text: langs.append("Multi Audio")
-    
+    langs = set()
+    for q in all_qualities:
+        quality_str = q[0] # Example: "720p (Dual Audio) [1.2GB]"
+        # Jo bhi text bracket (...) ke andar hai, usko extract karo
+        match = re.search(r'\((.*?)\)', quality_str)
+        if match:
+            lang_text = match.group(1).strip()
+            if lang_text:
+                langs.add(lang_text)
+                
     lang_display = ""
     if langs:
-        lang_display = f"🔊 <b>Language:</b> {', '.join(sorted(set(langs)))}\n"
+        lang_display = f"🔊 <b>Language:</b> {', '.join(sorted(langs))}\n"
+    # ---------------------------------------------------
     # ---------------------------------------------------
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
@@ -2915,7 +2925,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("reqA_") or data.startswith("reqN_"):
         await query.answer("🔄 Sending message to user...", show_alert=False)
         parts = data.split('_', 2)
-        action = parts[0]
+        action = parts[0]  # Yahan '_' hat jata hai, sirf 'reqA' ya 'reqN' bachta hai
         target_user_id = int(parts[1])
         movie_title = parts[2]
 
@@ -2931,7 +2941,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except: pass
             finally: close_db_connection(conn)
 
-        if action == "reqA_":
+        # ✅ FIXED: "reqA_" ki jagah "reqA" use karna hai
+        if action == "reqA":
             user_msg = (
                 f"🎉 <b>Good News!</b> 👋\n\n"
                 f"Hello <b>{first_name}!</b> आपकी Requested Movie अब उपलब्ध है।\n\n"
@@ -3422,12 +3433,10 @@ def get_storage_channels():
     channels_str = os.environ.get('STORAGE_CHANNELS', '')
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
-def generate_quality_label(file_name, file_size_str):
-    """
-    Generates a label like '720p [1.2GB]' or 'S01E01 - 1080p [500MB]'
-    """
+def generate_quality_label(file_name, file_size_str, ai_language=""):
+    """Bina hardcode kiye AI language ko use karta hai"""
     name_lower = file_name.lower()
-    quality = "HD" # Default
+    quality = "HD"
     
     # 1. Detect Quality
     if "4k" in name_lower or "2160p" in name_lower: quality = "4K"
@@ -3437,15 +3446,16 @@ def generate_quality_label(file_name, file_size_str):
     elif "360p" in name_lower: quality = "360p"
     elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
     
-    # 2. Detect Series (S01E01)
+    # 2. Add AI Detected Language (e.g., Gujarati, Dual Audio)
+    lang_tag = f" ({ai_language})" if ai_language else ""
+    
+    # 3. Detect Series (S01E01)
     season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
     if season_match:
         episode_tag = season_match.group(0).upper()
-        # Returns: S01E01 - 720p [1.2GB]
-        return f"{episode_tag} - {quality} [{file_size_str}]"
+        return f"{episode_tag} - {quality}{lang_tag} [{file_size_str}]"
         
-    # 3. Default Movie Format: 720p [1.2GB]
-    return f"{quality} [{file_size_str}]"
+    return f"{quality}{lang_tag} [{file_size_str}]"
 
 def get_readable_file_size(size_in_bytes):
     """Converts bytes to readable format (MB, GB)"""
@@ -3809,16 +3819,17 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur = conn.cursor()
                     cur.execute(
                         """
-                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
-                        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
+                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
+                        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
                         ON CONFLICT (title) DO UPDATE 
                         SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
                             poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
                             year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
-                            category = COALESCE(EXCLUDED.category, movies.category)
+                            category = COALESCE(EXCLUDED.category, movies.category),
+                            language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
                         RETURNING id
                         """,
-                        (title, imdb_id, poster_url, year, genre, rating, plot, category)
+                        (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
                     )
                     movie_id = cur.fetchone()[0]
                     conn.commit()
@@ -3834,7 +3845,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         'file_count': file_count, 
                         'admin_id': user_id,
                         'year': str(year) if year else movie_year,  # Save for later
-                        'category': category
+                        'category': category,
+                        'language': movie_lang
                     })
                     
                     # ✅ FIXED: Delete Old Files & Cancel Batch Buttons added
@@ -3894,7 +3906,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
         
         file_size_str = get_readable_file_size(file_size)
-        label = generate_quality_label(file_name, file_size_str)
+        current_lang = BATCH_SESSION.get('language', '')
+        label = generate_quality_label(file_name, file_size_str, current_lang)
         
         main_channel_id = channels[0]
         main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
