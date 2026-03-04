@@ -2970,6 +2970,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             btn_status = "❌ User Notified: Not Found"
 
+        # =======================================================
+    # 🖼️ NEW: ASK POSTER LOGIC (Semi-Auto Post)
+    # =======================================================
+    if query.data.startswith("askposter_"):
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Admin only!", show_alert=True)
+            return
+
+        movie_id = int(query.data.split("_")[1])
+        
+        # Bot ko yaad dilao ki ab agli photo is movie ke liye aayegi
+        context.user_data['waiting_for_poster'] = movie_id
+        
+        await query.answer()
+        await query.message.reply_text(
+            "🖼️ **Please send the Landscape Poster (Image) for this movie now.**\n\n"
+            "*(सिर्फ़ फोटो भेजें, कोई कैप्शन लिखने की ज़रूरत नहीं है)*",
+            parse_mode='Markdown'
+        )
+        return
+        
         # Multi-bot send
         success = await send_multi_bot_message(target_user_id, user_msg)
         
@@ -4009,13 +4030,112 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Backups: {channels_count} channels"
     )
 
-    await status_msg.edit_text(report, parse_mode='Markdown')
+    # 👇 NAYA: Post to Channel button
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Post to Channel", callback_data=f"askposter_{movie_id}")]
+    ])
+
+    await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
     
     # Reset Session
     BATCH_SESSION.update({
         'active': False, 'movie_id': None, 'movie_title': None,
         'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
     })
+
+async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin se photo lekar clean caption ke sath channel me post karega"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID: 
+        return
+
+    # Check karo ki bot photo ka wait kar raha tha ya nahi
+    movie_id = context.user_data.get('waiting_for_poster')
+    if not movie_id: 
+        return # Agar wait nahi kar raha tha, to ignore karo
+
+    if not update.message.photo:
+        await update.message.reply_text("❌ Please send a valid PHOTO.")
+        return
+
+    # Sabse acchi quality ki photo nikalo
+    file_id = update.message.photo[-1].file_id
+    status_msg = await update.message.reply_text("⏳ Publishing to channels...")
+
+    # 1. Database se sirf Title nikalo
+    conn = get_db_connection()
+    if not conn: return
+    cur = conn.cursor()
+    cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+    res = cur.fetchone()
+    cur.close()
+    close_db_connection(conn)
+
+    if not res:
+        await status_msg.edit_text("❌ Movie not found in DB.")
+        context.user_data.pop('waiting_for_poster', None)
+        return
+    
+    m_title = res[0]
+
+    # 2. 🎯 EXACT CLEAN CAPTION BANAO
+    channel_caption = (
+        f"🎬 <b>{m_title}</b>\n\n"
+        f"➖➖➖➖➖➖➖\n"
+        f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇🏻👇🏻:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
+        f"➖➖➖➖➖➖➖\n"
+        f"<b>👇 Download Below</b>"
+    )
+
+    # 3. Download Buttons Banao
+    link_param = f"movie_{movie_id}"
+    bot1 = "FlimfyBox_SearchBot"
+    bot2 = "urmoviebot"
+    bot3 = "FlimfyBox_Bot"
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
+            InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")
+        ],
+        [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
+        [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+    ])
+
+    # 4. Channels me Post karo
+    channels_str = os.environ.get('BROADCAST_CHANNELS', '')
+    target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
+
+    if not target_channels:
+        await status_msg.edit_text("❌ Error: No BROADCAST_CHANNELS found in .env")
+        context.user_data.pop('waiting_for_poster', None)
+        return
+
+    sent_count = 0
+    for chat_id_str in target_channels:
+        try:
+            chat_id = int(chat_id_str)
+            sent_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=file_id,
+                caption=channel_caption,
+                parse_mode='HTML',
+                reply_markup=keyboard
+            )
+            
+            # Restore Feature ke liye DB me save karo
+            if sent_msg:
+                save_post_to_db(
+                    movie_id, chat_id, sent_msg.message_id, bot3, 
+                    channel_caption, file_id, "photo", keyboard.to_dict(), None, "movies"
+                )
+                sent_count += 1
+        except Exception as e:
+            logger.error(f"Auto-post failed for {chat_id_str}: {e}")
+
+    # 5. Finish and Clear State
+    await status_msg.edit_text(f"✅ <b>Posted successfully to {sent_count} channels!</b>", parse_mode='HTML')
+    context.user_data.pop('waiting_for_poster', None)
 
 async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -6692,6 +6812,9 @@ def register_handlers(application: Application):
     application.add_handler(MessageHandler(filters.Regex(r'^/post18'), admin_post_18))
     application.add_handler(CommandHandler("fixbuttons", update_buttons_command))
     application.add_handler(CommandHandler("restore", restore_posts_command))
+
+    # 🚀 NEW: Add this line to catch the poster image
+    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_admin_poster), group=0)
 
     # ==========================================
     # 🔞 18+ BATCH SYSTEM HANDLERS
