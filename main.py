@@ -3778,13 +3778,16 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not (message.document or message.video or message.photo): return
 
-    # 🎯 FIX: Agar caption mein /post_query hai toh batch start mat karo
     caption = message.caption or ""
     if caption.startswith('/post_query'):
-        return  # admin_post_query function handle karega
+        return  
+
+    # 🚀 THE MAIN FIX: Agar sirf Photo aayi hai (bina caption ke) aur Batch OFF hai,
+    # toh isko Poster maan lo aur koi Error message mat do (Takrav khatam).
+    if message.photo and not caption and not BATCH_SESSION.get('active'):
+        return 
 
     async with auto_batch_lock:
-        # ... baaki ka code same rahega ...
         
         # ==========================================
         # 🤖 PHASE 1: START BATCH
@@ -3797,6 +3800,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             status_msg = await message.reply_text("🧠 Caption analyze kar raha hoon...", quote=True)
+
             
             # 🎯 AI se Name, Year, Language nikalo
             ai_data = await get_movie_name_from_caption(raw_caption)
@@ -4082,7 +4086,9 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     channel_caption = (
         f"🎬 <b>{m_title}</b>\n\n"
         f"➖➖➖➖➖➖➖\n"
-        f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨👇🏻👇🏻:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
+        f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨
+        f"👇🏻👇🏻\n"
+        f"</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
         f"➖➖➖➖➖➖➖\n"
         f"<b>👇 Download Below</b>"
     )
