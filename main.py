@@ -1085,11 +1085,9 @@ def setup_database():
 def migrate_add_imdb_columns():
     """One-time migration to add missing columns safely"""
     conn = get_db_connection()
-    if not conn:
-        return False
+    if not conn: return False
     try:
         cur = conn.cursor()
-
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER DEFAULT 0;")
@@ -1098,8 +1096,9 @@ def migrate_add_imdb_columns():
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS description TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT;")
         
-        # 👇👇👇 NAYI LINE: Language column add karein 👇👇👇
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS language TEXT;")
+        # 👇👇 NAYI LINE: COMBiNED aur Episodes ke liye 👇👇
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS extra_info TEXT;")
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
@@ -1107,16 +1106,9 @@ def migrate_add_imdb_columns():
         conn.commit()
         cur.close()
         close_db_connection(conn)
-        logger.info("✅ DB Migration: Missing columns ensured")
         return True
-
     except Exception as e:
-        # .... baaki ka code same rahega
-        logger.error(f"Migration Error: {e}", exc_info=True)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+        pass
         close_db_connection(conn)
         return False
 
@@ -2224,20 +2216,23 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
-    # --- 1. Fetch movie details (Genre, Year, Language) ---
+    # --- 1. Fetch movie details (Genre, Year, Language, Extra Info) ---
     genre = ""
     year = ""
     lang_display = ""
+    extra_display = "" # 👈 NAYA: Info (COMBiNED/Ep) dikhane ke liye
     
     # ✅ OPTIMIZATION: Agar data pehle se diya gaya hai, to DB connect mat karo
     if pre_fetched_meta:
         db_genre = pre_fetched_meta.get('genre')
         db_year = pre_fetched_meta.get('year')
         db_lang = pre_fetched_meta.get('language')
+        db_extra = pre_fetched_meta.get('extra_info') # 👈 Fetch Extra info
         
         if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
         if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
         if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+        if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
     
     # Agar data nahi diya gaya (Single file download), tabhi DB open karo
     else:
@@ -2245,13 +2240,15 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if conn:
             try:
                 cur = conn.cursor()
-                cur.execute("SELECT genre, year, language FROM movies WHERE id = %s", (movie_id,))
+                # 👇 UPDATE: SQL query mein 'extra_info' add kiya
+                cur.execute("SELECT genre, year, language, extra_info FROM movies WHERE id = %s", (movie_id,))
                 result = cur.fetchone()
                 if result:
-                    db_genre, db_year, db_lang = result
+                    db_genre, db_year, db_lang, db_extra = result # 👈 4 values unpack hongi
                     if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
                     if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
                     if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+                    if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
                 cur.close()
             except Exception as e:
                 logger.error(f"Error fetching movie info: {e}")
@@ -2288,9 +2285,10 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception as e:
                 logger.error(f"Warning file send failed: {e}")
         
-        # --- CAPTION UPDATE WITH GENRE, YEAR & LANGUAGE ---
+        # --- CAPTION UPDATE WITH EXTRA INFO ---
         caption_text = (
             f"🎬 <b>{title}</b>\n"
+            f"{extra_display}"   # 👈 Yahan print hoga apka COMBiNED / Ep Info
             f"{year}"        
             f"{genre}"       
             f"{lang_display}"  
@@ -2372,8 +2370,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             messages_to_delete.append(warning_msg.message_id)
 
         if messages_to_delete:
-            # ✅ DB-Backed Auto Delete call karega
-            track_message_for_deletion(context, chat_id, messages_to_delete[0], 60) # Note: Isse hum queue me add karte hain
+            track_message_for_deletion(context, chat_id, messages_to_delete[0], 60) 
             if len(messages_to_delete) > 1:
                 track_message_for_deletion(context, chat_id, messages_to_delete[1], 60)
         elif not sent_msg:
@@ -3017,6 +3014,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # === SEND ALL FILES LOGIC (HIGHLY OPTIMIZED) ===
+    # === SEND ALL FILES LOGIC (HIGHLY OPTIMIZED) ===
     if query.data.startswith("sendall_"):
         movie_id = int(query.data.split("_")[1])
         chat_id = update.effective_chat.id
@@ -3024,17 +3022,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ✅ FAST FETCH: Ek hi bar mein sab nikal lo
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT title, genre, year, language FROM movies WHERE id = %s", (movie_id,))
+        # 👇 UPDATE: Yahan bhi 'extra_info' add kiya
+        cur.execute("SELECT title, genre, year, language, extra_info FROM movies WHERE id = %s", (movie_id,))
         res = cur.fetchone()
         cur.close()
         close_db_connection(conn)
 
         if res:
-            title, db_genre, db_year, db_lang = res
-            pre_fetched_meta = {'genre': db_genre, 'year': db_year, 'language': db_lang}
+            # 👇 UPDATE: Unpack 5 values
+            title, db_genre, db_year, db_lang, db_extra = res
+            pre_fetched_meta = {'genre': db_genre, 'year': db_year, 'language': db_lang, 'extra_info': db_extra}
         else:
             title = "Movie"
             pre_fetched_meta = {}
+
+        # ... iske niche ka code (qualities nikalna aur loop chalana) same rahega ...
 
         qualities = get_all_movie_qualities(movie_id)
         if not qualities:
@@ -3818,6 +3820,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
+            movie_extra = ai_data.get("extra_info", "")
             
             if movie_name == "UNKNOWN" or len(movie_name) < 2:
                 await status_msg.edit_text(
@@ -3864,24 +3867,25 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     category = "Movies"
 
-            # Database Insert
+           # Database Insert
             conn = get_db_connection()
             if conn:
                 try:
                     cur = conn.cursor()
                     cur.execute(
                         """
-                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
-                        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
+                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info) 
+                        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
                         ON CONFLICT (title) DO UPDATE 
                         SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
                             poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
                             year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                             category = COALESCE(EXCLUDED.category, movies.category),
-                            language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
+                            language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
+                            extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END
                         RETURNING id
                         """,
-                        (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
+                        (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, movie_extra)
                     )
                     movie_id = cur.fetchone()[0]
                     conn.commit()
