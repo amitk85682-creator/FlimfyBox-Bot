@@ -476,32 +476,42 @@ async def get_movie_name_from_caption(caption_text):
         model = genai.GenerativeModel('gemini-2.0-flash')
 
         # 🎯 SUPER STRICT PROMPT
-        prompt = f"""You are extracting the REAL movie/show name from a file caption.
+        prompt = f"""You are a file caption parser. Extract the REAL movie/show/anime name.
 
 CAPTION: "{caption_text}"
 
-RULES (VERY IMPORTANT):
-1. Extract ONLY the actual movie/show name that you would search on Google or IMDb
-2. The name is usually at the BEGINNING of the caption, BEFORE the year
-3. STOP extracting when you see ANY of these (these are NOT part of movie name):
-   - Year in brackets like (2017) or just 2017
-   - Quality tags: 480p, 720p, 1080p, 2160p, 4K, HDRip, WebRip, WEB-DL, BluRay, DVDRip
-   - Language words when used as tags: Hindi, English, Tamil, Telugu, Dual Audio
-   - Technical terms: x264, x265, HEVC, AAC, ESub, mkv, mp4
-   - Genre words used as labels: Bollywood Movie, Hollywood Movie, South Movie
-   - Channel names starting with @
+STRICT RULES:
+1. Title is ALWAYS at the BEGINNING of caption
+2. STOP extracting title when you hit ANY of these:
+   - Season/Episode: S01, S02, E01, [E01-06], Season 1, Episode
+   - Year: (2017), 2022
+   - Quality: 480p, 720p, 1080p, 2160p, 4K
+   - Tags: COMBiNED, COMPLETE, PROPER, REPACK, REMUX
+   - Source: WEBRip, WEB-DL, BluRay, HDRip, DVDRip, NF, AMZN, DSNP
+   - Codec: x264, x265, HEVC, H.264, H.265, AVC, 10bit
+   - Audio: AAC, DDP, DDP5.1, DDP2.0, DTS, Atmos, FLAC, Multi Audio, Dual Audio
+   - Language tags: Hindi, English, Japanese, Tamil, Telugu, Korean (when used as label)
+   - Subtitle: ESub, MSub, Eng Sub
+   - Uploader: KEИ, Saon, Ember, TW4ALL, @channelname, !!
+   - Brackets with tech info: [Hindi + English], [Japanese DDP 2.0]
+3. File extension (.mkv .mp4 .avi) is NEVER part of title
+4. Dots and underscores between words = spaces (e.g. "RRR.2022" → title is "RRR")
+5. Keep special characters if part of real title (e.g. "I'm", "!", ":", "-")
 
 EXAMPLES:
+- "I'm the Evil Lord of an Intergalactic Empire! S01 COMBiNED 1080p WEBRip x265 HEVC [Japanese DDP 2.0] ESub KEИ !! Ember.mkv" → title: "I'm the Evil Lord of an Intergalactic Empire!"
+- "Campfire Cooking in Another World with My Absurd Skill S02 [E01-06] COMBiNED 1080p WEB-DL x265 HEVC Multi Audio ESub KEИ !! [TW4ALL].mkv" → title: "Campfire Cooking in Another World with My Absurd Skill"
+- "BAKI DOU The Invincible Samurai S01 [E08-13] COMBiNED 1080p NF WEB-DL HEVC [Hindi + English + Japanese] DDP5.1 ESub KEИ !! Saon.mkv" → title: "BAKI DOU The Invincible Samurai"
 - "Commando 2 (2017) 480p Hindi WebRip Bollywood Movie" → title: "Commando 2"
-- "Pushpa The Rise 2021 1080p Hindi" → title: "Pushpa The Rise"  
-- "Money Heist S01E01 720p NF WEB-DL" → title: "Money Heist"
-- "Kantara (2022) Hindi Dubbed 1080p" → title: "Kantara"
-- "The Kashmir Files 2022 480p" → title: "The Kashmir Files"
 - "RRR.2022.1080p.NF.WEB-DL.Hindi" → title: "RRR"
+- "Money Heist S01E01 720p NF WEB-DL" → title: "Money Heist"
+- "The.Batman.2022.1080p.BluRay.x264" → title: "The Batman"
 - "Jawan 2023 Hindi 720p WebRip" → title: "Jawan"
+- "Kantara (2022) Hindi Dubbed 1080p" → title: "Kantara"
+- "Squid.Game.S02E01.1080p.NF.WEB-DL" → title: "Squid Game"
 
-RESPOND WITH ONLY THIS JSON (no extra text):
-{{"title": "EXACT MOVIE NAME ONLY", "year": "YYYY", "language": "Exact audio text from caption"}}
+RESPOND ONLY THIS JSON, nothing else:
+{{"title": "EXACT MOVIE/SHOW/ANIME NAME", "year": "YYYY or empty", "language": "audio/language info from caption or empty"}}"""
 
 For language, extract the exact audio information written in the caption (e.g., "Dual Audio", "Hindi ORG - English", "Gujarati"). If none is found, leave it blank."""
 
