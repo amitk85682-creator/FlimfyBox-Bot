@@ -461,10 +461,10 @@ async def check_rate_limit(user_id):
 
 async def get_movie_name_from_caption(caption_text):
     """
-    🎯 SUPER STRICT: Sirf ACTUAL movie name extract karta hai
+    🎯 SUPER STRICT + SMART AI: Purane rules ki safety aur naye 'extra_info' ka magic!
     """
     if not caption_text or len(caption_text.strip()) < 2:
-        return {"title": "UNKNOWN", "year": "", "language": ""}
+        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": ""}
     
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -475,45 +475,36 @@ async def get_movie_name_from_caption(caption_text):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🎯 SUPER STRICT PROMPT
-        prompt = f"""You are a file caption parser. Extract the REAL movie/show/anime name.
+        # 🎯 BEST OF BOTH WORLDS PROMPT: Bada prompt + Naya feature
+        prompt = f"""You are a file caption parser. Extract the REAL movie/show/anime name, year, language, and extra info.
 
 CAPTION: "{caption_text}"
 
-STRICT RULES:
-1. Title is ALWAYS at the BEGINNING of caption
-2. STOP extracting title when you hit ANY of these:
-   - Season/Episode: S01, S02, E01, [E01-06], Season 1, Episode
+STRICT RULES (VERY IMPORTANT):
+1. `title`: Extract ONLY the actual movie/show name. The name is usually at the BEGINNING.
+2. STOP extracting `title` when you see ANY of these:
+   - Season/Episode markers: S01, S02, S03, E01, [E01-06], Season 1
    - Year: (2017), 2022
-   - Quality: 480p, 720p, 1080p, 2160p, 4K
-   - Tags: COMBiNED, COMPLETE, PROPER, REPACK, REMUX
-   - Source: WEBRip, WEB-DL, BluRay, HDRip, DVDRip, NF, AMZN, DSNP
-   - Codec: x264, x265, HEVC, H.264, H.265, AVC, 10bit
-   - Audio: AAC, DDP, DDP5.1, DDP2.0, DTS, Atmos, FLAC, Multi Audio, Dual Audio
-   - Language tags: Hindi, English, Japanese, Tamil, Telugu, Korean (when used as label)
-   - Subtitle: ESub, MSub, Eng Sub
-   - Uploader: KEИ, Saon, Ember, TW4ALL, @channelname, !!
-   - Brackets with tech info: [Hindi + English], [Japanese DDP 2.0]
-3. File extension (.mkv .mp4 .avi) is NEVER part of title
-4. Dots and underscores between words = spaces (e.g. "RRR.2022" → title is "RRR")
-5. Keep special characters if part of real title (e.g. "I'm", "!", ":", "-")
+   - Quality tags: 480p, 720p, 1080p, 2160p, 4K, HDRip, WebRip, WEB-DL, BluRay
+   - Language words used as tags: Hindi, English, Tamil, Telugu, Dual Audio
+   - Technical terms: x264, x265, HEVC, AAC, ESub, mkv, mp4
+   - Tags & Uploaders: COMBiNED, COMPLETE, KEИ, Saon, Ember, TW4ALL, @channelname
+3. `extra_info`: Extract Season, Episode ranges, and batch tags (e.g., "S01", "S02", "[E01-06]", "COMBiNED"). Combine them cleanly like "S01 [E01-06] COMBiNED". If none, leave blank.
+4. `language`: Extract the exact audio information written in the caption (e.g., "Hindi + English + Japanese", "Dual Audio", "Gujarati"). If none, leave blank.
+5. `year`: Extract the 4-digit year if present. Otherwise leave blank.
 
 EXAMPLES:
-- "I'm the Evil Lord of an Intergalactic Empire! S01 COMBiNED 1080p WEBRip x265 HEVC [Japanese DDP 2.0] ESub KEИ !! Ember.mkv" → title: "I'm the Evil Lord of an Intergalactic Empire!"
-- "Campfire Cooking in Another World with My Absurd Skill S02 [E01-06] COMBiNED 1080p WEB-DL x265 HEVC Multi Audio ESub KEИ !! [TW4ALL].mkv" → title: "Campfire Cooking in Another World with My Absurd Skill"
-- "BAKI DOU The Invincible Samurai S01 [E08-13] COMBiNED 1080p NF WEB-DL HEVC [Hindi + English + Japanese] DDP5.1 ESub KEИ !! Saon.mkv" → title: "BAKI DOU The Invincible Samurai"
-- "Commando 2 (2017) 480p Hindi WebRip Bollywood Movie" → title: "Commando 2"
-- "RRR.2022.1080p.NF.WEB-DL.Hindi" → title: "RRR"
-- "Money Heist S01E01 720p NF WEB-DL" → title: "Money Heist"
-- "The.Batman.2022.1080p.BluRay.x264" → title: "The Batman"
-- "Jawan 2023 Hindi 720p WebRip" → title: "Jawan"
-- "Kantara (2022) Hindi Dubbed 1080p" → title: "Kantara"
-- "Squid.Game.S02E01.1080p.NF.WEB-DL" → title: "Squid Game"
+- "I'm the Evil Lord of an Intergalactic Empire! S01 COMBiNED 1080p WEBRip x265 HEVC [Japanese DDP 2.0] ESub KEИ !! Ember.mkv"
+  -> {{"title": "I'm the Evil Lord of an Intergalactic Empire!", "year": "", "language": "Japanese", "extra_info": "S01 COMBiNED"}}
+- "Campfire Cooking in Another World with My Absurd Skill S02 [E01-06] COMBiNED 1080p WEB-DL x265 HEVC Multi Audio ESub"
+  -> {{"title": "Campfire Cooking in Another World with My Absurd Skill", "year": "", "language": "Multi Audio", "extra_info": "S02 [E01-06] COMBiNED"}}
+- "BAKI DOU The Invincible Samurai S01 [E08-13] COMBiNED 1080p NF WEB-DL HEVC [Hindi + English + Japanese] DDP5.1 ESub"
+  -> {{"title": "BAKI DOU The Invincible Samurai", "year": "", "language": "Hindi + English + Japanese", "extra_info": "S01 [E08-13] COMBiNED"}}
+- "Pushpa The Rise 2021 1080p Hindi"
+  -> {{"title": "Pushpa The Rise", "year": "2021", "language": "Hindi", "extra_info": ""}}
 
-RESPOND ONLY THIS JSON, nothing else:
-{{"title": "EXACT MOVIE/SHOW/ANIME NAME", "year": "YYYY or empty", "language": "Exact audio text from caption"}}
-
-For language, extract the exact audio information written in the caption (e.g., "Dual Audio", "Hindi ORG - English", "Gujarati"). If none is found, leave it blank."""
+RESPOND WITH ONLY THIS JSON (no extra text):
+{{"title": "EXACT MOVIE NAME ONLY", "year": "YYYY", "language": "Exact audio text", "extra_info": "Season/Ep/Combined info"}}"""
 
         response = await run_async(model.generate_content, prompt)
         
@@ -539,15 +530,15 @@ For language, extract the exact audio information written in the caption (e.g., 
         title = data.get("title", "").strip()
         year = data.get("year", "").strip()
         language = data.get("language", "").strip()
+        extra_info = data.get("extra_info", "").strip()
         
-        # 🧹 EXTRA CLEANING (Safety net)
-        # Remove any remaining junk that Gemini might have included
+        # 🧹 EXTRA CLEANING (Safety net) - Apka purana logic barkarar hai!
         junk_words = [
             'hindi', 'english', 'tamil', 'telugu', 'kannada', 'malayalam',
             'dubbed', 'webrip', 'web-dl', 'bluray', 'hdrip', 'dvdrip',
             'bollywood', 'hollywood', 'south', 'movie', 'film',
             '480p', '720p', '1080p', '2160p', '4k',
-            'x264', 'x265', 'hevc', 'aac', 'mkv', 'mp4', 'esub'
+            'x264', 'x265', 'hevc', 'aac', 'mkv', 'mp4', 'esub', 'combined'
         ]
         
         title_words = title.split()
@@ -560,14 +551,16 @@ For language, extract the exact audio information written in the caption (e.g., 
         
         title = ' '.join(clean_words).strip()
         
-        # Remove trailing year if still present
+        # Remove trailing year or S01/Season if AI missed it
         title = re.sub(r'\s*\(?\d{4}\)?$', '', title).strip()
+        title = re.sub(r'(?i)\s+S\d{2}.*', '', title).strip()
+        title = re.sub(r'(?i)\s+Season\s*\d+.*', '', title).strip()
         
         if not title or len(title) < 2:
             return await fallback_extraction(caption_text)
         
-        logger.info(f"✅ Final: Title='{title}', Year='{year}', Lang='{language}'")
-        return {"title": title, "year": year, "language": language}
+        logger.info(f"✅ Final: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}'")
+        return {"title": title, "year": year, "language": language, "extra_info": extra_info}
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
@@ -3854,16 +3847,20 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 poster_url, imdb_id = None, None
                 genre, rating, plot = "Unknown", "N/A", "Auto Added"
                 
-                # Category guess karo language se
+                # 🧠 Smart Category Guessing (Updated)
                 lang_lower = movie_lang.lower() if movie_lang else ""
-                if any(x in lang_lower for x in ['hindi', 'bollywood']):
+                title_extra_lower = (title + " " + movie_extra).lower()
+                
+                if 'japanese' in lang_lower or 'anime' in lang_lower:
+                    category = "Anime"
+                elif any(x in title_extra_lower for x in ['s0', 's1', 'season', 'episode', 'e0', 'e1']):
+                    category = "Web Series"
+                elif any(x in lang_lower for x in ['hindi', 'bollywood']):
                     category = "Bollywood"
                 elif any(x in lang_lower for x in ['tamil', 'telugu', 'kannada', 'malayalam']):
                     category = "South"
                 elif any(x in lang_lower for x in ['english', 'hollywood']):
                     category = "Hollywood"
-                elif any(x in lang_lower for x in ['korean', 'japanese', 'anime']):
-                    category = "Anime"
                 else:
                     category = "Movies"
 
