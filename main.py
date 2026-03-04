@@ -511,7 +511,7 @@ EXAMPLES:
 - "Squid.Game.S02E01.1080p.NF.WEB-DL" → title: "Squid Game"
 
 RESPOND ONLY THIS JSON, nothing else:
-{{"title": "EXACT MOVIE/SHOW/ANIME NAME", "year": "YYYY or empty", "language": "audio/language info from caption or empty"}}"""
+{{"title": "EXACT MOVIE/SHOW/ANIME NAME", "year": "YYYY or empty", "language": "Exact audio text from caption"}}
 
 For language, extract the exact audio information written in the caption (e.g., "Dual Audio", "Hindi ORG - English", "Gujarati"). If none is found, leave it blank."""
 
