@@ -552,9 +552,20 @@ RESPOND WITH ONLY THIS JSON (no extra text):
         title = ' '.join(clean_words).strip()
         
         # Remove trailing year or S01/Season if AI missed it
-        title = re.sub(r'\s*\(?\d{4}\)?$', '', title).strip()
-        title = re.sub(r'(?i)\s+S\d{2}.*', '', title).strip()
-        title = re.sub(r'(?i)\s+Season\s*\d+.*', '', title).strip()
+        # Remove trailing year
+title = re.sub(r'\s*\(?\d{4}\)?$', '', title).strip()
+
+# ✅ FIX: Agar AI ne S01/Season ko title me chod diya, to PEHLE capture karo extra_info me
+if not extra_info:
+    season_match = re.search(r'(?i)\s+(S\d{1,2}[\s\S]*)', title)
+    if season_match:
+        extra_info = season_match.group(1).strip()
+        # Clean extra_info se bhi junk hatao
+        extra_info = re.sub(r'(?i)\b(1080p|720p|480p|webrip|web-dl|bluray|hevc|x265|x264|aac|esub|mkv|mp4)\b', '', extra_info).strip()
+
+# Ab title se season info hatao (ye pehle se tha)
+title = re.sub(r'(?i)\s+S\d{1,2}.*', '', title).strip()
+title = re.sub(r'(?i)\s+Season\s*\d+.*', '', title).strip()
         
         if not title or len(title) < 2:
             return await fallback_extraction(caption_text)
@@ -3828,6 +3839,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Display what we found
             info_parts = [f"🎬 **{movie_name}**"]
             if movie_year: info_parts.append(f"📅 {movie_year}")
+            if movie_extra: info_parts.append(f"📌 {movie_extra}")  # ✅ NAYA: Extra info alag dikhega
             if movie_lang: info_parts.append(f"🔊 {movie_lang}")
             
             await status_msg.edit_text(
