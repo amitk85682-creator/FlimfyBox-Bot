@@ -576,7 +576,7 @@ For language, extract the exact audio information written in the caption (e.g., 
 
 async def fallback_extraction(caption_text):
     """
-    🛡️ SMART FALLBACK: Regex-based extraction when AI fails
+    SMART FALLBACK: Regex-based extraction when AI fails
     """
     try:
         text = caption_text.strip()
