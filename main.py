@@ -4086,9 +4086,9 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     channel_caption = (
         f"🎬 <b>{m_title}</b>\n\n"
         f"➖➖➖➖➖➖➖\n"
-        f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨
+        f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨</b>\n"
         f"👇🏻👇🏻\n"
-        f"</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
+        f"<a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
         f"➖➖➖➖➖➖➖\n"
         f"<b>👇 Download Below</b>"
     )
