@@ -466,6 +466,9 @@ async def get_movie_name_from_caption(caption_text):
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": ""}
     
+    # 🧠 HACK: AI ko confuse karne wale words ko pehle hi seedha kar do
+    clean_caption_for_ai = caption_text.replace("COMBiNED", "COMBINED").replace("KEИ", "KEN")
+
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: 
@@ -475,33 +478,23 @@ async def get_movie_name_from_caption(caption_text):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🎯 BEST OF BOTH WORLDS PROMPT: Bada prompt + Naya feature
+        # 🎯 BEST OF BOTH WORLDS PROMPT
         prompt = f"""You are a file caption parser. Extract the REAL movie/show/anime name, year, language, and extra info.
 
-CAPTION: "{caption_text}"
+CAPTION: "{clean_caption_for_ai}"
 
 STRICT RULES (VERY IMPORTANT):
-1. `title`: Extract ONLY the actual movie/show name. The name is usually at the BEGINNING.
-2. STOP extracting `title` when you see ANY of these:
-   - Season/Episode markers: S01, S02, S03, E01, [E01-06], Season 1
-   - Year: (2017), 2022
-   - Quality tags: 480p, 720p, 1080p, 2160p, 4K, HDRip, WebRip, WEB-DL, BluRay
-   - Language words used as tags: Hindi, English, Tamil, Telugu, Dual Audio
-   - Technical terms: x264, x265, HEVC, AAC, ESub, mkv, mp4
-   - Tags & Uploaders: COMBiNED, COMPLETE, KEИ, Saon, Ember, TW4ALL, @channelname
-3. `extra_info`: Extract Season, Episode ranges, and batch tags (e.g., "S01", "S02", "[E01-06]", "COMBiNED"). Combine them cleanly like "S01 [E01-06] COMBiNED". If none, leave blank.
-4. `language`: Extract the exact audio information written in the caption (e.g., "Hindi + English + Japanese", "Dual Audio", "Gujarati"). If none, leave blank.
-5. `year`: Extract the 4-digit year if present. Otherwise leave blank.
+1. `title`: Extract ONLY the actual movie/show name. You MUST STOP extracting before words like "COMBINED", "COMPLETE", or Season/Episode tags. "COMBINED" is NEVER part of the title.
+2. `extra_info`: Extract Season, Episode ranges, and batch tags like "COMBINED" or "COMPLETE". Combine them cleanly like "S01 [E01-06] COMBINED". If none, leave blank.
+3. `language`: Extract the exact audio information written in the caption (e.g., "Hindi + English + Japanese", "Dual Audio"). If none, leave blank.
+4. `year`: Extract the 4-digit year if present. Otherwise leave blank.
+5. IGNORE Quality/Tech (1080p, 720p, x264, x265, HEVC), Source (WEB-DL), Audio Tech (DDP2.0), Uploaders (KEN, Saon, !!).
 
 EXAMPLES:
-- "I'm the Evil Lord of an Intergalactic Empire! S01 COMBiNED 1080p WEBRip x265 HEVC [Japanese DDP 2.0] ESub KEИ !! Ember.mkv"
-  -> {{"title": "I'm the Evil Lord of an Intergalactic Empire!", "year": "", "language": "Japanese", "extra_info": "S01 COMBiNED"}}
-- "Campfire Cooking in Another World with My Absurd Skill S02 [E01-06] COMBiNED 1080p WEB-DL x265 HEVC Multi Audio ESub"
-  -> {{"title": "Campfire Cooking in Another World with My Absurd Skill", "year": "", "language": "Multi Audio", "extra_info": "S02 [E01-06] COMBiNED"}}
-- "BAKI DOU The Invincible Samurai S01 [E08-13] COMBiNED 1080p NF WEB-DL HEVC [Hindi + English + Japanese] DDP5.1 ESub"
-  -> {{"title": "BAKI DOU The Invincible Samurai", "year": "", "language": "Hindi + English + Japanese", "extra_info": "S01 [E08-13] COMBiNED"}}
-- "Pushpa The Rise 2021 1080p Hindi"
-  -> {{"title": "Pushpa The Rise", "year": "2021", "language": "Hindi", "extra_info": ""}}
+- "Spy X Family S03 COMBINED 1080p AMZN WEB-DL [Hindi + English + Japanese] DDP2.0 ESub"
+  -> {{"title": "Spy X Family", "year": "", "language": "Hindi + English + Japanese", "extra_info": "S03 COMBINED"}}
+- "Campfire Cooking in Another World S02 [E01-06] COMBINED 1080p WEB-DL Multi Audio"
+  -> {{"title": "Campfire Cooking in Another World", "year": "", "language": "Multi Audio", "extra_info": "S02 [E01-06] COMBINED"}}
 
 RESPOND WITH ONLY THIS JSON (no extra text):
 {{"title": "EXACT MOVIE NAME ONLY", "year": "YYYY", "language": "Exact audio text", "extra_info": "Season/Ep/Combined info"}}"""
@@ -532,13 +525,21 @@ RESPOND WITH ONLY THIS JSON (no extra text):
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
         
-        # 🧹 EXTRA CLEANING (Safety net) - Apka purana logic barkarar hai!
+        # 🧹 FORCEFUL CLEANING (Safety Net: Agar AI fir bhi galti kare to Python usko kaat dega)
+        title = re.sub(r'(?i)\s+S\d+.*', '', title).strip()
+        title = re.sub(r'(?i)\s+Season\s*\d+.*', '', title).strip()
+        title = re.sub(r'(?i)\s*\[?E\d+.*', '', title).strip()
+        title = re.sub(r'(?i)\s+COMBINED.*', '', title).strip()
+        title = re.sub(r'(?i)\s+COMBiNED.*', '', title).strip()
+        title = re.sub(r'(?i)\s+COMPLETE.*', '', title).strip()
+
+        # Purana junk words logic
         junk_words = [
             'hindi', 'english', 'tamil', 'telugu', 'kannada', 'malayalam',
             'dubbed', 'webrip', 'web-dl', 'bluray', 'hdrip', 'dvdrip',
             'bollywood', 'hollywood', 'south', 'movie', 'film',
             '480p', '720p', '1080p', '2160p', '4k',
-            'x264', 'x265', 'hevc', 'aac', 'mkv', 'mp4', 'esub', 'combined'
+            'x264', 'x265', 'hevc', 'aac', 'mkv', 'mp4', 'esub'
         ]
         
         title_words = title.split()
@@ -547,28 +548,14 @@ RESPOND WITH ONLY THIS JSON (no extra text):
             if word.lower() not in junk_words:
                 clean_words.append(word)
             else:
-                break  # Junk word aate hi stop karo
+                break
         
         title = ' '.join(clean_words).strip()
-        
-                # Remove trailing year
         title = re.sub(r'\s*\(?\d{4}\)?$', '', title).strip()
-
-        # ✅ FIX: Agar AI ne S01/Season ko title me chod diya, to PEHLE capture karo extra_info me
-        if not extra_info:
-            season_match = re.search(r'(?i)\s+(S\d{1,2}[\s\S]*)', title)
-            if season_match:
-                extra_info = season_match.group(1).strip()
-                # Clean extra_info se bhi junk hatao
-                extra_info = re.sub(r'(?i)\b(1080p|720p|480p|webrip|web-dl|bluray|hevc|x265|x264|aac|esub|mkv|mp4)\b', '', extra_info).strip()
-
-        # Ab title se season info hatao
-        title = re.sub(r'(?i)\s+S\d{1,2}.*', '', title).strip()
-        title = re.sub(r'(?i)\s+Season\s*\d+.*', '', title).strip()
-
+        
         if not title or len(title) < 2:
             return await fallback_extraction(caption_text)
-
+        
         logger.info(f"✅ Final: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}'")
         return {"title": title, "year": year, "language": language, "extra_info": extra_info}
 
