@@ -461,80 +461,74 @@ async def check_rate_limit(user_id):
 
 async def get_movie_name_from_caption(caption_text):
     """
-    🎯 AI ko Season/Episode tags se title alag karna sikhao
+    🎯 FULLY AI-POWERED EXTRACTION (Super Smart V2)
+    Bina kisi hardcoded list ke Telegram filenames ko samajhta hai.
+    Sath hi Emojis, Weird Fonts, aur Channel Tags ko bhi clean karta hai.
     """
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": ""}
     
-    # 🧠 Pre-clean
-    clean_caption_for_ai = caption_text.replace("COMBiNED", "COMBINED").replace("KEИ", "KEN")
+    # Sirf file ka naam/pehli line lo taaki promo links AI ko confuse na karein
+    first_line = caption_text.split('\n')[0].strip()
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: 
             logger.error("❌ GEMINI_API_KEY missing!")
-            return await fallback_extraction(caption_text)
+            return await fallback_extraction(first_line)
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🎯 SUPER CLEAR PROMPT - Examples se sikhao
-        prompt = f"""You are an expert file caption parser. Extract movie/show name, year, language, and extra metadata.
+        # 🧠 SUPER SMART PROMPT WITH NEW EXAMPLES & RULES
+        prompt = f"""You are an incredibly smart parser for Telegram movie/show filenames.
+Telegram filenames are extremely messy. They use dots (.) or underscores (_) instead of spaces, have weird capitalizations, emojis, channel tags, and special fonts.
 
-CAPTION: "{clean_caption_for_ai}"
+FILENAME/CAPTION: "{first_line}"
 
-🚨 CRITICAL RULES:
-1. **title**: Extract ONLY the show/movie name. STOP IMMEDIATELY when you see:
-   - Season markers: S01, S02, S03, S1, S2, Season 1, etc.
-   - Episode markers: E01, E02, Ep01, [E01-12], etc.
-   - Tags: COMBINED, COMPLETE, BATCH, etc.
-   
-2. **extra_info**: Put Season/Episode/Tags here. Examples:
-   - "S01 COMBINED"
-   - "S02 [E01-12]"
-   - "Season 3 COMPLETE"
-   
-3. **language**: Extract ONLY audio languages (Hindi, English, Multi Audio, Dual Audio, etc.)
+Extract the data into JSON with these exact keys:
+1. "title": The clean, pure name of the movie or show. 
+   - Convert all dots (.) and underscores (_) to spaces.
+   - Remove any emojis (e.g., 🎬, 🔥).
+   - Remove channel tags or usernames (e.g., {{@Royal_Backup2}}, @channelname).
+   - Normalize special/stylish fonts to plain English (e.g., 'Sᴜʙᴇᴅᴀᴀʀ' -> 'Subedaar').
+   - STOP capturing the title before you hit the year, quality (720p), season info (S01), or languages.
+2. "year": The 4-digit release year if present. If not, leave blank "".
+3. "language": Detect ANY audio languages mentioned (e.g., "Punjabi", "Hindi + Telugu", "English", "Multi Audio", "Hindi-Japanese"). Do not guess; only extract what is in the text.
+4. "extra_info": Extract ANY tags indicating a Web Series, Batch, Episode ranges, or completeness. 
+   - 🚨 CRITICAL RULE: Normalize weird spellings like "COMBiNED" or "CoMbInEd" to pure "COMBINED". 
+   - Understand that "COMBINED", "COMPLETE", or "BATCH" means the file contains full seasons or multiple episodes.
+   - Examples of clean extraction: "S01 COMBINED", "Season 1-3 COMPLETE", "S02 E21-E41", "UNCUT", "BATCH". 
+   - Ignore quality (1080p, 4K), codecs (x264, HEVC, AMZN, WEB-DL), and uploader names (like HDHub4u, BashAFK).
 
-4. **year**: 4-digit year if present, else blank.
+EXAMPLES TO LEARN FROM:
 
-5. **IGNORE completely**: Quality (720p, 1080p, 4K), Codecs (x265, HEVC, x264), Source (WEBRip, WEB-DL, BluRay), File format (mkv, mp4), Uploaders, Audio codecs (DDP, AAC).
+Input: "Moh.2022.720p.Punjabi.WEB-DL.5.1.ESub.x264-HDHub4u.M.mkv"
+Output: {{"title": "Moh", "year": "2022", "language": "Punjabi", "extra_info": ""}}
 
----
+Input: "Maa_Nanna_Super_Hero_2024_1080p_10bit_AMZN_WEBRip_Hindi_Telugu_DDP5.mkv"
+Output: {{"title": "Maa Nanna Super Hero", "year": "2024", "language": "Hindi + Telugu", "extra_info": ""}}
 
-📚 EXAMPLES (Learn from these):
+Input: "Bleach.S02.E21-E41.480p.HEVC.bluray.Hindi-Japanese.H.265.ESub ~ BashAFK.mkv"
+Output: {{"title": "Bleach", "year": "", "language": "Hindi + Japanese", "extra_info": "S02 E21-E41"}}
 
-INPUT: "The Exorcist S01 COMBINED 720p 10bit AMZN WEBRip HEVC x265 English mkv"
-OUTPUT: {{"title": "The Exorcist", "year": "", "language": "English", "extra_info": "S01 COMBINED"}}
+Input: "🎬 Sᴜʙᴇᴅᴀᴀʀ (2026) Bollywood Hindi Full Movie HD ESub ! 480p 720p & 1080p #1792 !"
+Output: {{"title": "Subedaar", "year": "2026", "language": "Hindi", "extra_info": ""}}
 
-INPUT: "Spy X Family S03 COMBINED 1080p AMZN WEB-DL [Hindi + English + Japanese] DDP2.0 ESub"
-OUTPUT: {{"title": "Spy X Family", "year": "", "language": "Hindi + English + Japanese", "extra_info": "S03 COMBINED"}}
+Input: "{{@Royal_Backup2}} Hey_Sinamika_2022_720p_UNCUT_NF_WEB_DL_Dual_Audio_Hindi_Tamil_x265.mkv"
+Output: {{"title": "Hey Sinamika", "year": "2022", "language": "Dual Audio Hindi + Tamil", "extra_info": "UNCUT"}}
 
-INPUT: "Campfire Cooking in Another World S02 [E01-06] COMBINED 1080p WEB-DL Multi Audio"
-OUTPUT: {{"title": "Campfire Cooking in Another World", "year": "", "language": "Multi Audio", "extra_info": "S02 [E01-06] COMBINED"}}
+Input: "The Exorcist S01 COMBiNED 720p 10bit AMZN WEBRip HEVC x265 English mkv"
+Output: {{"title": "The Exorcist", "year": "", "language": "English", "extra_info": "S01 COMBINED"}}
 
-INPUT: "Breaking Bad S05 COMPLETE 720p BluRay x264 English"
-OUTPUT: {{"title": "Breaking Bad", "year": "", "language": "English", "extra_info": "S05 COMPLETE"}}
-
-INPUT: "Inception 2010 1080p BluRay Hindi + English"
-OUTPUT: {{"title": "Inception", "year": "2010", "language": "Hindi + English", "extra_info": ""}}
-
-INPUT: "Demon Slayer Movie 2021 WEB-DL Japanese"
-OUTPUT: {{"title": "Demon Slayer Movie", "year": "2021", "language": "Japanese", "extra_info": ""}}
-
----
-
-NOW PARSE THIS CAPTION. Respond with ONLY JSON (no markdown, no explanation):
-{{"title": "", "year": "", "language": "", "extra_info": ""}}"""
+Now process the provided FILENAME/CAPTION. Return ONLY a valid JSON object. No markdown, no explanations."""
 
         response = await run_async(model.generate_content, prompt)
         
         if not response or not response.text:
-            logger.warning("Gemini empty response")
-            return await fallback_extraction(caption_text)
+            return await fallback_extraction(first_line)
         
         text = response.text.strip()
-        logger.info(f"🤖 Gemini Raw Response: {text}")
         
         # Clean JSON extraction
         text = text.replace("```json", "").replace("```", "").strip()
@@ -546,67 +540,18 @@ NOW PARSE THIS CAPTION. Respond with ONLY JSON (no markdown, no explanation):
             data = json.loads(text)
         except json.JSONDecodeError:
             logger.warning(f"⚠️ JSON parse failed: {text}")
-            return await fallback_extraction(caption_text)
+            return await fallback_extraction(first_line)
         
+        # AI par pura bharosa
         title = data.get("title", "").strip()
         year = data.get("year", "").strip()
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
         
-        # 🛡️ ULTIMATE SAFETY NET - Force clean title even if AI fails
-        # Remove Season patterns (S01, S02, S1, S2, Season 1, etc.)
-        title = re.sub(r'(?i)\s+S\d+\s*.*$', '', title).strip()
-        title = re.sub(r'(?i)\s+Season\s*\d+.*$', '', title).strip()
-        
-        # Remove Episode patterns
-        title = re.sub(r'(?i)\s*\[?E\d+.*$', '', title).strip()
-        title = re.sub(r'(?i)\s+Ep\s*\d+.*$', '', title).strip()
-        
-        # Remove batch tags
-        title = re.sub(r'(?i)\s+(COMBINED|COMPLETE|BATCH).*$', '', title).strip()
-        
-        # Remove tech/quality junk
-        junk_patterns = [
-            r'(?i)\s+\d{3,4}p\b.*$',  # 720p, 1080p onwards
-            r'(?i)\s+(WEB-?DL|WEBRip|BluRay|HDTV).*$',
-            r'(?i)\s+(x264|x265|HEVC|AVC).*$',
-            r'(?i)\s+\d+bit\b.*$',  # 10bit
-        ]
-        for pattern in junk_patterns:
-            title = re.sub(pattern, '', title).strip()
-        
-        # Remove language words from title if they slipped in
-        junk_words = [
-            'hindi', 'english', 'tamil', 'telugu', 'dubbed', 
-            'dual', 'multi', 'audio', 'webrip', 'web-dl', 
-            'bluray', '480p', '720p', '1080p', '2160p',
-            'x264', 'x265', 'hevc', 'mkv', 'mp4', 'avi'
-        ]
-        
-        title_words = title.split()
-        clean_words = []
-        for word in title_words:
-            if word.lower() not in junk_words:
-                clean_words.append(word)
-            else:
-                break  # Stop at first junk word
-        
-        title = ' '.join(clean_words).strip()
-        
-        # Remove trailing year from title (it goes in 'year' field)
-        title = re.sub(r'\s*\(?\d{4}\)?$', '', title).strip()
-        
-        # Final validation
         if not title or len(title) < 2:
-            logger.warning(f"⚠️ Title too short after cleaning: '{title}'")
-            return await fallback_extraction(caption_text)
+            return await fallback_extraction(first_line)
         
-        logger.info(f"✅ FINAL RESULT:")
-        logger.info(f"   📌 Title: '{title}'")
-        logger.info(f"   📅 Year: '{year}'")
-        logger.info(f"   🔊 Language: '{language}'")
-        logger.info(f"   📦 Extra: '{extra_info}'")
-        
+        logger.info(f"🤖 AI SMART RESULT: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}'")
         return {
             "title": title, 
             "year": year, 
@@ -616,7 +561,7 @@ NOW PARSE THIS CAPTION. Respond with ONLY JSON (no markdown, no explanation):
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
-        return await fallback_extraction(caption_text)
+        return await fallback_extraction(first_line)
 
 
 async def fallback_extraction(caption_text):
