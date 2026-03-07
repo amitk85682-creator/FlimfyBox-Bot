@@ -3024,45 +3024,53 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # =======================================================
     # 🤖 NEW: AUTO POST LOGIC (Fixed Thumbnail Error)
     # =======================================================
+    # =======================================================
+    # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Smart HD Poster)
+    # =======================================================
     if query.data.startswith("autopost_"):
         if update.effective_user.id != ADMIN_USER_ID:
             await query.answer("❌ Admin only!", show_alert=True)
             return
 
         movie_id = int(query.data.split("_")[1])
-        
-        # Bot ki memory se Video wala poster nikalo (Ye ek Thumbnail ID hai)
-        thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
+        await query.answer("⏳ Preparing HD Poster and posting...", show_alert=False)
 
-        if not thumb_file_id:
-            await query.answer("❌ File me koi thumbnail (poster) nahi mila! Kripya 'Manual Post' use karein.", show_alert=True)
-            return
-            
-        await query.answer("⏳ Converting thumbnail to photo and posting...", show_alert=False)
-
-        # ---------------------------------------------------------
-        # 🛑 FIX: Telegram thumbnail ID ko direct photo ki tarah accept nahi karta.
-        # Isliye hum pehle use bot ki memory me download karke 'Photo' banayenge.
-        # ---------------------------------------------------------
-        photo_to_send = None
-        try:
-            tg_file = await context.bot.get_file(thumb_file_id)
-            photo_byte_array = await tg_file.download_as_bytearray()
-            photo_to_send = bytes(photo_byte_array)  # Ye ab ek proper image ban chuki hai
-        except Exception as e:
-            logger.error(f"Thumbnail download failed: {e}")
-            photo_to_send = DEFAULT_POSTER # Fail hone par backup poster
-            
-        # 1. Database se sirf Title nikalo
+        # 1. Database se Title aur TMDB ka Auto-Fetched HD Poster nikalo
         conn = get_db_connection()
         if not conn: return
         cur = conn.cursor()
-        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+        cur.execute("SELECT title, poster_url FROM movies WHERE id = %s", (movie_id,))
         res = cur.fetchone()
         cur.close()
         close_db_connection(conn)
 
         m_title = res[0] if res else "Movie"
+        poster_url = res[1] if res and len(res) > 1 else None
+
+        photo_to_send = None
+
+        # 🚀 STEP A: TMDB se HD Poster download karo (Ye sabse pehle chalega)
+        if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
+            try:
+                io_obj = await get_poster_bytes(poster_url)
+                if io_obj:
+                    photo_to_send = io_obj.getvalue()
+            except Exception as e:
+                logger.error(f"HD Poster download failed: {e}")
+
+        # ⚠️ STEP B: Agar TMDB se fail ho jaye, sirf tabhi Video ka Thumbnail use karo (Backup)
+        if not photo_to_send:
+            thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
+            if thumb_file_id:
+                try:
+                    tg_file = await context.bot.get_file(thumb_file_id)
+                    photo_to_send = bytes(await tg_file.download_as_bytearray())
+                except Exception as e:
+                    logger.error(f"Thumbnail download failed: {e}")
+
+        # 🛑 STEP C: Agar dono fail ho gaye, to DEFAULT POSTER laga do
+        if not photo_to_send:
+            photo_to_send = DEFAULT_POSTER
 
         # 2. 🎯 EXACT CLEAN CAPTION BANAO
         channel_caption = (
@@ -3106,7 +3114,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 chat_id = int(chat_id_str)
                 
-                # Agar pehle channel me upload ho gaya, to wahi ID baki me use karo (Fast Posting)
+                # Fast posting ke liye cache use karo
                 current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
 
                 sent_msg = await context.bot.send_photo(
@@ -3134,7 +3142,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 last_error = str(e)
 
         # 5. Message Update and Error Display
-        result_msg = f"{query.message.text}\n\n✅ <b>Auto-Posted (File Poster) to {sent_count} channels!</b>"
+        result_msg = f"{query.message.text}\n\n✅ <b>Auto-Posted (HD TMDB Poster) to {sent_count} channels!</b>"
         
         if sent_count == 0 and last_error:
             result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
@@ -4195,13 +4203,13 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Backups: {channels_count} channels"
     )
 
-    # 👇 NAYA: File se nikale gaye poster ko bot memory me save karein
+    # 👇 NAYA: File se nikale gaye poster ko bot memory me save karein (Backup ke liye)
     extracted_thumb = BATCH_SESSION.get('extracted_thumb')
     if extracted_thumb:
         context.bot_data[f"auto_thumb_{movie_id}"] = extracted_thumb
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Auto Post (From File/Video)", callback_data=f"autopost_{movie_id}")],
+        [InlineKeyboardButton("🤖 Auto Post (HD TMDB Poster)", callback_data=f"autopost_{movie_id}")],
         [InlineKeyboardButton("📢 Manual Post (Send Poster)", callback_data=f"askposter_{movie_id}")]
     ])
 
