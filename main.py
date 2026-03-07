@@ -134,7 +134,7 @@ TOPIC_MAPPING = {
     22: ['anime', 'cartoon', 'animation'],                                  # Anime Topic (ID: 90)
     
     # Default Topic (Agar kuch match na ho to yahan jayega)
-    100: ['default'] 
+    1: ['default'] 
 }
 # =================================================
 
@@ -3048,14 +3048,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         photo_to_send = None
 
-        # 🚀 STEP A: TMDB se HD Poster download karo (Ye sabse pehle chalega)
+        # 🚀 STEP A: TMDB HD Poster DIRECT URL (No Download)
         if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
-            try:
-                io_obj = await get_poster_bytes(poster_url)
-                if io_obj:
-                    photo_to_send = io_obj.getvalue()
-            except Exception as e:
-                logger.error(f"HD Poster download failed: {e}")
+            photo_to_send = poster_url  # 🚀 DIRECT LINK PASS KIYA!
 
         # ⚠️ STEP B: Agar TMDB se fail ho jaye, sirf tabhi Video ka Thumbnail use karo (Backup)
         if not photo_to_send:
@@ -4145,7 +4140,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 close_db_connection(conn)
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Batch complete + AI Aliases generate"""
+    """Batch complete + AI Aliases generate + Auto Post to Forum"""
     if not BATCH_SESSION.get('active'): 
         await update.message.reply_text("❌ Koi batch active nahi hai!")
         return
@@ -4157,7 +4152,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     movie_year = BATCH_SESSION.get('year', '')
     movie_category = BATCH_SESSION.get('category', '')
     
-    # 🎯 AI Aliases generate karo (Year aur Category pass kar rahe hain!)
+    # 🎯 AI Aliases generate karo
     aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
     
     alias_count = 0
@@ -4190,6 +4185,98 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         finally:
             close_db_connection(conn)
 
+    # =======================================================
+    # 🚀 NAYA MAGIC: AUTO POST TO FORUM GROUP ON /DONE
+    # =======================================================
+    forum_post_status = "⏳ Posting to Forum..."
+    conn = get_db_connection()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT genre, poster_url, description, rating FROM movies WHERE id = %s", (movie_id,))
+        res = cur.fetchone()
+        cur.close()
+        close_db_connection(conn)
+        
+        if res:
+            m_genre, m_poster, m_desc, m_rating = res
+            
+            # --- TOPIC SELECTION (1 is General) ---
+            topic_id = 1
+            cat_lower = str(movie_category or "").lower()
+            
+            for tid, keywords in TOPIC_MAPPING.items():
+                if any(k.lower() in cat_lower for k in keywords):
+                    topic_id = tid
+                    break
+                    
+            if topic_id == 1:
+                if "south" in cat_lower: topic_id = 20
+                elif "hollywood" in cat_lower: topic_id = 32
+                elif "bollywood" in cat_lower: topic_id = 16
+                elif "anime" in cat_lower: topic_id = 22
+                elif "series" in cat_lower: topic_id = 18
+                
+            # --- CAPTION ---
+            short_desc = (m_desc[:150] + "...") if m_desc else "Plot details unavailable."
+            forum_caption = (
+                f"🎬 **{movie_title} ({movie_year})**\n\n"
+                f"⭐️ **Rating:** {m_rating}/10\n"
+                f"🎭 **Genre:** {m_genre}\n"
+                f"🏷 **Category:** {movie_category}\n\n"
+                f"📜 **Story:** {short_desc}\n\n"
+                f"👇 **Click Below to Download** 👇"
+            )
+            
+            # --- KEYBOARD ---
+            link_param = f"movie_{movie_id}"
+            bot1 = "FlimfyBox_SearchBot"
+            bot2 = "urmoviebot"
+            bot3 = "FlimfyBox_Bot"
+            
+            forum_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
+                    InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot2}?start={link_param}")
+                ],
+                [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")]
+            ])
+            
+            # --- GET POSTER (TMDB HD DIRECT URL or Backup Thumbnail) ---
+            photo_to_send = None
+            if m_poster and m_poster != 'N/A' and m_poster.startswith('http'):
+                photo_to_send = m_poster  # 🚀 BINA DOWNLOAD KIYE DIRECT LINK PASS KIYA!
+                
+            if not photo_to_send:
+                thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
+                if thumb_file_id:
+                    try:
+                        tg_file = await context.bot.get_file(thumb_file_id)
+                        photo_to_send = bytes(await tg_file.download_as_bytearray())
+                    except Exception: pass
+                    
+            if not photo_to_send:
+                photo_to_send = DEFAULT_POSTER
+
+            try:
+                await context.bot.send_photo(
+                    chat_id=FORUM_GROUP_ID,
+                    message_thread_id=topic_id,
+                    photo=photo_to_send,
+                    caption=forum_caption,
+                    parse_mode='Markdown',
+                    reply_markup=forum_kb
+                )
+                forum_post_status = f"✅ Auto-Posted to Forum (Topic ID: {topic_id})"
+            except Exception as e:
+                logger.error(f"Auto Forum Post Error: {e}")
+                forum_post_status = f"⚠️ Forum Post Failed (Check Bot Rights/Topic ID)"
+        else:
+            forum_post_status = "⚠️ Movie info missing for Forum Post"
+
+    # =======================================================
+    # END OF FORUM POST LOGIC
+    # =======================================================
+
     # Final Report
     channels_count = len(get_storage_channels())
     report = (
@@ -4199,10 +4286,11 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🏷️ **Category:** {movie_category}\n"
         f"📂 **Files Saved:** {BATCH_SESSION.get('file_count', 0)}\n"
         f"🤖 **AI Aliases:** {alias_count}\n\n"
-        f"✅ Backups: {channels_count} channels"
+        f"✅ Backups: {channels_count} channels\n"
+        f"💬 {forum_post_status}"  # 👈 NAYA: Result dikhayega
     )
 
-    # 👇 NAYA: File se nikale gaye poster ko bot memory me save karein (Backup ke liye)
+    # Backup File Poster Memory
     extracted_thumb = BATCH_SESSION.get('extracted_thumb')
     if extracted_thumb:
         context.bot_data[f"auto_thumb_{movie_id}"] = extracted_thumb
@@ -4214,7 +4302,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
     
-    # Reset Session (extracted_thumb ko bhi clear karein)
+    # Reset Session
     BATCH_SESSION.update({
         'active': False, 'movie_id': None, 'movie_title': None,
         'file_count': 0, 'admin_id': None, 'year': '', 'category': '',
