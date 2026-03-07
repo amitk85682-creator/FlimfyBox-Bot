@@ -2998,6 +2998,102 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Failed! User ne sabhi bots block kar diye hain.", show_alert=True)
         return
     
+    # =======================================================
+    # 🤖 NEW: AUTO POST LOGIC (Extract Thumbnail from Video)
+    # =======================================================
+    if query.data.startswith("autopost_"):
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Admin only!", show_alert=True)
+            return
+
+        movie_id = int(query.data.split("_")[1])
+        
+        # Bot ki memory se Video wala poster nikalo
+        photo_to_send = context.bot_data.get(f"auto_thumb_{movie_id}")
+
+        if not photo_to_send:
+            # Agar kisi file me telegram ne thumbnail nahi banaya
+            await query.answer("❌ File me koi thumbnail (poster) nahi mila! Kripya 'Manual Post' use karein.", show_alert=True)
+            return
+            
+        await query.answer("⏳ Posting video's thumbnail to channels...", show_alert=False)
+
+        # 1. Database se sirf Title nikalo
+        conn = get_db_connection()
+        if not conn: return
+        cur = conn.cursor()
+        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+        res = cur.fetchone()
+        cur.close()
+        close_db_connection(conn)
+
+        m_title = res[0] if res else "Movie"
+
+        # 2. 🎯 EXACT CLEAN CAPTION BANAO
+        channel_caption = (
+            f"🎬 <b>{m_title}</b>\n\n"
+            f"➖➖➖➖➖➖➖\n"
+            f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨</b>\n"
+            f"👇🏻👇🏻\n"
+            f"<a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
+            f"➖➖➖➖➖➖➖\n"
+            f"<b>👇 Download Below</b>"
+        )
+
+        # 3. Download Buttons Banao
+        link_param = f"movie_{movie_id}"
+        bot1 = "FlimfyBox_SearchBot"
+        bot2 = "urmoviebot"
+        bot3 = "FlimfyBox_Bot"
+
+        post_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
+                InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")
+            ],
+            [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
+            [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+        ])
+
+        # 4. Channels me Post karo
+        channels_str = os.environ.get('BROADCAST_CHANNELS', '')
+        target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
+
+        if not target_channels:
+            await query.edit_message_text(f"{query.message.text}\n\n❌ Error: No BROADCAST_CHANNELS found.")
+            return
+
+        sent_count = 0
+
+        for chat_id_str in target_channels:
+            try:
+                chat_id = int(chat_id_str)
+                # Yahan Telegram File ki hi ID pass ho rahi hai, isliye turant post ho jayega
+                sent_msg = await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_to_send,
+                    caption=channel_caption,
+                    parse_mode='HTML',
+                    reply_markup=post_keyboard
+                )
+                
+                if sent_msg:
+                    save_post_to_db(
+                        movie_id, chat_id, sent_msg.message_id, bot3, 
+                        channel_caption, photo_to_send, "photo", post_keyboard.to_dict(), None, "movies"
+                    )
+                    sent_count += 1
+            except Exception as e:
+                logger.error(f"Auto-post failed for {chat_id_str}: {e}")
+
+        # 5. Message Update and Memory Cleanup
+        await query.edit_message_text(
+            f"{query.message.text}\n\n✅ <b>Auto-Posted (File Thumbnail) to {sent_count} channels!</b>", 
+            parse_mode='HTML'
+        )
+        context.bot_data.pop(f"auto_thumb_{movie_id}", None)
+        return
+    
     # === NEW: GENRE CALLBACK HANDLER ===
     if data.startswith(("genre_", "cancel_genre")):
         await handle_genre_selection(update, context)
@@ -3956,6 +4052,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
         file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
         
+        # 👇👇👇 NAYA CODE: File/Video se Poster (Thumbnail) nikalna 👇👇👇
+        if message.video and message.video.thumbnail:
+            BATCH_SESSION['extracted_thumb'] = message.video.thumbnail.file_id
+        elif message.document and message.document.thumbnail:
+            BATCH_SESSION['extracted_thumb'] = message.document.thumbnail.file_id
+        # 👆👆👆 ---------------------------------------------------- 👆👆👆
+
         file_size_str = get_readable_file_size(file_size)
         current_lang = BATCH_SESSION.get('language', '')
         label = generate_quality_label(file_name, file_size_str, current_lang)
@@ -4043,17 +4146,23 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Backups: {channels_count} channels"
     )
 
-    # 👇 NAYA: Post to Channel button
+    # 👇 NAYA: File se nikale gaye poster ko bot memory me save karein
+    extracted_thumb = BATCH_SESSION.get('extracted_thumb')
+    if extracted_thumb:
+        context.bot_data[f"auto_thumb_{movie_id}"] = extracted_thumb
+
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Post to Channel", callback_data=f"askposter_{movie_id}")]
+        [InlineKeyboardButton("🤖 Auto Post (From File/Video)", callback_data=f"autopost_{movie_id}")],
+        [InlineKeyboardButton("📢 Manual Post (Send Poster)", callback_data=f"askposter_{movie_id}")]
     ])
 
     await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
     
-    # Reset Session
+    # Reset Session (extracted_thumb ko bhi clear karein)
     BATCH_SESSION.update({
         'active': False, 'movie_id': None, 'movie_title': None,
-        'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
+        'file_count': 0, 'admin_id': None, 'year': '', 'category': '',
+        'extracted_thumb': None
     })
 
 async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
