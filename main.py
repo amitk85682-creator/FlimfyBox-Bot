@@ -2999,7 +2999,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # =======================================================
-    # 🤖 NEW: AUTO POST LOGIC (Extract Thumbnail from Video)
+    # 🤖 NEW: AUTO POST LOGIC (Extract Thumbnail with Fallback & Error Display)
     # =======================================================
     if query.data.startswith("autopost_"):
         if update.effective_user.id != ADMIN_USER_ID:
@@ -3012,7 +3012,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_to_send = context.bot_data.get(f"auto_thumb_{movie_id}")
 
         if not photo_to_send:
-            # Agar kisi file me telegram ne thumbnail nahi banaya
             await query.answer("❌ File me koi thumbnail (poster) nahi mila! Kripya 'Manual Post' use karein.", show_alert=True)
             return
             
@@ -3064,11 +3063,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         sent_count = 0
+        last_error = ""
 
         for chat_id_str in target_channels:
             try:
                 chat_id = int(chat_id_str)
-                # Yahan Telegram File ki hi ID pass ho rahi hai, isliye turant post ho jayega
+                # Yahan Telegram File ki hi ID pass ho rahi hai
                 sent_msg = await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=photo_to_send,
@@ -3083,14 +3083,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         channel_caption, photo_to_send, "photo", post_keyboard.to_dict(), None, "movies"
                     )
                     sent_count += 1
+                    
             except Exception as e:
                 logger.error(f"Auto-post failed for {chat_id_str}: {e}")
+                last_error = str(e)
+                
+                # 🛑 FALLBACK: Agar thumbnail reject hua, to DEFAULT_POSTER use karega
+                if "wrong file identifier" in last_error.lower() or "invalid file" in last_error.lower():
+                    try:
+                        sent_msg = await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=DEFAULT_POSTER,
+                            caption=channel_caption,
+                            parse_mode='HTML',
+                            reply_markup=post_keyboard
+                        )
+                        if sent_msg:
+                            save_post_to_db(
+                                movie_id, chat_id, sent_msg.message_id, bot3, 
+                                channel_caption, DEFAULT_POSTER, "photo", post_keyboard.to_dict(), None, "movies"
+                            )
+                            sent_count += 1
+                            last_error = "" # Fallback successful, clear error
+                    except Exception as fallback_e:
+                        last_error = str(fallback_e)
 
-        # 5. Message Update and Memory Cleanup
-        await query.edit_message_text(
-            f"{query.message.text}\n\n✅ <b>Auto-Posted (File Thumbnail) to {sent_count} channels!</b>", 
-            parse_mode='HTML'
-        )
+        # 5. Message Update and Error Display
+        result_msg = f"{query.message.text}\n\n✅ <b>Auto-Posted to {sent_count} channels!</b>"
+        
+        # Agar 0 channels me gaya, to Error message dikhao
+        if sent_count == 0 and last_error:
+            result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
+
+        await query.edit_message_text(result_msg, parse_mode='HTML')
         context.bot_data.pop(f"auto_thumb_{movie_id}", None)
         return
     
