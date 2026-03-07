@@ -1542,8 +1542,7 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
 def get_tmdb_backdrop(query, search_year=""):
-    """TMDB API se HD Landscape (Backdrop) Poster nikalta hai"""
-    # Yahan aapki TMDB API Key permanently set kar di gayi hai
+    """TMDB API se HD Original Poster (Vertical with Text) nikalta hai"""
     api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" 
     try:
         url = f"https://api.themoviedb.org/3/search/multi?api_key={api_key}&query={quote(query)}"
@@ -1551,21 +1550,21 @@ def get_tmdb_backdrop(query, search_year=""):
         
         if resp.get('results'):
             for item in resp['results']:
-                # Year match karne ki koshish (Better Accuracy)
                 item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
                 if search_year and str(search_year) != item_year:
                     continue
                 
-                # HD Landscape (Backdrop) Poster
-                if item.get('backdrop_path'):
+                # 🛑 NAYA: Ab pehle Original Poster (Jisme Text hota hai) dhundega
+                if item.get('poster_path'):
+                    return f"https://image.tmdb.org/t/p/original{item['poster_path']}"
+                elif item.get('backdrop_path'):
                     return f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
             
-            # Agar year match na ho, to first result le lo
             first = resp['results'][0]
-            if first.get('backdrop_path'):
-                return f"https://image.tmdb.org/t/p/original{first['backdrop_path']}"
-            elif first.get('poster_path'):
+            if first.get('poster_path'):
                 return f"https://image.tmdb.org/t/p/original{first['poster_path']}"
+            elif first.get('backdrop_path'):
+                return f"https://image.tmdb.org/t/p/original{first['backdrop_path']}"
     except Exception as e:
         logger.error(f"TMDB Error: {e}")
     return None
