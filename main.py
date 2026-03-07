@@ -1541,8 +1541,37 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
+def get_tmdb_backdrop(query, search_year=""):
+    """TMDB API se HD Landscape (Backdrop) Poster nikalta hai"""
+    # Yahan aapki TMDB API Key permanently set kar di gayi hai
+    api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" 
+    try:
+        url = f"https://api.themoviedb.org/3/search/multi?api_key={api_key}&query={quote(query)}"
+        resp = requests.get(url, timeout=10).json()
+        
+        if resp.get('results'):
+            for item in resp['results']:
+                # Year match karne ki koshish (Better Accuracy)
+                item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
+                if search_year and str(search_year) != item_year:
+                    continue
+                
+                # HD Landscape (Backdrop) Poster
+                if item.get('backdrop_path'):
+                    return f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
+            
+            # Agar year match na ho, to first result le lo
+            first = resp['results'][0]
+            if first.get('backdrop_path'):
+                return f"https://image.tmdb.org/t/p/original{first['backdrop_path']}"
+            elif first.get('poster_path'):
+                return f"https://image.tmdb.org/t/p/original{first['poster_path']}"
+    except Exception as e:
+        logger.error(f"TMDB Error: {e}")
+    return None
+
 def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """Smart Metadata Fetcher (Title + Year + Language Fallback)"""
+    """Smart Metadata Fetcher (OMDb + Cinemagoer + TMDB HD Posters)"""
     if not ia: return query, 0, '', '', '', 'N/A', '', 'Unknown'
 
     def get_smart_category(country, language, genre):
@@ -1553,72 +1582,66 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         if any(x in l for x in ['telugu', 'tamil', 'kannada', 'malayalam', 'marathi']): return "South"
         return "Bollywood"
 
+    title, year, poster, genres, imdb_id, rating, plot, category = query, 0, '', '', '', 'N/A', '', 'Unknown'
+
     try:
-        # 📝 1. OMDb Strategy
+        # 📝 1. OMDb Strategy (Data ke liye)
         omdb_api_key = os.environ.get("OMDB_API_KEY")
         if omdb_api_key:
             try:
                 base_url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
                 url = base_url
-                
-                if search_year and search_year.isdigit():
-                    url += f"&y={search_year}"
+                if search_year and search_year.isdigit(): url += f"&y={search_year}"
 
-                response = requests.get(url, timeout=10)
-                data = response.json()
+                response = requests.get(url, timeout=10).json()
+                if response.get("Response") != "True" and search_year:
+                    response = requests.get(base_url, timeout=10).json()
                 
-                # FALLBACK: Agar Year ke sath nahi mili, to bina Year ke dobara try karo!
-                if data.get("Response") != "True" and search_year:
-                    response = requests.get(base_url, timeout=10)
-                    data = response.json()
-                
-                if data.get("Response") == "True":
-                    title = data['Title']
-                    year = int(data.get('Year', 0).split('–')[0]) if data.get('Year') else 0
-                    poster = data.get('Poster', '') if data.get('Poster') != 'N/A' else ''
-                    genre = data.get('Genre', '')
-                    imdb_id = data.get('imdbID', '')
-                    rating = data.get('imdbRating', 'N/A')
-                    plot = data.get('Plot', '')
-                    category = get_smart_category(data.get('Country', ''), data.get('Language', ''), genre)
-                    return title, year, poster, genre, imdb_id, rating, plot, category
+                if response.get("Response") == "True":
+                    title = response['Title']
+                    year = int(response.get('Year', 0).split('–')[0]) if response.get('Year') else 0
+                    poster = response.get('Poster', '') if response.get('Poster') != 'N/A' else ''
+                    genres = response.get('Genre', '')
+                    imdb_id = response.get('imdbID', '')
+                    rating = response.get('imdbRating', 'N/A')
+                    plot = response.get('Plot', '')
+                    category = get_smart_category(response.get('Country', ''), response.get('Language', ''), genres)
             except Exception as e:
                 logger.warning(f"OMDb Error: {e}")
 
-        # 🔍 2. Cinemagoer Strategy (IMDb Fallback with Language & Year)
-        movies = ia.search_movie(query)
-        if not movies: return None
-        
-        best_match = movies[0] # Default to first result
-        
-        # Best match dhoondne ka logic (Year -> Language)
-        for m in movies:
-            m_year = str(m.get('year', ''))
-            
-            # 1. Agar Year exact match ho gaya, to wahi best hai!
-            if search_year and search_year == m_year:
-                best_match = m
-                break
+        # 🔍 2. Cinemagoer Strategy (Fallback)
+        if not imdb_id:
+            movies = ia.search_movie(query)
+            if movies:
+                best_match = movies[0]
+                for m in movies:
+                    m_year = str(m.get('year', ''))
+                    if search_year and search_year == m_year:
+                        best_match = m
+                        break
+                ia.update(best_match)
                 
-        # Movie ki puri detail load karo (Plot, Genre, Language etc.)
-        ia.update(best_match)
-        
-        title = best_match.get('title', 'Unknown')
-        year = best_match.get('year', 0)
-        poster = best_match.get('full-size cover url', '')
-        genres = ', '.join(best_match.get('genres', [])[:3])
-        imdb_id = f"tt{best_match.movieID}"
-        rating = best_match.get('rating', 'N/A')
-        plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else '')
-        
-        db_langs = best_match.get('languages', [])
-        category = get_smart_category(best_match.get('countries', []), db_langs, genres)
+                title = best_match.get('title', title)
+                year = best_match.get('year', year)
+                poster = best_match.get('full-size cover url', poster)
+                genres = ', '.join(best_match.get('genres', [])[:3])
+                imdb_id = f"tt{best_match.movieID}"
+                rating = best_match.get('rating', rating)
+                plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else plot)
+                category = get_smart_category(best_match.get('countries', []), best_match.get('languages', []), genres)
+
+        # 🚀🚀 3. TMDB MAGIC: HD LANDSCAPE POSTER OVERRIDE 🚀🚀
+        # Yahan hum purane vertical poster ko TMDB ke HD landscape se replace kar rahe hain
+        tmdb_landscape = get_tmdb_backdrop(query, search_year)
+        if tmdb_landscape:
+            poster = tmdb_landscape
 
         return title, year, poster, genres, imdb_id, rating, plot, category
 
     except Exception as e:
         logger.error(f"Metadata Error: {e}")
-        return None
+        return title, year, poster, genres, imdb_id, rating, plot, category
+
 # ==================== AI INTENT ANALYSIS ====================
 # 👇👇👇 START COPY HERE 👇👇👇
 async def analyze_intent(message_text):
