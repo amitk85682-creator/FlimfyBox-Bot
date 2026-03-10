@@ -459,78 +459,58 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
-async def get_movie_name_from_caption(caption_text):
+async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
-    🎯 FULLY AI-POWERED EXTRACTION (Super Smart V2)
-    Bina kisi hardcoded list ke Telegram filenames ko samajhta hai.
-    Sath hi Emojis, Weird Fonts, aur Channel Tags ko bhi clean karta hai.
+    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL 2-STEP VERIFICATION)
+    Gemini ab Caption + Video Thumbnail dono dekhega!
     """
     if not caption_text or len(caption_text.strip()) < 2:
-        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": ""}
+        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
     
-    # Sirf file ka naam/pehli line lo taaki promo links AI ko confuse na karein
     first_line = caption_text.split('\n')[0].strip()
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key: 
-            logger.error("❌ GEMINI_API_KEY missing!")
             return await fallback_extraction(first_line)
 
         genai.configure(api_key=api_key)
+        # Vision aur Text dono ke liye 'gemini-2.0-flash' (ya 'gemini-1.5-flash') best hai
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🧠 SUPER SMART PROMPT WITH NEW EXAMPLES & RULES
-        prompt = f"""You are an incredibly smart parser for Telegram movie/show filenames.
-Telegram filenames are extremely messy. They use dots (.) or underscores (_) instead of spaces, have weird capitalizations, emojis, channel tags, and special fonts.
+        # 🧠 SUPER SMART PROMPT FOR VISION & TEXT
+        prompt = f"""You are an advanced Movie/Series Metadata Extractor.
+        I am providing you a Telegram filename/caption and possibly a thumbnail image from the video.
+        
+        FILENAME/CAPTION: "{first_line}"
 
-FILENAME/CAPTION: "{first_line}"
+        Analyze the text AND the image (if provided) to identify the exact movie or web series.
+        
+        Extract the data into JSON with these exact keys:
+        1. "title": The clean, official name of the movie/show. Remove junk words like 'Full', 'Movie', 'HD', '1080p'. (e.g., "Taarzan The Wonder Car Full" -> "Taarzan The Wonder Car").
+        2. "year": The 4-digit release year. If the text doesn't have it, but you recognize the movie from the image, provide its actual release year!
+        3. "language": Any audio languages mentioned.
+        4. "extra_info": Tags indicating Batch, Seasons, Episodes (e.g., "S01 COMBINED").
+        5. "category": Guess the exact category from these: 'Bollywood', 'Hollywood', 'South', 'Anime', 'Web Series', or 'Movies'.
 
-Extract the data into JSON with these exact keys:
-1. "title": The clean, pure name of the movie or show. 
-   - Convert all dots (.) and underscores (_) to spaces.
-   - Remove any emojis (e.g., 🎬, 🔥).
-   - Remove channel tags or usernames (e.g., {{@Royal_Backup2}}, @channelname).
-   - Normalize special/stylish fonts to plain English (e.g., 'Sᴜʙᴇᴅᴀᴀʀ' -> 'Subedaar').
-   - STOP capturing the title before you hit the year, quality (720p), season info (S01), or languages.
-2. "year": The 4-digit release year if present. If not, leave blank "".
-3. "language": Detect ANY audio languages mentioned (e.g., "Punjabi", "Hindi + Telugu", "English", "Multi Audio", "Hindi-Japanese"). Do not guess; only extract what is in the text.
-4. "extra_info": Extract ANY tags indicating a Web Series, Batch, Episode ranges, or completeness. 
-   - 🚨 CRITICAL RULE: Normalize weird spellings like "COMBiNED" or "CoMbInEd" to pure "COMBINED". 
-   - Understand that "COMBINED", "COMPLETE", or "BATCH" means the file contains full seasons or multiple episodes.
-   - Examples of clean extraction: "S01 COMBINED", "Season 1-3 COMPLETE", "S02 E21-E41", "UNCUT", "BATCH". 
-   - Ignore quality (1080p, 4K), codecs (x264, HEVC, AMZN, WEB-DL), and uploader names (like HDHub4u, BashAFK).
+        Return ONLY a valid JSON object. No markdown formatting like ```json."""
 
-EXAMPLES TO LEARN FROM:
+        contents = [prompt]
+        
+        # 🚀 JADOO: Agar thumbnail image aayi hai, to usko Gemini ko 'dekhne' ke liye de do!
+        if image_bytes:
+            contents.append({
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            })
 
-Input: "Moh.2022.720p.Punjabi.WEB-DL.5.1.ESub.x264-HDHub4u.M.mkv"
-Output: {{"title": "Moh", "year": "2022", "language": "Punjabi", "extra_info": ""}}
-
-Input: "Maa_Nanna_Super_Hero_2024_1080p_10bit_AMZN_WEBRip_Hindi_Telugu_DDP5.mkv"
-Output: {{"title": "Maa Nanna Super Hero", "year": "2024", "language": "Hindi + Telugu", "extra_info": ""}}
-
-Input: "Bleach.S02.E21-E41.480p.HEVC.bluray.Hindi-Japanese.H.265.ESub ~ BashAFK.mkv"
-Output: {{"title": "Bleach", "year": "", "language": "Hindi + Japanese", "extra_info": "S02 E21-E41"}}
-
-Input: "🎬 Sᴜʙᴇᴅᴀᴀʀ (2026) Bollywood Hindi Full Movie HD ESub ! 480p 720p & 1080p #1792 !"
-Output: {{"title": "Subedaar", "year": "2026", "language": "Hindi", "extra_info": ""}}
-
-Input: "{{@Royal_Backup2}} Hey_Sinamika_2022_720p_UNCUT_NF_WEB_DL_Dual_Audio_Hindi_Tamil_x265.mkv"
-Output: {{"title": "Hey Sinamika", "year": "2022", "language": "Dual Audio Hindi + Tamil", "extra_info": "UNCUT"}}
-
-Input: "The Exorcist S01 COMBiNED 720p 10bit AMZN WEBRip HEVC x265 English mkv"
-Output: {{"title": "The Exorcist", "year": "", "language": "English", "extra_info": "S01 COMBINED"}}
-
-Now process the provided FILENAME/CAPTION. Return ONLY a valid JSON object. No markdown, no explanations."""
-
-        response = await run_async(model.generate_content, prompt)
+        response = await run_async(model.generate_content, contents)
         
         if not response or not response.text:
             return await fallback_extraction(first_line)
         
         text = response.text.strip()
         
-        # Clean JSON extraction
         text = text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
@@ -542,27 +522,24 @@ Now process the provided FILENAME/CAPTION. Return ONLY a valid JSON object. No m
             logger.warning(f"⚠️ JSON parse failed: {text}")
             return await fallback_extraction(first_line)
         
-        # AI par pura bharosa
         title = data.get("title", "").strip()
-        year = data.get("year", "").strip()
+        year = str(data.get("year", "")).strip()
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
+        category = data.get("category", "").strip()
         
         if not title or len(title) < 2:
             return await fallback_extraction(first_line)
         
-        logger.info(f"🤖 AI SMART RESULT: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}'")
+        logger.info(f"🤖 GEMINI VISION RESULT: Title='{title}', Year='{year}', Cat='{category}'")
         return {
-            "title": title, 
-            "year": year, 
-            "language": language, 
-            "extra_info": extra_info
+            "title": title, "year": year, "language": language, 
+            "extra_info": extra_info, "category": category
         }
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
         return await fallback_extraction(first_line)
-
 
 async def fallback_extraction(caption_text):
     """
@@ -3939,7 +3916,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with auto_batch_lock:
         
         # ==========================================
-        # 🤖 PHASE 1: START BATCH
+        # 🤖 PHASE 1: START BATCH (2-Step Verification)
         # ==========================================
         if not BATCH_SESSION.get('active'):
             
@@ -3948,68 +3925,59 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("❌ **Batch Off!**\nFile ke sath CAPTION mein movie naam likho.", parse_mode='Markdown')
                 return
             
-            status_msg = await message.reply_text("🧠 Caption analyze kar raha hoon...", quote=True)
+            status_msg = await message.reply_text("🧠 Analyzing Thumbnail & Caption with Gemini Vision...", quote=True)
 
+            # 🛑 STEP 1: THUMBNAIL DOWNLOAD FOR GEMINI VISION
+            image_bytes = None
+            thumb_file_id = None
             
-            # 🎯 AI se Name, Year, Language nikalo
-            ai_data = await get_movie_name_from_caption(raw_caption)
+            try:
+                if message.photo:
+                    thumb_file_id = message.photo[-1].file_id
+                elif message.video and message.video.thumbnail:
+                    thumb_file_id = message.video.thumbnail.file_id
+                elif message.document and message.document.thumbnail:
+                    thumb_file_id = message.document.thumbnail.file_id
+
+                if thumb_file_id:
+                    # Backup for Auto Post later (Agar TMDB fail hua)
+                    BATCH_SESSION['extracted_thumb'] = thumb_file_id
+                    
+                    # Download immediately for Gemini to "SEE"
+                    tg_file = await context.bot.get_file(thumb_file_id)
+                    image_bytes = bytes(await tg_file.download_as_bytearray())
+            except Exception as e:
+                logger.error(f"Failed to extract thumbnail for Gemini: {e}")
+
+            # 🎯 STEP 2: GEMINI AI SE DATA NIKALO (Passing Image & Caption!)
+            ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
             
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
             movie_extra = ai_data.get("extra_info", "")
+            gemini_category = ai_data.get("category", "")
             
             if movie_name == "UNKNOWN" or len(movie_name) < 2:
-                await status_msg.edit_text(
-                    "❌ Movie naam extract nahi ho paya.\n\n"
-                    "**Manual Method:**\n"
-                    "`/batch Movie Name`\n\n"
-                    "Example: `/batch Chhichhore`",
-                    parse_mode='Markdown'
-                )
+                await status_msg.edit_text("❌ Movie naam extract nahi ho paya.\n\n`/batch Movie Name` use karein.")
                 return
             
-            # Display what we found
-            info_parts = [f"🎬 **{movie_name}**"]
-            if movie_year: info_parts.append(f"📅 {movie_year}")
-            if movie_extra: info_parts.append(f"📌 {movie_extra}")  # ✅ NAYA: Extra info alag dikhega
-            if movie_lang: info_parts.append(f"🔊 {movie_lang}")
-            
-            await status_msg.edit_text(
-                f"✅ Detected:\n{' | '.join(info_parts)}\n\n⏳ Metadata fetch kar raha hoon...",
-                parse_mode='Markdown'
-            )
+            await status_msg.edit_text(f"✅ **Gemini Extracted:** 🎬 {movie_name}\n⏳ Fetching IMDb Data & TMDB HD Poster...")
 
-            # 🎯 Metadata fetch karo (Year aur Language PASS kar rahe hain!)
+            # 🎯 STEP 3: IMDb (Data) + TMDB (HD Poster) FETCH
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                # Fallback: Jo AI ne diya wahi use karo
+                # Fallback: Jo Gemini AI ne dekha wahi maan lo
                 title = movie_name
-                year = int(movie_year) if movie_year and movie_year.isdigit() else 0
+                year = int(movie_year) if movie_year and str(movie_year).isdigit() else 0
                 poster_url, imdb_id = None, None
                 genre, rating, plot = "Unknown", "N/A", "Auto Added"
-                
-                # 🧠 Smart Category Guessing (Updated)
-                lang_lower = movie_lang.lower() if movie_lang else ""
-                title_extra_lower = (title + " " + movie_extra).lower()
-                
-                if 'japanese' in lang_lower or 'anime' in lang_lower:
-                    category = "Anime"
-                elif any(x in title_extra_lower for x in ['s0', 's1', 'season', 'episode', 'e0', 'e1']):
-                    category = "Web Series"
-                elif any(x in lang_lower for x in ['hindi', 'bollywood']):
-                    category = "Bollywood"
-                elif any(x in lang_lower for x in ['tamil', 'telugu', 'kannada', 'malayalam']):
-                    category = "South"
-                elif any(x in lang_lower for x in ['english', 'hollywood']):
-                    category = "Hollywood"
-                else:
-                    category = "Movies"
+                category = gemini_category if gemini_category else "Movies"
 
-           # Database Insert
+            # Database Insert...
             conn = get_db_connection()
             if conn:
                 try:
@@ -4023,6 +3991,9 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
                             year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                             category = COALESCE(EXCLUDED.category, movies.category),
+                            genre = COALESCE(EXCLUDED.genre, movies.genre),
+                            rating = COALESCE(EXCLUDED.rating, movies.rating),
+                            description = COALESCE(EXCLUDED.description, movies.description),
                             language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
                             extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END
                         RETURNING id
@@ -4037,33 +4008,19 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.close()
 
                     BATCH_SESSION.update({
-                        'active': True, 
-                        'movie_id': movie_id, 
-                        'movie_title': title, 
-                        'file_count': file_count, 
-                        'admin_id': user_id,
-                        'year': str(year) if year else movie_year,  # Save for later
-                        'category': category,
-                        'language': movie_lang
+                        'active': True, 'movie_id': movie_id, 'movie_title': title, 
+                        'file_count': file_count, 'admin_id': user_id,
+                        'year': str(year) if year else movie_year, 'category': category, 'language': movie_lang
                     })
                     
-                    # ✅ FIXED: Delete Old Files & Cancel Batch Buttons added
                     keyboard = []
                     if file_count > 0:
                         keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
-                    keyboard.append([InlineKeyboardButton("❌ Cancel Batch (Wrong Name)", callback_data="cancel_batch")])
-                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
                     
                     await status_msg.edit_text(
-                        f"✅ **Batch Started!**\n\n"
-                        f"🎬 Movie: **{title}**\n"
-                        f"📅 Year: {year if year else 'N/A'}\n"
-                        f"🏷️ Category: {category}\n"
-                        f"📂 Existing Files: {file_count}\n\n"
-                        f"🚀 **Ab apni files bhejna shuru karo!**\n"
-                        f"Jab ho jaye: `/done`",
-                        parse_mode='Markdown',
-                        reply_markup=reply_markup
+                        f"✅ **Batch Started!**\n\n🎬 Movie: **{title}**\n📅 Year: {year if year else 'N/A'}\n🏷️ Category: {category}\n\n🚀 **Ab apni files bhejna shuru karo!**\nJab ho jaye: `/done`",
+                        parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     
                 except Exception as e:
@@ -4072,7 +4029,6 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 finally:
                     close_db_connection(conn)
             return
-
 
         # ==========================================
         # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho) - NO CHANGES HERE
