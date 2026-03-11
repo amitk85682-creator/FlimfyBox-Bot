@@ -393,6 +393,7 @@ messages_to_auto_delete = defaultdict(list)
 
 # ✅ NEW GLOBAL VARIABLES FOR BATCH SESSION
 BATCH_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None}
+SUPER_BATCH_SESSION = {'active': False, 'admin_id': None, 'files': []}
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -3895,6 +3896,262 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn: close_db_connection(conn)
 
 
+# ============================================================================
+# 🚀 SUPER BATCH SYSTEM (Smart Grouping + Auto Post)
+# ============================================================================
+
+async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Super Batch shuru karega"""
+    if update.effective_user.id != ADMIN_USER_ID: return
+    
+    SUPER_BATCH_SESSION['active'] = True
+    SUPER_BATCH_SESSION['admin_id'] = update.effective_user.id
+    SUPER_BATCH_SESSION['files'] = []
+    
+    await update.message.reply_text(
+        "🚀 **SUPER BATCH MODE ON!**\n\n"
+        "👉 Ab aap ek sath 50-100 files (alag-alag movies ki) yahan forward kar dein.\n"
+        "👉 Bot khud unhe movies ke hisaab se group karega.\n"
+        "👉 Jab sab bhej dein, to type karein: `/superdone`",
+        parse_mode='Markdown'
+    )
+
+async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Super batch me aayi hui files ko chupchap memory me save karega"""
+    if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
+        return
+
+    message = update.effective_message
+    if not (message.document or message.video or message.audio): return
+    
+    caption = message.caption or message.text or ""
+    file_id = None
+    file_name = "File"
+    file_size = 0
+    thumb_id = None
+    
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name
+        file_size = message.document.file_size
+        if message.document.thumbnail: thumb_id = message.document.thumbnail.file_id
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name
+        file_size = message.video.file_size
+        if message.video.thumbnail: thumb_id = message.video.thumbnail.file_id
+
+    # Queue me save karo
+    SUPER_BATCH_SESSION['files'].append({
+        'file_id': file_id,
+        'file_name': file_name,
+        'file_size': file_size,
+        'caption': caption,
+        'thumb_id': thumb_id,
+        'message_obj': message
+    })
+    
+    count = len(SUPER_BATCH_SESSION['files'])
+    if count % 10 == 0:
+        await message.reply_text(f"📥 Received {count} files so far...")
+
+async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Smart Grouping -> Gemini AI -> TMDB -> Auto Post"""
+    if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
+        return
+
+    files = SUPER_BATCH_SESSION['files']
+    if not files:
+        await update.message.reply_text("❌ Koi file nahi mili!")
+        SUPER_BATCH_SESSION['active'] = False
+        return
+
+    status_msg = await update.message.reply_text(f"🔄 **Grouping {len(files)} files... Please wait.**", parse_mode='Markdown')
+
+    # 🛑 1. SMART GROUPING BY MOVIE NAME (Fast Fallback se)
+    grouped_movies = defaultdict(list)
+    for f in files:
+        raw_text = f['caption'] if f['caption'] else f['file_name']
+        basic_data = await fallback_extraction(raw_text)
+        temp_title = basic_data.get('title', 'Unknown_Movie').lower()
+        grouped_movies[temp_title].append(f)
+
+    total_movies = len(grouped_movies)
+    await status_msg.edit_text(f"✅ **Files grouped into {total_movies} unique movies!**\n\n🚀 Auto-Processing & Posting starts now...", parse_mode='Markdown')
+
+    success_movies = 0
+    channels = get_storage_channels()
+    target_channels = [ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',') if ch.strip()]
+
+    # 🛑 2. PROCESS EACH MOVIE GROUP
+    for i, (temp_title, movie_files) in enumerate(grouped_movies.items(), 1):
+        try:
+            await status_msg.edit_text(f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: `{temp_title}`")
+            
+            # --- A. Gemini Vision & TMDB Fetch (Pehli file se) ---
+            first_file = movie_files[0]
+            image_bytes = None
+            if first_file['thumb_id']:
+                try:
+                    tg_file = await context.bot.get_file(first_file['thumb_id'])
+                    image_bytes = bytes(await tg_file.download_as_bytearray())
+                except Exception: pass
+            
+            ai_data = await get_movie_name_from_caption(first_file['caption'] or first_file['file_name'], image_bytes)
+            movie_name = ai_data.get("title", temp_title)
+            movie_year = ai_data.get("year", "")
+            movie_lang = ai_data.get("language", "")
+            gemini_category = ai_data.get("category", "Movies")
+
+            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
+            
+            if metadata:
+                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+            else:
+                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
+                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
+
+            # --- B. Save Movie to Database ---
+            conn = get_db_connection()
+            if not conn: continue
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE 
+                SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
+                    year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
+                    genre = COALESCE(EXCLUDED.genre, movies.genre),
+                    rating = COALESCE(EXCLUDED.rating, movies.rating),
+                    description = COALESCE(EXCLUDED.description, movies.description),
+                    category = COALESCE(EXCLUDED.category, movies.category),
+                    language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
+                RETURNING id
+                """,
+                (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
+            )
+            movie_id = cur.fetchone()[0]
+            conn.commit()
+
+            # --- C. Backup Upload & Save Qualities ---
+            for f in movie_files:
+                backup_map = {}
+                main_url = ""
+                if channels:
+                    try:
+                        sent = await f['message_obj'].copy(chat_id=channels[0])
+                        backup_map[str(channels[0])] = sent.message_id
+                        main_url = f"https://t.me/c/{str(channels[0]).replace('-100', '')}/{sent.message_id}"
+                        await asyncio.sleep(0.5) 
+                    except Exception as e:
+                        logger.error(f"Backup failed: {e}")
+
+                file_size_str = get_readable_file_size(f['file_size'])
+                label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
+
+                cur.execute(
+                    """
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                    """,
+                    (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
+                )
+                conn.commit()
+            
+            cur.close()
+            close_db_connection(conn)
+
+            # --- D. GET HD POSTER (Direct Link) ---
+            photo_to_send = None
+            if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
+                photo_to_send = poster_url
+            if not photo_to_send and first_file['thumb_id']:
+                photo_to_send = first_file['thumb_id']
+            if not photo_to_send: photo_to_send = DEFAULT_POSTER
+
+            # --- E. BUILD CAPTION & KEYBOARD ---
+            short_desc = (plot[:150] + "...") if plot else "Plot details unavailable."
+            caption = (
+                f"🎬 **{title} ({year})**\n\n"
+                f"⭐️ **Rating:** {rating}/10\n"
+                f"🎭 **Genre:** {genre}\n"
+                f"🔞 **FlimfyBox For Adult:** [Join Premium](https://t.me/+wcYoTQhIz-ZmOTY1)\n\n"
+                f"👇 **Click Below to Download** 👇"
+            )
+
+            link_param = f"movie_{movie_id}"
+            bot1 = "FlimfyBox_SearchBot"
+            bot2 = "urmoviebot"
+            bot3 = "FlimfyBox_Bot"
+
+            post_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
+                 InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
+                [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            ])
+
+            # --- F. AUTO POST TO FORUM ---
+            topic_id = 1
+            cat_lower = str(category or "").lower()
+            for tid, keywords in TOPIC_MAPPING.items():
+                if any(k.lower() in cat_lower for k in keywords):
+                    topic_id = tid
+                    break
+            
+            if topic_id == 1:
+                if "south" in cat_lower: topic_id = 20
+                elif "hollywood" in cat_lower: topic_id = 32
+                elif "bollywood" in cat_lower: topic_id = 16
+                elif "anime" in cat_lower: topic_id = 22
+                elif "series" in cat_lower: topic_id = 18
+
+            try:
+                if topic_id == 1:
+                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='Markdown', reply_markup=post_keyboard)
+                else:
+                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='Markdown', reply_markup=post_keyboard)
+            except Exception as e:
+                logger.error(f"SuperBatch Forum Post Error: {e}")
+
+            # --- G. AUTO POST TO MAIN CHANNELS ---
+            telegram_photo_id = None
+            if target_channels:
+                for chat_id_str in target_channels:
+                    try:
+                        current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
+                        sent_msg = await context.bot.send_photo(
+                            chat_id=int(chat_id_str), photo=current_photo,
+                            caption=caption, parse_mode='Markdown', reply_markup=post_keyboard
+                        )
+                        if not telegram_photo_id and sent_msg.photo:
+                            telegram_photo_id = sent_msg.photo[-1].file_id
+                        
+                        save_post_to_db(movie_id, int(chat_id_str), sent_msg.message_id, bot3, caption, telegram_photo_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
+                        await asyncio.sleep(1.5) # Protect against FloodWait
+                    except Exception as e:
+                        logger.error(f"SuperBatch Main Channel Post Error: {e}")
+
+            success_movies += 1
+            await asyncio.sleep(2) # Relax before processing next movie
+
+        except Exception as e:
+            logger.error(f"SuperBatch Movie Error: {e}")
+            continue
+
+    # 🛑 3. FINISH
+    await status_msg.edit_text(
+        f"🎉 **SUPER BATCH COMPLETED!**\n\n"
+        f"✅ Total Movies Processed: {success_movies}/{total_movies}\n"
+        f"📦 Total Files Saved: {len(files)}\n"
+        f"🚀 All movies auto-posted to Channels & Forum successfully!",
+        parse_mode='Markdown'
+    )
+
+    SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -4173,13 +4430,11 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 elif "series" in cat_lower: topic_id = 18
                 
             # --- CAPTION ---
-            short_desc = (m_desc[:150] + "...") if m_desc else "Plot details unavailable."
-            forum_caption = (
-                f"🎬 **{movie_title} ({movie_year})**\n\n"
-                f"⭐️ **Rating:** {m_rating}/10\n"
-                f"🎭 **Genre:** {m_genre}\n"
-                f"🏷 **Category:** {movie_category}\n\n"
-                f"📜 **Story:** {short_desc}\n\n"
+            caption = (
+                f"🎬 **{title} ({year})**\n\n"
+                f"⭐️ **Rating:** {rating}/10\n"
+                f"🎭 **Genre:** {genre}\n\n"
+                f"🔞 **FlimfyBox For Adult:** https://t.me/+wcYoTQhIz-ZmOTY1\n\n"
                 f"👇 **Click Below to Download** 👇"
             )
             
@@ -7040,6 +7295,12 @@ def register_handlers(application: Application):
     # 🚀 NEW: Add this line to catch the poster image
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_admin_poster), group=0)
 
+    # 🚀 SUPER BATCH COMMANDS
+    application.add_handler(CommandHandler("superbatch", superbatch_start))
+    application.add_handler(CommandHandler("superdone", superbatch_done))
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO), superbatch_listener), group=4)
+    
+    
     # ==========================================
     # 🔞 18+ BATCH SYSTEM HANDLERS
     # ==========================================
