@@ -71,7 +71,6 @@ except Exception:
 def get_safe_font(text):
     """
     Normal text ko Anti-Ban Fonts (Squared Style) mein convert karta hai.
-    Clean & Fixed Version.
     """
     if not text:
         return ""
@@ -82,8 +81,6 @@ def get_safe_font(text):
             result += chr(0x1F130 + ord(char) - ord('a'))
         elif 'A' <= char <= 'Z':
             result += chr(0x1F130 + ord(char) - ord('A'))
-        elif '0' <= char <= '9':
-            result += char 
         else:
             result += char
             
@@ -448,6 +445,7 @@ async def get_poster_bytes(url):
 def preprocess_query(query):
     """Clean and normalize user query"""
     query = re.sub(r'[^\w\s-]', '', query)
+    return query  # 👈 YE RETURN MISSING THA
 
 async def check_rate_limit(user_id):
     """Check if user is rate limited"""
@@ -2999,9 +2997,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # =======================================================
-    # 🤖 NEW: AUTO POST LOGIC (Fixed Thumbnail Error)
-    # =======================================================
-    # =======================================================
     # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Smart HD Poster)
     # =======================================================
     if query.data.startswith("autopost_"):
@@ -3010,67 +3005,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         movie_id = int(query.data.split("_")[1])
-        await query.answer("⏳ Preparing HD Poster and posting...", show_alert=False)
+        await query.answer("⏳ Posting HD Poster directly to channels...", show_alert=False)
 
-        # 1. Database se Title aur TMDB ka Auto-Fetched HD Poster nikalo
         conn = get_db_connection()
         if not conn: return
         cur = conn.cursor()
-        cur.execute("SELECT title, poster_url FROM movies WHERE id = %s", (movie_id,))
+        cur.execute("SELECT title, year, rating, genre, poster_url FROM movies WHERE id = %s", (movie_id,))
         res = cur.fetchone()
         cur.close()
         close_db_connection(conn)
 
-        m_title = res[0] if res else "Movie"
-        poster_url = res[1] if res and len(res) > 1 else None
+        if res:
+            title, year, rating, genre, poster_url = res
+        else:
+            title, year, rating, genre, poster_url = "Movie", "", "N/A", "Unknown", None
 
-        photo_to_send = None
-
-        # 🚀 STEP A: TMDB HD Poster DIRECT URL (No Download)
-        if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
-            photo_to_send = poster_url  # 🚀 DIRECT LINK PASS KIYA!
-
-        # ⚠️ STEP B: Agar TMDB se fail ho jaye, sirf tabhi Video ka Thumbnail use karo (Backup)
+        photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
         if not photo_to_send:
             thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
-            if thumb_file_id:
-                try:
-                    tg_file = await context.bot.get_file(thumb_file_id)
-                    photo_to_send = bytes(await tg_file.download_as_bytearray())
-                except Exception as e:
-                    logger.error(f"Thumbnail download failed: {e}")
+            if thumb_file_id: photo_to_send = thumb_file_id
+        if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
-        # 🛑 STEP C: Agar dono fail ho gaye, to DEFAULT POSTER laga do
-        if not photo_to_send:
-            photo_to_send = DEFAULT_POSTER
-
-        # 2. 🎯 EXACT CLEAN CAPTION BANAO
+        # 🛑 100% SAFE HTML BOLD CAPTION
+        safe_rating = rating if rating else "N/A"
+        safe_genre = genre if genre else "Unknown"
+        
         channel_caption = (
-            f"🎬 <b>{m_title}</b>\n\n"
-            f"➖➖➖➖➖➖➖\n"
-            f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨</b>\n"
-            f"👇🏻👇🏻\n"
-            f"<a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
-            f"➖➖➖➖➖➖➖\n"
-            f"<b>👇 Download Below</b>"
+            f"🎬 <b>{title} ({year})</b>\n\n"
+            f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
+            f"🎭 <b>Genre:</b> {safe_genre}\n\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"👇 <b>Download Below</b> 👇"
         )
 
-        # 3. Download Buttons Banao
         link_param = f"movie_{movie_id}"
-        bot1 = "FlimfyBox_SearchBot"
-        bot2 = "urmoviebot"
-        bot3 = "FlimfyBox_Bot"
+        bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
 
         post_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
-                InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")
-            ],
+            [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
             [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
-        # 4. Channels me Post karo
         channels_str = os.environ.get('BROADCAST_CHANNELS', '')
         target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
 
@@ -3080,15 +3058,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         sent_count = 0
         last_error = ""
-        telegram_photo_id = None # Nayi Photo ki ID Cache karne ke liye
+        telegram_photo_id = None 
 
         for chat_id_str in target_channels:
             try:
                 chat_id = int(chat_id_str)
-                
-                # Fast posting ke liye cache use karo
                 current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
 
+                # 🛑 HTML PARSE MODE
                 sent_msg = await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=current_photo,
@@ -3098,26 +3075,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 
                 if sent_msg:
-                    # Pehli baar upload hone par Nayi Photo ID save kar lo
-                    if not telegram_photo_id and sent_msg.photo:
-                        telegram_photo_id = sent_msg.photo[-1].file_id
-
-                    # Restore Feature ke liye DB me save karo
-                    save_post_to_db(
-                        movie_id, chat_id, sent_msg.message_id, bot3, 
-                        channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies"
-                    )
+                    if not telegram_photo_id and sent_msg.photo: telegram_photo_id = sent_msg.photo[-1].file_id
+                    save_post_to_db(movie_id, chat_id, sent_msg.message_id, bot3, channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
                     sent_count += 1
-                    
             except Exception as e:
                 logger.error(f"Auto-post failed for {chat_id_str}: {e}")
                 last_error = str(e)
 
-        # 5. Message Update and Error Display
-        result_msg = f"{query.message.text}\n\n✅ <b>Auto-Posted (HD TMDB Poster) to {sent_count} channels!</b>"
-        
-        if sent_count == 0 and last_error:
-            result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
+        result_msg = f"{query.message.text}\n\n✅ <b>Auto-Posted (100% Original HD) to {sent_count} channels!</b>"
+        if sent_count == 0 and last_error: result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
 
         await query.edit_message_text(result_msg, parse_mode='HTML')
         context.bot_data.pop(f"auto_thumb_{movie_id}", None)
@@ -3960,15 +3926,17 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
 
+    # 🚀 YAHAN PAR TURANT 'OFF' KAR DIYA TAAKI NORMAL BATCH KAAM KAR SAKE
+    SUPER_BATCH_SESSION['active'] = False
     files = SUPER_BATCH_SESSION['files']
+    SUPER_BATCH_SESSION['files'] = [] 
+    
     if not files:
         await update.message.reply_text("❌ Koi file nahi mili!")
-        SUPER_BATCH_SESSION['active'] = False
         return
 
     status_msg = await update.message.reply_text(f"🔄 **Grouping {len(files)} files... Please wait.**", parse_mode='Markdown')
 
-    # 🛑 1. SMART GROUPING BY MOVIE NAME (Fast Fallback se)
     grouped_movies = defaultdict(list)
     for f in files:
         raw_text = f['caption'] if f['caption'] else f['file_name']
@@ -3983,12 +3951,10 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channels = get_storage_channels()
     target_channels = [ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',') if ch.strip()]
 
-    # 🛑 2. PROCESS EACH MOVIE GROUP
     for i, (temp_title, movie_files) in enumerate(grouped_movies.items(), 1):
         try:
             await status_msg.edit_text(f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: `{temp_title}`")
             
-            # --- A. Gemini Vision & TMDB Fetch (Pehli file se) ---
             first_file = movie_files[0]
             image_bytes = None
             if first_file['thumb_id']:
@@ -4011,92 +3977,106 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
                 genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
 
-            # --- B. Save Movie to Database ---
+            # ... (उपर का कोड सेम रहेगा)
             conn = get_db_connection()
             if not conn: continue
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
-                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (title) DO UPDATE 
-                SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
-                    year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
-                    genre = COALESCE(EXCLUDED.genre, movies.genre),
-                    rating = COALESCE(EXCLUDED.rating, movies.rating),
-                    description = COALESCE(EXCLUDED.description, movies.description),
-                    category = COALESCE(EXCLUDED.category, movies.category),
-                    language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
-                RETURNING id
-                """,
-                (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
-            )
-            movie_id = cur.fetchone()[0]
-            conn.commit()
-
-            # --- C. Backup Upload & Save Qualities ---
-            for f in movie_files:
-                backup_map = {}
-                main_url = ""
-                if channels:
-                    try:
-                        sent = await f['message_obj'].copy(chat_id=channels[0])
-                        backup_map[str(channels[0])] = sent.message_id
-                        main_url = f"https://t.me/c/{str(channels[0]).replace('-100', '')}/{sent.message_id}"
-                        await asyncio.sleep(0.5) 
-                    except Exception as e:
-                        logger.error(f"Backup failed: {e}")
-
-                file_size_str = get_readable_file_size(f['file_size'])
-                label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
-
+            
+            try:  # 🛑 NAYA: Try-Finally block zaroori hai taaki DB leak na ho
+                cur = conn.cursor()
                 cur.execute(
                     """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
+                    ON CONFLICT (title) DO UPDATE 
+                    SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
+                        year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
+                        genre = COALESCE(EXCLUDED.genre, movies.genre),
+                        rating = COALESCE(EXCLUDED.rating, movies.rating),
+                        description = COALESCE(EXCLUDED.description, movies.description),
+                        category = COALESCE(EXCLUDED.category, movies.category),
+                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
+                    RETURNING id
                     """,
-                    (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
+                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
                 )
-                conn.commit()
-            
-            cur.close()
-            close_db_connection(conn)
+                movie_id = cur.fetchone()[0]
 
-            # --- D. GET HD POSTER (Direct Link) ---
-            photo_to_send = None
-            if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
-                photo_to_send = poster_url
-            if not photo_to_send and first_file['thumb_id']:
-                photo_to_send = first_file['thumb_id']
+                # 📂 Insert Files
+                for f in movie_files:
+                    backup_map = {}
+                    main_url = ""
+                    if channels:
+                        try:
+                            sent = await f['message_obj'].copy(chat_id=channels[0])
+                            backup_map[str(channels[0])] = sent.message_id
+                            main_url = f"https://t.me/c/{str(channels[0]).replace('-100', '')}/{sent.message_id}"
+                            await asyncio.sleep(0.5) 
+                        except Exception as e:
+                            logger.error(f"Backup failed: {e}")
+
+                    file_size_str = get_readable_file_size(f['file_size'])
+                    label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
+
+                    cur.execute(
+                        """
+                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                        url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                        """,
+                        (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
+                    )
+                
+                # 🤖 NAYA: Generate and Save AI Aliases in Superbatch
+                aliases = generate_aliases_gemini(title, str(year), category)
+                if aliases:
+                    for alias in aliases:
+                        if not alias or len(alias) > 255: continue
+                        try:
+                            cur.execute("SAVEPOINT sp_alias")
+                            cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
+                            cur.execute("RELEASE SAVEPOINT sp_alias")
+                        except Exception:
+                            cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
+                            
+                conn.commit()
+                cur.close()
+                
+            except Exception as db_err:
+                logger.error(f"SuperBatch DB Error: {db_err}")
+                if conn: conn.rollback()
+            finally:
+                if conn: close_db_connection(conn) # 🛑 VERY IMPORTANT: Iske bina pool full ho jayega
+            
+            # ... (Yahan se aage ka poster aur forum posting ka logic same rahega)
+
+            photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
+            if not photo_to_send and first_file['thumb_id']: photo_to_send = first_file['thumb_id']
             if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
-            # --- E. BUILD CAPTION & KEYBOARD ---
-            # --- PREMIUM SLEEK CAPTION ---
+            # 🛑 100% SAFE HTML BOLD CAPTION
+            safe_rating = rating if rating else "N/A"
+            safe_genre = genre if genre else "Unknown"
+            
             caption = (
-                f"🎬 **{title} ({year})**\n\n"
-                f"⭐️ **Rating:** {rating}/10\n"
-                f"🎭 **Genre:** {genre}\n\n"
+                f"🎬 <b>{title} ({year})</b>\n\n"
+                f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
+                f"🎭 <b>Genre:</b> {safe_genre}\n\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"🔞 **18+ Content:** [Join Premium](https://t.me/+wcYoTQhIz-ZmOTY1)\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"👇 **Download Below** 👇"
+                f"👇 <b>Download Below</b> 👇"
             )
 
             link_param = f"movie_{movie_id}"
-            bot1 = "FlimfyBox_SearchBot"
-            bot2 = "urmoviebot"
-            bot3 = "FlimfyBox_Bot"
+            bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
 
             post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
-                 InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
+                [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
                 [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
-            # --- F. AUTO POST TO FORUM ---
             topic_id = 1
             cat_lower = str(category or "").lower()
             for tid, keywords in TOPIC_MAPPING.items():
@@ -4112,43 +4092,43 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif "series" in cat_lower: topic_id = 18
 
             try:
+                # 🛑 HTML PARSE MODE YAHAN BHI LAGA DIYA
                 if topic_id == 1:
-                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='Markdown', reply_markup=post_keyboard)
+                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
                 else:
-                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='Markdown', reply_markup=post_keyboard)
+                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
             except Exception as e:
                 logger.error(f"SuperBatch Forum Post Error: {e}")
 
-            # --- G. AUTO POST TO MAIN CHANNELS ---
             telegram_photo_id = None
             if target_channels:
                 for chat_id_str in target_channels:
                     try:
                         current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
+                        
+                        # 🛑 HTML PARSE MODE YAHAN BHI LAGA DIYA
                         sent_msg = await context.bot.send_photo(
                             chat_id=int(chat_id_str), photo=current_photo,
-                            caption=caption, parse_mode='Markdown', reply_markup=post_keyboard
+                            caption=caption, parse_mode='HTML', reply_markup=post_keyboard
                         )
                         if not telegram_photo_id and sent_msg.photo:
                             telegram_photo_id = sent_msg.photo[-1].file_id
                         
                         save_post_to_db(movie_id, int(chat_id_str), sent_msg.message_id, bot3, caption, telegram_photo_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
-                        await asyncio.sleep(1.5) # Protect against FloodWait
+                        await asyncio.sleep(1.5)
                     except Exception as e:
                         logger.error(f"SuperBatch Main Channel Post Error: {e}")
 
             success_movies += 1
-            await asyncio.sleep(2) # Relax before processing next movie
+            await asyncio.sleep(2)
 
         except Exception as e:
             logger.error(f"SuperBatch Movie Error: {e}")
             continue
 
-    # 🛑 3. FINISH
     await status_msg.edit_text(
         f"🎉 **SUPER BATCH COMPLETED!**\n\n"
         f"✅ Total Movies Processed: {success_movies}/{total_movies}\n"
-        f"📦 Total Files Saved: {len(files)}\n"
         f"🚀 All movies auto-posted to Channels & Forum successfully!",
         parse_mode='Markdown'
     )
@@ -4366,165 +4346,136 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     status_msg = await update.message.reply_text("🔄 **Batch complete kar raha hoon...**\n🧠 AI Aliases generate ho rahe hain...", parse_mode='Markdown')
 
-    movie_title = BATCH_SESSION.get('movie_title', '')
-    movie_id = BATCH_SESSION.get('movie_id')
-    movie_year = BATCH_SESSION.get('year', '')
-    movie_category = BATCH_SESSION.get('category', '')
-    
-    # 🎯 AI Aliases generate karo
-    aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
-    
-    alias_count = 0
-    conn = get_db_connection()
-    
-    if conn and aliases:
-        try:
-            cur = conn.cursor()
-            for alias in aliases:
-                if not alias or len(alias) > 255:
-                    continue
-                
-                try:
-                    cur.execute("SAVEPOINT sp_alias")
-                    cur.execute(
-                        "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-                        (movie_id, alias.lower().strip())
-                    )
-                    cur.execute("RELEASE SAVEPOINT sp_alias")
-                    alias_count += 1
-                except Exception as inner_e:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
-                    logger.warning(f"Alias skip '{alias}': {inner_e}")
-                    
-            conn.commit()
-            cur.close()
-        except Exception as e:
-            logger.error(f"Alias save error: {e}")
-            if conn: conn.rollback()
-        finally:
-            close_db_connection(conn)
-
-    # =======================================================
-    # 🚀 NAYA MAGIC: AUTO POST TO FORUM GROUP ON /DONE
-    # =======================================================
-    forum_post_status = "⏳ Posting to Forum..."
-    conn = get_db_connection()
-    if conn:
-        cur = conn.cursor()
-        cur.execute("SELECT genre, poster_url, description, rating FROM movies WHERE id = %s", (movie_id,))
-        res = cur.fetchone()
-        cur.close()
-        close_db_connection(conn)
+    try:
+        movie_title = BATCH_SESSION.get('movie_title', 'Unknown')
+        movie_id = BATCH_SESSION.get('movie_id')
+        movie_year = BATCH_SESSION.get('year', '')
+        movie_category = BATCH_SESSION.get('category', '')
         
-        if res:
-            m_genre, m_poster, m_desc, m_rating = res
-            
-            # --- TOPIC SELECTION (1 is General) ---
-            topic_id = 1
-            cat_lower = str(movie_category or "").lower()
-            
-            for tid, keywords in TOPIC_MAPPING.items():
-                if any(k.lower() in cat_lower for k in keywords):
-                    topic_id = tid
-                    break
-                    
-            if topic_id == 1:
-                if "south" in cat_lower: topic_id = 20
-                elif "hollywood" in cat_lower: topic_id = 32
-                elif "bollywood" in cat_lower: topic_id = 16
-                elif "anime" in cat_lower: topic_id = 22
-                elif "series" in cat_lower: topic_id = 18
-                
-            # --- CAPTION ---
-            caption = (
-                f"🎬 **{title} ({year})**\n\n"
-                f"⭐️ **Rating:** {rating}/10\n"
-                f"🎭 **Genre:** {genre}\n\n"
-                f"🔞 **FlimfyBox For Adult:** https://t.me/+wcYoTQhIz-ZmOTY1\n\n"
-                f"👇 **Click Below to Download** 👇"
-            )
-            
-            # --- KEYBOARD ---
-            link_param = f"movie_{movie_id}"
-            bot1 = "FlimfyBox_SearchBot"
-            bot2 = "urmoviebot"
-            bot3 = "FlimfyBox_Bot"
-            
-            forum_kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
-                    InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot2}?start={link_param}")
-                ],
-                [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")]
-            ])
-            
-            # --- GET POSTER (TMDB HD DIRECT URL or Backup Thumbnail) ---
-            photo_to_send = None
-            if m_poster and m_poster != 'N/A' and m_poster.startswith('http'):
-                photo_to_send = m_poster  # 🚀 BINA DOWNLOAD KIYE DIRECT LINK PASS KIYA!
-                
-            if not photo_to_send:
-                thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
-                if thumb_file_id:
-                    try:
-                        tg_file = await context.bot.get_file(thumb_file_id)
-                        photo_to_send = bytes(await tg_file.download_as_bytearray())
-                    except Exception: pass
-                    
-            if not photo_to_send:
-                photo_to_send = DEFAULT_POSTER
-
+        aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
+        alias_count = 0
+        conn = get_db_connection()
+        
+        if conn and aliases:
             try:
-                await context.bot.send_photo(
-                    chat_id=FORUM_GROUP_ID,
-                    message_thread_id=topic_id,
-                    photo=photo_to_send,
-                    caption=forum_caption,
-                    parse_mode='Markdown',
-                    reply_markup=forum_kb
+                cur = conn.cursor()
+                for alias in aliases:
+                    if not alias or len(alias) > 255: continue
+                    try:
+                        cur.execute("SAVEPOINT sp_alias")
+                        cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
+                        cur.execute("RELEASE SAVEPOINT sp_alias")
+                        alias_count += 1
+                    except Exception:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
+                conn.commit()
+                cur.close()
+            except Exception:
+                if conn: conn.rollback()
+            finally:
+                close_db_connection(conn)
+
+        # 🚀 POST TO FORUM
+        forum_post_status = "⏳ Posting to Forum..."
+        conn = get_db_connection()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT genre, poster_url, description, rating FROM movies WHERE id = %s", (movie_id,))
+            res = cur.fetchone()
+            cur.close()
+            close_db_connection(conn)
+            
+            if res:
+                m_genre, m_poster, m_desc, m_rating = res
+                
+                topic_id = 1
+                cat_lower = str(movie_category or "").lower()
+                for tid, keywords in TOPIC_MAPPING.items():
+                    if any(k.lower() in cat_lower for k in keywords):
+                        topic_id = tid
+                        break
+                if topic_id == 1:
+                    if "south" in cat_lower: topic_id = 20
+                    elif "hollywood" in cat_lower: topic_id = 32
+                    elif "bollywood" in cat_lower: topic_id = 16
+                    elif "anime" in cat_lower: topic_id = 22
+                    elif "series" in cat_lower: topic_id = 18
+                    
+                # 🛑 100% SAFE HTML BOLD CAPTION
+                safe_rating = m_rating if m_rating else "N/A"
+                safe_genre = m_genre if m_genre else "Unknown"
+                
+                caption = (
+                    f"🎬 <b>{movie_title} ({movie_year})</b>\n\n"
+                    f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
+                    f"🎭 <b>Genre:</b> {safe_genre}\n\n"
+                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                    f"👇 <b>Download Below</b> 👇"
                 )
-                forum_post_status = f"✅ Auto-Posted to Forum (Topic ID: {topic_id})"
-            except Exception as e:
-                logger.error(f"Auto Forum Post Error: {e}")
-                forum_post_status = f"⚠️ Forum Post Failed (Check Bot Rights/Topic ID)"
-        else:
-            forum_post_status = "⚠️ Movie info missing for Forum Post"
+                
+                link_param = f"movie_{movie_id}"
+                bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
+                
+                forum_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
+                    [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")]
+                ])
+                
+                photo_to_send = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
+                if not photo_to_send:
+                    thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
+                    if thumb_file_id:
+                        photo_to_send = thumb_file_id
+                if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
-    # =======================================================
-    # END OF FORUM POST LOGIC
-    # =======================================================
+                try:
+                    # 🛑 HTML PARSE MODE LAGAYA HAI YAHAN
+                    if topic_id == 1:
+                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=forum_kb)
+                    else:
+                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=forum_kb)
+                    forum_post_status = f"✅ Auto-Posted to Forum (Topic ID: {topic_id})"
+                except Exception as e:
+                    logger.error(f"Auto Forum Post Error: {e}")
+                    forum_post_status = f"⚠️ Forum Post Failed"
+            else:
+                forum_post_status = "⚠️ Movie info missing for Forum Post"
 
-    # Final Report
-    channels_count = len(get_storage_channels())
-    report = (
-        f"🎉 **Batch Completed!**\n\n"
-        f"🎬 **Movie:** `{movie_title}`\n"
-        f"📅 **Year:** {movie_year if movie_year else 'N/A'}\n"
-        f"🏷️ **Category:** {movie_category}\n"
-        f"📂 **Files Saved:** {BATCH_SESSION.get('file_count', 0)}\n"
-        f"🤖 **AI Aliases:** {alias_count}\n\n"
-        f"✅ Backups: {channels_count} channels\n"
-        f"💬 {forum_post_status}"  # 👈 NAYA: Result dikhayega
-    )
+        channels_count = len(get_storage_channels())
+        report = (
+            f"🎉 **Batch Completed!**\n\n"
+            f"🎬 **Movie:** `{movie_title}`\n"
+            f"📅 **Year:** {movie_year if movie_year else 'N/A'}\n"
+            f"🏷️ **Category:** {movie_category}\n"
+            f"📂 **Files Saved:** {BATCH_SESSION.get('file_count', 0)}\n"
+            f"🤖 **AI Aliases:** {alias_count}\n\n"
+            f"✅ Backups: {channels_count} channels\n"
+            f"💬 {forum_post_status}"
+        )
 
-    # Backup File Poster Memory
-    extracted_thumb = BATCH_SESSION.get('extracted_thumb')
-    if extracted_thumb:
-        context.bot_data[f"auto_thumb_{movie_id}"] = extracted_thumb
+        extracted_thumb = BATCH_SESSION.get('extracted_thumb')
+        if extracted_thumb: context.bot_data[f"auto_thumb_{movie_id}"] = extracted_thumb
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Auto Post (HD TMDB Poster)", callback_data=f"autopost_{movie_id}")],
-        [InlineKeyboardButton("📢 Manual Post (Send Poster)", callback_data=f"askposter_{movie_id}")]
-    ])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤖 Auto Post (HD TMDB Poster)", callback_data=f"autopost_{movie_id}")],
+            [InlineKeyboardButton("📢 Manual Post (Send Poster)", callback_data=f"askposter_{movie_id}")]
+        ])
 
-    await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
-    
-    # Reset Session
-    BATCH_SESSION.update({
-        'active': False, 'movie_id': None, 'movie_title': None,
-        'file_count': 0, 'admin_id': None, 'year': '', 'category': '',
-        'extracted_thumb': None
-    })
+        await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Error in batch_done_command: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ Error during /done: {e}")
+
+    finally:
+        # ✅ SINGLE GUARANTEED RESET (Double hat gaya)
+        BATCH_SESSION.update({
+            'active': False, 'movie_id': None, 'movie_title': None, 
+            'file_count': 0, 'admin_id': None, 'year': '', 'category': '', 
+            'extracted_thumb': None
+        })
 
 async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin se photo lekar clean caption ke sath channel me post karega"""
