@@ -4157,13 +4157,17 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
     if BATCH_18_SESSION.get('active'): return
+    
+    # 👇👇👇 NAYI LINE: Agar Super Batch ON hai, to normal batch shant rahega
+    if SUPER_BATCH_SESSION.get('active'): return
+    # 👆👆👆
 
     message = update.effective_message
     if not (message.document or message.video or message.photo): return
 
     caption = message.caption or ""
     if caption.startswith('/post_query'):
-        return  
+        return
 
     # 🚀 THE MAIN FIX: Agar sirf Photo aayi hai (bina caption ke) aur Batch OFF hai,
     # toh isko Poster maan lo aur koi Error message mat do (Takrav khatam).
