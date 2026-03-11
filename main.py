@@ -4073,13 +4073,15 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
             # --- E. BUILD CAPTION & KEYBOARD ---
-            short_desc = (plot[:150] + "...") if plot else "Plot details unavailable."
+            # --- PREMIUM SLEEK CAPTION ---
             caption = (
                 f"🎬 **{title} ({year})**\n\n"
                 f"⭐️ **Rating:** {rating}/10\n"
-                f"🎭 **Genre:** {genre}\n"
-                f"🔞 **FlimfyBox For Adult:** [Join Premium](https://t.me/+wcYoTQhIz-ZmOTY1)\n\n"
-                f"👇 **Click Below to Download** 👇"
+                f"🎭 **Genre:** {genre}\n\n"
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"🔞 **18+ Content:** [Join Premium](https://t.me/+wcYoTQhIz-ZmOTY1)\n"
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"👇 **Download Below** 👇"
             )
 
             link_param = f"movie_{movie_id}"
