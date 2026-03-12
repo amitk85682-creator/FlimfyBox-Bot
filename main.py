@@ -1546,7 +1546,7 @@ def get_tmdb_backdrop(query, search_year=""):
     return None
 
 def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """Smart Metadata Fetcher (OMDb + Cinemagoer + TMDB HD Posters)"""
+    """Smart Metadata Fetcher (OMDb + Cinemagoer + TMDB HD Posters) - NOW SUPPORTS IMDb IDs!"""
     if not ia: return query, 0, '', '', '', 'N/A', '', 'Unknown'
 
     def get_smart_category(country, language, genre):
@@ -1559,17 +1559,29 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
 
     title, year, poster, genres, imdb_id, rating, plot, category = query, 0, '', '', '', 'N/A', '', 'Unknown'
 
+    # 🟢 NAYA: Check karo ki 'query' me IMDb ID hai ya Title
+    search_query = query.strip()
+    is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
+
     try:
-        # 📝 1. OMDb Strategy (Data ke liye)
+        # 📝 1. OMDb Strategy
         omdb_api_key = os.environ.get("OMDB_API_KEY")
         if omdb_api_key:
             try:
-                base_url = f"https://www.omdbapi.com/?t={quote(query)}&apikey={omdb_api_key}"
-                url = base_url
-                if search_year and search_year.isdigit(): url += f"&y={search_year}"
+                # Agar ID hai to '?i=' lagao, varna '?t=' lagao
+                if is_imdb_id:
+                    base_url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}"
+                    url = base_url
+                else:
+                    base_url = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}"
+                    url = base_url
+                    if search_year and search_year.isdigit(): 
+                        url += f"&y={search_year}"
 
                 response = requests.get(url, timeout=10).json()
-                if response.get("Response") != "True" and search_year:
+                
+                # Agar title + year se nahi mili, to sirf title se try karo
+                if response.get("Response") != "True" and not is_imdb_id and search_year:
                     response = requests.get(base_url, timeout=10).json()
                 
                 if response.get("Response") == "True":
@@ -1585,29 +1597,47 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 logger.warning(f"OMDb Error: {e}")
 
         # 🔍 2. Cinemagoer Strategy (Fallback)
-        if not imdb_id:
-            movies = ia.search_movie(query)
-            if movies:
-                best_match = movies[0]
-                for m in movies:
-                    m_year = str(m.get('year', ''))
-                    if search_year and search_year == m_year:
-                        best_match = m
-                        break
-                ia.update(best_match)
-                
-                title = best_match.get('title', title)
-                year = best_match.get('year', year)
-                poster = best_match.get('full-size cover url', poster)
-                genres = ', '.join(best_match.get('genres', [])[:3])
-                imdb_id = f"tt{best_match.movieID}"
-                rating = best_match.get('rating', rating)
-                plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else plot)
-                category = get_smart_category(best_match.get('countries', []), best_match.get('languages', []), genres)
+        # Agar OMDb ne kaam nahi kiya (imdb_id abhi bhi khali hai)
+        if not imdb_id or title == query:
+            if is_imdb_id:
+                # Cinemagoer me ID numbers me chahiye hoti hai (tt hatakar)
+                num_id = search_query[2:]
+                try:
+                    best_match = ia.get_movie(num_id)
+                    title = best_match.get('title', title)
+                    year = best_match.get('year', year)
+                    poster = best_match.get('full-size cover url', poster)
+                    genres = ', '.join(best_match.get('genres', [])[:3])
+                    imdb_id = search_query
+                    rating = best_match.get('rating', rating)
+                    plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else plot)
+                    category = get_smart_category(best_match.get('countries', []), best_match.get('languages', []), genres)
+                except Exception as e:
+                    logger.warning(f"Cinemagoer ID fetch error: {e}")
+            else:
+                movies = ia.search_movie(query)
+                if movies:
+                    best_match = movies[0]
+                    for m in movies:
+                        m_year = str(m.get('year', ''))
+                        if search_year and search_year == m_year:
+                            best_match = m
+                            break
+                    ia.update(best_match)
+                    
+                    title = best_match.get('title', title)
+                    year = best_match.get('year', year)
+                    poster = best_match.get('full-size cover url', poster)
+                    genres = ', '.join(best_match.get('genres', [])[:3])
+                    imdb_id = f"tt{best_match.movieID}"
+                    rating = best_match.get('rating', rating)
+                    plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else plot)
+                    category = get_smart_category(best_match.get('countries', []), best_match.get('languages', []), genres)
 
         # 🚀🚀 3. TMDB MAGIC: HD LANDSCAPE POSTER OVERRIDE 🚀🚀
-        # Yahan hum purane vertical poster ko TMDB ke HD landscape se replace kar rahe hain
-        tmdb_landscape = get_tmdb_backdrop(query, search_year)
+        # Agar user ne IMDb ID di thi, toh TMDB ko ID nahi balki original Title pass karo (jo OMDb se abhi nikala hai)
+        tmdb_search_term = title if is_imdb_id and title != query else query
+        tmdb_landscape = get_tmdb_backdrop(tmdb_search_term, search_year)
         if tmdb_landscape:
             poster = tmdb_landscape
 
@@ -3977,11 +4007,10 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
                 genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
 
-            # ... (उपर का कोड सेम रहेगा)
             conn = get_db_connection()
             if not conn: continue
             
-            try:  # 🛑 NAYA: Try-Finally block zaroori hai taaki DB leak na ho
+            try:  
                 cur = conn.cursor()
                 cur.execute(
                     """
@@ -4027,29 +4056,40 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
                     )
                 
-                # 🤖 NAYA: Generate and Save AI Aliases in Superbatch
-                aliases = generate_aliases_gemini(title, str(year), category)
-                if aliases:
-                    for alias in aliases:
+                # 🛑 CRITICAL FIX 1: Pehle Movie aur Files ko save karlo taaki Aliases ke error se ye delete na ho!
+                conn.commit()
+
+                # 🤖 CRITICAL FIX 2: Generate and Save AI Aliases in Superbatch SAFELY (Non-blocking)
+                try:
+                    # Async function use karna zaroori hai taaki bot hang na ho
+                    aliases = await run_async(generate_aliases_gemini, title, str(year), category)
+                    
+                    # Fallback agar Gemini API fail ho
+                    if not aliases:
+                        aliases = [title.lower().strip(), title.replace(" ", "").lower()]
+                    
+                    for alias in set(aliases): # Duplicates hata do
                         if not alias or len(alias) > 255: continue
                         try:
-                            cur.execute("SAVEPOINT sp_alias")
                             cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
-                            cur.execute("RELEASE SAVEPOINT sp_alias")
-                        except Exception:
-                            cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
+                        except Exception as alias_insert_err:
+                            # Agar ek alias galat ho to use ignore karke baaki save karo (Current transaction rollback)
+                            conn.rollback() 
                             
-                conn.commit()
+                    conn.commit() # Aliases DB me save ho gaye!
+                except Exception as alias_err:
+                    logger.error(f"SuperBatch Alias Generation Error: {alias_err}")
+                    conn.rollback()
+
                 cur.close()
                 
             except Exception as db_err:
                 logger.error(f"SuperBatch DB Error: {db_err}")
                 if conn: conn.rollback()
             finally:
-                if conn: close_db_connection(conn) # 🛑 VERY IMPORTANT: Iske bina pool full ho jayega
+                if conn: close_db_connection(conn)
             
-            # ... (Yahan se aage ka poster aur forum posting ka logic same rahega)
-
+            # --- POSTER & POSTING LOGIC ---
             photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
             if not photo_to_send and first_file['thumb_id']: photo_to_send = first_file['thumb_id']
             if not photo_to_send: photo_to_send = DEFAULT_POSTER
@@ -4092,7 +4132,6 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif "series" in cat_lower: topic_id = 18
 
             try:
-                # 🛑 HTML PARSE MODE YAHAN BHI LAGA DIYA
                 if topic_id == 1:
                     await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
                 else:
@@ -4106,7 +4145,6 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
                         
-                        # 🛑 HTML PARSE MODE YAHAN BHI LAGA DIYA
                         sent_msg = await context.bot.send_photo(
                             chat_id=int(chat_id_str), photo=current_photo,
                             caption=caption, parse_mode='HTML', reply_markup=post_keyboard
