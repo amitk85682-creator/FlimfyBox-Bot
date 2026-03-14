@@ -6880,12 +6880,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to send error message to user: {e}")
 
 # ==================== FLASK APP ====================
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 
 flask_app = Flask('')
-CORS(flask_app)  # 👈 Ye website ko data fetch karne dega
+CORS(flask_app, resources={r"/*": {"origins": "*"}})
+
+# 👇 100% BULLETPROOF CORS FIX (Browser Security ko bypass karne ke liye) 👇
+@flask_app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+# 👆 YAHAN TAK 👆
 
 @flask_app.route('/')
 def home():
@@ -6895,9 +6904,11 @@ def home():
 def health():
     return "OK", 200
 
-# 👇 NAYA API ROUTE 👇
-@flask_app.route('/api/movies', methods=['GET'])
+@flask_app.route('/api/movies', methods=['GET', 'OPTIONS']) # OPTIONS add kiya
 def get_movies_api():
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "success"}), 200
+        
     """Web App ke liye Movies ka Data return karega"""
     conn = get_db_connection()
     if not conn:
@@ -6905,7 +6916,6 @@ def get_movies_api():
     
     try:
         cur = conn.cursor()
-        # Latest 100 movies nikalenge jinka poster maujood ho
         cur.execute("""
             SELECT id, title, year, rating, category, poster_url 
             FROM movies 
@@ -6936,7 +6946,6 @@ def get_movies_api():
         if conn:
             close_db_connection(conn)
 
-# 👇 YEH FUNCTION MISSING THA (Ise wapas add kar diya gaya hai) 👇
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
     flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
@@ -6944,9 +6953,8 @@ def run_flask():
     try:
         from admin_views import admin as admin_blueprint
         flask_app.register_blueprint(admin_blueprint)
-        logger.info("Admin blueprint registered successfully.")
     except Exception as e:
-        logger.error(f"Failed to register admin blueprint: {e}")
+        logger.error(f"Blueprint Error: {e}")
 
     flask_app.run(host='0.0.0.0', port=port)
 
