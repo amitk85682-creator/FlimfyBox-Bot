@@ -6880,8 +6880,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Failed to send error message to user: {e}")
 
 # ==================== FLASK APP ====================
+from flask import Flask, jsonify
+from flask_cors import CORS
+import os
+
 flask_app = Flask('')
-CORS(flask_app)  # 👈 NAYA: Ye website ko data fetch karne dega
+CORS(flask_app)  # 👈 Ye website ko data fetch karne dega
 
 @flask_app.route('/')
 def home():
@@ -6891,7 +6895,7 @@ def home():
 def health():
     return "OK", 200
 
-# 👇👇👇 NAYA API ROUTE 👇👇👇
+# 👇 NAYA API ROUTE 👇
 @flask_app.route('/api/movies', methods=['GET'])
 def get_movies_api():
     """Web App ke liye Movies ka Data return karega"""
@@ -6931,7 +6935,20 @@ def get_movies_api():
     finally:
         if conn:
             close_db_connection(conn)
-# 👆👆👆 YAHAN TAK 👆👆👆
+
+# 👇 YEH FUNCTION MISSING THA (Ise wapas add kar diya gaya hai) 👇
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
+
+    try:
+        from admin_views import admin as admin_blueprint
+        flask_app.register_blueprint(admin_blueprint)
+        logger.info("Admin blueprint registered successfully.")
+    except Exception as e:
+        logger.error(f"Failed to register admin blueprint: {e}")
+
+    flask_app.run(host='0.0.0.0', port=port)
 
 # ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
