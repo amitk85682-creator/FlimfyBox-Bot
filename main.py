@@ -9,6 +9,7 @@ import random
 import requests
 import signal
 import sys
+from telegram import KeyboardButton, WebAppInfo
 import aiohttp
 # import anthropic  # Agar zaroorat ho toh uncomment karein
 from flask import jsonify
