@@ -458,140 +458,13 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
-def pre_clean_caption(raw_text: str) -> str:
-    """
-    🧹 Caption को पूरी तरह साफ़ करता है: URLs, Promotions, Emojis और Weird Fonts हटाता है।
-    """
-    if not raw_text:
-        return ""
-    
-    text = raw_text.strip()
-    
-    # 1. Remove URLs, Mentions & Tags like [@PlexRip]
-    text = re.sub(r'https?://\S+', '', text)
-    text = re.sub(r'@\w+', '', text)
-    text = re.sub(r'\[@?\w+\]', '', text)
-    
-    # 2. Skip Promotional Lines
-    skip_keywords = [
-        'must join', 'channel 1', 'join channel', 'join group', 'subscribe', 'follow',
-        '1st on', '1ˢᵗ ᵒⁿ', 'powered by', 'movies, web series', 't.me', 'telegram',
-        'new movies', 'new webseries'
-    ]
-    
-    lines = text.split('\n')
-    clean_lines = []
-    for line in lines:
-        line_lower = line.strip().lower()
-        if len(line.strip()) < 3:
-            continue
-        if any(kw in line_lower for kw in skip_keywords):
-            continue
-        clean_lines.append(line.strip())
-    
-    # सबसे पहली काम की लाइन ही असली नाम होता है
-    text = clean_lines[0] if clean_lines else text
-    
-    # 3. Remove Emojis & Weird Symbols (Keep Alphanumeric, Spaces, Dots, Hyphens, Brackets)
-    text = re.sub(r'[^\w\s\.\-\[\]\(\)]', ' ', text)
-    
-    # 4. Remove Extra Spaces
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    return text
-
-
-async def fallback_extraction(caption_text):
-    """
-    🔧 SMART FALLBACK: जब AI फेल हो जाए, तो यह बिना गलती के Title, Year, Season निकालेगा।
-    (नोट: पुराने कोड से दोनों fallback_extraction हटाकर सिर्फ इसे रखें)
-    """
-    try:
-        text = pre_clean_caption(caption_text)
-        if not text or len(text) < 2:
-            return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": "Movies"}
-
-        # 1. Extract Year
-        year_match = re.search(r'\b(19|20)\d{2}\b', text)
-        year = year_match.group(0) if year_match else ""
-
-        # 2. Extract Season/Episode
-        extra_info = ""
-        season_match = re.search(r'\b(S\d{1,2}E\d{1,3}|S\d{1,2}|EP\d{1,3}|SEASON\s?\d+)\b', text, re.IGNORECASE)
-        if season_match:
-            extra_info = season_match.group(0).upper().strip()
-
-        if re.search(r'\b(complete|all\s*episodes?|batch|combined)\b', text, re.IGNORECASE):
-            extra_info = (extra_info + " Complete").strip()
-
-        # 3. Extract Language
-        language = ""
-        lang_patterns = [
-            (r'\b(dual\s*audio)\b', 'Dual Audio'),
-            (r'\b(multi\s*audio)\b', 'Multi Audio'),
-            (r'\b(hindi)\b', 'Hindi'),
-            (r'\b(english)\b', 'English'),
-            (r'\b(tamil)\b', 'Tamil'),
-            (r'\b(telugu)\b', 'Telugu')
-        ]
-        for pattern, lang_name in lang_patterns:
-            if re.search(pattern, text.lower()):
-                language = lang_name
-                break
-
-        # 4. Category Detect
-        text_lower = text.lower()
-        is_adult = any(kw in text_lower for kw in ['ullu', 'kooku', 'palang tod', '18+', 'unrated', 'adult'])
-        category = "Adult Web Series" if is_adult else ("Web Series" if extra_info else "Movies")
-
-        # 5. Extract & Clean Title (The Magic Cut ✂️)
-        title = text
-
-        # Remove file extensions
-        title = re.sub(r'\.(mkv|mp4|avi)$', ' ', title, flags=re.IGNORECASE)
-
-        # Cut EVERYTHING after Season or Year
-        if season_match:
-            title = title[:season_match.start()]
-        elif year:
-            year_pos = re.search(r'\b' + year + r'\b', title)
-            if year_pos:
-                title = title[:year_pos.start()]
-
-        # Cut at Quality Tags
-        quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv|x264|x265|hevc|aac\d?|unrated|jio|nf|amzn|telly|plexrip)\b'
-        title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
-
-        # Remove brackets like [Telly], (2023)
-        title = re.sub(r'\[.*?\]|\(.*?\)', ' ', title)
-
-        # Remove languages from title
-        title = re.sub(r'(?i)\b(hindi|english|tamil|telugu|dual audio|multi audio)\b', ' ', title)
-
-        # Clean spaces and special characters
-        title = re.sub(r'[_\.\-]+', ' ', title)
-        title = re.sub(r'\s+', ' ', title).strip()
-
-        if len(title) < 2:
-            title = "UNKNOWN"
-
-        logger.info(f"✅ FALLBACK: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}', Cat='{category}'")
-        return {
-            "title": title, "year": year, "language": language,
-            "extra_info": extra_info, "category": category
-        }
-
-    except Exception as e:
-        logger.error(f"Fallback failed: {e}")
-        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": "Movies"}
-
-
 async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
-    🎯 ADVANCED AI EXTRACTION: Strictly extracts Title, Year, and Language for filtering.
+    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL 2-STEP VERIFICATION)
+    Gemini ab Caption + Video Thumbnail dono dekhega!
     """
     if not caption_text or len(caption_text.strip()) < 2:
-        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": "Movies"}
+        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
     
     first_line = caption_text.split('\n')[0].strip()
 
@@ -601,102 +474,89 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
             return await fallback_extraction(first_line)
 
         genai.configure(api_key=api_key)
+        # Vision aur Text dono ke liye 'gemini-2.0-flash' (ya 'gemini-1.5-flash') best hai
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🧠 ULTRA-STRICT PROMPT (For Year and Language Filtering)
-        prompt = f"""You are a precise Movie/Series Metadata Extractor.
-        PRIMARY SOURCE: The text caption provided below.
-        SECONDARY SOURCE: The image provided (use only for context if needed).
+        # 🧠 SUPER SMART PROMPT FOR VISION & TEXT
+        prompt = f"""You are an advanced Movie/Series Metadata Extractor.
+        I am providing you a Telegram filename/caption and possibly a thumbnail image from the video.
         
-        CAPTION: "{first_line}"
+        FILENAME/CAPTION: "{first_line}"
 
-        Task:
-        1. Remove junk: @mentions, telegram links, website names, and file qualities (HDRip, 1080p, 720p, mkv, mp4, x264, x265, HEVC, WEB-DL).
-        2. Extract CLEAN TITLE. (e.g., "[@movie] Palang Tod: Zaroorat (2022) Hindi mkv" -> "Palang Tod Zaroorat").
-        3. Extract the 4-digit YEAR exactly as written.
-        4. Extract the LANGUAGE (e.g., Hindi, English, Tamil). If dual audio, write "Dual Audio".
-        5. Extract EXTRA INFO like Season/Episode (e.g., "S01", "E05", "Unrated").
-        6. Guess CATEGORY strictly from: 'Bollywood', 'Hollywood', 'South', 'Anime', 'Web Series', 'Adult'.
+        Analyze the text AND the image (if provided) to identify the exact movie or web series.
+        
+        Extract the data into JSON with these exact keys:
+        1. "title": The clean, official name of the movie/show. Remove junk words like 'Full', 'Movie', 'HD', '1080p'. (e.g., "Taarzan The Wonder Car Full" -> "Taarzan The Wonder Car").
+        2. "year": The 4-digit release year. If the text doesn't have it, but you recognize the movie from the image, provide its actual release year!
+        3. "language": Any audio languages mentioned.
+        4. "extra_info": Tags indicating Batch, Seasons, Episodes (e.g., "S01 COMBINED").
+        5. "category": Guess the exact category from these: 'Bollywood', 'Hollywood', 'South', 'Anime', 'Web Series', or 'Movies'.
 
-        Return ONLY a raw JSON object (No markdown, no ```json tags). Keys must be:
-        {{"title": "", "year": "", "language": "", "extra_info": "", "category": ""}}"""
+        Return ONLY a valid JSON object. No markdown formatting like ```json."""
 
         contents = [prompt]
+        
+        # 🚀 JADOO: Agar thumbnail image aayi hai, to usko Gemini ko 'dekhne' ke liye de do!
         if image_bytes:
-            contents.append({"mime_type": "image/jpeg", "data": image_bytes})
+            contents.append({
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            })
 
         response = await run_async(model.generate_content, contents)
         
         if not response or not response.text:
             return await fallback_extraction(first_line)
         
-        # Clean JSON text
-        text = response.text.replace("```json", "").replace("```", "").strip()
+        text = response.text.strip()
+        
+        text = text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
         
-        data = json.loads(text)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning(f"⚠️ JSON parse failed: {text}")
+            return await fallback_extraction(first_line)
         
         title = data.get("title", "").strip()
         year = str(data.get("year", "")).strip()
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
-        category = data.get("category", "Movies").strip()
+        category = data.get("category", "").strip()
         
-        if not title or title.lower() == "unknown":
+        if not title or len(title) < 2:
             return await fallback_extraction(first_line)
         
-        logger.info(f"🤖 AI EXTRACTED -> Title: '{title}', Year: '{year}', Lang: '{language}', Extra: '{extra_info}'")
-        return {"title": title, "year": year, "language": language, "extra_info": extra_info, "category": category}
+        logger.info(f"🤖 GEMINI VISION RESULT: Title='{title}', Year='{year}', Cat='{category}'")
+        return {
+            "title": title, "year": year, "language": language, 
+            "extra_info": extra_info, "category": category
+        }
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
         return await fallback_extraction(first_line)
 
-
 async def fallback_extraction(caption_text):
     """
-    🔧 SMART FALLBACK: When AI fails
-    Handles seasons, episode titles, adult content, languages
+    SMART FALLBACK: Regex-based extraction when AI fails
     """
     try:
-        text = pre_clean_caption(caption_text) if caption_text else ""
-        if not text or len(text) < 2:
-            text = caption_text.strip() if caption_text else ""
-        if not text:
-            return {
-                "title": "UNKNOWN", "year": "", "language": "",
-                "extra_info": "", "category": ""
-            }
-
-        # ── 1. Extract Year ──
-        year_match = re.search(r'[\(\[\s]?(19|20)\d{2}[\)\]\s]?', text)
+        text = caption_text.strip()
+        original_text = text
+        
+        # 1. Extract Year FIRST (save it)
+        year_match = re.search(r'[\(\[]?(19|20)\d{2}[\)\]]?', text)
         year = ""
         if year_match:
             year = re.search(r'(19|20)\d{2}', year_match.group(0)).group(0)
-
-        # ── 2. Extract Season/Episode Info ──
-        extra_info = ""
-        season_match = re.search(
-            r'(S\d{1,2})([-\s]*(S\d{1,2}|E\d{1,3}))*',
-            text, re.IGNORECASE
-        )
-        if season_match:
-            extra_info = season_match.group(0).strip()
-
-        if re.search(
-            r'\b(complete|all\s*episodes?|batch|combined)\b',
-            text, re.IGNORECASE
-        ):
-            extra_info = (extra_info + " Complete").strip()
-
-        # ── 3. Extract Language ──
+        
+        # 2. Extract Language
         language = ""
         lang_patterns = [
-            (r'\b(dual\s*audio)\b', 'Dual Audio'),
-            (r'\b(multi\s*audio)\b', 'Multi Audio'),
-            (r'\b(hindi\s*dubbed)\b', 'Hindi Dubbed'),
             (r'\b(hindi)\b', 'Hindi'),
             (r'\b(english)\b', 'English'),
             (r'\b(tamil)\b', 'Tamil'),
@@ -705,173 +565,54 @@ async def fallback_extraction(caption_text):
             (r'\b(malayalam)\b', 'Malayalam'),
             (r'\b(korean)\b', 'Korean'),
             (r'\b(japanese)\b', 'Japanese'),
-            (r'\b(bengali|bangla)\b', 'Bengali'),
-            (r'\b(punjabi)\b', 'Punjabi'),
-            (r'\b(marathi)\b', 'Marathi'),
+            (r'\b(dual\s*audio)\b', 'Dual Audio'),
+            (r'\b(multi\s*audio)\b', 'Multi Audio'),
         ]
         text_lower = text.lower()
         for pattern, lang_name in lang_patterns:
             if re.search(pattern, text_lower):
                 language = lang_name
                 break
-
-        # ── 4. Detect Category ──
-        category = ""
-        adult_keywords = [
-            'ullu', 'kooku', 'palang tod', 'charmsukh', 'unrated',
-            'fliz', 'nuefliks', 'hotshot', 'gupchup', 'primeflix',
-            'hunters', '18+', 'erotic'
-        ]
-        if any(kw in text_lower for kw in adult_keywords):
-            category = "Adult Web Series"
-        elif extra_info:
-            category = "Web Series"
-        elif language in ['Tamil', 'Telugu', 'Kannada', 'Malayalam']:
-            category = "South"
-        elif language == 'Hindi':
-            category = "Bollywood"
-        elif language == 'English':
-            category = "Hollywood"
-        elif language == 'Japanese' or 'anime' in text_lower:
-            category = "Anime"
-
-        # ══════════════════════════════════════════
-        # ── 5. Extract Title (MOST IMPORTANT FIX) ──
-        # ══════════════════════════════════════════
         
-        # KEY RULE: Title = Everything BEFORE season/year/quality
-        # "Your Honor Hindi S02E01 Michael and Olivia 720p..."
-        #  ^^^^^^^^^^^^^^^^^^^  ← Title ends HERE (before S02E01)
-        #  "Michael and Olivia" is episode title, NOT series name!
-
-        title = text
-
-        # STEP A: If season found, take ONLY what's BEFORE it
-        if season_match:
-            title = text[:season_match.start()].strip()
-        
-        # STEP B: If year found, take what's BEFORE it
+        # 3. Get title - everything BEFORE the year or quality tag
+        # Split by year first
         if year:
-            year_pos = re.search(
-                r'[\(\[\s]?' + year + r'[\)\]\s]?', title
-            )
-            if year_pos:
-                title = title[:year_pos.start()].strip()
-
-        # STEP C: Remove everything from quality tags onwards
-        quality_pattern = (
-            r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|'
-            r'bluray|dvdrip|hdtv|x264|x265|hevc|aac\d?|'
-            r'unrated|mkv|mp4|avi|seri|jio|nf|amzn)\b'
-        )
+            parts = re.split(r'[\(\[]?' + year + r'[\)\]]?', text, maxsplit=1)
+            title = parts[0] if parts else text
+        else:
+            title = text
+        
+        # 4. Remove everything after quality tags
+        quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv)\b'
         title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
-
-        # ── 6. Clean Title ──
-        title = re.sub(r'https?://\S+', '', title)
-        title = re.sub(r'@\w+', '', title)
-        title = re.sub(r'#\w+', '', title)
-        title = re.sub(r'\[@?\w+\]', '', title)
-        title = re.sub(r'[_\.\-]+', ' ', title)
-        title = re.sub(r'[\(\)\[\]\{\}]', ' ', title)
-        title = re.sub(r'\s+', ' ', title).strip()
-
-        # Remove trailing junk/language words
-        junk_words = [
-            'hindi', 'english', 'tamil', 'telugu', 'dubbed',
-            'movie', 'film', 'bollywood', 'hollywood', 'south',
-            'full', 'hd', 'sd', 'dual', 'audio', 'complete',
-            'series', 'web', 'season', 'episode', 'combined',
-            'batch', 'all', 'episodes', 'korean', 'japanese',
-            'kannada', 'malayalam', 'bengali', 'punjabi',
-            'marathi', 'gujarati', 'multi'
-        ]
+        
+        # 5. Clean up
+        title = re.sub(r'https?://\S+', '', title)  # URLs
+        title = re.sub(r'@\w+', '', title)  # @mentions
+        title = re.sub(r'#\w+', '', title)  # hashtags
+        title = re.sub(r'[_\.\-]+', ' ', title)  # separators to space
+        title = re.sub(r'\s+', ' ', title).strip()  # multiple spaces
+        
+        # 6. Remove trailing junk words
+        junk_words = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'movie', 'film', 'bollywood', 'hollywood', 'south']
         words = title.split()
         clean_words = []
         for word in words:
             if word.lower() in junk_words:
-                if clean_words:
-                    break
-                continue
-            clean_words.append(word)
-
-        title = ' '.join(clean_words).strip()
-
-        # ── 7. Final Check ──
-        if len(title) >= 2:
-            logger.info(
-                f"✅ Fallback: Title='{title}', Year='{year}', "
-                f"Lang='{language}', Extra='{extra_info}', Cat='{category}'"
-            )
-            return {
-                "title": title, "year": year, "language": language,
-                "extra_info": extra_info, "category": category
-            }
-
-        return {
-            "title": "UNKNOWN", "year": "", "language": "",
-            "extra_info": "", "category": ""
-        }
-
-    except Exception as e:
-        logger.error(f"Fallback failed: {e}")
-        return {
-            "title": "UNKNOWN", "year": "", "language": "",
-            "extra_info": "", "category": ""
-        }
-
-async def fallback_extraction(caption_text):
-    """🔧 FIXED: S01=Season, Adult Detection, Better Language"""
-    try:
-        text = caption_text.strip().upper()
-        
-        # 1. YEAR FIRST (Priority)
-        year_match = re.search(r'\$?(19|20)\d{2}\$?', text)
-        year = year_match.group(1) + year_match.group(2) if year_match else ""
-        
-        # 2. SEASON DETECTION (CRITICAL)
-        season_match = re.search(r'(S0[1-9]|S1[0-2]|SEASON\s?\d+)', text)
-        extra_info = season_match.group(0).replace(' ', '') if season_match else ""
-        
-        # 3. ADULT DETECTION
-        adult_keywords = ['PALANG TOD', 'ULLU', 'PRIMEPLAY', '18+', 'UNRATED', 'ADULT']
-        is_adult = any(keyword in text for keyword in adult_keywords)
-        
-        # 4. LANGUAGE (IMPROVED)
-        lang_patterns = [
-            (r'HINDI', 'Hindi'),
-            (r'ENGLISH', 'English'), 
-            (r'DUAL', 'Dual Audio'),
-            (r'TAMIL', 'Tamil'),
-            (r'TELUGU', 'Telugu'),
-        ]
-        language = ""
-        for pattern, lang_name in lang_patterns:
-            if re.search(pattern, text):
-                language = lang_name
                 break
+            clean_words.append(word)
         
-        # 5. TITLE (Remove S01, Quality, Adult words)
-        title = text
+        title = ' '.join(clean_words).strip()
         
-        # Remove junk first
-        title = re.sub(r'[@#][A-Z0-9_]+', '', title)  # Remove @channel #tags
-        title = re.sub(r'(S0[1-9]|S1[0-2]|SEASON|HDRIP|WEBRIP|1080P|720P|480P|4K|UNRATED|ADULT|PALANG TOD|ULLU)', '', title)
-        title = re.sub(r'[_\.\-]+', ' ', title)
-        title = re.sub(r'\s+', ' ', title).strip()
+        if len(title) >= 2:
+            logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}'")
+            return {"title": title, "year": year, "language": language}
         
-        # Category
-        category = "Adult Web Series" if is_adult else "Movies"
-        if season_match: category = "Series"
-        
-        logger.info(f"✅ FALLBACK: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}', Cat='{category}'")
-        return {
-            "title": title, "year": year, "language": language,
-            "extra_info": extra_info, "category": category
-        }
+        return {"title": "UNKNOWN", "year": "", "language": ""}
         
     except Exception as e:
         logger.error(f"Fallback failed: {e}")
-        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": "Movies"}
+        return {"title": "UNKNOWN", "year": "", "language": ""}
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
@@ -4211,11 +3952,11 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(f"📥 Received {count} files so far...")
 
 async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Smart Grouping -> Gemini AI -> TMDB -> Database -> Aliases -> Auto Post"""
+    """Smart Grouping -> Gemini AI -> TMDB -> Auto Post"""
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
 
-    # 🚀 Turn off session so normal bot functions resume
+    # 🚀 YAHAN PAR TURANT 'OFF' KAR DIYA TAAKI NORMAL BATCH KAAM KAR SAKE
     SUPER_BATCH_SESSION['active'] = False
     files = SUPER_BATCH_SESSION['files']
     SUPER_BATCH_SESSION['files'] = [] 
@@ -4252,53 +3993,44 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     image_bytes = bytes(await tg_file.download_as_bytearray())
                 except Exception: pass
             
-            # 🧠 1. Get Data from Gemini (Now strict with filters)
             ai_data = await get_movie_name_from_caption(first_file['caption'] or first_file['file_name'], image_bytes)
             movie_name = ai_data.get("title", temp_title)
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
-            movie_extra = ai_data.get("extra_info", "")
             gemini_category = ai_data.get("category", "Movies")
 
-            # 🔍 2. Apply Filters to fetch accurate Metadata
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                title = movie_name
-                year = int(movie_year) if str(movie_year).isdigit() else 0
-                poster_url, imdb_id = None, None
-                genre, rating, plot = "Unknown", "N/A", "Auto Added"
-                category = gemini_category
+                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
+                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
 
-            # 💾 3. SAVE MOVIE AND FILES TO DATABASE
             conn = get_db_connection()
             if not conn: continue
             
-            movie_id = None
             try:  
                 cur = conn.cursor()
-                # Insert Movie
                 cur.execute(
                     """
-                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info) 
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
                     ON CONFLICT (title) DO UPDATE 
                     SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
                         year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                         genre = COALESCE(EXCLUDED.genre, movies.genre),
                         rating = COALESCE(EXCLUDED.rating, movies.rating),
+                        description = COALESCE(EXCLUDED.description, movies.description),
                         category = COALESCE(EXCLUDED.category, movies.category),
-                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
-                        extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END
+                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
                     RETURNING id
                     """,
-                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, movie_extra)
+                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
                 )
                 movie_id = cur.fetchone()[0]
 
-                # Insert Files
+                # 📂 Insert Files
                 for f in movie_files:
                     backup_map = {}
                     main_url = ""
@@ -4306,7 +4038,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try:
                             sent = await f['message_obj'].copy(chat_id=channels[0])
                             backup_map[str(channels[0])] = sent.message_id
-                            main_url = f"[https://t.me/c/](https://t.me/c/){str(channels[0]).replace('-100', '')}/{sent.message_id}"
+                            main_url = f"https://t.me/c/{str(channels[0]).replace('-100', '')}/{sent.message_id}"
                             await asyncio.sleep(0.5) 
                         except Exception as e:
                             logger.error(f"Backup failed: {e}")
@@ -4324,58 +4056,54 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
                     )
                 
-                # ✅ ALWAYS COMMIT MOVIE AND FILES FIRST
+                # 🛑 CRITICAL FIX 1: Pehle Movie aur Files ko save karlo taaki Aliases ke error se ye delete na ho!
                 conn.commit()
-                cur.close()
 
+                # 🤖 CRITICAL FIX 2: Generate and Save AI Aliases in Superbatch SAFELY (Non-blocking)
+                try:
+                    # Async function use karna zaroori hai taaki bot hang na ho
+                    aliases = await run_async(generate_aliases_gemini, title, str(year), category)
+                    
+                    # Fallback agar Gemini API fail ho
+                    if not aliases:
+                        aliases = [title.lower().strip(), title.replace(" ", "").lower()]
+                    
+                    for alias in set(aliases): # Duplicates hata do
+                        if not alias or len(alias) > 255: continue
+                        try:
+                            cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
+                        except Exception as alias_insert_err:
+                            # Agar ek alias galat ho to use ignore karke baaki save karo (Current transaction rollback)
+                            conn.rollback() 
+                            
+                    conn.commit() # Aliases DB me save ho gaye!
+                except Exception as alias_err:
+                    logger.error(f"SuperBatch Alias Generation Error: {alias_err}")
+                    conn.rollback()
+
+                cur.close()
+                
             except Exception as db_err:
-                logger.error(f"SuperBatch DB Insert Error: {db_err}")
+                logger.error(f"SuperBatch DB Error: {db_err}")
                 if conn: conn.rollback()
             finally:
                 if conn: close_db_connection(conn)
-
-            # 🤖 4. GENERATE AND SAVE ALIASES (Separate safe block)
-            if movie_id:
-                try:
-                    await status_msg.edit_text(f"⚙️ Generating AI Aliases for `{title}`...")
-                    aliases = await run_async(generate_aliases_gemini, title, str(year), category)
-                    
-                    if aliases:
-                        conn_alias = get_db_connection()
-                        if conn_alias:
-                            try:
-                                cur_alias = conn_alias.cursor()
-                                for alias in set(aliases): # Remove duplicates
-                                    if not alias or len(alias) > 255: continue
-                                    try:
-                                        cur_alias.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
-                                    except Exception:
-                                        conn_alias.rollback() # Skip bad alias
-                                conn_alias.commit()
-                                cur_alias.close()
-                            finally:
-                                close_db_connection(conn_alias)
-                except Exception as alias_err:
-                    logger.error(f"SuperBatch Alias Generation Error: {alias_err}")
-
-            # 🖼️ 5. AUTO POST TO CHANNELS & FORUM
+            
+            # --- POSTER & POSTING LOGIC ---
             photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
             if not photo_to_send and first_file['thumb_id']: photo_to_send = first_file['thumb_id']
             if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
+            # 🛑 100% SAFE HTML BOLD CAPTION
             safe_rating = rating if rating else "N/A"
             safe_genre = genre if genre else "Unknown"
             
-            # Print Extra Info (S01, UNRATED) if found
-            extra_display = f"📌 **Info:** {movie_extra}\n" if movie_extra else ""
-
             caption = (
                 f"🎬 <b>{title} ({year})</b>\n\n"
-                f"{extra_display}"
                 f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
                 f"🎭 <b>Genre:</b> {safe_genre}\n\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"🔞 <b>18+ Content:</b> <a href='[https://t.me/+wcYoTQhIz-ZmOTY1](https://t.me/+wcYoTQhIz-ZmOTY1)'>Join Premium</a>\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
                 f"👇 <b>Download Below</b> 👇"
             )
@@ -4384,8 +4112,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
 
             post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", url=f"[https://t.me/](https://t.me/){bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"[https://t.me/](https://t.me/){bot2}?start={link_param}")],
-                [InlineKeyboardButton("⚡ Download Now", url=f"[https://t.me/](https://t.me/){bot3}?start={link_param}")],
+                [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
+                [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
@@ -4397,8 +4125,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     break
             
             if topic_id == 1:
-                if "adult" in cat_lower or "18+" in cat_lower: topic_id = 20 # Assuming 20 is adult or change accordingly
-                elif "south" in cat_lower: topic_id = 20
+                if "south" in cat_lower: topic_id = 20
                 elif "hollywood" in cat_lower: topic_id = 32
                 elif "bollywood" in cat_lower: topic_id = 16
                 elif "anime" in cat_lower: topic_id = 22
@@ -4443,6 +4170,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚀 All movies auto-posted to Channels & Forum successfully!",
         parse_mode='Markdown'
     )
+
+    SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
