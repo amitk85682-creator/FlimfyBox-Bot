@@ -24,3 +24,4 @@ python-telegram-bot[job-queue]
 anthropic
 cinemagoer
 Pillow
+Flask-Cors
