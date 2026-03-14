@@ -2074,8 +2074,12 @@ async def handle_genre_selection(update: Update, context:  ContextTypes.DEFAULT_
         )
 # ==================== KEYBOARD MARKUPS ====================
 def get_main_keyboard():
-    """Get the main menu keyboard - UPDATED with Genre"""
+    """Get the main menu keyboard - Ab isme Mini App ka direct button hai!"""
+    web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
+    
     keyboard = [
+        # 👇 Sabse upar bada sa Web App ka button 👇
+        [KeyboardButton(text="🎬 Premium Web Version", web_app=WebAppInfo(url=web_app_url))],
         ['🔍 Search Movies'],
         ['📂 Browse by Genre', '🙋 Request Movie'],
         ['📊 My Stats', '❓ Help']
@@ -2679,22 +2683,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👇 Use the buttons below to get started:
 """
-    # 👇👇👇 YAHAN MENU BUTTON KA CODE DALNA HAI 👇👇👇
-    web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
-    
-    try:
-        await context.bot.set_chat_menu_button(
-            chat_id=chat_id,
-            menu_button=MenuButtonWebApp(
-                text="🎬 Web Version", 
-                web_app=WebAppInfo(url=web_app_url)
-            )
-        )
-    except Exception as e:
-        logger.error(f"Menu Button Error: {e}")
-    # 👆👆👆 
-
-    # ✅ FIX 5: Final Welcome Msg bhi safe tarike se bhejen
+    # Bas sidha message aur get_main_keyboard() bhej do
     msg = await context.bot.send_message(
         chat_id=chat_id, 
         text=welcome_text, 
