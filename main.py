@@ -588,85 +588,71 @@ async def fallback_extraction(caption_text):
 
 async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
-    🎯 AI EXTRACTION WITH STRICT YEAR & LANGUAGE FILTERS
+    🎯 ADVANCED AI EXTRACTION: Strictly extracts Title, Year, and Language for filtering.
     """
     if not caption_text or len(caption_text.strip()) < 2:
-        return await fallback_extraction(caption_text)
-
-    cleaned_caption = pre_clean_caption(caption_text)
+        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": "Movies"}
     
-    if not cleaned_caption or len(cleaned_caption) < 3:
-        return await fallback_extraction(caption_text)
+    first_line = caption_text.split('\n')[0].strip()
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            return await fallback_extraction(cleaned_caption)
+        if not api_key: 
+            return await fallback_extraction(first_line)
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 👇 यहाँ Prompt को बेहतर बनाया गया है ताकि Year और Language पक्के तौर पर फ़िल्टर हों
-        prompt = f"""You are an expert Movie/Web Series metadata extractor.
-CLEANED CAPTION: "{cleaned_caption}"
+        # 🧠 ULTRA-STRICT PROMPT (For Year and Language Filtering)
+        prompt = f"""You are a precise Movie/Series Metadata Extractor.
+        PRIMARY SOURCE: The text caption provided below.
+        SECONDARY SOURCE: The image provided (use only for context if needed).
+        
+        CAPTION: "{first_line}"
 
-YOUR TASK:
-Extract exactly 5 pieces of information into valid JSON. 
+        Task:
+        1. Remove junk: @mentions, telegram links, website names, and file qualities (HDRip, 1080p, 720p, mkv, mp4, x264, x265, HEVC, WEB-DL).
+        2. Extract CLEAN TITLE. (e.g., "[@movie] Palang Tod: Zaroorat (2022) Hindi mkv" -> "Palang Tod Zaroorat").
+        3. Extract the 4-digit YEAR exactly as written.
+        4. Extract the LANGUAGE (e.g., Hindi, English, Tamil). If dual audio, write "Dual Audio".
+        5. Extract EXTRA INFO like Season/Episode (e.g., "S01", "E05", "Unrated").
+        6. Guess CATEGORY strictly from: 'Bollywood', 'Hollywood', 'South', 'Anime', 'Web Series', 'Adult'.
 
-CRITICAL FILTERS:
-1. year: Extract the 4-digit release year (e.g., "1988", "2023"). If not found, return "". This is highly important for search filtering.
-2. language: Extract the audio language (e.g., "Hindi", "English", "Tamil", "Telugu", "Dual Audio"). If not found, return "".
-
-OTHER FIELDS:
-3. title: ONLY the core movie/series name. DO NOT include year, language, quality (720p, 1080p), or extensions (.mkv) in the title.
-4. extra_info: Season/Episode info (e.g., "S01E03", "Complete Season"). Return "" if not a series.
-5. category: Choose from: Movies, Web Series, Anime, Bollywood, Hollywood, South, Adult Web Series.
-
-Return ONLY valid JSON. No markdown, no extra text."""
+        Return ONLY a raw JSON object (No markdown, no ```json tags). Keys must be:
+        {{"title": "", "year": "", "language": "", "extra_info": "", "category": ""}}"""
 
         contents = [prompt]
         if image_bytes:
-            contents = [prompt + "\n\nUse the attached poster/thumbnail to visually VERIFY the title and year if possible."]
             contents.append({"mime_type": "image/jpeg", "data": image_bytes})
 
         response = await run_async(model.generate_content, contents)
-
+        
         if not response or not response.text:
-            return await fallback_extraction(cleaned_caption)
-
-        text = response.text.strip()
+            return await fallback_extraction(first_line)
+        
+        # Clean JSON text
+        text = response.text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
-
+        
         data = json.loads(text)
         
-        # 🧹 Ensuring data is perfectly assigned to variables
         title = data.get("title", "").strip()
         year = str(data.get("year", "")).strip()
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
         category = data.get("category", "Movies").strip()
         
-        # 🛡️ Safety Check: अगर AI ने गलती से टाइटल में 720p या mkv छोड़ दिया, तो फॉलबैक इस्तेमाल करो
-        if not title or len(title) < 2 or re.search(r'(720p|1080p|mkv|webrip|x264)', title, re.IGNORECASE):
-            logger.warning(f"⚠️ AI messed up title: {title}. Routing to fallback.")
-            return await fallback_extraction(cleaned_caption)
-
-        logger.info(f"✅ GEMINI FILTERS -> Title: '{title}', Year: '{year}', Lang: '{language}'")
+        if not title or title.lower() == "unknown":
+            return await fallback_extraction(first_line)
         
-        # Return properly structured dictionary
-        return {
-            "title": title,
-            "year": year,
-            "language": language,
-            "extra_info": extra_info,
-            "category": category
-        }
+        logger.info(f"🤖 AI EXTRACTED -> Title: '{title}', Year: '{year}', Lang: '{language}', Extra: '{extra_info}'")
+        return {"title": title, "year": year, "language": language, "extra_info": extra_info, "category": category}
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
-        return await fallback_extraction(cleaned_caption)
+        return await fallback_extraction(first_line)
 
 
 async def fallback_extraction(caption_text):
@@ -4225,26 +4211,21 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
         await message.reply_text(f"📥 Received {count} files so far...")
 
 async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Smart Grouping -> Gemini AI -> TMDB -> Auto Post"""
+    """Smart Grouping -> Gemini AI -> TMDB -> Database -> Aliases -> Auto Post"""
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
 
-    # 🚀 Session OFF karo + files copy karo
+    # 🚀 Turn off session so normal bot functions resume
     SUPER_BATCH_SESSION['active'] = False
     files = SUPER_BATCH_SESSION['files']
-    SUPER_BATCH_SESSION['files'] = []
-    SUPER_BATCH_SESSION['admin_id'] = None
-
+    SUPER_BATCH_SESSION['files'] = [] 
+    
     if not files:
         await update.message.reply_text("❌ Koi file nahi mili!")
         return
 
-    status_msg = await update.message.reply_text(
-        f"🔄 **Grouping {len(files)} files... Please wait.**",
-        parse_mode='Markdown'
-    )
+    status_msg = await update.message.reply_text(f"🔄 **Grouping {len(files)} files... Please wait.**", parse_mode='Markdown')
 
-    # ── STEP 1: Group Files by Basic Title ──
     grouped_movies = defaultdict(list)
     for f in files:
         raw_text = f['caption'] if f['caption'] else f['file_name']
@@ -4253,95 +4234,71 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         grouped_movies[temp_title].append(f)
 
     total_movies = len(grouped_movies)
-    await status_msg.edit_text(
-        f"✅ **Files grouped into {total_movies} unique movies!**\n\n"
-        f"🚀 Auto-Processing & Posting starts now...",
-        parse_mode='Markdown'
-    )
+    await status_msg.edit_text(f"✅ **Files grouped into {total_movies} unique movies!**\n\n🚀 Auto-Processing & Posting starts now...", parse_mode='Markdown')
 
     success_movies = 0
     channels = get_storage_channels()
-    target_channels = [
-        ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',')
-        if ch.strip()
-    ]
+    target_channels = [ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',') if ch.strip()]
 
-    # ── STEP 2: Process Each Movie ──
     for i, (temp_title, movie_files) in enumerate(grouped_movies.items(), 1):
-        conn = None
         try:
-            await status_msg.edit_text(
-                f"⚙️ Processing Movie {i}/{total_movies}...\n"
-                f"🎬 Name: `{temp_title}`"
-            )
-
-            # ── AI Extraction ──
+            await status_msg.edit_text(f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: `{temp_title}`")
+            
             first_file = movie_files[0]
             image_bytes = None
             if first_file['thumb_id']:
                 try:
                     tg_file = await context.bot.get_file(first_file['thumb_id'])
                     image_bytes = bytes(await tg_file.download_as_bytearray())
-                except Exception:
-                    pass
-
-            ai_data = await get_movie_name_from_caption(
-                first_file['caption'] or first_file['file_name'], image_bytes
-            )
+                except Exception: pass
+            
+            # 🧠 1. Get Data from Gemini (Now strict with filters)
+            ai_data = await get_movie_name_from_caption(first_file['caption'] or first_file['file_name'], image_bytes)
             movie_name = ai_data.get("title", temp_title)
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
+            movie_extra = ai_data.get("extra_info", "")
             gemini_category = ai_data.get("category", "Movies")
 
-            # ── TMDB Metadata ──
+            # 🔍 2. Apply Filters to fetch accurate Metadata
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
-
+            
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
                 title = movie_name
                 year = int(movie_year) if str(movie_year).isdigit() else 0
-                poster_url = None
-                imdb_id = None
-                genre = "Unknown"
-                rating = "N/A"
-                plot = "Auto Added"
+                poster_url, imdb_id = None, None
+                genre, rating, plot = "Unknown", "N/A", "Auto Added"
                 category = gemini_category
 
-            # ══════════════════════════════════════
-            # ── DATABASE: Movie + Files + Aliases ──
-            # ══════════════════════════════════════
+            # 💾 3. SAVE MOVIE AND FILES TO DATABASE
             conn = get_db_connection()
-            if not conn:
-                logger.error(f"DB connection failed for: {title}")
-                continue
-
-            cur = conn.cursor()
-            try:
-                # ── Insert/Update Movie ──
+            if not conn: continue
+            
+            movie_id = None
+            try:  
+                cur = conn.cursor()
+                # Insert Movie
                 cur.execute(
                     """
-                    INSERT INTO movies (title, url, imdb_id, poster_url, year,
-                                        genre, rating, description, category, language)
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (title) DO UPDATE
+                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info) 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                    ON CONFLICT (title) DO UPDATE 
                     SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
-                        year = CASE WHEN movies.year = 0
-                                    THEN EXCLUDED.year ELSE movies.year END,
+                        year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                         genre = COALESCE(EXCLUDED.genre, movies.genre),
                         rating = COALESCE(EXCLUDED.rating, movies.rating),
-                        description = COALESCE(EXCLUDED.description, movies.description),
                         category = COALESCE(EXCLUDED.category, movies.category),
-                        language = CASE WHEN EXCLUDED.language != ''
-                                        THEN EXCLUDED.language ELSE movies.language END
+                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
+                        extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END
                     RETURNING id
                     """,
-                    (title, imdb_id, poster_url, year, genre,
-                     rating, plot, category, movie_lang)
+                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, movie_extra)
                 )
                 movie_id = cur.fetchone()[0]
 
-                # ── Insert Files with Backup ──
+                # Insert Files
                 for f in movie_files:
                     backup_map = {}
                     main_url = ""
@@ -4349,227 +4306,141 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try:
                             sent = await f['message_obj'].copy(chat_id=channels[0])
                             backup_map[str(channels[0])] = sent.message_id
-                            main_url = (
-                                f"https://t.me/c/"
-                                f"{str(channels[0]).replace('-100', '')}/"
-                                f"{sent.message_id}"
-                            )
-                            await asyncio.sleep(0.5)
+                            main_url = f"[https://t.me/c/](https://t.me/c/){str(channels[0]).replace('-100', '')}/{sent.message_id}"
+                            await asyncio.sleep(0.5) 
                         except Exception as e:
                             logger.error(f"Backup failed: {e}")
 
                     file_size_str = get_readable_file_size(f['file_size'])
-                    label = generate_quality_label(
-                        f['file_name'], file_size_str, movie_lang
-                    )
+                    label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
 
                     cur.execute(
                         """
-                        INSERT INTO movie_files (movie_id, quality, file_size,
-                                                  url, backup_map)
+                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
                         VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (movie_id, quality) DO UPDATE
-                        SET url = EXCLUDED.url,
-                            file_size = EXCLUDED.file_size,
-                            backup_map = EXCLUDED.backup_map,
-                            file_id = NULL
+                        ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                        url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
                         """,
-                        (movie_id, label, file_size_str,
-                         main_url, json.dumps(backup_map))
+                        (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
                     )
-
-                # ✅ Movie + Files COMMIT (safe ho gaya)
+                
+                # ✅ ALWAYS COMMIT MOVIE AND FILES FIRST
                 conn.commit()
+                cur.close()
 
             except Exception as db_err:
-                logger.error(f"SuperBatch DB Error for '{title}': {db_err}")
-                if conn:
-                    conn.rollback()
-                cur.close()
-                close_db_connection(conn)
-                conn = None
-                continue
-            
-            cur.close()
+                logger.error(f"SuperBatch DB Insert Error: {db_err}")
+                if conn: conn.rollback()
+            finally:
+                if conn: close_db_connection(conn)
 
-            # ──────────────────────────────────────────
-            # ── ALIASES: Alag se safely (movie safe hai) ──
-            # ──────────────────────────────────────────
-            try:
-                aliases = await run_async(
-                    generate_aliases_gemini, title, str(year), category
-                )
-                if not aliases:
-                    aliases = [
-                        title.lower().strip(),
-                        title.replace(" ", "").lower()
-                    ]
-
-                cur2 = conn.cursor()
-                for alias in set(aliases):
-                    if not alias or len(alias) < 2 or len(alias) > 255:
-                        continue
-                    try:
-                        cur2.execute(
-                            """INSERT INTO movie_aliases (movie_id, alias)
-                               VALUES (%s, %s)
-                               ON CONFLICT (movie_id, alias) DO NOTHING""",
-                            (movie_id, alias.lower().strip())
-                        )
-                    except Exception:
-                        # ✅ Sirf ye ek alias skip, baaki continue
-                        pass
-
-                conn.commit()
-                cur2.close()
-                logger.info(f"✅ Aliases saved for '{title}'")
-
-            except Exception as alias_err:
-                logger.error(f"Alias Error for '{title}': {alias_err}")
+            # 🤖 4. GENERATE AND SAVE ALIASES (Separate safe block)
+            if movie_id:
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
+                    await status_msg.edit_text(f"⚙️ Generating AI Aliases for `{title}`...")
+                    aliases = await run_async(generate_aliases_gemini, title, str(year), category)
+                    
+                    if aliases:
+                        conn_alias = get_db_connection()
+                        if conn_alias:
+                            try:
+                                cur_alias = conn_alias.cursor()
+                                for alias in set(aliases): # Remove duplicates
+                                    if not alias or len(alias) > 255: continue
+                                    try:
+                                        cur_alias.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
+                                    except Exception:
+                                        conn_alias.rollback() # Skip bad alias
+                                conn_alias.commit()
+                                cur_alias.close()
+                            finally:
+                                close_db_connection(conn_alias)
+                except Exception as alias_err:
+                    logger.error(f"SuperBatch Alias Generation Error: {alias_err}")
 
-            # ── DB Connection band karo ──
-            close_db_connection(conn)
-            conn = None
-
-            # ══════════════════════════════
-            # ── POSTER & POSTING LOGIC ──
-            # ══════════════════════════════
-            photo_to_send = None
-            if poster_url and poster_url != 'N/A' and poster_url.startswith('http'):
-                photo_to_send = poster_url
-            if not photo_to_send and first_file['thumb_id']:
-                photo_to_send = first_file['thumb_id']
-            if not photo_to_send:
-                photo_to_send = DEFAULT_POSTER
+            # 🖼️ 5. AUTO POST TO CHANNELS & FORUM
+            photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
+            if not photo_to_send and first_file['thumb_id']: photo_to_send = first_file['thumb_id']
+            if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
             safe_rating = rating if rating else "N/A"
             safe_genre = genre if genre else "Unknown"
+            
+            # Print Extra Info (S01, UNRATED) if found
+            extra_display = f"📌 **Info:** {movie_extra}\n" if movie_extra else ""
 
             caption = (
                 f"🎬 <b>{title} ({year})</b>\n\n"
+                f"{extra_display}"
                 f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
                 f"🎭 <b>Genre:</b> {safe_genre}\n\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"🔞 <b>18+ Content:</b> "
-                f"<a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                f"🔞 <b>18+ Content:</b> <a href='[https://t.me/+wcYoTQhIz-ZmOTY1](https://t.me/+wcYoTQhIz-ZmOTY1)'>Join Premium</a>\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
                 f"👇 <b>Download Below</b> 👇"
             )
 
             link_param = f"movie_{movie_id}"
-            bot1 = "FlimfyBox_SearchBot"
-            bot2 = "urmoviebot"
-            bot3 = "FlimfyBox_Bot"
+            bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
 
             post_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "Download Now",
-                        url=f"https://t.me/{bot1}?start={link_param}"
-                    ),
-                    InlineKeyboardButton(
-                        "Download Now",
-                        url=f"https://t.me/{bot2}?start={link_param}"
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "⚡ Download Now",
-                        url=f"https://t.me/{bot3}?start={link_param}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "📢 Join Channel",
-                        url=FILMFYBOX_CHANNEL_URL
-                    )
-                ],
+                [InlineKeyboardButton("Download Now", url=f"[https://t.me/](https://t.me/){bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"[https://t.me/](https://t.me/){bot2}?start={link_param}")],
+                [InlineKeyboardButton("⚡ Download Now", url=f"[https://t.me/](https://t.me/){bot3}?start={link_param}")],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
-            # ── Topic Detection ──
             topic_id = 1
             cat_lower = str(category or "").lower()
             for tid, keywords in TOPIC_MAPPING.items():
                 if any(k.lower() in cat_lower for k in keywords):
                     topic_id = tid
                     break
-
+            
             if topic_id == 1:
-                if "south" in cat_lower:
-                    topic_id = 20
-                elif "hollywood" in cat_lower:
-                    topic_id = 32
-                elif "bollywood" in cat_lower:
-                    topic_id = 16
-                elif "anime" in cat_lower:
-                    topic_id = 22
-                elif "series" in cat_lower:
-                    topic_id = 18
+                if "adult" in cat_lower or "18+" in cat_lower: topic_id = 20 # Assuming 20 is adult or change accordingly
+                elif "south" in cat_lower: topic_id = 20
+                elif "hollywood" in cat_lower: topic_id = 32
+                elif "bollywood" in cat_lower: topic_id = 16
+                elif "anime" in cat_lower: topic_id = 22
+                elif "series" in cat_lower: topic_id = 18
 
-            # ── Post to Forum ──
             try:
-                kwargs = {
-                    "chat_id": FORUM_GROUP_ID,
-                    "photo": photo_to_send,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                    "reply_markup": post_keyboard,
-                }
-                if topic_id != 1:
-                    kwargs["message_thread_id"] = topic_id
-
-                await context.bot.send_photo(**kwargs)
+                if topic_id == 1:
+                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
+                else:
+                    await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
             except Exception as e:
                 logger.error(f"SuperBatch Forum Post Error: {e}")
 
-            # ── Post to Broadcast Channels ──
             telegram_photo_id = None
-            for chat_id_str in target_channels:
-                try:
-                    current_photo = telegram_photo_id or photo_to_send
-
-                    sent_msg = await context.bot.send_photo(
-                        chat_id=int(chat_id_str),
-                        photo=current_photo,
-                        caption=caption,
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard,
-                    )
-                    if not telegram_photo_id and sent_msg.photo:
-                        telegram_photo_id = sent_msg.photo[-1].file_id
-
-                    save_post_to_db(
-                        movie_id, int(chat_id_str), sent_msg.message_id,
-                        bot3, caption, telegram_photo_id or poster_url,
-                        "photo", post_keyboard.to_dict(), None, "movies"
-                    )
-                    await asyncio.sleep(1.5)
-                except Exception as e:
-                    logger.error(f"SuperBatch Channel Post Error: {e}")
+            if target_channels:
+                for chat_id_str in target_channels:
+                    try:
+                        current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
+                        
+                        sent_msg = await context.bot.send_photo(
+                            chat_id=int(chat_id_str), photo=current_photo,
+                            caption=caption, parse_mode='HTML', reply_markup=post_keyboard
+                        )
+                        if not telegram_photo_id and sent_msg.photo:
+                            telegram_photo_id = sent_msg.photo[-1].file_id
+                        
+                        save_post_to_db(movie_id, int(chat_id_str), sent_msg.message_id, bot3, caption, telegram_photo_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
+                        await asyncio.sleep(1.5)
+                    except Exception as e:
+                        logger.error(f"SuperBatch Main Channel Post Error: {e}")
 
             success_movies += 1
             await asyncio.sleep(2)
 
         except Exception as e:
-            logger.error(f"SuperBatch Movie Error [{temp_title}]: {e}")
+            logger.error(f"SuperBatch Movie Error: {e}")
             continue
-        finally:
-            # ✅ Safety: Agar connection abhi bhi open hai
-            if conn:
-                try:
-                    close_db_connection(conn)
-                except Exception:
-                    pass
 
-    # ── FINAL STATUS ──
     await status_msg.edit_text(
         f"🎉 **SUPER BATCH COMPLETED!**\n\n"
         f"✅ Total Movies Processed: {success_movies}/{total_movies}\n"
-        f"🚀 All movies auto-posted successfully!",
+        f"🚀 All movies auto-posted to Channels & Forum successfully!",
         parse_mode='Markdown'
     )
 
