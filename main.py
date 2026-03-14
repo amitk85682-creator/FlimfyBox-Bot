@@ -11,6 +11,8 @@ import signal
 import sys
 import aiohttp
 # import anthropic  # Agar zaroorat ho toh uncomment karein
+from flask import jsonify
+from flask_cors import CORS
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urlunparse, quote
 from collections import defaultdict
@@ -6879,6 +6881,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== FLASK APP ====================
 flask_app = Flask('')
+CORS(flask_app)  # 👈 NAYA: Ye website ko data fetch karne dega
 
 @flask_app.route('/')
 def home():
@@ -6888,23 +6891,47 @@ def home():
 def health():
     return "OK", 200
 
-@flask_app.route(f'/{UPDATE_SECRET_CODE}')
-def trigger_update():
-    result = update_movies_in_db()
-    return result
-
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
-
+# 👇👇👇 NAYA API ROUTE 👇👇👇
+@flask_app.route('/api/movies', methods=['GET'])
+def get_movies_api():
+    """Web App ke liye Movies ka Data return karega"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"status": "error", "message": "Database error"}), 500
+    
     try:
-        from admin_views import admin as admin_blueprint
-        flask_app.register_blueprint(admin_blueprint)
-        logger.info("Admin blueprint registered successfully.")
+        cur = conn.cursor()
+        # Latest 100 movies nikalenge jinka poster maujood ho
+        cur.execute("""
+            SELECT id, title, year, rating, category, poster_url 
+            FROM movies 
+            WHERE poster_url IS NOT NULL AND poster_url != 'N/A'
+            ORDER BY id DESC 
+            LIMIT 100
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        
+        movies_list = []
+        for row in rows:
+            movies_list.append({
+                "id": row[0],
+                "title": row[1],
+                "year": str(row[2]) if row[2] else "N/A",
+                "rating": str(row[3]) if row[3] else "N/A",
+                "category": row[4] if row[4] else "Movies",
+                "image": row[5]
+            })
+            
+        return jsonify({"status": "success", "movies": movies_list})
+        
     except Exception as e:
-        logger.error(f"Failed to register admin blueprint: {e}")
-
-    flask_app.run(host='0.0.0.0', port=port)
+        logger.error(f"API Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if conn:
+            close_db_connection(conn)
+# 👆👆👆 YAHAN TAK 👆👆👆
 
 # ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
