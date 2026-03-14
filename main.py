@@ -458,89 +458,412 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
+def pre_clean_caption(raw_text: str) -> str:
+    """
+    🧹 Gemini ko bhejne se PEHLE caption saaf karo
+    Junk hata do: @channels, URLs, 'MUST JOIN', emojis, etc.
+    """
+    if not raw_text:
+        return ""
+    
+    text = raw_text.strip()
+    
+    # 1. Remove [@channel_name] brackets
+    text = re.sub(r'\[@?\w+\]', '', text)
+    
+    # 2. Remove @mentions
+    text = re.sub(r'@\w+', '', text)
+    
+    # 3. Remove URLs
+    text = re.sub(r'https?://\S+', '', text)
+    
+    # 4. Remove "MUST JOIN", "Channel 1.", "Channel 2." type lines
+    lines = text.split('\n')
+    clean_lines = []
+    skip_keywords = [
+        'must join', 'channel 1', 'channel 2', 'channel 3',
+        'join channel', 'join group', 'subscribe', 'follow',
+        '🔰', '📢', 't.me/', 'telegram.me/'
+    ]
+    for line in lines:
+        line_lower = line.strip().lower()
+        if any(kw in line_lower for kw in skip_keywords):
+            continue
+        if len(line.strip()) < 2:
+            continue
+        clean_lines.append(line.strip())
+    
+    text = ' '.join(clean_lines)
+    
+    # 5. Remove extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+
 async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
-    🎯 FIXED: S01=Season, Adult Web Series, Language+Year Filters
+    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL + PRE-CLEANED)
+    Caption pehle saaf hoga, phir Gemini analyze karega
     """
     if not caption_text or len(caption_text.strip()) < 2:
-        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
+        return {
+            "title": "UNKNOWN", "year": "", "language": "",
+            "extra_info": "", "category": ""
+        }
+
+    # 🧹 STEP 1: Caption ko pehle saaf karo
+    cleaned_caption = pre_clean_caption(caption_text)
     
-    first_line = caption_text.split('\n')[0].strip()
+    # Agar cleaning ke baad kuch nahi bacha
+    if not cleaned_caption or len(cleaned_caption) < 3:
+        first_line = caption_text.split('\n')[0].strip()
+        cleaned_caption = pre_clean_caption(first_line)
+    
+    if not cleaned_caption or len(cleaned_caption) < 3:
+        return await fallback_extraction(caption_text)
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key: 
-            return await fallback_extraction(first_line)
+        if not api_key:
+            return await fallback_extraction(cleaned_caption)
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🎯 SUPER SMART PROMPT - ALL ISSUES FIXED
-        prompt = f"""You are an expert Movie/Series Metadata Extractor.
+        # 🧠 SUPER IMPROVED PROMPT
+        prompt = f"""You are an expert Movie/Web Series metadata extractor for Indian & International content.
 
-FILENAME/CAPTION: "{first_line}"
+I am giving you a CLEANED filename/caption from Telegram. Analyze it carefully.
 
-🎯 CRITICAL RULES:
-1. S01/S02/S03 = SEASON 1/2/3 (NOT movie name)
-2. "Mirzapur S01" = Title: "Mirzapur", Season: "S01"
-3. "Adult" / "18+" / "UNRATED" / "Palang Tod" = Category: "Adult Web Series"
-4. ALWAYS extract Language (Hindi, English, Dual Audio) FIRST
-5. ALWAYS extract Year (4 digits in brackets) FIRST
+CLEANED CAPTION: "{cleaned_caption}"
 
-📋 Extract EXACTLY in this JSON format:
-{{
-  "title": "Clean movie/show name WITHOUT S01/S02/quality/HD",
-  "year": "2022", 
-  "language": "Hindi OR Dual Audio OR English",
-  "extra_info": "S01 OR S01E01 OR COMBINED OR Batch",
-  "category": "Adult Web Series OR Bollywood OR Hollywood OR South OR Series OR Anime"
-}}
+STRICT RULES:
+1. "title": Extract ONLY the official movie/series name. 
+   - REMOVE all junk: 'Full', 'Movie', 'HD', '1080p', '720p', 'HDRip', 'WEBRip', 'BluRay', 'UNRATED', 'mkv', 'mp4', 'avi', 'Seri'
+   - REMOVE quality tags, codec names (x264, x265, HEVC, AAC)
+   - REMOVE language names from title (Hindi, English, Tamil etc.)
+   - Keep subtitle/colon names: "Palang Tod: Zaroorat" is correct (keep the colon part)
+   - If title has "The" at end like "Conjuring, The" -> make it "The Conjuring"
 
-🔍 Examples:
-- "Palang Tod: Zaroorat (2022) S01 HDRip Hindi UNRATED" → {{"title": "Palang Tod Zaroorat", "year": "2022", "language": "Hindi", "extra_info": "S01", "category": "Adult Web Series"}}
-- "[@movie_blast_official]Mirzapur S01 HDRip" → {{"title": "Mirzapur", "year": "", "language": "", "extra_info": "S01", "category": "Series"}}
-- "Pushpa 2 (2024) Hindi 1080p" → {{"title": "Pushpa 2", "year": "2024", "language": "Hindi", "extra_info": "", "category": "Bollywood"}}
+2. "year": 4-digit release year (1900-2099). 
+   - If text has year like (2022) or [2022], extract it.
+   - If you recognize the movie/show from knowledge or image, provide actual release year.
+   - If unsure, leave empty string "".
 
-Return ONLY valid JSON. No explanations."""
-        
+3. "language": Audio language(s) mentioned in text.
+   - Examples: "Hindi", "English", "Tamil", "Telugu", "Dual Audio", "Multi Audio"
+   - If not mentioned, leave empty "".
+
+4. "extra_info": Season/Episode/Batch info ONLY.
+   - S01, S02, S01-S03 = Season info (NOT part of title!)
+   - E01, E05, EP01 = Episode info
+   - "Complete", "All Episodes", "Batch" = batch info
+   - IMPORTANT: S01 means "Season 1", it is NOT part of the movie name!
+
+5. "category": Pick the BEST match from these options:
+   - "Bollywood" = Hindi language Indian movies
+   - "Hollywood" = English language Western movies  
+   - "South" = Tamil/Telugu/Kannada/Malayalam movies
+   - "Anime" = Japanese animation
+   - "Web Series" = Any TV series or web series (Netflix, Amazon, etc.)
+   - "Adult Web Series" = If UNRATED, 18+, adult content indicators present (like "Palang Tod", "Ullu", "Kooku", "Charmsukh", "UNRATED")
+   - "Movies" = General/Unknown category
+
+EXAMPLES:
+- "Palang Tod: Zaroorat (2022) S01 HDRip Hindi UNRATED Seri mkv"
+  → {{"title": "Palang Tod Zaroorat", "year": "2022", "language": "Hindi", "extra_info": "S01", "category": "Adult Web Series"}}
+
+- "Mirzapur S01 Complete Hindi 720p WEBRip"
+  → {{"title": "Mirzapur", "year": "", "language": "Hindi", "extra_info": "S01 Complete", "category": "Web Series"}}
+
+- "Taarzan The Wonder Car Full Movie Hindi 480p"
+  → {{"title": "Taarzan The Wonder Car", "year": "", "language": "Hindi", "extra_info": "", "category": "Bollywood"}}
+
+- "Money Heist S01-S05 English 1080p NF WEB-DL"
+  → {{"title": "Money Heist", "year": "", "language": "English", "extra_info": "S01-S05", "category": "Web Series"}}
+
+Return ONLY a valid JSON object. No markdown, no explanation, no ```json tags."""
+
         contents = [prompt]
+
+        # 🖼️ Agar thumbnail/poster image hai
         if image_bytes:
-            contents.append({"mime_type": "image/jpeg", "data": image_bytes})
+            image_prompt = (
+                "\n\nI am also providing the VIDEO THUMBNAIL/POSTER image. "
+                "If you can recognize the movie/show from this image, "
+                "use it to VERIFY or CORRECT the title and year. "
+                "The image is more reliable than the filename for identification."
+            )
+            contents = [prompt + image_prompt]
+            contents.append({
+                "mime_type": "image/jpeg",
+                "data": image_bytes
+            })
 
         response = await run_async(model.generate_content, contents)
-        
+
         if not response or not response.text:
-            return await fallback_extraction(first_line)
-        
-        text = response.text.strip().replace("```json", "").replace("```", "")
+            return await fallback_extraction(cleaned_caption)
+
+        text = response.text.strip()
+
+        # Clean JSON response
+        text = text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
-        
+
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
             logger.warning(f"⚠️ JSON parse failed: {text}")
-            return await fallback_extraction(first_line)
-        
+            return await fallback_extraction(cleaned_caption)
+
         title = data.get("title", "").strip()
         year = str(data.get("year", "")).strip()
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
         category = data.get("category", "").strip()
-        
+
+        # ── Post-processing validation ──
+
+        # Title check
         if not title or len(title) < 2:
-            return await fallback_extraction(first_line)
-        
-        logger.info(f"🤖 GEMINI FIXED: '{first_line}' → Title='{title}', Year='{year}', Lang='{language}', Cat='{category}', Extra='{extra_info}'")
+            return await fallback_extraction(cleaned_caption)
+
+        # Remove season from title if Gemini accidentally kept it
+        title = re.sub(
+            r'\s*(S\d{1,2})([-\s]*(S\d{1,2}|E\d{1,3}))*\s*$',
+            '', title, flags=re.IGNORECASE
+        ).strip()
+
+        # Remove quality tags from title if Gemini accidentally kept them
+        title = re.sub(
+            r'\s*(480p|720p|1080p|2160p|4K|HDRip|WEBRip|WEB-DL|BluRay|'
+            r'DVDRip|HDTV|UNRATED|mkv|mp4|avi|Seri)\s*',
+            ' ', title, flags=re.IGNORECASE
+        ).strip()
+
+        # Clean extra spaces
+        title = re.sub(r'\s+', ' ', title).strip()
+
+        # Year validation
+        if year and not re.match(r'^(19|20)\d{2}$', year):
+            year = ""
+
+        # ── ADULT CONTENT DETECTION (backup check) ──
+        adult_keywords = [
+            'ullu', 'kooku', 'palang tod', 'charmsukh', 'unrated',
+            'fliz', 'nuefliks', 'hotshot', 'gupchup', 'primeflix',
+            'bgrade', 'b-grade', '18+', 'xxx', 'erotic',
+            'hot web', 'masti', 'feneo', 'boom', 'hunters'
+        ]
+        caption_lower = cleaned_caption.lower()
+        if category != "Adult Web Series":
+            if any(kw in caption_lower for kw in adult_keywords):
+                category = "Adult Web Series"
+
+        # ── Season detection backup ──
+        if not extra_info:
+            season_match = re.search(
+                r'(S\d{1,2})([-\s]*(S\d{1,2}|E\d{1,3}))*',
+                cleaned_caption, re.IGNORECASE
+            )
+            if season_match:
+                extra_info = season_match.group(0).strip()
+
+            # "Complete" / "All Episodes" / "Batch"
+            if re.search(
+                r'\b(complete|all\s*episodes?|batch|combined)\b',
+                caption_lower
+            ):
+                extra_info = (extra_info + " Complete").strip()
+
+        # If has season info, likely a series
+        if extra_info and category in ["Movies", "Bollywood", ""]:
+            if "Adult" not in category:
+                category = "Web Series"
+
+        logger.info(
+            f"🤖 GEMINI RESULT: Title='{title}', Year='{year}', "
+            f"Lang='{language}', Extra='{extra_info}', Cat='{category}'"
+        )
+
         return {
-            "title": title, "year": year, "language": language, 
-            "extra_info": extra_info, "category": category
+            "title": title,
+            "year": year,
+            "language": language,
+            "extra_info": extra_info,
+            "category": category
         }
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
-        return await fallback_extraction(first_line)
+        return await fallback_extraction(cleaned_caption)
+
+
+async def fallback_extraction(caption_text):
+    """
+    🔧 SMART FALLBACK: Regex-based extraction when AI fails
+    Handles seasons, adult content, languages properly
+    """
+    try:
+        # Pre-clean first
+        text = pre_clean_caption(caption_text) if caption_text else ""
+        if not text or len(text) < 2:
+            text = caption_text.strip() if caption_text else ""
+        if not text:
+            return {
+                "title": "UNKNOWN", "year": "", "language": "",
+                "extra_info": "", "category": ""
+            }
+
+        original_text = text
+
+        # ── 1. Extract Year ──
+        year_match = re.search(r'[\(\[\s]?(19|20)\d{2}[\)\]\s]?', text)
+        year = ""
+        if year_match:
+            year = re.search(r'(19|20)\d{2}', year_match.group(0)).group(0)
+
+        # ── 2. Extract Season/Episode Info ──
+        extra_info = ""
+        season_match = re.search(
+            r'(S\d{1,2})([-\s]*(S\d{1,2}|E\d{1,3}))*',
+            text, re.IGNORECASE
+        )
+        if season_match:
+            extra_info = season_match.group(0).strip()
+
+        if re.search(
+            r'\b(complete|all\s*episodes?|batch|combined)\b',
+            text, re.IGNORECASE
+        ):
+            extra_info = (extra_info + " Complete").strip()
+
+        # ── 3. Extract Language ──
+        language = ""
+        lang_patterns = [
+            (r'\b(dual\s*audio)\b', 'Dual Audio'),
+            (r'\b(multi\s*audio)\b', 'Multi Audio'),
+            (r'\b(hindi)\b', 'Hindi'),
+            (r'\b(english)\b', 'English'),
+            (r'\b(tamil)\b', 'Tamil'),
+            (r'\b(telugu)\b', 'Telugu'),
+            (r'\b(kannada)\b', 'Kannada'),
+            (r'\b(malayalam)\b', 'Malayalam'),
+            (r'\b(korean)\b', 'Korean'),
+            (r'\b(japanese)\b', 'Japanese'),
+            (r'\b(bengali|bangla)\b', 'Bengali'),
+            (r'\b(punjabi)\b', 'Punjabi'),
+            (r'\b(marathi)\b', 'Marathi'),
+            (r'\b(gujarati)\b', 'Gujarati'),
+        ]
+        text_lower = text.lower()
+        for pattern, lang_name in lang_patterns:
+            if re.search(pattern, text_lower):
+                language = lang_name
+                break
+
+        # ── 4. Detect Category ──
+        category = ""
+        adult_keywords = [
+            'ullu', 'kooku', 'palang tod', 'charmsukh', 'unrated',
+            'fliz', 'nuefliks', 'hotshot', 'gupchup', 'primeflix',
+            'bgrade', 'b-grade', '18+', 'xxx', 'erotic', 'hunters'
+        ]
+        if any(kw in text_lower for kw in adult_keywords):
+            category = "Adult Web Series"
+        elif extra_info:
+            category = "Web Series"
+        elif language in ['Tamil', 'Telugu', 'Kannada', 'Malayalam']:
+            category = "South"
+        elif language == 'Hindi':
+            category = "Bollywood"
+        elif language == 'English':
+            category = "Hollywood"
+        elif language == 'Japanese' or 'anime' in text_lower:
+            category = "Anime"
+
+        # ── 5. Extract Title ──
+        title = text
+
+        # Remove season/episode info from title
+        if season_match:
+            title = title[:season_match.start()] + title[season_match.end():]
+
+        # Split by year
+        if year:
+            parts = re.split(
+                r'[\(\[\s]?' + year + r'[\)\]\s]?',
+                title, maxsplit=1
+            )
+            title = parts[0] if parts else title
+
+        # Remove everything after quality tags
+        quality_pattern = (
+            r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|'
+            r'bluray|dvdrip|hdtv|x264|x265|hevc|aac|unrated|'
+            r'mkv|mp4|avi|seri)\b'
+        )
+        title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
+
+        # ── 6. Clean Title ──
+        title = re.sub(r'https?://\S+', '', title)
+        title = re.sub(r'@\w+', '', title)
+        title = re.sub(r'#\w+', '', title)
+        title = re.sub(r'\[@?\w+\]', '', title)
+        title = re.sub(r'[_\.\-]+', ' ', title)
+        title = re.sub(r'[\(\)\[\]\{\}]', ' ', title)
+        title = re.sub(r'\s+', ' ', title).strip()
+
+        # Remove trailing junk words
+        junk_words = [
+            'hindi', 'english', 'tamil', 'telugu', 'dubbed',
+            'movie', 'film', 'bollywood', 'hollywood', 'south',
+            'full', 'hd', 'sd', 'dual', 'audio', 'complete',
+            'series', 'web', 'season', 'episode', 'combined',
+            'batch', 'all', 'episodes'
+        ]
+        words = title.split()
+        clean_words = []
+        for word in words:
+            if word.lower() in junk_words:
+                # Agar pehle se kuch title mila hai to break
+                if clean_words:
+                    break
+                # Agar title shuru hi junk se ho to skip
+                continue
+            clean_words.append(word)
+
+        title = ' '.join(clean_words).strip()
+
+        # ── 7. Final Validation ──
+        if len(title) >= 2:
+            logger.info(
+                f"✅ Fallback: Title='{title}', Year='{year}', "
+                f"Lang='{language}', Extra='{extra_info}', Cat='{category}'"
+            )
+            return {
+                "title": title,
+                "year": year,
+                "language": language,
+                "extra_info": extra_info,
+                "category": category
+            }
+
+        return {
+            "title": "UNKNOWN", "year": "", "language": "",
+            "extra_info": "", "category": ""
+        }
+
+    except Exception as e:
+        logger.error(f"Fallback failed: {e}")
+        return {
+            "title": "UNKNOWN", "year": "", "language": "",
+            "extra_info": "", "category": ""
+        }
 
 async def fallback_extraction(caption_text):
     """🔧 FIXED: S01=Season, Adult Detection, Better Language"""
