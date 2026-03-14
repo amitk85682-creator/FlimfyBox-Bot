@@ -2679,6 +2679,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👇 Use the buttons below to get started:
 """
+    # 👇👇👇 YAHAN MENU BUTTON KA CODE DALNA HAI 👇👇👇
+    web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
+    
+    try:
+        await context.bot.set_chat_menu_button(
+            chat_id=chat_id,
+            menu_button=MenuButtonWebApp(
+                text="🎬 Web Version", 
+                web_app=WebAppInfo(url=web_app_url)
+            )
+        )
+    except Exception as e:
+        logger.error(f"Menu Button Error: {e}")
+    # 👆👆👆 
+
     # ✅ FIX 5: Final Welcome Msg bhi safe tarike se bhejen
     msg = await context.bot.send_message(
         chat_id=chat_id, 
@@ -6958,6 +6973,104 @@ def run_flask():
 
     flask_app.run(host='0.0.0.0', port=port)
 
+# 👇 Yahan se shuru karein 👇
+@flask_app.route('/webapp')
+def serve_mini_app():
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <title>FlimfyBox Premium</title>
+        <script src="https://telegram.org/js/telegram-web-app.js"></script>
+        <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+            body { background-color: #0f0f0f; color: #ffffff; padding-bottom: 20px; overflow-x: hidden; }
+            header { background-color: rgba(20, 20, 20, 0.95); backdrop-filter: blur(10px); padding: 15px 20px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; }
+            .logo { font-size: 24px; font-weight: 900; color: #e50914; letter-spacing: 1px; text-align: center; }
+            .logo span { color: #fff; }
+            .search-container { padding: 15px 20px 5px 20px; }
+            .search-bar { width: 100%; padding: 14px 20px; border-radius: 30px; border: none; outline: none; background-color: #2a2a2a; color: white; font-size: 15px; transition: 0.3s; }
+            .categories { display: flex; overflow-x: auto; padding: 10px 20px; gap: 10px; scrollbar-width: none; }
+            .cat-btn { background-color: #2a2a2a; color: #ccc; border: none; padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+            .cat-btn.active { background-color: #e50914; color: white; }
+            .section-title { padding: 10px 20px; font-size: 18px; font-weight: 700; margin-top: 5px; }
+            .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 15px; padding: 0 20px; }
+            .movie-card { background-color: #1e1e1e; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; position: relative; }
+            .poster-container { position: relative; width: 100%; height: 210px; }
+            .poster { width: 100%; height: 100%; object-fit: cover; }
+            .rating-badge { position: absolute; top: 8px; right: 8px; background-color: rgba(0,0,0,0.8); color: #ffd700; font-size: 11px; font-weight: bold; padding: 4px 6px; border-radius: 4px; border: 1px solid #ffd700; }
+            .movie-info { padding: 12px; flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; }
+            .movie-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .movie-year { font-size: 12px; color: #888; margin-bottom: 12px; }
+            .download-btn { background-color: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; width: 100%; }
+        </style>
+    </head>
+    <body>
+        <header><div class="logo">Flimfy<span>Box</span></div></header>
+        <div class="search-container"><input type="text" id="searchInput" class="search-bar" placeholder="🔍 Search movies..."></div>
+        <h2 class="section-title">🔥 Trending Now</h2>
+        <div class="movie-grid" id="movieContainer"><div id="noResults" style="display:none; width:100%; text-align:center; color:#888;">😕 No movies found!</div></div>
+
+        <script>
+            const tg = window.Telegram.WebApp;
+            tg.expand();
+            tg.ready();
+
+            // 🔥 AB API_URL SIRF RELATIVE HOGA (CORS KA TENSION KHATAM)
+            const API_URL = '/api/movies'; 
+            let moviesData = [];
+
+            async function fetchMovies() {
+                const container = document.getElementById('movieContainer');
+                container.innerHTML = '<h3 style="text-align:center; width:100%;">⏳ Loading...</h3>';
+                try {
+                    const response = await fetch(API_URL);
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        moviesData = data.movies;
+                        renderMovies(moviesData); 
+                    }
+                } catch (error) {
+                    container.innerHTML = '<h3 style="text-align:center; color:red;">❌ System Error</h3>';
+                }
+            }
+
+            function renderMovies(movies) {
+                const container = document.getElementById('movieContainer');
+                container.innerHTML = '';
+                movies.forEach(movie => {
+                    const card = document.createElement('div');
+                    card.className = 'movie-card';
+                    card.innerHTML = `
+                        <div class="poster-container"><img src="${movie.image}" class="poster"><div class="rating-badge">⭐ ${movie.rating}</div></div>
+                        <div class="movie-info">
+                            <div><div class="movie-title">${movie.title}</div><div class="movie-year">${movie.year}</div></div>
+                            <button class="download-btn" onclick="requestMovie(${movie.id})">📥 Get in Bot</button>
+                        </div>`;
+                    container.appendChild(card);
+                });
+            }
+
+            document.getElementById('searchInput').addEventListener('input', function(e) {
+                const term = e.target.value.toLowerCase();
+                renderMovies(moviesData.filter(m => m.title.toLowerCase().includes(term)));
+            });
+
+            function requestMovie(movieId) {
+                tg.sendData("movie_" + movieId);
+                tg.close();
+            }
+
+            fetchMovies();
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
+# 👆 Yahan tak 👆
+
 # ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
 # Note: Purane batch functions ko replace kar diya gaya hai naye multi-channel batch functions se
@@ -7230,6 +7343,26 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Auto-delete (Optional - 2 min)
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
 
+async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mini App se aane wali movie ID ko receive karega aur movie bhejega"""
+    if update.effective_message.web_app_data:
+        received_data = update.effective_message.web_app_data.data
+        chat_id = update.effective_chat.id
+        
+        if received_data.startswith("movie_"):
+            movie_id = int(received_data.split("_")[1])
+            
+            # Loading message dikhayein
+            status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ <b>Fetching your movie from Web App...</b>", parse_mode='HTML')
+            
+            # Movie bhejne wala purana function call karein
+            await deliver_movie_on_start(update, context, movie_id)
+            
+            try:
+                await status_msg.delete()
+            except:
+                pass
+
 async def auto_delete_worker(app: Application):
     """
     Background worker jo har 5 second me DB check karega, 
@@ -7374,6 +7507,8 @@ def register_handlers(application: Application):
     # -----------------------------------------------------------
     application.add_handler(CommandHandler("genres", show_genre_selection))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
+
+    application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
       
     # -----------------------------------------------------------
     # 5. NOTIFICATION & STATS
