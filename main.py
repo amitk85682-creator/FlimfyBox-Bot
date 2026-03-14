@@ -543,53 +543,42 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
 
 CLEANED CAPTION: "{cleaned_caption}"
 
-STRICT RULES — READ CAREFULLY:
+YOUR TASK:
+Extract ONLY 5 pieces of information from the text above:
+1. title - The movie/series name (NOTHING ELSE)
+2. year - Release year if found (4 digits only, otherwise empty)
+3. language - Audio language (Hindi, English, Tamil, etc. or empty)
+4. extra_info - Season/Episode info like S01, S02E03, etc (or empty)
+5. category - Type of content (Movies, Web Series, Anime, Bollywood, Hollywood, South, Adult Web Series)
 
-1. "title": Extract ONLY the official series/movie name.
-   - "Your Honor Hindi S02E01 Michael and Olivia 720p" → title is "Your Honor" (NOT "Your Honor Hindi S02E01 Michael and Olivia")
-   - "Mirzapur S01 Complete 720p" → title is "Mirzapur"
-   - "Palang Tod: Zaroorat (2022) S01" → title is "Palang Tod Zaroorat"
-   - REMOVE: language names (Hindi, English, Tamil), quality (720p, 1080p), codec (AAC, x264, HEVC), format (mkv, mp4), source (WEB-DL, HDRip, BluRay)
-   - REMOVE: Season/Episode markers (S01, S02E01, E05) from title
-   - REMOVE: Episode titles like "Michael and Olivia" — these are episode names, NOT part of the series name
-   - REMOVE: "Full", "Movie", "UNRATED", "Seri", "Complete"
-
-2. "year": 4-digit release year (1900-2099).
-   - If text has (2022) or [2022], extract it.
-   - If you RECOGNIZE the show (e.g., "Your Honor" is 2020 show), provide the actual year.
-   - If unsure, leave "".
-
-3. "language": Audio language from text. "Hindi", "English", "Tamil", "Dual Audio", etc.
-   - If not mentioned, leave "".
-
-4. "extra_info": ONLY season/episode/batch info.
-   - S02E01 → "S02E01"
-   - S01 Complete → "S01 Complete"  
-   - S01-S03 → "S01-S03"
-   - IMPORTANT: "S01" is Season 1, "E01" is Episode 1. These are NOT part of the title!
-   - "Michael and Olivia" after S02E01 is an EPISODE TITLE — put it here like "S02E01 Michael and Olivia" or just "S02E01"
-
-5. "category": Pick ONE:
-   - "Bollywood" = Hindi Indian movies
-   - "Hollywood" = English Western movies
-   - "South" = Tamil/Telugu/Kannada/Malayalam movies
-   - "Anime" = Japanese animation
-   - "Web Series" = Any TV/web series (Netflix, Amazon, JioCinema, etc.)
-   - "Adult Web Series" = UNRATED/18+ content (Ullu, Kooku, Palang Tod, Charmsukh, etc.)
-   - "Movies" = General/Unknown
+CRITICAL RULES:
+- title MUST be SHORT and CLEAN
+- Remove ALL: quality (720p, 1080p), codecs (x264, AAC), formats (mkv, mp4), sources (WebRip, HDRip, WEB-DL)
+- Remove ALL: Season/Episode numbers from title (they go in extra_info)
+- Remove ALL: Language names from title (they go in language field)
+- Remove ALL: File metadata words like "Telly", "PlexRip", etc.
+- title should be 2-50 characters maximum
 
 EXAMPLES:
-- "Your Honor Hindi S02E01 Michael and Olivia 720p JIO WEB DL AAC2 mkv"
-  → {{"title": "Your Honor", "year": "2020", "language": "Hindi", "extra_info": "S02E01", "category": "Web Series"}}
+Input: "Your Honor Hindi S02E01 Michael and Olivia 720p JIO WEB DL AAC2 mkv"
+Output:
+{{
+    "title": "Your Honor",
+    "year": "",
+    "language": "Hindi",
+    "extra_info": "S02E01",
+    "category": "Web Series"
+}}
 
-- "Mirzapur S01 Complete Hindi 720p WEBRip"
-  → {{"title": "Mirzapur", "year": "2018", "language": "Hindi", "extra_info": "S01 Complete", "category": "Web Series"}}
-
-- "Palang Tod Zaroorat 2022 S01 HDRip Hindi UNRATED Seri mkv"
-  → {{"title": "Palang Tod Zaroorat", "year": "2022", "language": "Hindi", "extra_info": "S01", "category": "Adult Web Series"}}
-
-- "Pushpa The Rise 2021 Hindi Dubbed 1080p BluRay"
-  → {{"title": "Pushpa The Rise", "year": "2021", "language": "Hindi Dubbed", "extra_info": "", "category": "South"}}
+Input: "Qayamat Se Qayamat Tak 1988 WebRip 720p Hindi AAC 2.0 x264 [Telly].mkv"
+Output:
+{{
+    "title": "Qayamat Se Qayamat Tak",
+    "year": "1988",
+    "language": "Hindi",
+    "extra_info": "",
+    "category": "Bollywood"
+}}
 
 Return ONLY valid JSON. No markdown, no explanation."""
 
@@ -630,7 +619,9 @@ Return ONLY valid JSON. No markdown, no explanation."""
         extra_info = data.get("extra_info", "").strip()
         category = data.get("category", "").strip()
 
-        if not title or len(title) < 2:
+        # 🛑 CRITICAL: Agar title 2 characters se kam hai, FALLBACK use karo
+        if not title or len(title) < 2 or len(title) > 100:
+            logger.warning(f"⚠️ Invalid title extracted: '{title}'. Using fallback.")
             return await fallback_extraction(cleaned_caption)
 
         # ── Post-processing: Remove season/quality if Gemini kept them ──
@@ -642,7 +633,7 @@ Return ONLY valid JSON. No markdown, no explanation."""
         title = re.sub(
             r'\s*(480p|720p|1080p|2160p|4K|HDRip|WEBRip|WEB-DL|'
             r'BluRay|DVDRip|HDTV|UNRATED|mkv|mp4|avi|Seri|'
-            r'AAC\d?|x264|x265|HEVC|JIO|NF|AMZN)\s*',
+            r'AAC\d?|x264|x265|HEVC|JIO|NF|AMZN|PlexRip|Telly)\s*',
             ' ', title, flags=re.IGNORECASE
         ).strip()
 
@@ -654,6 +645,11 @@ Return ONLY valid JSON. No markdown, no explanation."""
         ).strip()
 
         title = re.sub(r'\s+', ' ', title).strip()
+
+        # Final validation
+        if not title or len(title) < 2:
+            logger.warning(f"⚠️ Title became empty after cleanup. Using fallback.")
+            return await fallback_extraction(cleaned_caption)
 
         if year and not re.match(r'^(19|20)\d{2}$', year):
             year = ""
@@ -682,14 +678,14 @@ Return ONLY valid JSON. No markdown, no explanation."""
                 r'\b(complete|all\s*episodes?|batch|combined)\b',
                 caption_lower
             ):
-                extra_info = (extra_info + " Complete").strip()
+                extra_info = (extra_info + " Complete").strip() if extra_info else "Complete"
 
         if extra_info and category in ["Movies", "Bollywood", ""]:
             if "Adult" not in category:
                 category = "Web Series"
 
         logger.info(
-            f"🤖 GEMINI: Title='{title}', Year='{year}', "
+            f"✅ GEMINI: Title='{title}', Year='{year}', "
             f"Lang='{language}', Extra='{extra_info}', Cat='{category}'"
         )
 
