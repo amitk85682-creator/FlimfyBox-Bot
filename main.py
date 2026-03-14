@@ -461,7 +461,7 @@ async def check_rate_limit(user_id):
 def pre_clean_caption(raw_text: str) -> str:
     """
     🧹 Gemini ko bhejne se PEHLE caption saaf karo
-    Junk hata do: @channels, URLs, 'MUST JOIN', emojis, etc.
+    Junk hata do: @channels, URLs, 'Join', 'MUST JOIN', emojis, etc.
     """
     if not raw_text:
         return ""
@@ -477,25 +477,38 @@ def pre_clean_caption(raw_text: str) -> str:
     # 3. Remove URLs
     text = re.sub(r'https?://\S+', '', text)
     
-    # 4. Remove "MUST JOIN", "Channel 1.", "Channel 2." type lines
+    # 4. Remove junk lines
     lines = text.split('\n')
     clean_lines = []
     skip_keywords = [
         'must join', 'channel 1', 'channel 2', 'channel 3',
         'join channel', 'join group', 'subscribe', 'follow',
-        '🔰', '📢', 't.me/', 'telegram.me/'
+        'join', 'for new', 'for latest', 'for more',
+        '🔰', '📢', 't.me/', 'telegram.me/',
+        'new movies', 'new webseries', 'movies/webseries'
     ]
     for line in lines:
         line_lower = line.strip().lower()
-        if any(kw in line_lower for kw in skip_keywords):
+        # Skip empty lines
+        if len(line.strip()) < 3:
             continue
-        if len(line.strip()) < 2:
+        # Skip junk lines
+        if any(kw in line_lower for kw in skip_keywords):
             continue
         clean_lines.append(line.strip())
     
-    text = ' '.join(clean_lines)
+    # Sirf FIRST useful line lo (baaki sab junk hota hai)
+    text = clean_lines[0] if clean_lines else ''
     
-    # 5. Remove extra spaces
+    # 5. Remove emojis
+    text = re.sub(
+        r'[\U0001F300-\U0001F9FF\U00002702-\U000027B0'
+        r'\U0000FE00-\U0000FE0F\U0000200D\U00002600-\U000026FF'
+        r'\U00002700-\U000027BF\U0001FA00-\U0001FA6F'
+        r'\U0001FA70-\U0001FAFF]+', '', text
+    )
+    
+    # 6. Remove extra spaces
     text = re.sub(r'\s+', ' ', text).strip()
     
     return text
@@ -515,11 +528,6 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
     # 🧹 STEP 1: Caption ko pehle saaf karo
     cleaned_caption = pre_clean_caption(caption_text)
     
-    # Agar cleaning ke baad kuch nahi bacha
-    if not cleaned_caption or len(cleaned_caption) < 3:
-        first_line = caption_text.split('\n')[0].strip()
-        cleaned_caption = pre_clean_caption(first_line)
-    
     if not cleaned_caption or len(cleaned_caption) < 3:
         return await fallback_extraction(caption_text)
 
@@ -531,69 +539,67 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-        # 🧠 SUPER IMPROVED PROMPT
-        prompt = f"""You are an expert Movie/Web Series metadata extractor for Indian & International content.
-
-I am giving you a CLEANED filename/caption from Telegram. Analyze it carefully.
+        prompt = f"""You are an expert Movie/Web Series metadata extractor.
 
 CLEANED CAPTION: "{cleaned_caption}"
 
-STRICT RULES:
-1. "title": Extract ONLY the official movie/series name. 
-   - REMOVE all junk: 'Full', 'Movie', 'HD', '1080p', '720p', 'HDRip', 'WEBRip', 'BluRay', 'UNRATED', 'mkv', 'mp4', 'avi', 'Seri'
-   - REMOVE quality tags, codec names (x264, x265, HEVC, AAC)
-   - REMOVE language names from title (Hindi, English, Tamil etc.)
-   - Keep subtitle/colon names: "Palang Tod: Zaroorat" is correct (keep the colon part)
-   - If title has "The" at end like "Conjuring, The" -> make it "The Conjuring"
+STRICT RULES — READ CAREFULLY:
 
-2. "year": 4-digit release year (1900-2099). 
-   - If text has year like (2022) or [2022], extract it.
-   - If you recognize the movie/show from knowledge or image, provide actual release year.
-   - If unsure, leave empty string "".
+1. "title": Extract ONLY the official series/movie name.
+   - "Your Honor Hindi S02E01 Michael and Olivia 720p" → title is "Your Honor" (NOT "Your Honor Hindi S02E01 Michael and Olivia")
+   - "Mirzapur S01 Complete 720p" → title is "Mirzapur"
+   - "Palang Tod: Zaroorat (2022) S01" → title is "Palang Tod Zaroorat"
+   - REMOVE: language names (Hindi, English, Tamil), quality (720p, 1080p), codec (AAC, x264, HEVC), format (mkv, mp4), source (WEB-DL, HDRip, BluRay)
+   - REMOVE: Season/Episode markers (S01, S02E01, E05) from title
+   - REMOVE: Episode titles like "Michael and Olivia" — these are episode names, NOT part of the series name
+   - REMOVE: "Full", "Movie", "UNRATED", "Seri", "Complete"
 
-3. "language": Audio language(s) mentioned in text.
-   - Examples: "Hindi", "English", "Tamil", "Telugu", "Dual Audio", "Multi Audio"
-   - If not mentioned, leave empty "".
+2. "year": 4-digit release year (1900-2099).
+   - If text has (2022) or [2022], extract it.
+   - If you RECOGNIZE the show (e.g., "Your Honor" is 2020 show), provide the actual year.
+   - If unsure, leave "".
 
-4. "extra_info": Season/Episode/Batch info ONLY.
-   - S01, S02, S01-S03 = Season info (NOT part of title!)
-   - E01, E05, EP01 = Episode info
-   - "Complete", "All Episodes", "Batch" = batch info
-   - IMPORTANT: S01 means "Season 1", it is NOT part of the movie name!
+3. "language": Audio language from text. "Hindi", "English", "Tamil", "Dual Audio", etc.
+   - If not mentioned, leave "".
 
-5. "category": Pick the BEST match from these options:
-   - "Bollywood" = Hindi language Indian movies
-   - "Hollywood" = English language Western movies  
+4. "extra_info": ONLY season/episode/batch info.
+   - S02E01 → "S02E01"
+   - S01 Complete → "S01 Complete"  
+   - S01-S03 → "S01-S03"
+   - IMPORTANT: "S01" is Season 1, "E01" is Episode 1. These are NOT part of the title!
+   - "Michael and Olivia" after S02E01 is an EPISODE TITLE — put it here like "S02E01 Michael and Olivia" or just "S02E01"
+
+5. "category": Pick ONE:
+   - "Bollywood" = Hindi Indian movies
+   - "Hollywood" = English Western movies
    - "South" = Tamil/Telugu/Kannada/Malayalam movies
    - "Anime" = Japanese animation
-   - "Web Series" = Any TV series or web series (Netflix, Amazon, etc.)
-   - "Adult Web Series" = If UNRATED, 18+, adult content indicators present (like "Palang Tod", "Ullu", "Kooku", "Charmsukh", "UNRATED")
-   - "Movies" = General/Unknown category
+   - "Web Series" = Any TV/web series (Netflix, Amazon, JioCinema, etc.)
+   - "Adult Web Series" = UNRATED/18+ content (Ullu, Kooku, Palang Tod, Charmsukh, etc.)
+   - "Movies" = General/Unknown
 
 EXAMPLES:
-- "Palang Tod: Zaroorat (2022) S01 HDRip Hindi UNRATED Seri mkv"
-  → {{"title": "Palang Tod Zaroorat", "year": "2022", "language": "Hindi", "extra_info": "S01", "category": "Adult Web Series"}}
+- "Your Honor Hindi S02E01 Michael and Olivia 720p JIO WEB DL AAC2 mkv"
+  → {{"title": "Your Honor", "year": "2020", "language": "Hindi", "extra_info": "S02E01", "category": "Web Series"}}
 
 - "Mirzapur S01 Complete Hindi 720p WEBRip"
-  → {{"title": "Mirzapur", "year": "", "language": "Hindi", "extra_info": "S01 Complete", "category": "Web Series"}}
+  → {{"title": "Mirzapur", "year": "2018", "language": "Hindi", "extra_info": "S01 Complete", "category": "Web Series"}}
 
-- "Taarzan The Wonder Car Full Movie Hindi 480p"
-  → {{"title": "Taarzan The Wonder Car", "year": "", "language": "Hindi", "extra_info": "", "category": "Bollywood"}}
+- "Palang Tod Zaroorat 2022 S01 HDRip Hindi UNRATED Seri mkv"
+  → {{"title": "Palang Tod Zaroorat", "year": "2022", "language": "Hindi", "extra_info": "S01", "category": "Adult Web Series"}}
 
-- "Money Heist S01-S05 English 1080p NF WEB-DL"
-  → {{"title": "Money Heist", "year": "", "language": "English", "extra_info": "S01-S05", "category": "Web Series"}}
+- "Pushpa The Rise 2021 Hindi Dubbed 1080p BluRay"
+  → {{"title": "Pushpa The Rise", "year": "2021", "language": "Hindi Dubbed", "extra_info": "", "category": "South"}}
 
-Return ONLY a valid JSON object. No markdown, no explanation, no ```json tags."""
+Return ONLY valid JSON. No markdown, no explanation."""
 
         contents = [prompt]
 
-        # 🖼️ Agar thumbnail/poster image hai
         if image_bytes:
             image_prompt = (
-                "\n\nI am also providing the VIDEO THUMBNAIL/POSTER image. "
+                "\n\nI am also providing the VIDEO THUMBNAIL/POSTER. "
                 "If you can recognize the movie/show from this image, "
-                "use it to VERIFY or CORRECT the title and year. "
-                "The image is more reliable than the filename for identification."
+                "use it to VERIFY or CORRECT the title and year."
             )
             contents = [prompt + image_prompt]
             contents.append({
@@ -607,8 +613,6 @@ Return ONLY a valid JSON object. No markdown, no explanation, no ```json tags.""
             return await fallback_extraction(cleaned_caption)
 
         text = response.text.strip()
-
-        # Clean JSON response
         text = text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
@@ -626,38 +630,39 @@ Return ONLY a valid JSON object. No markdown, no explanation, no ```json tags.""
         extra_info = data.get("extra_info", "").strip()
         category = data.get("category", "").strip()
 
-        # ── Post-processing validation ──
-
-        # Title check
         if not title or len(title) < 2:
             return await fallback_extraction(cleaned_caption)
 
-        # Remove season from title if Gemini accidentally kept it
+        # ── Post-processing: Remove season/quality if Gemini kept them ──
         title = re.sub(
-            r'\s*(S\d{1,2})([-\s]*(S\d{1,2}|E\d{1,3}))*\s*$',
+            r'\s*(S\d{1,2})([-\s]*(S\d{1,2}|E\d{1,3}))*.*$',
             '', title, flags=re.IGNORECASE
         ).strip()
 
-        # Remove quality tags from title if Gemini accidentally kept them
         title = re.sub(
-            r'\s*(480p|720p|1080p|2160p|4K|HDRip|WEBRip|WEB-DL|BluRay|'
-            r'DVDRip|HDTV|UNRATED|mkv|mp4|avi|Seri)\s*',
+            r'\s*(480p|720p|1080p|2160p|4K|HDRip|WEBRip|WEB-DL|'
+            r'BluRay|DVDRip|HDTV|UNRATED|mkv|mp4|avi|Seri|'
+            r'AAC\d?|x264|x265|HEVC|JIO|NF|AMZN)\s*',
             ' ', title, flags=re.IGNORECASE
         ).strip()
 
-        # Clean extra spaces
+        # Remove language from title end
+        title = re.sub(
+            r'\s+(Hindi|English|Tamil|Telugu|Kannada|Malayalam|'
+            r'Korean|Japanese|Dubbed|Dual\s*Audio)\s*$',
+            '', title, flags=re.IGNORECASE
+        ).strip()
+
         title = re.sub(r'\s+', ' ', title).strip()
 
-        # Year validation
         if year and not re.match(r'^(19|20)\d{2}$', year):
             year = ""
 
-        # ── ADULT CONTENT DETECTION (backup check) ──
+        # ── Adult Content Detection (backup) ──
         adult_keywords = [
             'ullu', 'kooku', 'palang tod', 'charmsukh', 'unrated',
             'fliz', 'nuefliks', 'hotshot', 'gupchup', 'primeflix',
-            'bgrade', 'b-grade', '18+', 'xxx', 'erotic',
-            'hot web', 'masti', 'feneo', 'boom', 'hunters'
+            'hunters', '18+', 'erotic', 'hot web'
         ]
         caption_lower = cleaned_caption.lower()
         if category != "Adult Web Series":
@@ -673,29 +678,24 @@ Return ONLY a valid JSON object. No markdown, no explanation, no ```json tags.""
             if season_match:
                 extra_info = season_match.group(0).strip()
 
-            # "Complete" / "All Episodes" / "Batch"
             if re.search(
                 r'\b(complete|all\s*episodes?|batch|combined)\b',
                 caption_lower
             ):
                 extra_info = (extra_info + " Complete").strip()
 
-        # If has season info, likely a series
         if extra_info and category in ["Movies", "Bollywood", ""]:
             if "Adult" not in category:
                 category = "Web Series"
 
         logger.info(
-            f"🤖 GEMINI RESULT: Title='{title}', Year='{year}', "
+            f"🤖 GEMINI: Title='{title}', Year='{year}', "
             f"Lang='{language}', Extra='{extra_info}', Cat='{category}'"
         )
 
         return {
-            "title": title,
-            "year": year,
-            "language": language,
-            "extra_info": extra_info,
-            "category": category
+            "title": title, "year": year, "language": language,
+            "extra_info": extra_info, "category": category
         }
 
     except Exception as e:
@@ -705,11 +705,10 @@ Return ONLY a valid JSON object. No markdown, no explanation, no ```json tags.""
 
 async def fallback_extraction(caption_text):
     """
-    🔧 SMART FALLBACK: Regex-based extraction when AI fails
-    Handles seasons, adult content, languages properly
+    🔧 SMART FALLBACK: When AI fails
+    Handles seasons, episode titles, adult content, languages
     """
     try:
-        # Pre-clean first
         text = pre_clean_caption(caption_text) if caption_text else ""
         if not text or len(text) < 2:
             text = caption_text.strip() if caption_text else ""
@@ -718,8 +717,6 @@ async def fallback_extraction(caption_text):
                 "title": "UNKNOWN", "year": "", "language": "",
                 "extra_info": "", "category": ""
             }
-
-        original_text = text
 
         # ── 1. Extract Year ──
         year_match = re.search(r'[\(\[\s]?(19|20)\d{2}[\)\]\s]?', text)
@@ -747,6 +744,7 @@ async def fallback_extraction(caption_text):
         lang_patterns = [
             (r'\b(dual\s*audio)\b', 'Dual Audio'),
             (r'\b(multi\s*audio)\b', 'Multi Audio'),
+            (r'\b(hindi\s*dubbed)\b', 'Hindi Dubbed'),
             (r'\b(hindi)\b', 'Hindi'),
             (r'\b(english)\b', 'English'),
             (r'\b(tamil)\b', 'Tamil'),
@@ -758,7 +756,6 @@ async def fallback_extraction(caption_text):
             (r'\b(bengali|bangla)\b', 'Bengali'),
             (r'\b(punjabi)\b', 'Punjabi'),
             (r'\b(marathi)\b', 'Marathi'),
-            (r'\b(gujarati)\b', 'Gujarati'),
         ]
         text_lower = text.lower()
         for pattern, lang_name in lang_patterns:
@@ -771,7 +768,7 @@ async def fallback_extraction(caption_text):
         adult_keywords = [
             'ullu', 'kooku', 'palang tod', 'charmsukh', 'unrated',
             'fliz', 'nuefliks', 'hotshot', 'gupchup', 'primeflix',
-            'bgrade', 'b-grade', '18+', 'xxx', 'erotic', 'hunters'
+            'hunters', '18+', 'erotic'
         ]
         if any(kw in text_lower for kw in adult_keywords):
             category = "Adult Web Series"
@@ -786,26 +783,34 @@ async def fallback_extraction(caption_text):
         elif language == 'Japanese' or 'anime' in text_lower:
             category = "Anime"
 
-        # ── 5. Extract Title ──
+        # ══════════════════════════════════════════
+        # ── 5. Extract Title (MOST IMPORTANT FIX) ──
+        # ══════════════════════════════════════════
+        
+        # KEY RULE: Title = Everything BEFORE season/year/quality
+        # "Your Honor Hindi S02E01 Michael and Olivia 720p..."
+        #  ^^^^^^^^^^^^^^^^^^^  ← Title ends HERE (before S02E01)
+        #  "Michael and Olivia" is episode title, NOT series name!
+
         title = text
 
-        # Remove season/episode info from title
+        # STEP A: If season found, take ONLY what's BEFORE it
         if season_match:
-            title = title[:season_match.start()] + title[season_match.end():]
-
-        # Split by year
+            title = text[:season_match.start()].strip()
+        
+        # STEP B: If year found, take what's BEFORE it
         if year:
-            parts = re.split(
-                r'[\(\[\s]?' + year + r'[\)\]\s]?',
-                title, maxsplit=1
+            year_pos = re.search(
+                r'[\(\[\s]?' + year + r'[\)\]\s]?', title
             )
-            title = parts[0] if parts else title
+            if year_pos:
+                title = title[:year_pos.start()].strip()
 
-        # Remove everything after quality tags
+        # STEP C: Remove everything from quality tags onwards
         quality_pattern = (
             r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|'
-            r'bluray|dvdrip|hdtv|x264|x265|hevc|aac|unrated|'
-            r'mkv|mp4|avi|seri)\b'
+            r'bluray|dvdrip|hdtv|x264|x265|hevc|aac\d?|'
+            r'unrated|mkv|mp4|avi|seri|jio|nf|amzn)\b'
         )
         title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
 
@@ -818,39 +823,36 @@ async def fallback_extraction(caption_text):
         title = re.sub(r'[\(\)\[\]\{\}]', ' ', title)
         title = re.sub(r'\s+', ' ', title).strip()
 
-        # Remove trailing junk words
+        # Remove trailing junk/language words
         junk_words = [
             'hindi', 'english', 'tamil', 'telugu', 'dubbed',
             'movie', 'film', 'bollywood', 'hollywood', 'south',
             'full', 'hd', 'sd', 'dual', 'audio', 'complete',
             'series', 'web', 'season', 'episode', 'combined',
-            'batch', 'all', 'episodes'
+            'batch', 'all', 'episodes', 'korean', 'japanese',
+            'kannada', 'malayalam', 'bengali', 'punjabi',
+            'marathi', 'gujarati', 'multi'
         ]
         words = title.split()
         clean_words = []
         for word in words:
             if word.lower() in junk_words:
-                # Agar pehle se kuch title mila hai to break
                 if clean_words:
                     break
-                # Agar title shuru hi junk se ho to skip
                 continue
             clean_words.append(word)
 
         title = ' '.join(clean_words).strip()
 
-        # ── 7. Final Validation ──
+        # ── 7. Final Check ──
         if len(title) >= 2:
             logger.info(
                 f"✅ Fallback: Title='{title}', Year='{year}', "
                 f"Lang='{language}', Extra='{extra_info}', Cat='{category}'"
             )
             return {
-                "title": title,
-                "year": year,
-                "language": language,
-                "extra_info": extra_info,
-                "category": category
+                "title": title, "year": year, "language": language,
+                "extra_info": extra_info, "category": category
             }
 
         return {
