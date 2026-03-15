@@ -547,145 +547,179 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
         return await fallback_extraction(first_line)
 
 
+async def get_movie_name_from_caption(caption_text, image_bytes=None):
+    """
+    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL 2-STEP VERIFICATION)
+    """
+    if not caption_text or len(caption_text.strip()) < 2:
+        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
+    
+    first_line = caption_text.split('\n')[0].strip()
+    logger.info(f"📝 Processing caption: {first_line[:100]}...")
+
+    # TRY GEMINI FIRST
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+
+            prompt = f"""Extract movie/series info from this filename. Return ONLY JSON.
+
+Filename: "{first_line}"
+
+Rules:
+- title: Clean name without S01, E01, group names, quality, etc.
+- year: 4-digit year if present
+- language: Audio languages mentioned
+- extra_info: Season/episode info (e.g., "S01 E01-12 COMBINED")
+- category: 'Web Series' if season/episode found, else 'Movies'
+
+Example:
+Input: "A Gatherer's Adventure In Isekai S01 [E01-12] COMBiNED 720p AMZN WEB-DL HEVC Multi DDP2.0 MSub KEИ !! Shubham.mkv"
+Output: {{"title": "A Gatherer's Adventure In Isekai", "year": "", "language": "Multi Audio", "extra_info": "S01 E01-12 COMBINED", "category": "Web Series"}}
+
+JSON:"""
+
+            contents = [prompt]
+            if image_bytes:
+                contents.append({"mime_type": "image/jpeg", "data": image_bytes})
+
+            response = await run_async(model.generate_content, contents)
+            
+            if response and response.text:
+                logger.info(f"🤖 Gemini Response: {response.text[:200]}")
+                
+                # Clean JSON
+                text = response.text.strip()
+                text = re.sub(r'```json|```', '', text)
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group())
+                    
+                    # Validate
+                    if data.get("title") and len(data["title"]) > 2:
+                        logger.info(f"✅ Gemini Success: {data['title']}")
+                        return data
+
+    except Exception as e:
+        logger.error(f"❌ Gemini failed: {e}")
+
+    # FALLBACK: Improved version
+    logger.info("⚠️ Using fallback extraction...")
+    return await fallback_extraction(first_line)
+
+
 async def fallback_extraction(caption_text):
     """
-    SMART FALLBACK: Regex-based extraction when AI fails
+    SMART FALLBACK: Regex-based extraction
     """
     try:
         text = caption_text.strip()
-        
-        # 1. Extract Year
-        year_match = re.search(r'[\(\[]?(19|20)\d{2}[\)\]]?', text)
-        year = year_match.group(0) if year_match else ""
-        if year:
-            year = re.search(r'(19|20)\d{2}', year).group(0)
+        original = text
 
-        # 2. Extract Language (multiple languages)
-        language = ""
-        lang_patterns = [
-            (r'japanese|日本語', 'Japanese'),
-            (r'english', 'English'),
-            (r'hindi|हिन्दी', 'Hindi'),
-            (r'tamil|தமிழ்', 'Tamil'),
-            (r'telugu|తెలుగు', 'Telugu'),
-            (r'malayalam', 'Malayalam'),
-            (r'korean', 'Korean'),
-            (r'dual[\s-]*audio', 'Dual Audio'),
-            (r'multi[\s-]*audio', 'Multi Audio'),
+        # 1. Remove language indicators line
+        text = re.sub(r'🔊.*?(?:\n|$)', '', text, flags=re.DOTALL)
+
+        # 2. Find season/episode position to split title
+        split_pos = None
+        season_patterns = [
+            r'\bS\d{1,2}\b', r'\bSeason\s*\d+\b', 
+            r'\bS\d{1,2}E\d{1,2}\b', r'\[E\d{1,2}-\d{1,2}\]'
         ]
-        found_langs = []
-        for pattern, lang_name in lang_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                found_langs.append(lang_name)
-        if found_langs:
-            language = ", ".join(list(dict.fromkeys(found_langs)))  # Remove duplicates
+        for pattern in season_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                split_pos = match.start()
+                break
 
-        # 3. Extract Season/Episode info for extra_info
-        extra_info = ""
-        
-        # Season pattern: S01, Season 1, S1
-        season_match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', text)
-        season = season_match.group(0) if season_match else ""
-        
-        # Episode pattern: E01-12, E01-E12, Episodes 1-12, [E01-12]
-        episode_match = re.search(r'(?i)(\[?e\d{1,2}[-_]\d{1,2}\]?|episodes?\s*\d+\s*[-_]\s*\d+|e\d{1,2}[-_]e\d{1,2})', text)
-        episode_range = episode_match.group(0) if episode_match else ""
-        
-        # Combined/Batch pattern
-        batch_match = re.search(r'(?i)(combined|complete|batch)', text)
-        batch = batch_match.group(0) if batch_match else ""
-        
-        # Build extra_info
-        extra_parts = []
-        if season:
-            extra_parts.append(season.upper())
-        if episode_range:
-            # Clean episode range: [E01-12] -> E01-12
-            clean_range = re.sub(r'[\[\]]', '', episode_range)
-            extra_parts.append(clean_range.upper())
-        if batch:
-            extra_parts.append(batch.upper())
-        if extra_parts:
-            extra_info = " ".join(extra_parts)
+        # 3. Extract title
+        if split_pos is not None:
+            title = text[:split_pos].strip()
+        else:
+            title = text
 
-        # 4. Get title - remove all known patterns
-        title = text
+        # 4. Clean title thoroughly
+        # Remove group names (KEИ !! Shubham, [Group], etc.)
+        title = re.sub(r'[A-ZА-Я]{2,}\s*!+\s*\w+$', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\[.*?\]', '', title)  # Remove [brackets content]
+        title = re.sub(r'\(.*?\)', '', title)  # Remove (parentheses content)
+        title = re.sub(r'by\s+\w+$', '', title, flags=re.IGNORECASE)
         
-        # Remove language section if present (like "🔊 : 日本語, English, ...")
-        title = re.sub(r'🔊.*?(?:\n|$)', '', title, flags=re.DOTALL)
-        
-        # Remove year
-        if year:
-            title = re.sub(r'[\(\[]?' + year + r'[\)\]]?', '', title)
-        
-        # Remove quality tags
-        quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv|amzn|hevc|ddp\d\.\d|x264|x265)\b'
-        title = re.sub(quality_pattern, '', title, flags=re.IGNORECASE)
-        
-        # Remove season/episode patterns
-        title = re.sub(r'(?i)(s\d{1,2}|season\s*\d+|\[?e\d{1,2}[-_]\d{1,2}\]?|episodes?\s*\d+\s*[-_]\s*\d+|combined|complete|batch)', '', title)
-        
-        # Remove codec/container info
-        title = re.sub(r'\b(mkv|mp4|avi|hevc|x264|x265|ddp\d\.\d|multi|web-dl|bluray)\b', '', title, flags=re.IGNORECASE)
-        
-        # Remove group tags like "KEИ !! Shubham"
-        title = re.sub(r'[A-Z]{2,}\s*!+\s*\w+', '', title)
-        
-        # Clean up separators
+        # Remove URLs, mentions, hashtags
         title = re.sub(r'https?://\S+', '', title)
         title = re.sub(r'@\w+', '', title)
         title = re.sub(r'#\w+', '', title)
+        
+        # Replace separators with space
         title = re.sub(r'[_\.\-]+', ' ', title)
         title = re.sub(r'\s+', ' ', title).strip()
-        
-        # Remove leading/trailing junk words
-        junk_words = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'multi', 'audio', 'ddp']
+
+        # Remove trailing junk words
+        junk = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'multi', 'audio', 
+                'ddp', 'web', 'dl', 'bluray', 'amzn', 'hevc', 'x264', 'x265', 'mkv']
         words = title.split()
-        if words:
-            # Clean from start
-            while words and words[0].lower() in junk_words:
-                words.pop(0)
-            # Clean from end
-            while words and words[-1].lower() in junk_words:
-                words.pop()
-        
-        title = ' '.join(words).strip()
-        
-        # Remove any remaining square brackets
-        title = re.sub(r'[\[\]]', '', title)
-        
-        # If title is empty, try original text
+        while words and words[-1].lower() in junk:
+            words.pop()
+        title = ' '.join(words)
+
+        # 5. Extract metadata
+        # Year
+        year_match = re.search(r'[\(\[]?(19|20)\d{2}[\)\]]?', text)
+        year = re.search(r'(19|20)\d{2}', year_match.group()) if year_match else ""
+        year = year.group() if year else ""
+
+        # Languages
+        languages = []
+        lang_map = {
+            'japanese|日本語': 'Japanese', 'english': 'English', 
+            'hindi|हिन्दी': 'Hindi', 'tamil|தமிழ்': 'Tamil',
+            'telugu|తెలుగు': 'Telugu', 'malayalam': 'Malayalam',
+            'korean': 'Korean', 'dual.*audio': 'Dual Audio',
+            'multi.*audio': 'Multi Audio'
+        }
+        for pattern, name in lang_map.items():
+            if re.search(pattern, text, re.IGNORECASE):
+                languages.append(name)
+        language = ', '.join(dict.fromkeys(languages)) if languages else ""
+
+        # Extra info (season/episodes)
+        extra_parts = []
+        # Season
+        s_match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', text)
+        if s_match:
+            extra_parts.append(s_match.group().upper())
+        # Episodes
+        e_match = re.search(r'(?i)(\[?e\d{1,2}[-_]\d{1,2}\]?|episodes?\s*\d+\s*[-_]\s*\d+)', text)
+        if e_match:
+            ep = re.sub(r'[\[\]]', '', e_match.group()).upper()
+            extra_parts.append(ep)
+        # Batch
+        if re.search(r'(?i)(combined|complete|batch)', text):
+            extra_parts.append('COMBINED')
+        extra_info = ' '.join(extra_parts)
+
+        # Category
+        category = "Web Series" if any(x in text.lower() for x in ['s01', 'season', 'episode']) else "Movies"
+
+        # Final check
         if not title or len(title) < 2:
-            # Fallback: first part before any bracket/pattern
-            parts = re.split(r'[\(\[]', original_text)
-            title = parts[0].strip() if parts else original_text
+            title = original.split('.')[0].strip()
+            title = re.sub(r'[\[\(].*?[\]\)]', '', title)
 
-        # Extract episode count for display (optional)
-        episode_count = ""
-        if episode_range:
-            count_match = re.search(r'\d+', episode_range)
-            if count_match:
-                episode_count = count_match.group(0)
-
-        logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}', Episodes='{episode_count}'")
+        logger.info(f"✅ Fallback Result: '{title}' | Year: {year} | Lang: {language} | Extra: {extra_info} | Cat: {category}")
         
         return {
             "title": title,
             "year": year,
             "language": language,
             "extra_info": extra_info,
-            "category": "Web Series" if "s01" in text.lower() or "season" in text.lower() else "Movies"
+            "category": category
         }
 
     except Exception as e:
-        logger.error(f"Fallback failed: {e}")
-        return {
-            "title": "UNKNOWN",
-            "year": "",
-            "language": "",
-            "extra_info": "",
-            "category": ""
-        }
+        logger.error(f"❌ Fallback error: {e}")
+        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
