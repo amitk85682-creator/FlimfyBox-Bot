@@ -6898,6 +6898,8 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
 import logging
+import requests  # Telegram API call ke liye
+from datetime import datetime
 
 flask_app = Flask('')
 CORS(flask_app, resources={r"/*": {"origins": "*"}})
@@ -6947,7 +6949,7 @@ def get_movies_api():
                 "rating": str(row[3]) if row[3] else "N/A",
                 "category": row[4] if row[4] else "Movies",
                 "image": row[5] if row[5] and row[5] != 'N/A' else None,
-                "description": row[6] if row[6] else "",
+                "description": row[6] if row[6] else "Story details are not available for this movie right now. Please watch the trailer for more info.",
                 "genre": row[7] if row[7] else "Action, Drama"
             })
             
@@ -6957,7 +6959,7 @@ def get_movies_api():
     finally:
         if conn: close_db_connection(conn)
 
-# API: For Silent Requests
+# ✅ FIXED API: For Silent Requests (Ab Admin Channel par Message aayega)
 @flask_app.route('/api/request', methods=['POST', 'OPTIONS'])
 def api_request_movie():
     if request.method == 'OPTIONS':
@@ -6969,7 +6971,32 @@ def api_request_movie():
         username = data.get('username', 'WebAppUser')
         first_name = data.get('first_name', 'User')
         
+        # 1. DB me save karo
         store_user_request(user_id, username, first_name, title, None, None)
+        
+        # 2. TELEGRAM ADMIN CHANNEL PAR NOTIFICATION BHEJO
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        req_channel = os.environ.get("REQUEST_CHANNEL_ID")
+        
+        if bot_token and req_channel:
+            safe_title = title.replace('<', '&lt;').replace('>', '&gt;')
+            short_title = safe_title[:15].replace('_', ' ') 
+            
+            msg = f"🎬 <b>New Movie Request (From Web App)!</b> 🎬\n\nMovie: <b>{safe_title}</b>\nUser: {first_name} (ID: <code>{user_id}</code>)\nUsername: @{username}\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
+            
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "✅ Movie Add Kar Di Gai Hai", "callback_data": f"reqA_{user_id}_{short_title}"}],
+                    [{"text": "❌ Nahi Mili", "callback_data": f"reqN_{user_id}_{short_title}"}]
+                ]
+            }
+            
+            # API ko Hit karo taaki message aa jaye
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": req_channel, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard}
+            )
+
         return jsonify({"status": "success"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -6987,7 +7014,13 @@ def serve_mini_app():
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
-            :root { --bg: #09090b; --card-bg: #18181b; --primary: #06b6d4; --text: #ffffff; --text-muted: #a1a1aa; }
+            :root { 
+                --bg: #09090b; 
+                --card-bg: #18181b; 
+                --primary: #06b6d4; 
+                --text: #ffffff; 
+                --text-muted: #a1a1aa;
+            }
             * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
             body { background-color: var(--bg); color: var(--text); overflow-x: hidden; padding-bottom: 20px; }
             
@@ -7038,7 +7071,7 @@ def serve_mini_app():
             
             /* BEAUTIFUL RICH TEXT INFO */
             .rich-info-box { background: rgba(255, 255, 255, 0.03); border: 1px solid #27272a; border-radius: 10px; padding: 15px; margin-bottom: 20px; font-size: 13.5px; color: #e4e4e7; line-height: 1.7; }
-            .rich-info-box span { color: var(--primary); font-weight: 600; margin-right: 5px; }
+            .rich-info-box span { color: var(--text-muted); font-weight: 600; margin-right: 5px; }
             .rich-desc { margin-top: 10px; font-size: 13px; color: var(--text-muted); font-style: italic; border-top: 1px dashed #3f3f46; padding-top: 10px; }
 
             /* DOWNLOAD LINKS SECTION */
@@ -7123,10 +7156,11 @@ def serve_mini_app():
                     <h1 class="dp-title" id="dpTitle">Title</h1>
                     
                     <div class="rich-info-box">
-                        <div><span>iMDB Rating:</span> <label id="dpRating">8.5/10</label></div>
+                        <div><span>iMDB Rating:</span> <label id="dpRating" style="color:#facc15; font-weight:bold;">8.5/10</label></div>
                         <div><span>Genre:</span> <label id="dpGenre">Action, Drama</label></div>
-                        <div><span>Language:</span> <label>Dual Audio [Hindi & English] / ESubs</label></div>
+                        <div id="dpActorsRow"><span>Stars:</span> <label id="dpActors">Fetching...</label></div>
                         <div id="episodesRow" style="display:none;"><span>No. of Episodes:</span> <label>All Episodes Added</label></div>
+                        <div><span>Language:</span> <label>Dual Audio [Hindi & English] / ESubs</label></div>
                         <div><span>Quality:</span> <label>WEB-DL 4K | 1080p | 720p | 480p</label></div>
                         
                         <div class="rich-desc" id="dpDesc">Story details loading...</div>
@@ -7135,7 +7169,7 @@ def serve_mini_app():
                     <div id="dpTrailerBtn"></div>
                     
                     <div class="dl-section" id="dpLinks">
-                        <div class="dl-heading">: DOWNLOAD LINKS :</div>
+                        <div class="dl-heading">: DOWNLOAD NOW :</div>
                         </div>
                     
                 </div>
@@ -7150,10 +7184,10 @@ def serve_mini_app():
             tg.ready();
 
             const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
+            const REQUEST_URL = 'https://flimfybox-bot-yht0.onrender.com/api/request'; 
             const TMDB_KEY = '9fa44f5e9fbd41415df930ce5b81c4d7';
             const BOT_USERNAME = 'FlimfyBox_Bot'; 
             
-            // ✅ BUG FIX: Global Map banaya taaki ' JSON parse error' na aaye!
             let dbMoviesMap = {}; 
             let tmdbMoviesMap = {};
             let allMoviesList = [];
@@ -7173,7 +7207,6 @@ def serve_mini_app():
                     const data = await res.json();
                     if (data.status === 'success') {
                         allMoviesList = data.movies.filter(m => m.image);
-                        // Save to Map
                         allMoviesList.forEach(m => dbMoviesMap[m.id] = m);
                         setupHome(allMoviesList);
                     }
@@ -7205,7 +7238,6 @@ def serve_mini_app():
                 if (movies.length === 0) return '';
                 return movies.map(m => {
                     const badge = isTMDB ? `<div class="not-in-db">Request It</div>` : `<div class="card-rating">⭐ ${m.rating || 'N/A'}</div>`;
-                    // ✅ FIXED: Sirf ID pass kar rahe hain HTML me, Object nahi!
                     return `
                         <div class="${cardClass}" onclick="openDetails('${m.id}', ${isTMDB})">
                             <img src="${m.image}" class="card-img" loading="lazy">
@@ -7268,7 +7300,7 @@ def serve_mini_app():
                                         description: item.overview || "Story details are not available.",
                                         genre: "Action, Drama"
                                     };
-                                    tmdbMoviesMap[obj.id] = obj; // TMDB Map me save kiya
+                                    tmdbMoviesMap[obj.id] = obj; 
                                     return obj;
                                 });
                                 searchGrid.innerHTML = generateCardsHTML(formattedTMDB, true, 'grid-card');
@@ -7285,7 +7317,6 @@ def serve_mini_app():
 
             // DETAILS PAGE LOGIC
             window.openDetails = function(id, isTMDB) {
-                // ✅ FIXED: ID se data nikalo (No stringify issues)
                 const movie = isTMDB ? tmdbMoviesMap[id] : dbMoviesMap[id];
                 if(!movie) return;
 
@@ -7298,11 +7329,30 @@ def serve_mini_app():
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
                 document.getElementById('dpDesc').innerText = movie.description || 'Watch trailer for more details.';
                 
-                // Show Episode Row only for Series
+                // LIVE ACTOR FETCH (TMDB MAGIC) 🔥
+                document.getElementById('dpActors').innerText = "Fetching...";
+                fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_KEY}&query=${encodeURIComponent(title)}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if(data.results && data.results.length > 0) {
+                            const item = data.results[0];
+                            const type = item.media_type === 'tv' ? 'tv' : 'movie';
+                            return fetch(`https://api.themoviedb.org/3/${type}/${item.id}/credits?api_key=${TMDB_KEY}`);
+                        } throw new Error('Not found');
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        if(data.cast && data.cast.length > 0) {
+                            document.getElementById('dpActors').innerText = data.cast.slice(0, 3).map(c => c.name).join(', ');
+                        } else { document.getElementById('dpActors').innerText = "Not Available"; }
+                    })
+                    .catch(() => { document.getElementById('dpActors').innerText = "Not Available"; });
+
                 document.getElementById('episodesRow').style.display = isSeries ? 'block' : 'none';
                 
+                // ✅ TELEGRAM IN-APP BROWSER (Trailer will open inside Telegram)
                 const searchTitle = encodeURIComponent(title);
-                document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')"><i class="fas fa-play"></i> Watch Trailer</button>`;
+                document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${searchTitle}+trailer')"><i class="fas fa-play"></i> Watch Trailer</button>`;
                 
                 const linksBox = document.getElementById('dpLinks');
                 
@@ -7316,10 +7366,10 @@ def serve_mini_app():
                 } else {
                     if(isSeries) {
                         linksBox.innerHTML = `
-                            <div class="dl-heading">: DOWNLOAD EPISODES :</div>
+                            <div class="dl-heading">: DOWNLOAD NOW :</div>
                             <button class="dl-btn" onclick="downloadBot(${movie.id})">
                                 <div><i class="fas fa-folder-open"></i> Get All Episodes (Zip/Folder)</div>
-                                <div class="action">Bot Link</div>
+                                <div class="action">Download Now</div>
                             </button>
                             <button class="dl-btn" onclick="downloadBot(${movie.id})">
                                 <div><i class="fas fa-play-circle"></i> Watch Online</div>
@@ -7328,19 +7378,18 @@ def serve_mini_app():
                         `;
                     } else {
                         linksBox.innerHTML = `
-                            <div class="dl-heading">: DOWNLOAD LINKS :</div>
+                            <div class="dl-heading">: DOWNLOAD NOW :</div>
                             <button class="dl-btn" onclick="downloadBot(${movie.id})">
                                 <div><i class="fas fa-film"></i> 4K UHD & 1080p (Original)</div>
-                                <div class="action">Get Link</div>
+                                <div class="action">Download Now</div>
                             </button>
                             <button class="dl-btn" onclick="downloadBot(${movie.id})">
                                 <div><i class="fas fa-video"></i> 720p HD & 480p</div>
-                                <div class="action">Get Link</div>
+                                <div class="action">Download Now</div>
                             </button>
                         `;
                     }
                 }
-                
                 document.getElementById('detailsPage').classList.add('open');
             };
 
@@ -7363,7 +7412,7 @@ def serve_mini_app():
                 
                 const user = tg.initDataUnsafe?.user || {id: 0, username: 'Unknown', first_name: 'WebApp'};
                 try {
-                    const res = await fetch('/api/request', {
+                    const res = await fetch(REQUEST_URL, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({title: title, user_id: user.id, username: user.username, first_name: user.first_name})
