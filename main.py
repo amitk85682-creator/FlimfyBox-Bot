@@ -7001,21 +7001,20 @@ def serve_mini_app():
         </div>
 
         <h2 class="section-title" id="sectionTitle">🔥 Trending Now</h2>
-        <div class="movie-grid" id="movieContainer"><div id="noResults" style="display:none; width:100%; text-align:center; color:#888;">😕 No movies found!</div></div>
+        <div class="movie-grid" id="movieContainer"></div>
 
         <script>
             const tg = window.Telegram.WebApp;
             tg.expand();
             tg.ready();
 
-            // ✅ FULL ABSOLUTE URL
             const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
             let moviesData = [];
             let currentCategory = 'All';
 
             async function fetchMovies() {
                 const container = document.getElementById('movieContainer');
-                container.innerHTML = '<h3 style="text-align:center; width:100%;">⏳ Loading...</h3>';
+                container.innerHTML = '<h3 style="text-align:center; width:100%; grid-column: 1 / -1;">⏳ Loading...</h3>';
                 try {
                     const response = await fetch(API_URL);
                     const data = await response.json();
@@ -7023,26 +7022,22 @@ def serve_mini_app():
                         moviesData = data.movies;
                         renderMovies(moviesData.filter(m => m.image)); 
                     } else {
-                        container.innerHTML = '<h3 style="text-align:center; color:red;">❌ Server Error</h3>';
+                        container.innerHTML = '<h3 style="text-align:center; color:red; grid-column: 1 / -1;">❌ Server Error</h3>';
                     }
                 } catch (error) {
-                    // Agar Error aayega to screen par reason bhi dikhega
-                    container.innerHTML = `<h3 style="text-align:center; color:red;">❌ System Error<br><small>${error.message}</small></h3>`;
+                    container.innerHTML = `<h3 style="text-align:center; color:red; grid-column: 1 / -1;">❌ System Error<br><small>${error.message}</small></h3>`;
                 }
             }
 
             function renderMovies(movies) {
                 const container = document.getElementById('movieContainer');
-                const noResults = document.getElementById('noResults');
                 container.innerHTML = '';
                 
+                // ✅ ERROR FIXED HERE: Pura element hi naya bna diya
                 if (movies.length === 0) {
-                    noResults.style.display = 'block';
-                    container.appendChild(noResults);
+                    container.innerHTML = '<div style="width:100%; text-align:center; color:#888; grid-column: 1 / -1; padding: 40px 20px;">😕 No movies found!</div>';
                     return;
                 }
-                noResults.style.display = 'none';
-                container.appendChild(noResults);
 
                 movies.forEach(movie => {
                     const imgUrl = movie.image ? movie.image : 'https://via.placeholder.com/150x225?text=No+Poster';
