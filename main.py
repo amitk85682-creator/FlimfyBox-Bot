@@ -7006,7 +7006,9 @@ def serve_mini_app():
             tg.expand();
             tg.ready();
 
-            const API_URL = '/api/movies'; 
+            // 👇 Yahan pura URL daalein taaki app hamesha sahi jagah se data uthaye 👇
+            const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
+            
             let moviesData = [];
             let currentCategory = 'All';
 
