@@ -6917,6 +6917,7 @@ def home():
 def health():
     return "OK", 200
 
+# API: For Fetching Movies
 @flask_app.route('/api/movies', methods=['GET', 'OPTIONS'])
 def get_movies_api():
     if request.method == 'OPTIONS':
@@ -6928,7 +6929,6 @@ def get_movies_api():
     
     try:
         cur = conn.cursor()
-        # 🛑 SERVER CRASH FIX: Limit 200 lagaya hai taaki server overload na ho
         cur.execute("""
             SELECT id, title, year, rating, category, poster_url 
             FROM movies 
@@ -6955,6 +6955,25 @@ def get_movies_api():
     finally:
         if conn: close_db_connection(conn)
 
+# NAYA API: For Silent Requests (Bina App close kiye)
+@flask_app.route('/api/request', methods=['POST', 'OPTIONS'])
+def api_request_movie():
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "success"}), 200
+    try:
+        data = request.json
+        title = data.get('title', 'Unknown Movie')
+        user_id = data.get('user_id', 0)
+        username = data.get('username', 'WebAppUser')
+        first_name = data.get('first_name', 'User')
+        
+        # Call your existing DB function
+        store_user_request(user_id, username, first_name, title, None, None)
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# WEB APP HTML
 @flask_app.route('/webapp')
 def serve_mini_app():
     html_content = """
@@ -6966,121 +6985,268 @@ def serve_mini_app():
         <title>FlimfyBox Premium</title>
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <style>
-            * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-            body { background-color: #0f0f0f; color: #ffffff; padding-bottom: 20px; overflow-x: hidden; }
-            header { background-color: rgba(20, 20, 20, 0.95); backdrop-filter: blur(10px); padding: 15px 20px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; }
-            .logo { font-size: 24px; font-weight: 900; color: #e50914; letter-spacing: 1px; text-align: center; }
+            :root { --primary: #e50914; --bg: #0f0f0f; --card: #1e1e1e; --text: #fff; }
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+            body { background-color: var(--bg); color: var(--text); padding-bottom: 20px; overflow-x: hidden; }
+            
+            /* Header & Search */
+            header { background-color: rgba(20, 20, 20, 0.95); padding: 15px 20px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; display:flex; justify-content: space-between; align-items:center; }
+            .logo { font-size: 22px; font-weight: 900; color: var(--primary); letter-spacing: 1px; }
             .logo span { color: #fff; }
             .search-container { padding: 15px 20px 5px 20px; }
-            .search-bar { width: 100%; padding: 14px 20px; border-radius: 30px; border: none; outline: none; background-color: #2a2a2a; color: white; font-size: 15px; transition: 0.3s; }
-            .categories { display: flex; overflow-x: auto; padding: 10px 20px; gap: 10px; scrollbar-width: none; }
+            .search-bar { width: 100%; padding: 14px 20px; border-radius: 30px; border: none; outline: none; background-color: #2a2a2a; color: white; font-size: 15px; }
+            .search-bar:focus { background-color: #333; box-shadow: 0 0 0 2px var(--primary); }
+            
+            /* Top Banner */
+            .banner { width: 100%; height: 250px; background: url('https://image.tmdb.org/t/p/original/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg') center/cover; position: relative; display: flex; align-items: flex-end; padding: 20px; box-shadow: inset 0 -80px 50px -10px #0f0f0f; }
+            .banner-title { font-size: 24px; font-weight: 800; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); }
+            
+            /* Categories */
+            .categories { display: flex; overflow-x: auto; padding: 15px 20px; gap: 10px; scrollbar-width: none; }
+            .categories::-webkit-scrollbar { display: none; }
             .cat-btn { background-color: #2a2a2a; color: #ccc; border: none; padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
-            .cat-btn.active { background-color: #e50914; color: white; }
-            .section-title { padding: 10px 20px; font-size: 18px; font-weight: 700; margin-top: 5px; }
-            .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 15px; padding: 0 20px; }
-            .movie-card { background-color: #1e1e1e; border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; position: relative; }
-            .poster-container { position: relative; width: 100%; height: 210px; }
+            .cat-btn.active { background-color: var(--primary); color: white; }
+            
+            /* Grid */
+            .section-title { padding: 10px 20px; font-size: 18px; font-weight: 700; margin-top: 5px; display:flex; justify-content:space-between;}
+            .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; padding: 0 20px; }
+            
+            /* Card */
+            .movie-card { background-color: var(--card); border-radius: 8px; overflow: hidden; position: relative; transition: 0.2s; }
+            .movie-card:active { transform: scale(0.95); }
+            .poster-container { width: 100%; height: 160px; position:relative; }
             .poster { width: 100%; height: 100%; object-fit: cover; }
-            .rating-badge { position: absolute; top: 8px; right: 8px; background-color: rgba(0,0,0,0.8); color: #ffd700; font-size: 11px; font-weight: bold; padding: 4px 6px; border-radius: 4px; border: 1px solid #ffd700; }
-            .movie-info { padding: 12px; flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; }
-            .movie-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-            .movie-year { font-size: 12px; color: #888; margin-bottom: 12px; }
-            .download-btn { background-color: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; width: 100%; }
+            .not-in-db-badge { position: absolute; bottom: 0; left: 0; width:100%; background: rgba(229, 9, 20, 0.9); color: white; font-size: 10px; text-align: center; padding: 3px 0; font-weight: bold; }
+            
+            /* SKELETON LOADING ANIMATION */
+            @keyframes shimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+            .skeleton { background: linear-gradient(90deg, #2a2a2a 25%, #3a3a3a 50%, #2a2a2a 75%); background-size: 400px 100%; animation: shimmer 1.5s infinite; border-radius: 8px; width: 100%; height: 160px; }
+
+            /* NETFLIX MODAL */
+            .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: flex-end; }
+            .modal.show { display: flex; animation: slideUp 0.3s ease-out; }
+            @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+            .modal-content { background: #181818; width: 100%; border-radius: 20px 20px 0 0; overflow: hidden; position: relative; }
+            .modal-backdrop { height: 220px; background-size: cover; background-position: top; position: relative; box-shadow: inset 0 -60px 40px -10px #181818; }
+            .close-btn { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: 50%; width: 30px; height: 30px; font-size: 16px; z-index: 10; }
+            .modal-info { padding: 20px; margin-top:-40px; position:relative; z-index:5; }
+            .m-title { font-size: 22px; font-weight: bold; margin-bottom: 5px; }
+            .m-meta { font-size: 12px; color: #aaa; margin-bottom: 15px; }
+            .btn-group { display: flex; gap: 10px; }
+            .btn-play { background: white; color: black; border: none; padding: 12px; border-radius: 5px; font-weight: bold; flex: 1; font-size: 15px; display:flex; justify-content:center; align-items:center; gap:5px; }
+            .btn-trailer { background: #333; color: white; border: none; padding: 12px; border-radius: 5px; font-weight: bold; flex: 1; font-size: 15px; }
+            .btn-request { background: var(--primary); color: white; border: none; padding: 12px; border-radius: 5px; font-weight: bold; width: 100%; font-size: 15px; }
+
+            /* TOAST NOTIFICATION */
+            #toast { visibility: hidden; min-width: 250px; background-color: #333; color: #fff; text-align: center; border-radius: 30px; padding: 12px; position: fixed; z-index: 2000; left: 50%; bottom: 30px; transform: translateX(-50%); font-size: 14px; font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+            #toast.show { visibility: visible; animation: fadein 0.5s, fadeout 0.5s 2.5s; }
+            @keyframes fadein { from { bottom: 0; opacity: 0; } to { bottom: 30px; opacity: 1; } }
+            @keyframes fadeout { from { bottom: 30px; opacity: 1; } to { bottom: 0; opacity: 0; } }
         </style>
     </head>
     <body>
-        <header><div class="logo">Flimfy<span>Box</span></div></header>
-        <div class="search-container"><input type="text" id="searchInput" class="search-bar" placeholder="🔍 Search movies..."></div>
+        <header>
+            <div class="logo">Flimfy<span>Box</span></div>
+        </header>
+
+        <div class="banner">
+            <div class="banner-title">Premium Collection</div>
+        </div>
+
+        <div class="search-container">
+            <input type="text" id="searchInput" class="search-bar" placeholder="🔍 Search movies, shows...">
+        </div>
         
         <div class="categories" id="categoryContainer">
             <button class="cat-btn active" onclick="filterCategory('All')">🔥 All</button>
             <button class="cat-btn" onclick="filterCategory('Bollywood')">🇮🇳 Bollywood</button>
             <button class="cat-btn" onclick="filterCategory('Hollywood')">🇺🇸 Hollywood</button>
             <button class="cat-btn" onclick="filterCategory('Series')">📺 Web Series</button>
-            <button class="cat-btn" onclick="filterCategory('Adult')">🔞 18+</button>
         </div>
 
-        <h2 class="section-title" id="sectionTitle">🔥 Trending Now</h2>
-        <div class="movie-grid" id="movieContainer"></div>
+        <h2 class="section-title" id="sectionTitle"><span>🔥 Trending Now</span></h2>
+        <div class="movie-grid" id="movieContainer">
+            </div>
+
+        <div id="movieModal" class="modal">
+            <div class="modal-content">
+                <button class="close-btn" onclick="closeModal()">✕</button>
+                <div class="modal-backdrop" id="modalImg"></div>
+                <div class="modal-info">
+                    <div class="m-title" id="modalTitle">Movie Title</div>
+                    <div class="m-meta" id="modalMeta">2024 • Rating: 8.5</div>
+                    <div class="btn-group" id="modalActions">
+                        </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="toast">✅ Request Sent!</div>
 
         <script>
             const tg = window.Telegram.WebApp;
             tg.expand();
             tg.ready();
 
-            const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
+            const API_URL = '/api/movies'; 
+            const TMDB_KEY = '9fa44f5e9fbd41415df930ce5b81c4d7';
+            
             let moviesData = [];
             let currentCategory = 'All';
 
-            async function fetchMovies() {
+            function showToast(message) {
+                const toast = document.getElementById("toast");
+                toast.innerText = message;
+                toast.className = "show";
+                setTimeout(() => { toast.className = toast.className.replace("show", ""); }, 3000);
+            }
+
+            function loadSkeletons() {
                 const container = document.getElementById('movieContainer');
-                container.innerHTML = '<h3 style="text-align:center; width:100%; grid-column: 1 / -1;">⏳ Loading...</h3>';
+                container.innerHTML = '';
+                for(let i=0; i<12; i++) {
+                    container.innerHTML += `<div class="skeleton"></div>`;
+                }
+            }
+
+            async function fetchMovies() {
+                loadSkeletons();
                 try {
                     const response = await fetch(API_URL);
                     const data = await response.json();
                     if (data.status === 'success') {
                         moviesData = data.movies;
                         renderMovies(moviesData.filter(m => m.image)); 
-                    } else {
-                        container.innerHTML = '<h3 style="text-align:center; color:red; grid-column: 1 / -1;">❌ Server Error</h3>';
                     }
                 } catch (error) {
-                    container.innerHTML = `<h3 style="text-align:center; color:red; grid-column: 1 / -1;">❌ System Error<br><small>${error.message}</small></h3>`;
+                    document.getElementById('movieContainer').innerHTML = '<h3 style="color:red; text-align:center; width:100%; grid-column:1/-1;">Error loading data</h3>';
                 }
             }
 
-            function renderMovies(movies) {
+            function renderMovies(movies, isTMDB = false) {
                 const container = document.getElementById('movieContainer');
                 container.innerHTML = '';
                 
-                // ✅ ERROR FIXED HERE: Pura element hi naya bna diya
-                if (movies.length === 0) {
-                    container.innerHTML = '<div style="width:100%; text-align:center; color:#888; grid-column: 1 / -1; padding: 40px 20px;">😕 No movies found!</div>';
-                    return;
-                }
-
                 movies.forEach(movie => {
                     const imgUrl = movie.image ? movie.image : 'https://via.placeholder.com/150x225?text=No+Poster';
+                    const badge = isTMDB ? `<div class="not-in-db-badge">NOT IN DB - REQUEST IT</div>` : `<div class="rating-badge">⭐ ${movie.rating || 'N/A'}</div>`;
+                    
                     const card = document.createElement('div');
                     card.className = 'movie-card';
-                    card.innerHTML = `
-                        <div class="poster-container"><img src="${imgUrl}" class="poster" loading="lazy"><div class="rating-badge">⭐ ${movie.rating}</div></div>
-                        <div class="movie-info">
-                            <div><div class="movie-title">${movie.title}</div><div class="movie-year">${movie.year} • ${movie.category}</div></div>
-                            <button class="download-btn" onclick="requestMovie(${movie.id})">📥 Get in Bot</button>
-                        </div>`;
+                    card.innerHTML = `<div class="poster-container"><img src="${imgUrl}" class="poster" loading="lazy">${badge}</div>`;
+                    
+                    // Click event to open Modal
+                    card.onclick = () => openModal(movie, isTMDB);
                     container.appendChild(card);
                 });
             }
 
-            document.getElementById('searchInput').addEventListener('input', function(e) {
+            // MODAL LOGIC
+            function openModal(movie, isTMDB) {
+                document.getElementById('modalImg').style.backgroundImage = `url(${movie.image})`;
+                document.getElementById('modalTitle').innerText = movie.title || movie.name;
+                document.getElementById('modalMeta').innerText = `${movie.year || ''} • ${movie.category || 'Movie'}`;
+                
+                const actions = document.getElementById('modalActions');
+                actions.innerHTML = '';
+
+                if (isTMDB) {
+                    actions.innerHTML = `<button class="btn-request" onclick="requestSilent('${movie.title || movie.name}')">🙋‍♂️ Request This Movie</button>`;
+                } else {
+                    const searchTitle = encodeURIComponent(movie.title);
+                    actions.innerHTML = `
+                        <button class="btn-play" onclick="downloadBot(${movie.id})">📥 Download</button>
+                        <button class="btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')">▶ Trailer</button>
+                    `;
+                }
+                
+                document.getElementById('movieModal').classList.add('show');
+            }
+
+            function closeModal() {
+                document.getElementById('movieModal').classList.remove('show');
+            }
+
+            // ACTIONS
+            function downloadBot(id) {
+                tg.sendData("movie_" + id);
+                tg.close();
+            }
+
+            async function requestSilent(title) {
+                closeModal();
+                showToast("⏳ Requesting...");
+                
+                const user = tg.initDataUnsafe?.user || {id: 0, username: 'Unknown', first_name: 'WebApp'};
+                try {
+                    const res = await fetch('/api/request', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({title: title, user_id: user.id, username: user.username, first_name: user.first_name})
+                    });
+                    if(res.ok) {
+                        tg.HapticFeedback.notificationOccurred('success');
+                        showToast("✅ Request Sent Successfully!");
+                    } else {
+                        showToast("❌ Failed to request.");
+                    }
+                } catch(e) {
+                    showToast("❌ Server Error.");
+                }
+            }
+
+            // SEARCH & TMDB
+            document.getElementById('searchInput').addEventListener('input', async function(e) {
                 const term = e.target.value.toLowerCase();
                 if (term === '') {
+                    document.getElementById('sectionTitle').innerHTML = `<span>🔥 Trending Now</span>`;
                     filterCategory(currentCategory); 
+                    return;
+                }
+                
+                const localResults = moviesData.filter(m => m.title.toLowerCase().includes(term));
+                
+                if(localResults.length > 0) {
+                    document.getElementById('sectionTitle').innerHTML = `<span>🔍 Search Results</span>`;
+                    renderMovies(localResults);
                 } else {
-                    renderMovies(moviesData.filter(m => m.title.toLowerCase().includes(term)));
+                    // TMDB LIVE SEARCH
+                    document.getElementById('sectionTitle').innerHTML = `<span>🌐 Searching Globally...</span>`;
+                    loadSkeletons();
+                    
+                    try {
+                        const res = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_KEY}&query=${term}`);
+                        const tmdbData = await res.json();
+                        const results = tmdbData.results.filter(item => item.poster_path && (item.media_type === 'movie' || item.media_type === 'tv'));
+                        
+                        if(results.length > 0) {
+                            document.getElementById('sectionTitle').innerHTML = `<span>⚠️ Not in Bot (Click to Request)</span>`;
+                            const formattedTMDB = results.map(item => ({
+                                title: item.title || item.name,
+                                year: (item.release_date || item.first_air_date || '').substring(0,4),
+                                image: `https://image.tmdb.org/t/p/w500${item.poster_path}`,
+                                category: item.media_type === 'tv' ? 'Web Series' : 'Movie'
+                            }));
+                            renderMovies(formattedTMDB, true); // true = isTMDB
+                        } else {
+                            document.getElementById('movieContainer').innerHTML = '<div style="width:100%; text-align:center; color:#888; grid-column:1/-1; padding:30px;">😕 Nothing found anywhere!</div>';
+                        }
+                    } catch(err) {
+                        document.getElementById('movieContainer').innerHTML = '<div style="width:100%; text-align:center; color:red; grid-column:1/-1;">API Error</div>';
+                    }
                 }
             });
 
             function filterCategory(category) {
                 currentCategory = category;
-                document.getElementById('sectionTitle').innerText = category === 'All' ? '🔥 Trending Now' : `📂 ${category} Movies`;
-                
+                document.getElementById('sectionTitle').innerHTML = `<span>${category === 'All' ? '🔥 Trending Now' : `📂 ${category} Movies`}</span>`;
                 const buttons = document.querySelectorAll('.cat-btn');
                 buttons.forEach(btn => btn.classList.remove('active'));
                 event.target.classList.add('active');
                 document.getElementById('searchInput').value = '';
-
-                let filtered = moviesData;
-                if (category !== 'All') {
-                    filtered = filtered.filter(m => m.category === category);
-                }
+                
+                let filtered = category === 'All' ? moviesData : moviesData.filter(m => m.category === category);
                 renderMovies(filtered.filter(m => m.image));
-            }
-
-            function requestMovie(movieId) {
-                tg.sendData("movie_" + movieId);
-                tg.close();
             }
 
             fetchMovies();
