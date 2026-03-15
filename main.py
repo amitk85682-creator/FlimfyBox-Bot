@@ -553,88 +553,128 @@ async def fallback_extraction(caption_text):
     """
     try:
         text = caption_text.strip()
-        original_text = text
-
-        # 1. Extract Year FIRST (save it)
+        
+        # 1. Extract Year
         year_match = re.search(r'[\(\[]?(19|20)\d{2}[\)\]]?', text)
-        year = ""
-        if year_match:
-            year = re.search(r'(19|20)\d{2}', year_match.group(0)).group(0)
+        year = year_match.group(0) if year_match else ""
+        if year:
+            year = re.search(r'(19|20)\d{2}', year).group(0)
 
-        # 2. Extract Language
+        # 2. Extract Language (multiple languages)
         language = ""
         lang_patterns = [
-            (r'\b(hindi)\b', 'Hindi'),
-            (r'\b(english)\b', 'English'),
-            (r'\b(tamil)\b', 'Tamil'),
-            (r'\b(telugu)\b', 'Telugu'),
-            (r'\b(kannada)\b', 'Kannada'),
-            (r'\b(malayalam)\b', 'Malayalam'),
-            (r'\b(korean)\b', 'Korean'),
-            (r'\b(japanese)\b', 'Japanese'),
-            (r'\b(dual\s*audio)\b', 'Dual Audio'),
-            (r'\b(multi\s*audio)\b', 'Multi Audio'),
+            (r'japanese|日本語', 'Japanese'),
+            (r'english', 'English'),
+            (r'hindi|हिन्दी', 'Hindi'),
+            (r'tamil|தமிழ்', 'Tamil'),
+            (r'telugu|తెలుగు', 'Telugu'),
+            (r'malayalam', 'Malayalam'),
+            (r'korean', 'Korean'),
+            (r'dual[\s-]*audio', 'Dual Audio'),
+            (r'multi[\s-]*audio', 'Multi Audio'),
         ]
-        text_lower = text.lower()
+        found_langs = []
         for pattern, lang_name in lang_patterns:
-            if re.search(pattern, text_lower):
-                language = lang_name
-                break
+            if re.search(pattern, text, re.IGNORECASE):
+                found_langs.append(lang_name)
+        if found_langs:
+            language = ", ".join(list(dict.fromkeys(found_langs)))  # Remove duplicates
 
-        # 3. Get title - everything BEFORE the year or quality tag
-        if year:
-            parts = re.split(r'[\(\[]?' + year + r'[\)\]]?', text, maxsplit=1)
-            title = parts[0] if parts else text
-        else:
-            title = text
-
-        # 4. Remove everything after quality tags
-        quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv)\b'
-        title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
-
-        # 5. Extract and remove Season/Episode info (S01, S02) for extra_info
+        # 3. Extract Season/Episode info for extra_info
         extra_info = ""
-        extra_matches = re.findall(r'(?i)\b(s\d{1,2}|e\d{1,2}|season\s*\d+|episode\s*\d+|complete|combined)\b', title)
-        if extra_matches:
-            extra_info = " ".join(extra_matches).upper()
-            # Title se season hata do
-            title = re.sub(r'(?i)\b(s\d{1,2}|e\d{1,2}|season\s*\d+|episode\s*\d+|complete|combined)\b', '', title)
+        
+        # Season pattern: S01, Season 1, S1
+        season_match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', text)
+        season = season_match.group(0) if season_match else ""
+        
+        # Episode pattern: E01-12, E01-E12, Episodes 1-12, [E01-12]
+        episode_match = re.search(r'(?i)(\[?e\d{1,2}[-_]\d{1,2}\]?|episodes?\s*\d+\s*[-_]\s*\d+|e\d{1,2}[-_]e\d{1,2})', text)
+        episode_range = episode_match.group(0) if episode_match else ""
+        
+        # Combined/Batch pattern
+        batch_match = re.search(r'(?i)(combined|complete|batch)', text)
+        batch = batch_match.group(0) if batch_match else ""
+        
+        # Build extra_info
+        extra_parts = []
+        if season:
+            extra_parts.append(season.upper())
+        if episode_range:
+            # Clean episode range: [E01-12] -> E01-12
+            clean_range = re.sub(r'[\[\]]', '', episode_range)
+            extra_parts.append(clean_range.upper())
+        if batch:
+            extra_parts.append(batch.upper())
+        if extra_parts:
+            extra_info = " ".join(extra_parts)
 
-        # 6. Clean up
-        title = re.sub(r'https?://\S+', '', title)  # URLs
-        title = re.sub(r'@\w+', '', title)          # @mentions
-        title = re.sub(r'#\w+', '', title)          # hashtags
-        title = re.sub(r'[_\.\-]+', ' ', title)     # separators to space
-        title = re.sub(r'\s+', ' ', title).strip()  # multiple spaces
-
-        # 7. Remove trailing junk words
-        junk_words = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'movie', 'film', 'bollywood', 'hollywood', 'south']
+        # 4. Get title - remove all known patterns
+        title = text
+        
+        # Remove language section if present (like "🔊 : 日本語, English, ...")
+        title = re.sub(r'🔊.*?(?:\n|$)', '', title, flags=re.DOTALL)
+        
+        # Remove year
+        if year:
+            title = re.sub(r'[\(\[]?' + year + r'[\)\]]?', '', title)
+        
+        # Remove quality tags
+        quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv|amzn|hevc|ddp\d\.\d|x264|x265)\b'
+        title = re.sub(quality_pattern, '', title, flags=re.IGNORECASE)
+        
+        # Remove season/episode patterns
+        title = re.sub(r'(?i)(s\d{1,2}|season\s*\d+|\[?e\d{1,2}[-_]\d{1,2}\]?|episodes?\s*\d+\s*[-_]\s*\d+|combined|complete|batch)', '', title)
+        
+        # Remove codec/container info
+        title = re.sub(r'\b(mkv|mp4|avi|hevc|x264|x265|ddp\d\.\d|multi|web-dl|bluray)\b', '', title, flags=re.IGNORECASE)
+        
+        # Remove group tags like "KEИ !! Shubham"
+        title = re.sub(r'[A-Z]{2,}\s*!+\s*\w+', '', title)
+        
+        # Clean up separators
+        title = re.sub(r'https?://\S+', '', title)
+        title = re.sub(r'@\w+', '', title)
+        title = re.sub(r'#\w+', '', title)
+        title = re.sub(r'[_\.\-]+', ' ', title)
+        title = re.sub(r'\s+', ' ', title).strip()
+        
+        # Remove leading/trailing junk words
+        junk_words = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'multi', 'audio', 'ddp']
         words = title.split()
-        clean_words = []
-        for word in words:
-            if word.lower() in junk_words:
-                break
-            clean_words.append(word)
+        if words:
+            # Clean from start
+            while words and words[0].lower() in junk_words:
+                words.pop(0)
+            # Clean from end
+            while words and words[-1].lower() in junk_words:
+                words.pop()
+        
+        title = ' '.join(words).strip()
+        
+        # Remove any remaining square brackets
+        title = re.sub(r'[\[\]]', '', title)
+        
+        # If title is empty, try original text
+        if not title or len(title) < 2:
+            # Fallback: first part before any bracket/pattern
+            parts = re.split(r'[\(\[]', original_text)
+            title = parts[0].strip() if parts else original_text
 
-        title = ' '.join(clean_words).strip()
+        # Extract episode count for display (optional)
+        episode_count = ""
+        if episode_range:
+            count_match = re.search(r'\d+', episode_range)
+            if count_match:
+                episode_count = count_match.group(0)
 
-        if len(title) >= 2:
-            logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}'")
-            return {
-                "title": title,
-                "year": year,
-                "language": language,
-                "extra_info": extra_info,
-                "category": ""
-            }
-
-        # If title is too short, return UNKNOWN
+        logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}', Episodes='{episode_count}'")
+        
         return {
-            "title": "UNKNOWN",
-            "year": "",
-            "language": "",
-            "extra_info": "",
-            "category": ""
+            "title": title,
+            "year": year,
+            "language": language,
+            "extra_info": extra_info,
+            "category": "Web Series" if "s01" in text.lower() or "season" in text.lower() else "Movies"
         }
 
     except Exception as e:
