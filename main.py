@@ -469,12 +469,12 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
-    
+
     first_line = caption_text.split('\n')[0].strip()
 
     try:
         api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key: 
+        if not api_key:
             return await fallback_extraction(first_line)
 
         genai.configure(api_key=api_key)
@@ -484,11 +484,11 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
         # 🧠 SUPER SMART PROMPT FOR VISION & TEXT
         prompt = f"""You are an advanced Movie/Series Metadata Extractor.
         I am providing you a Telegram filename/caption and possibly a thumbnail image from the video.
-        
+
         FILENAME/CAPTION: "{first_line}"
 
         Analyze the text AND the image (if provided) to identify the exact movie or web series.
-        
+
         Extract the data into JSON with these exact keys:
         1. "title": The clean, official name of the movie/show. Remove junk words like 'Full', 'Movie', 'HD', '1080p'. (e.g., "Taarzan The Wonder Car Full" -> "Taarzan The Wonder Car").
         2. "year": The 4-digit release year. If the text doesn't have it, but you recognize the movie from the image, provide its actual release year!
@@ -499,7 +499,7 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
         Return ONLY a valid JSON object. No markdown formatting like ```json."""
 
         contents = [prompt]
-        
+
         # 🚀 JADOO: Agar thumbnail image aayi hai, to usko Gemini ko 'dekhne' ke liye de do!
         if image_bytes:
             contents.append({
@@ -508,41 +508,44 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
             })
 
         response = await run_async(model.generate_content, contents)
-        
+
         if not response or not response.text:
             return await fallback_extraction(first_line)
-        
+
         text = response.text.strip()
-        
         text = text.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
         if match:
             text = match.group(0)
-        
+
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
             logger.warning(f"⚠️ JSON parse failed: {text}")
             return await fallback_extraction(first_line)
-        
+
         title = data.get("title", "").strip()
         year = str(data.get("year", "")).strip()
         language = data.get("language", "").strip()
         extra_info = data.get("extra_info", "").strip()
         category = data.get("category", "").strip()
-        
+
         if not title or len(title) < 2:
             return await fallback_extraction(first_line)
-        
+
         logger.info(f"🤖 GEMINI VISION RESULT: Title='{title}', Year='{year}', Cat='{category}'")
         return {
-            "title": title, "year": year, "language": language, 
-            "extra_info": extra_info, "category": category
+            "title": title,
+            "year": year,
+            "language": language,
+            "extra_info": extra_info,
+            "category": category
         }
 
     except Exception as e:
         logger.error(f"❌ Gemini Error: {e}")
         return await fallback_extraction(first_line)
+
 
 async def fallback_extraction(caption_text):
     """
@@ -551,13 +554,13 @@ async def fallback_extraction(caption_text):
     try:
         text = caption_text.strip()
         original_text = text
-        
+
         # 1. Extract Year FIRST (save it)
         year_match = re.search(r'[\(\[]?(19|20)\d{2}[\)\]]?', text)
         year = ""
         if year_match:
             year = re.search(r'(19|20)\d{2}', year_match.group(0)).group(0)
-        
+
         # 2. Extract Language
         language = ""
         lang_patterns = [
@@ -577,27 +580,34 @@ async def fallback_extraction(caption_text):
             if re.search(pattern, text_lower):
                 language = lang_name
                 break
-        
+
         # 3. Get title - everything BEFORE the year or quality tag
-        # Split by year first
         if year:
             parts = re.split(r'[\(\[]?' + year + r'[\)\]]?', text, maxsplit=1)
             title = parts[0] if parts else text
         else:
             title = text
-        
+
         # 4. Remove everything after quality tags
         quality_pattern = r'\b(480p|720p|1080p|2160p|4k|hdrip|webrip|web-dl|bluray|dvdrip|hdtv)\b'
         title = re.split(quality_pattern, title, flags=re.IGNORECASE)[0]
-        
-        # 5. Clean up
+
+        # 5. Extract and remove Season/Episode info (S01, S02) for extra_info
+        extra_info = ""
+        extra_matches = re.findall(r'(?i)\b(s\d{1,2}|e\d{1,2}|season\s*\d+|episode\s*\d+|complete|combined)\b', title)
+        if extra_matches:
+            extra_info = " ".join(extra_matches).upper()
+            # Title se season hata do
+            title = re.sub(r'(?i)\b(s\d{1,2}|e\d{1,2}|season\s*\d+|episode\s*\d+|complete|combined)\b', '', title)
+
+        # 6. Clean up
         title = re.sub(r'https?://\S+', '', title)  # URLs
-        title = re.sub(r'@\w+', '', title)  # @mentions
-        title = re.sub(r'#\w+', '', title)  # hashtags
-        title = re.sub(r'[_\.\-]+', ' ', title)  # separators to space
+        title = re.sub(r'@\w+', '', title)          # @mentions
+        title = re.sub(r'#\w+', '', title)          # hashtags
+        title = re.sub(r'[_\.\-]+', ' ', title)     # separators to space
         title = re.sub(r'\s+', ' ', title).strip()  # multiple spaces
-        
-        # 6. Remove trailing junk words
+
+        # 7. Remove trailing junk words
         junk_words = ['hindi', 'english', 'tamil', 'telugu', 'dubbed', 'movie', 'film', 'bollywood', 'hollywood', 'south']
         words = title.split()
         clean_words = []
@@ -605,18 +615,37 @@ async def fallback_extraction(caption_text):
             if word.lower() in junk_words:
                 break
             clean_words.append(word)
-        
+
         title = ' '.join(clean_words).strip()
-        
+
         if len(title) >= 2:
-            logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}'")
-            return {"title": title, "year": year, "language": language}
-        
-        return {"title": "UNKNOWN", "year": "", "language": ""}
-        
+            logger.info(f"✅ Fallback: Title='{title}', Year='{year}', Lang='{language}', Extra='{extra_info}'")
+            return {
+                "title": title,
+                "year": year,
+                "language": language,
+                "extra_info": extra_info,
+                "category": ""
+            }
+
+        # If title is too short, return UNKNOWN
+        return {
+            "title": "UNKNOWN",
+            "year": "",
+            "language": "",
+            "extra_info": "",
+            "category": ""
+        }
+
     except Exception as e:
         logger.error(f"Fallback failed: {e}")
-        return {"title": "UNKNOWN", "year": "", "language": ""}
+        return {
+            "title": "UNKNOWN",
+            "year": "",
+            "language": "",
+            "extra_info": "",
+            "category": ""
+        }
 
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
@@ -3011,28 +3040,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             btn_status = "❌ User Notified: Not Found"
 
-        # =======================================================
-    # 🖼️ NEW: ASK POSTER LOGIC (Semi-Auto Post)
-    # =======================================================
-    if query.data.startswith("askposter_"):
-        if update.effective_user.id != ADMIN_USER_ID:
-            await query.answer("❌ Admin only!", show_alert=True)
-            return
-
-        movie_id = int(query.data.split("_")[1])
-        
-        # Bot ko yaad dilao ki ab agli photo is movie ke liye aayegi
-        context.user_data['waiting_for_poster'] = movie_id
-        
-        await query.answer()
-        await query.message.reply_text(
-            "🖼️ **Please send the Landscape Poster (Image) for this movie now.**\n\n"
-            "*(सिर्फ़ फोटो भेजें, कोई कैप्शन लिखने की ज़रूरत नहीं है)*",
-            parse_mode='Markdown'
-        )
-        return
-        
-        # Multi-bot send
+        # ✅ FIXED: Yahan user ko message send karna hai, taaki request block sahi se band ho jaye!
         success = await send_multi_bot_message(target_user_id, user_msg)
         
         if success:
@@ -3040,7 +3048,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"{query.message.text}\n\n{btn_status} 📩", parse_mode='HTML')
         else:
             await query.answer("❌ Failed! User ne sabhi bots block kar diye hain.", show_alert=True)
+            
+        return # Yahan is block ka kaam khatam!
+
+    # =======================================================
+    # 🖼️ NEW: ASK POSTER LOGIC (Semi-Auto Post)
+    # =======================================================
+    if data.startswith("askposter_"):
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Admin only!", show_alert=True)
+            return
+
+        movie_id = int(data.split("_")[1])
+        
+        # Bot ko yaad dilao ki ab agli photo is movie ke liye aayegi
+        context.user_data['waiting_for_poster'] = movie_id
+        
+        await query.answer()
+        await query.message.reply_text(
+            "🖼️ **Please send the Landscape Poster (Image) for this movie now.**\n\n"
+            "*(सिर्फ़ फोटो भेजें, कोई कैप्शन लिखने की ज़रूरत नहीं है)*",
+            parse_mode='Markdown'
+        )
         return
+        
+    # Iske niche aapke baki ke callback conditions waise hi rahenge (autopost_, cancel_genre aadi...)
     
     # =======================================================
     # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Smart HD Poster)
