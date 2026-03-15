@@ -6928,10 +6928,12 @@ def get_movies_api():
     
     try:
         cur = conn.cursor()
+        # 🛑 SERVER CRASH FIX: Limit 200 lagaya hai taaki server overload na ho
         cur.execute("""
             SELECT id, title, year, rating, category, poster_url 
             FROM movies 
             ORDER BY id DESC 
+            LIMIT 200
         """)
         rows = cur.fetchall()
         cur.close()
@@ -7006,9 +7008,8 @@ def serve_mini_app():
             tg.expand();
             tg.ready();
 
-            // 👇 Yahan pura URL daalein taaki app hamesha sahi jagah se data uthaye 👇
+            // ✅ FULL ABSOLUTE URL
             const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
-            
             let moviesData = [];
             let currentCategory = 'All';
 
@@ -7021,9 +7022,12 @@ def serve_mini_app():
                     if (data.status === 'success') {
                         moviesData = data.movies;
                         renderMovies(moviesData.filter(m => m.image)); 
+                    } else {
+                        container.innerHTML = '<h3 style="text-align:center; color:red;">❌ Server Error</h3>';
                     }
                 } catch (error) {
-                    container.innerHTML = '<h3 style="text-align:center; color:red;">❌ System Error</h3>';
+                    // Agar Error aayega to screen par reason bhi dikhega
+                    container.innerHTML = `<h3 style="text-align:center; color:red;">❌ System Error<br><small>${error.message}</small></h3>`;
                 }
             }
 
@@ -7091,7 +7095,6 @@ def serve_mini_app():
     """
     return html_content
 
-# 👇 YAHI FUNCTION MISSING THA JISSE CRASH HUA 👇
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
     flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
