@@ -6897,18 +6897,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
+import logging
 
 flask_app = Flask('')
 CORS(flask_app, resources={r"/*": {"origins": "*"}})
 
-# 👇 100% BULLETPROOF CORS FIX (Browser Security ko bypass karne ke liye) 👇
 @flask_app.after_request
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
-# 👆 YAHAN TAK 👆
 
 @flask_app.route('/')
 def home():
@@ -6929,7 +6928,6 @@ def get_movies_api():
     
     try:
         cur = conn.cursor()
-        # LIMIT 100 aur Poster filter hata diya, ab SARI movies aayengi
         cur.execute("""
             SELECT id, title, year, rating, category, poster_url 
             FROM movies 
@@ -6946,7 +6944,7 @@ def get_movies_api():
                 "year": str(row[2]) if row[2] else "N/A",
                 "rating": str(row[3]) if row[3] else "N/A",
                 "category": row[4] if row[4] else "Movies",
-                "image": row[5] if row[5] and row[5] != 'N/A' else None # Handle missing poster
+                "image": row[5] if row[5] and row[5] != 'N/A' else None
             })
             
         return jsonify({"status": "success", "movies": movies_list})
@@ -7020,7 +7018,6 @@ def serve_mini_app():
                     const data = await response.json();
                     if (data.status === 'success') {
                         moviesData = data.movies;
-                        // Default render: Sirf wo movies jinka poster hai
                         renderMovies(moviesData.filter(m => m.image)); 
                     }
                 } catch (error) {
@@ -7030,11 +7027,17 @@ def serve_mini_app():
 
             function renderMovies(movies) {
                 const container = document.getElementById('movieContainer');
+                const noResults = document.getElementById('noResults');
                 container.innerHTML = '';
-                if(movies.length === 0) {
-                    container.innerHTML = '<div style="width:100%; text-align:center; color:#888;">😕 No movies found!</div>';
+                
+                if (movies.length === 0) {
+                    noResults.style.display = 'block';
+                    container.appendChild(noResults);
                     return;
                 }
+                noResults.style.display = 'none';
+                container.appendChild(noResults);
+
                 movies.forEach(movie => {
                     const imgUrl = movie.image ? movie.image : 'https://via.placeholder.com/150x225?text=No+Poster';
                     const card = document.createElement('div');
@@ -7042,18 +7045,17 @@ def serve_mini_app():
                     card.innerHTML = `
                         <div class="poster-container"><img src="${imgUrl}" class="poster" loading="lazy"><div class="rating-badge">⭐ ${movie.rating}</div></div>
                         <div class="movie-info">
-                            <div><div class="movie-title">${movie.title}</div><div class="movie-year">${movie.year}</div></div>
+                            <div><div class="movie-title">${movie.title}</div><div class="movie-year">${movie.year} • ${movie.category}</div></div>
                             <button class="download-btn" onclick="requestMovie(${movie.id})">📥 Get in Bot</button>
                         </div>`;
                     container.appendChild(card);
                 });
             }
 
-            // Search logic: Jab search karega, tabhi bina poster wali dikhengi
             document.getElementById('searchInput').addEventListener('input', function(e) {
                 const term = e.target.value.toLowerCase();
                 if (term === '') {
-                    filterCategory(currentCategory); // Khali search par wapas poster wali dikhao
+                    filterCategory(currentCategory); 
                 } else {
                     renderMovies(moviesData.filter(m => m.title.toLowerCase().includes(term)));
                 }
@@ -7072,7 +7074,6 @@ def serve_mini_app():
                 if (category !== 'All') {
                     filtered = filtered.filter(m => m.category === category);
                 }
-                // Category me sirf poster wali dikhao
                 renderMovies(filtered.filter(m => m.image));
             }
 
@@ -7087,6 +7088,19 @@ def serve_mini_app():
     </html>
     """
     return html_content
+
+# 👇 YAHI FUNCTION MISSING THA JISSE CRASH HUA 👇
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
+
+    try:
+        from admin_views import admin as admin_blueprint
+        flask_app.register_blueprint(admin_blueprint)
+    except Exception as e:
+        logging.error(f"Blueprint Error: {e}")
+
+    flask_app.run(host='0.0.0.0', port=port)
 
 # ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
