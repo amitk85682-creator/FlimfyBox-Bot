@@ -6986,20 +6986,21 @@ def serve_mini_app():
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <style>
             :root { --primary: #e50914; --bg: #0f0f0f; --card: #1e1e1e; --text: #fff; }
-            * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
             body { background-color: var(--bg); color: var(--text); padding-bottom: 20px; overflow-x: hidden; }
             
             /* Header & Search */
-            header { background-color: rgba(20, 20, 20, 0.95); padding: 15px 20px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; display:flex; justify-content: space-between; align-items:center; }
+            header { background-color: rgba(20, 20, 20, 0.95); padding: 15px 20px; position: sticky; top: 0; z-index: 100; border-bottom: 1px solid #333; display:flex; justify-content: space-between; align-items:center; backdrop-filter: blur(10px); }
             .logo { font-size: 22px; font-weight: 900; color: var(--primary); letter-spacing: 1px; }
             .logo span { color: #fff; }
             .search-container { padding: 15px 20px 5px 20px; }
             .search-bar { width: 100%; padding: 14px 20px; border-radius: 30px; border: none; outline: none; background-color: #2a2a2a; color: white; font-size: 15px; }
             .search-bar:focus { background-color: #333; box-shadow: 0 0 0 2px var(--primary); }
             
-            /* Top Banner */
-            .banner { width: 100%; height: 250px; background: url('https://image.tmdb.org/t/p/original/8cdWjvZQUExUUTzyp4t6EDMubfO.jpg') center/cover; position: relative; display: flex; align-items: flex-end; padding: 20px; box-shadow: inset 0 -80px 50px -10px #0f0f0f; }
-            .banner-title { font-size: 24px; font-weight: 800; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); }
+            /* Top Banner (Auto-Slider) */
+            .banner { width: 100%; height: 280px; background-color: #222; background-size: cover; background-position: center; position: relative; display: flex; align-items: flex-end; padding: 20px; transition: background-image 0.5s ease-in-out; }
+            .banner::after { content: ''; position: absolute; bottom: 0; left: 0; width: 100%; height: 150px; background: linear-gradient(to top, var(--bg), transparent); }
+            .banner-title { font-size: 26px; font-weight: 900; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); position: relative; z-index: 2; }
             
             /* Categories */
             .categories { display: flex; overflow-x: auto; padding: 15px 20px; gap: 10px; scrollbar-width: none; }
@@ -7008,40 +7009,43 @@ def serve_mini_app():
             .cat-btn.active { background-color: var(--primary); color: white; }
             
             /* Grid */
-            .section-title { padding: 10px 20px; font-size: 18px; font-weight: 700; margin-top: 5px; display:flex; justify-content:space-between;}
-            .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; padding: 0 20px; }
+            .section-title { padding: 10px 20px; font-size: 18px; font-weight: 700; margin-top: 5px; }
+            .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 12px; padding: 0 20px; }
             
             /* Card */
-            .movie-card { background-color: var(--card); border-radius: 8px; overflow: hidden; position: relative; transition: 0.2s; }
+            .movie-card { background-color: var(--card); border-radius: 8px; overflow: hidden; position: relative; transition: 0.2s; cursor: pointer; }
             .movie-card:active { transform: scale(0.95); }
             .poster-container { width: 100%; height: 160px; position:relative; }
             .poster { width: 100%; height: 100%; object-fit: cover; }
-            .not-in-db-badge { position: absolute; bottom: 0; left: 0; width:100%; background: rgba(229, 9, 20, 0.9); color: white; font-size: 10px; text-align: center; padding: 3px 0; font-weight: bold; }
+            .rating-badge { position: absolute; top: 5px; right: 5px; background: rgba(0,0,0,0.7); color: #ffd700; font-size: 10px; padding: 3px 5px; border-radius: 4px; font-weight: bold; border: 1px solid #ffd700; }
+            .not-in-db-badge { position: absolute; bottom: 0; left: 0; width:100%; background: rgba(229, 9, 20, 0.9); color: white; font-size: 10px; text-align: center; padding: 4px 0; font-weight: bold; }
+            
+            /* Netflix Style Full Page Details */
+            .details-page { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: var(--bg); z-index: 3000; transform: translateX(100%); transition: transform 0.3s ease-out; overflow-y: auto; display: block; }
+            .details-page.active { transform: translateX(0); }
+            .dp-header { position: absolute; top: 15px; left: 15px; z-index: 3010; }
+            .back-btn { background: rgba(0,0,0,0.6); color: white; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 20px; cursor: pointer; backdrop-filter: blur(5px); display:flex; justify-content:center; align-items:center; }
+            .dp-backdrop { width: 100%; height: 350px; background-size: cover; background-position: center; position: relative; }
+            .dp-backdrop::after { content: ''; position: absolute; bottom: 0; left: 0; width: 100%; height: 150px; background: linear-gradient(to top, var(--bg), transparent); }
+            .dp-content { padding: 20px; margin-top: -50px; position: relative; z-index: 3005; }
+            .dp-title { font-size: 28px; font-weight: 900; margin-bottom: 5px; }
+            .dp-meta { font-size: 14px; color: #aaa; margin-bottom: 15px; font-weight: 500; }
+            .dp-desc { margin-top: 15px; font-size: 14px; color: #ccc; line-height: 1.5; }
+            
+            .btn-large { width: 100%; padding: 14px; border: none; border-radius: 5px; font-size: 16px; font-weight: bold; margin-bottom: 10px; display: flex; justify-content: center; align-items: center; gap: 8px; cursor: pointer; }
+            .btn-download { background: white; color: black; }
+            .btn-request { background: var(--primary); color: white; }
+            .btn-trailer { background: #2a2a2a; color: white; }
+
+            /* TOAST NOTIFICATION */
+            #toast { visibility: hidden; min-width: 250px; background-color: #333; color: #fff; text-align: center; border-radius: 30px; padding: 12px; position: fixed; z-index: 4000; left: 50%; bottom: 30px; transform: translateX(-50%); font-size: 14px; font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+            #toast.show { visibility: visible; animation: fadein 0.5s, fadeout 0.5s 2.5s; }
+            @keyframes fadein { from { bottom: 0; opacity: 0; } to { bottom: 30px; opacity: 1; } }
+            @keyframes fadeout { from { bottom: 30px; opacity: 1; } to { bottom: 0; opacity: 0; } }
             
             /* SKELETON LOADING ANIMATION */
             @keyframes shimmer { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
             .skeleton { background: linear-gradient(90deg, #2a2a2a 25%, #3a3a3a 50%, #2a2a2a 75%); background-size: 400px 100%; animation: shimmer 1.5s infinite; border-radius: 8px; width: 100%; height: 160px; }
-
-            /* NETFLIX MODAL */
-            .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: flex-end; }
-            .modal.show { display: flex; animation: slideUp 0.3s ease-out; }
-            @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-            .modal-content { background: #181818; width: 100%; border-radius: 20px 20px 0 0; overflow: hidden; position: relative; }
-            .modal-backdrop { height: 220px; background-size: cover; background-position: top; position: relative; box-shadow: inset 0 -60px 40px -10px #181818; }
-            .close-btn { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: 50%; width: 30px; height: 30px; font-size: 16px; z-index: 10; }
-            .modal-info { padding: 20px; margin-top:-40px; position:relative; z-index:5; }
-            .m-title { font-size: 22px; font-weight: bold; margin-bottom: 5px; }
-            .m-meta { font-size: 12px; color: #aaa; margin-bottom: 15px; }
-            .btn-group { display: flex; gap: 10px; }
-            .btn-play { background: white; color: black; border: none; padding: 12px; border-radius: 5px; font-weight: bold; flex: 1; font-size: 15px; display:flex; justify-content:center; align-items:center; gap:5px; }
-            .btn-trailer { background: #333; color: white; border: none; padding: 12px; border-radius: 5px; font-weight: bold; flex: 1; font-size: 15px; }
-            .btn-request { background: var(--primary); color: white; border: none; padding: 12px; border-radius: 5px; font-weight: bold; width: 100%; font-size: 15px; }
-
-            /* TOAST NOTIFICATION */
-            #toast { visibility: hidden; min-width: 250px; background-color: #333; color: #fff; text-align: center; border-radius: 30px; padding: 12px; position: fixed; z-index: 2000; left: 50%; bottom: 30px; transform: translateX(-50%); font-size: 14px; font-weight: bold; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
-            #toast.show { visibility: visible; animation: fadein 0.5s, fadeout 0.5s 2.5s; }
-            @keyframes fadein { from { bottom: 0; opacity: 0; } to { bottom: 30px; opacity: 1; } }
-            @keyframes fadeout { from { bottom: 30px; opacity: 1; } to { bottom: 0; opacity: 0; } }
         </style>
     </head>
     <body>
@@ -7049,8 +7053,8 @@ def serve_mini_app():
             <div class="logo">Flimfy<span>Box</span></div>
         </header>
 
-        <div class="banner">
-            <div class="banner-title">Premium Collection</div>
+        <div class="banner" id="mainBanner">
+            <div class="banner-title" id="bannerTitle">Loading Premium...</div>
         </div>
 
         <div class="search-container">
@@ -7062,22 +7066,28 @@ def serve_mini_app():
             <button class="cat-btn" onclick="filterCategory('Bollywood')">🇮🇳 Bollywood</button>
             <button class="cat-btn" onclick="filterCategory('Hollywood')">🇺🇸 Hollywood</button>
             <button class="cat-btn" onclick="filterCategory('Series')">📺 Web Series</button>
+            <button class="cat-btn" onclick="filterCategory('Adult')">🔞 18+</button>
         </div>
 
-        <h2 class="section-title" id="sectionTitle"><span>🔥 Trending Now</span></h2>
+        <h2 class="section-title" id="sectionTitle">🔥 Trending Now</h2>
         <div class="movie-grid" id="movieContainer">
             </div>
 
-        <div id="movieModal" class="modal">
-            <div class="modal-content">
-                <button class="close-btn" onclick="closeModal()">✕</button>
-                <div class="modal-backdrop" id="modalImg"></div>
-                <div class="modal-info">
-                    <div class="m-title" id="modalTitle">Movie Title</div>
-                    <div class="m-meta" id="modalMeta">2024 • Rating: 8.5</div>
-                    <div class="btn-group" id="modalActions">
-                        </div>
-                </div>
+        <div id="detailsPage" class="details-page">
+            <div class="dp-header">
+                <button class="back-btn" onclick="closeDetails()">←</button>
+            </div>
+            <div class="dp-backdrop" id="dpImage"></div>
+            <div class="dp-content">
+                <h1 class="dp-title" id="dpTitle">Movie Title</h1>
+                <div class="dp-meta" id="dpMeta">2024 • Action</div>
+                
+                <div id="dpActions" style="margin-top: 20px;">
+                    </div>
+                
+                <p class="dp-desc">
+                    Get the best quality download file directly in the Telegram Bot. Fast servers and premium experience by FlimfyBox.
+                </p>
             </div>
         </div>
 
@@ -7088,11 +7098,14 @@ def serve_mini_app():
             tg.expand();
             tg.ready();
 
-            const API_URL = '/api/movies'; 
+            const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
             const TMDB_KEY = '9fa44f5e9fbd41415df930ce5b81c4d7';
             
             let moviesData = [];
             let currentCategory = 'All';
+            let slideIndex = 0;
+            let sliderInterval;
+            let searchTimeout = null; // Race Condition fix ke liye
 
             function showToast(message) {
                 const toast = document.getElementById("toast");
@@ -7109,6 +7122,23 @@ def serve_mini_app():
                 }
             }
 
+            // 1. AUTO SLIDER LOGIC
+            function startSlider(movies) {
+                if(movies.length === 0) return;
+                const topMovies = movies.slice(0, 5); // Start ki 5 movies
+                
+                const updateBanner = () => {
+                    const m = topMovies[slideIndex];
+                    document.getElementById('mainBanner').style.backgroundImage = `url(${m.image || 'https://via.placeholder.com/600x300?text=No+Image'})`;
+                    document.getElementById('bannerTitle').innerText = m.title;
+                    slideIndex = (slideIndex + 1) % topMovies.length;
+                };
+                
+                updateBanner(); // Pehli baar turant chalao
+                clearInterval(sliderInterval);
+                sliderInterval = setInterval(updateBanner, 3000); // Har 3 sec me badlega
+            }
+
             async function fetchMovies() {
                 loadSkeletons();
                 try {
@@ -7116,7 +7146,9 @@ def serve_mini_app():
                     const data = await response.json();
                     if (data.status === 'success') {
                         moviesData = data.movies;
-                        renderMovies(moviesData.filter(m => m.image)); 
+                        const posterMovies = moviesData.filter(m => m.image);
+                        renderMovies(posterMovies); 
+                        startSlider(posterMovies); // Slider chalu karo
                     }
                 } catch (error) {
                     document.getElementById('movieContainer').innerHTML = '<h3 style="color:red; text-align:center; width:100%; grid-column:1/-1;">Error loading data</h3>';
@@ -7127,6 +7159,11 @@ def serve_mini_app():
                 const container = document.getElementById('movieContainer');
                 container.innerHTML = '';
                 
+                if(movies.length === 0) {
+                    container.innerHTML = '<div style="width:100%; text-align:center; color:#888; grid-column:1/-1; padding:30px;">😕 Nothing found!</div>';
+                    return;
+                }
+
                 movies.forEach(movie => {
                     const imgUrl = movie.image ? movie.image : 'https://via.placeholder.com/150x225?text=No+Poster';
                     const badge = isTMDB ? `<div class="not-in-db-badge">NOT IN DB - REQUEST IT</div>` : `<div class="rating-badge">⭐ ${movie.rating || 'N/A'}</div>`;
@@ -7135,46 +7172,56 @@ def serve_mini_app():
                     card.className = 'movie-card';
                     card.innerHTML = `<div class="poster-container"><img src="${imgUrl}" class="poster" loading="lazy">${badge}</div>`;
                     
-                    // Click event to open Modal
-                    card.onclick = () => openModal(movie, isTMDB);
+                    // Click -> Open Details Page
+                    card.onclick = () => openDetails(movie, isTMDB);
                     container.appendChild(card);
                 });
             }
 
-            // MODAL LOGIC
-            function openModal(movie, isTMDB) {
-                document.getElementById('modalImg').style.backgroundImage = `url(${movie.image})`;
-                document.getElementById('modalTitle').innerText = movie.title || movie.name;
-                document.getElementById('modalMeta').innerText = `${movie.year || ''} • ${movie.category || 'Movie'}`;
+            // 2. FULL PAGE DETAILS UI (Netflix Style)
+            function openDetails(movie, isTMDB) {
+                const title = movie.title || movie.name;
+                const year = movie.year || '2024';
+                const cat = movie.category || 'Movie';
                 
-                const actions = document.getElementById('modalActions');
-                actions.innerHTML = '';
-
+                document.getElementById('dpImage').style.backgroundImage = `url(${movie.image || 'https://via.placeholder.com/600x300?text=No+Image'})`;
+                document.getElementById('dpTitle').innerText = title;
+                document.getElementById('dpMeta').innerText = `${year} • ${cat} • ⭐ ${movie.rating || 'N/A'}`;
+                
+                const actions = document.getElementById('dpActions');
+                const searchTitle = encodeURIComponent(title);
+                
                 if (isTMDB) {
-                    actions.innerHTML = `<button class="btn-request" onclick="requestSilent('${movie.title || movie.name}')">🙋‍♂️ Request This Movie</button>`;
-                } else {
-                    const searchTitle = encodeURIComponent(movie.title);
                     actions.innerHTML = `
-                        <button class="btn-play" onclick="downloadBot(${movie.id})">📥 Download</button>
-                        <button class="btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')">▶ Trailer</button>
+                        <button class="btn-large btn-request" onclick="requestSilent('${title}')">🙋‍♂️ Request This Movie</button>
+                        <button class="btn-large btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')">▶ Watch Trailer</button>
+                    `;
+                } else {
+                    actions.innerHTML = `
+                        <button class="btn-large btn-download" onclick="downloadBot(${movie.id})">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                            Download via Bot
+                        </button>
+                        <button class="btn-large btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')">▶ Watch Trailer</button>
                     `;
                 }
                 
-                document.getElementById('movieModal').classList.add('show');
+                document.getElementById('detailsPage').classList.add('active');
             }
 
-            function closeModal() {
-                document.getElementById('movieModal').classList.remove('show');
+            function closeDetails() {
+                document.getElementById('detailsPage').classList.remove('active');
             }
 
-            // ACTIONS
             function downloadBot(id) {
+                tg.HapticFeedback.impactOccurred('heavy');
                 tg.sendData("movie_" + id);
                 tg.close();
             }
 
             async function requestSilent(title) {
-                closeModal();
+                tg.HapticFeedback.notificationOccurred('success');
+                closeDetails();
                 showToast("⏳ Requesting...");
                 
                 const user = tg.initDataUnsafe?.user || {id: 0, username: 'Unknown', first_name: 'WebApp'};
@@ -7185,61 +7232,70 @@ def serve_mini_app():
                         body: JSON.stringify({title: title, user_id: user.id, username: user.username, first_name: user.first_name})
                     });
                     if(res.ok) {
-                        tg.HapticFeedback.notificationOccurred('success');
                         showToast("✅ Request Sent Successfully!");
                     } else {
                         showToast("❌ Failed to request.");
                     }
                 } catch(e) {
-                    showToast("❌ Server Error.");
+                    showToast("❌ System Error.");
                 }
             }
 
-            // SEARCH & TMDB
-            document.getElementById('searchInput').addEventListener('input', async function(e) {
-                const term = e.target.value.toLowerCase();
+            // 3. SMART SEARCH (Race Condition Fixed)
+            document.getElementById('searchInput').addEventListener('input', function(e) {
+                clearTimeout(searchTimeout); // Purana search cancel karo
+                
+                const term = e.target.value.toLowerCase().trim();
+                
                 if (term === '') {
-                    document.getElementById('sectionTitle').innerHTML = `<span>🔥 Trending Now</span>`;
+                    document.getElementById('sectionTitle').innerText = `🔥 Trending Now`;
                     filterCategory(currentCategory); 
                     return;
                 }
                 
+                // Smart Local Match
                 const localResults = moviesData.filter(m => m.title.toLowerCase().includes(term));
                 
                 if(localResults.length > 0) {
-                    document.getElementById('sectionTitle').innerHTML = `<span>🔍 Search Results</span>`;
+                    document.getElementById('sectionTitle').innerText = `🔍 Search Results`;
                     renderMovies(localResults);
                 } else {
-                    // TMDB LIVE SEARCH
-                    document.getElementById('sectionTitle').innerHTML = `<span>🌐 Searching Globally...</span>`;
+                    document.getElementById('sectionTitle').innerText = `🌐 Searching Globally...`;
                     loadSkeletons();
                     
-                    try {
-                        const res = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_KEY}&query=${term}`);
-                        const tmdbData = await res.json();
-                        const results = tmdbData.results.filter(item => item.poster_path && (item.media_type === 'movie' || item.media_type === 'tv'));
+                    // 0.8 Second rukne ke baad hi TMDB search karega (Taki local overwrite na ho)
+                    searchTimeout = setTimeout(async () => {
+                        // Double check: Kya user ne wapas kuch aur type kar diya?
+                        const currentTerm = document.getElementById('searchInput').value.toLowerCase().trim();
+                        if(currentTerm !== term) return; // Agar type badal gaya, to ye result chhod do
                         
-                        if(results.length > 0) {
-                            document.getElementById('sectionTitle').innerHTML = `<span>⚠️ Not in Bot (Click to Request)</span>`;
-                            const formattedTMDB = results.map(item => ({
-                                title: item.title || item.name,
-                                year: (item.release_date || item.first_air_date || '').substring(0,4),
-                                image: `https://image.tmdb.org/t/p/w500${item.poster_path}`,
-                                category: item.media_type === 'tv' ? 'Web Series' : 'Movie'
-                            }));
-                            renderMovies(formattedTMDB, true); // true = isTMDB
-                        } else {
-                            document.getElementById('movieContainer').innerHTML = '<div style="width:100%; text-align:center; color:#888; grid-column:1/-1; padding:30px;">😕 Nothing found anywhere!</div>';
+                        try {
+                            const res = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_KEY}&query=${encodeURIComponent(term)}`);
+                            const tmdbData = await res.json();
+                            const results = tmdbData.results.filter(item => item.poster_path && (item.media_type === 'movie' || item.media_type === 'tv'));
+                            
+                            if(results.length > 0) {
+                                document.getElementById('sectionTitle').innerText = `⚠️ Not in Bot (Click to Request)`;
+                                const formattedTMDB = results.map(item => ({
+                                    title: item.title || item.name,
+                                    year: (item.release_date || item.first_air_date || '').substring(0,4),
+                                    image: `https://image.tmdb.org/t/p/w500${item.poster_path}`,
+                                    category: item.media_type === 'tv' ? 'Web Series' : 'Movie'
+                                }));
+                                renderMovies(formattedTMDB, true); 
+                            } else {
+                                document.getElementById('movieContainer').innerHTML = '<div style="width:100%; text-align:center; color:#888; grid-column:1/-1; padding:30px;">😕 Nothing found anywhere!</div>';
+                            }
+                        } catch(err) {
+                            document.getElementById('movieContainer').innerHTML = '<div style="width:100%; text-align:center; color:red; grid-column:1/-1;">API Error</div>';
                         }
-                    } catch(err) {
-                        document.getElementById('movieContainer').innerHTML = '<div style="width:100%; text-align:center; color:red; grid-column:1/-1;">API Error</div>';
-                    }
+                    }, 800);
                 }
             });
 
             function filterCategory(category) {
                 currentCategory = category;
-                document.getElementById('sectionTitle').innerHTML = `<span>${category === 'All' ? '🔥 Trending Now' : `📂 ${category} Movies`}</span>`;
+                document.getElementById('sectionTitle').innerText = category === 'All' ? '🔥 Trending Now' : `📂 ${category} Movies`;
                 const buttons = document.querySelectorAll('.cat-btn');
                 buttons.forEach(btn => btn.classList.remove('active'));
                 event.target.classList.add('active');
