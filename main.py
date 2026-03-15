@@ -10,6 +10,7 @@ import requests
 import signal
 import sys
 from telegram import KeyboardButton, WebAppInfo
+from telegram import MenuButtonWebApp, WebAppInfo
 import aiohttp
 # import anthropic  # Agar zaroorat ho toh uncomment karein
 from flask import jsonify
@@ -2075,12 +2076,7 @@ async def handle_genre_selection(update: Update, context:  ContextTypes.DEFAULT_
         )
 # ==================== KEYBOARD MARKUPS ====================
 def get_main_keyboard():
-    """Get the main menu keyboard - Ab isme Mini App ka direct button hai!"""
-    web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
-    
     keyboard = [
-        # 👇 Sabse upar bada sa Web App ka button 👇
-        [KeyboardButton(text="🎬 Premium Web Version", web_app=WebAppInfo(url=web_app_url))],
         ['🔍 Search Movies'],
         ['📂 Browse by Genre', '🙋 Request Movie'],
         ['📊 My Stats', '❓ Help']
@@ -2684,6 +2680,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 👇 Use the buttons below to get started:
 """
+
+    # 🌐 Web App Menu Button (Side wala button yahan set ho raha hai)
+    web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
+    
+    try:
+        await context.bot.set_chat_menu_button(
+            chat_id=chat_id,
+            menu_button=MenuButtonWebApp(
+                text="🎬 Web Version", 
+                web_app=WebAppInfo(url=web_app_url)
+            )
+        )
+    except Exception as e:
+        logger.error(f"Menu Button Error: {e}")
+
     # Bas sidha message aur get_main_keyboard() bhej do
     msg = await context.bot.send_message(
         chat_id=chat_id, 
@@ -2692,9 +2703,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
     track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
-    return
     
-    # ✅ Just return (No state needed for main menu)
     return
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
@@ -6909,24 +6918,22 @@ def home():
 def health():
     return "OK", 200
 
-@flask_app.route('/api/movies', methods=['GET', 'OPTIONS']) # OPTIONS add kiya
+@flask_app.route('/api/movies', methods=['GET', 'OPTIONS'])
 def get_movies_api():
     if request.method == 'OPTIONS':
         return jsonify({"status": "success"}), 200
         
-    """Web App ke liye Movies ka Data return karega"""
     conn = get_db_connection()
     if not conn:
         return jsonify({"status": "error", "message": "Database error"}), 500
     
     try:
         cur = conn.cursor()
+        # LIMIT 100 aur Poster filter hata diya, ab SARI movies aayengi
         cur.execute("""
             SELECT id, title, year, rating, category, poster_url 
             FROM movies 
-            WHERE poster_url IS NOT NULL AND poster_url != 'N/A'
             ORDER BY id DESC 
-            LIMIT 100
         """)
         rows = cur.fetchall()
         cur.close()
@@ -6939,31 +6946,15 @@ def get_movies_api():
                 "year": str(row[2]) if row[2] else "N/A",
                 "rating": str(row[3]) if row[3] else "N/A",
                 "category": row[4] if row[4] else "Movies",
-                "image": row[5]
+                "image": row[5] if row[5] and row[5] != 'N/A' else None # Handle missing poster
             })
             
         return jsonify({"status": "success", "movies": movies_list})
-        
     except Exception as e:
-        logger.error(f"API Error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
-        if conn:
-            close_db_connection(conn)
+        if conn: close_db_connection(conn)
 
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
-
-    try:
-        from admin_views import admin as admin_blueprint
-        flask_app.register_blueprint(admin_blueprint)
-    except Exception as e:
-        logger.error(f"Blueprint Error: {e}")
-
-    flask_app.run(host='0.0.0.0', port=port)
-
-# 👇 Yahan se shuru karein 👇
 @flask_app.route('/webapp')
 def serve_mini_app():
     html_content = """
@@ -7000,7 +6991,16 @@ def serve_mini_app():
     <body>
         <header><div class="logo">Flimfy<span>Box</span></div></header>
         <div class="search-container"><input type="text" id="searchInput" class="search-bar" placeholder="🔍 Search movies..."></div>
-        <h2 class="section-title">🔥 Trending Now</h2>
+        
+        <div class="categories" id="categoryContainer">
+            <button class="cat-btn active" onclick="filterCategory('All')">🔥 All</button>
+            <button class="cat-btn" onclick="filterCategory('Bollywood')">🇮🇳 Bollywood</button>
+            <button class="cat-btn" onclick="filterCategory('Hollywood')">🇺🇸 Hollywood</button>
+            <button class="cat-btn" onclick="filterCategory('Series')">📺 Web Series</button>
+            <button class="cat-btn" onclick="filterCategory('Adult')">🔞 18+</button>
+        </div>
+
+        <h2 class="section-title" id="sectionTitle">🔥 Trending Now</h2>
         <div class="movie-grid" id="movieContainer"><div id="noResults" style="display:none; width:100%; text-align:center; color:#888;">😕 No movies found!</div></div>
 
         <script>
@@ -7008,9 +7008,9 @@ def serve_mini_app():
             tg.expand();
             tg.ready();
 
-            // 🔥 AB API_URL SIRF RELATIVE HOGA (CORS KA TENSION KHATAM)
             const API_URL = '/api/movies'; 
             let moviesData = [];
+            let currentCategory = 'All';
 
             async function fetchMovies() {
                 const container = document.getElementById('movieContainer');
@@ -7020,7 +7020,8 @@ def serve_mini_app():
                     const data = await response.json();
                     if (data.status === 'success') {
                         moviesData = data.movies;
-                        renderMovies(moviesData); 
+                        // Default render: Sirf wo movies jinka poster hai
+                        renderMovies(moviesData.filter(m => m.image)); 
                     }
                 } catch (error) {
                     container.innerHTML = '<h3 style="text-align:center; color:red;">❌ System Error</h3>';
@@ -7030,11 +7031,16 @@ def serve_mini_app():
             function renderMovies(movies) {
                 const container = document.getElementById('movieContainer');
                 container.innerHTML = '';
+                if(movies.length === 0) {
+                    container.innerHTML = '<div style="width:100%; text-align:center; color:#888;">😕 No movies found!</div>';
+                    return;
+                }
                 movies.forEach(movie => {
+                    const imgUrl = movie.image ? movie.image : 'https://via.placeholder.com/150x225?text=No+Poster';
                     const card = document.createElement('div');
                     card.className = 'movie-card';
                     card.innerHTML = `
-                        <div class="poster-container"><img src="${movie.image}" class="poster"><div class="rating-badge">⭐ ${movie.rating}</div></div>
+                        <div class="poster-container"><img src="${imgUrl}" class="poster" loading="lazy"><div class="rating-badge">⭐ ${movie.rating}</div></div>
                         <div class="movie-info">
                             <div><div class="movie-title">${movie.title}</div><div class="movie-year">${movie.year}</div></div>
                             <button class="download-btn" onclick="requestMovie(${movie.id})">📥 Get in Bot</button>
@@ -7043,10 +7049,32 @@ def serve_mini_app():
                 });
             }
 
+            // Search logic: Jab search karega, tabhi bina poster wali dikhengi
             document.getElementById('searchInput').addEventListener('input', function(e) {
                 const term = e.target.value.toLowerCase();
-                renderMovies(moviesData.filter(m => m.title.toLowerCase().includes(term)));
+                if (term === '') {
+                    filterCategory(currentCategory); // Khali search par wapas poster wali dikhao
+                } else {
+                    renderMovies(moviesData.filter(m => m.title.toLowerCase().includes(term)));
+                }
             });
+
+            function filterCategory(category) {
+                currentCategory = category;
+                document.getElementById('sectionTitle').innerText = category === 'All' ? '🔥 Trending Now' : `📂 ${category} Movies`;
+                
+                const buttons = document.querySelectorAll('.cat-btn');
+                buttons.forEach(btn => btn.classList.remove('active'));
+                event.target.classList.add('active');
+                document.getElementById('searchInput').value = '';
+
+                let filtered = moviesData;
+                if (category !== 'All') {
+                    filtered = filtered.filter(m => m.category === category);
+                }
+                // Category me sirf poster wali dikhao
+                renderMovies(filtered.filter(m => m.image));
+            }
 
             function requestMovie(movieId) {
                 tg.sendData("movie_" + movieId);
@@ -7059,7 +7087,6 @@ def serve_mini_app():
     </html>
     """
     return html_content
-# 👆 Yahan tak 👆
 
 # ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
