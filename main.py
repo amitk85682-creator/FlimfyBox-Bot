@@ -6929,7 +6929,6 @@ def get_movies_api():
     
     try:
         cur = conn.cursor()
-        # ✅ LIMIT badha di hai (800) aur Description/Genre add kar diya!
         cur.execute("""
             SELECT id, title, year, rating, category, poster_url, description, genre 
             FROM movies 
@@ -6948,7 +6947,7 @@ def get_movies_api():
                 "rating": str(row[3]) if row[3] else "N/A",
                 "category": row[4] if row[4] else "Movies",
                 "image": row[5] if row[5] and row[5] != 'N/A' else None,
-                "description": row[6] if row[6] else "Story details are not available for this movie right now. Please watch the trailer for more info.",
+                "description": row[6] if row[6] else "",
                 "genre": row[7] if row[7] else "Action, Drama"
             })
             
@@ -6988,43 +6987,31 @@ def serve_mini_app():
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
-            :root { 
-                --bg: #09090b; 
-                --card-bg: #18181b; 
-                --primary: #06b6d4; 
-                --text: #ffffff; 
-                --text-muted: #a1a1aa;
-            }
+            :root { --bg: #09090b; --card-bg: #18181b; --primary: #06b6d4; --text: #ffffff; --text-muted: #a1a1aa; }
             * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
             body { background-color: var(--bg); color: var(--text); overflow-x: hidden; padding-bottom: 20px; }
             
-            /* Navbar */
             header { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: rgba(9, 9, 11, 0.9); position: sticky; top: 0; z-index: 100; backdrop-filter: blur(10px); border-bottom: 1px solid #27272a; }
             .logo { font-size: 22px; font-weight: 900; color: var(--primary); letter-spacing: 0.5px; }
             .logo span { color: #fff; }
             
-            /* Search */
             .search-section { padding: 15px 20px; }
             .search-box { display: flex; align-items: center; background: #27272a; border-radius: 8px; padding: 10px 15px; }
             .search-box i { color: var(--text-muted); margin-right: 10px; }
             .search-box input { flex: 1; background: transparent; border: none; color: white; outline: none; font-size: 15px; }
             
-            /* Hero Slider */
             .hero-slider { width: 100%; height: 250px; position: relative; background-size: cover; background-position: center; transition: background-image 0.5s ease-in-out; }
             .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to top, var(--bg) 0%, transparent 100%); display: flex; align-items: flex-end; padding: 20px; }
             .hero-info h2 { font-size: 24px; font-weight: 800; margin-bottom: 5px; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); }
             
-            /* Horizontal Rows */
             .movie-row-container { margin-top: 20px; }
             .row-header { padding: 0 20px; margin-bottom: 10px; font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
             .row-header i { color: var(--primary); }
             .horizontal-scroll { display: flex; overflow-x: auto; gap: 15px; padding: 0 20px 10px 20px; scroll-snap-type: x mandatory; scrollbar-width: none; }
             .horizontal-scroll::-webkit-scrollbar { display: none; }
             
-            /* Vertical Grid (For MORE Section) */
             .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 12px; padding: 0 20px; }
 
-            /* Cards */
             .card { flex: 0 0 130px; scroll-snap-align: start; position: relative; cursor: pointer; transition: transform 0.2s; }
             .grid-card { width: 100%; position: relative; cursor: pointer; transition: transform 0.2s; }
             .card:active, .grid-card:active { transform: scale(0.95); }
@@ -7036,37 +7023,37 @@ def serve_mini_app():
             
             .not-in-db { position: absolute; bottom: 0; left: 0; width: 100%; background: rgba(220, 38, 38, 0.9); color: white; font-size: 10px; text-align: center; padding: 4px 0; font-weight: bold; border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }
 
-            /* Details Page (New Page UI) */
+            /* DETAILS PAGE UI */
             .details-page { position: fixed; inset: 0; background: var(--bg); z-index: 2000; overflow-y: auto; transform: translateX(100%); transition: transform 0.3s ease-out; }
             .details-page.open { transform: translateX(0); }
             
             .dp-header { position: absolute; top: 15px; left: 15px; z-index: 2010; }
             .btn-back { background: rgba(0,0,0,0.5); color: white; border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 18px; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(5px); cursor: pointer; }
             
-            .dp-layout { display: flex; flex-direction: column; }
-            .dp-poster-bg { width: 100%; height: 350px; background-size: cover; background-position: center; position: relative; }
+            .dp-poster-bg { width: 100%; height: 320px; background-size: cover; background-position: center; position: relative; }
             .dp-poster-bg::after { content: ''; position: absolute; inset: 0; background: linear-gradient(to top, var(--bg) 0%, transparent 100%); }
             
-            .dp-info { padding: 20px; margin-top: -80px; position: relative; z-index: 2005; }
-            .dp-title { font-size: 28px; font-weight: 900; margin-bottom: 8px; line-height: 1.2; }
-            .dp-meta-row { display: flex; align-items: center; gap: 15px; font-size: 13px; color: var(--text-muted); margin-bottom: 15px; font-weight: 600; }
-            .dp-rating { display: flex; align-items: center; gap: 5px; color: #facc15; }
+            .dp-info { padding: 20px; margin-top: -60px; position: relative; z-index: 2005; }
+            .dp-title { font-size: 26px; font-weight: 900; margin-bottom: 15px; line-height: 1.2; text-shadow: 1px 1px 3px rgba(0,0,0,0.8); }
             
-            .dp-tags { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
-            .tag { padding: 4px 10px; border: 1px solid #3f3f46; border-radius: 20px; font-size: 11px; color: #d4d4d8; background: rgba(255,255,255,0.05); }
-            
-            .dp-actions { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
-            .btn-main { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 15px; font-weight: bold; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; transition: 0.2s; }
-            .btn-watch { background: var(--primary); color: #000; }
-            .btn-trailer { background: #27272a; color: white; border: 1px solid #3f3f46; }
-            
-            .dp-desc { font-size: 14px; color: #a1a1aa; line-height: 1.6; text-align: justify; }
+            /* BEAUTIFUL RICH TEXT INFO */
+            .rich-info-box { background: rgba(255, 255, 255, 0.03); border: 1px solid #27272a; border-radius: 10px; padding: 15px; margin-bottom: 20px; font-size: 13.5px; color: #e4e4e7; line-height: 1.7; }
+            .rich-info-box span { color: var(--primary); font-weight: 600; margin-right: 5px; }
+            .rich-desc { margin-top: 10px; font-size: 13px; color: var(--text-muted); font-style: italic; border-top: 1px dashed #3f3f46; padding-top: 10px; }
 
-            /* Toast */
+            /* DOWNLOAD LINKS SECTION */
+            .dl-section { margin-top: 10px; margin-bottom: 30px; }
+            .dl-heading { font-size: 14px; font-weight: 800; color: #facc15; text-align: center; margin-bottom: 12px; letter-spacing: 1px; }
+            .dl-btn { width: 100%; background: #18181b; border: 1px solid #3f3f46; border-radius: 8px; padding: 14px 15px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; color: white; font-size: 14px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+            .dl-btn:active { transform: scale(0.97); background: #27272a; }
+            .dl-btn .action { color: var(--primary); font-size: 12px; font-weight: bold; background: rgba(6, 182, 212, 0.1); padding: 4px 8px; border-radius: 4px; }
+            .dl-btn i { color: #a1a1aa; margin-right: 8px; font-size: 16px; }
+
+            .btn-trailer { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 15px; font-weight: bold; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; background: #ef4444; color: white; margin-bottom: 20px;}
+            .btn-request { width: 100%; padding: 14px; border-radius: 8px; border: none; font-size: 15px; font-weight: bold; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; background: var(--primary); color: #000; margin-bottom: 20px;}
+
             .toast { position: fixed; bottom: -50px; left: 50%; transform: translateX(-50%); background: #22c55e; color: white; padding: 12px 24px; border-radius: 30px; font-size: 14px; font-weight: bold; transition: bottom 0.3s; z-index: 3000; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
             .toast.show { bottom: 30px; }
-            
-            /* Loader */
             .loader { text-align: center; padding: 40px; color: var(--text-muted); font-size: 16px; width: 100%; }
         </style>
     </head>
@@ -7112,7 +7099,7 @@ def serve_mini_app():
                 <div class="horizontal-scroll" id="seriesScroll"></div>
             </div>
 
-            <div class="movie-row-container" id="moreRow" style="margin-top: 30px;">
+            <div class="movie-row-container" style="margin-top: 30px;">
                 <div class="row-header"><i class="fas fa-list"></i> More Collections</div>
                 <div class="movie-grid" id="moreGrid"></div>
             </div>
@@ -7129,20 +7116,28 @@ def serve_mini_app():
             <div class="dp-header">
                 <button class="btn-back" onclick="closeDetails()"><i class="fas fa-arrow-left"></i></button>
             </div>
+            
             <div class="dp-layout">
                 <div class="dp-poster-bg" id="dpImage"></div>
                 <div class="dp-info">
                     <h1 class="dp-title" id="dpTitle">Title</h1>
-                    <div class="dp-meta-row">
-                        <div class="dp-rating"><i class="fas fa-star"></i> <span id="dpRating">8.5</span></div>
-                        <span id="dpYear">2024</span>
-                        <span id="dpType">Movie</span>
+                    
+                    <div class="rich-info-box">
+                        <div><span>iMDB Rating:</span> <label id="dpRating">8.5/10</label></div>
+                        <div><span>Genre:</span> <label id="dpGenre">Action, Drama</label></div>
+                        <div><span>Language:</span> <label>Dual Audio [Hindi & English] / ESubs</label></div>
+                        <div id="episodesRow" style="display:none;"><span>No. of Episodes:</span> <label>All Episodes Added</label></div>
+                        <div><span>Quality:</span> <label>WEB-DL 4K | 1080p | 720p | 480p</label></div>
+                        
+                        <div class="rich-desc" id="dpDesc">Story details loading...</div>
                     </div>
-                    <div class="dp-tags" id="dpTags"></div>
                     
-                    <div class="dp-actions" id="dpActions"></div>
+                    <div id="dpTrailerBtn"></div>
                     
-                    <p class="dp-desc" id="dpDesc">Story details loading...</p>
+                    <div class="dl-section" id="dpLinks">
+                        <div class="dl-heading">: DOWNLOAD LINKS :</div>
+                        </div>
+                    
                 </div>
             </div>
         </div>
@@ -7156,11 +7151,12 @@ def serve_mini_app():
 
             const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies'; 
             const TMDB_KEY = '9fa44f5e9fbd41415df930ce5b81c4d7';
-            
-            // 🔥 BOT KA USERNAME YAHAN DAALEIN TAAKI DEEP LINK HAMESHA KAAM KARE
             const BOT_USERNAME = 'FlimfyBox_Bot'; 
             
-            let allMovies = [];
+            // ✅ BUG FIX: Global Map banaya taaki ' JSON parse error' na aaye!
+            let dbMoviesMap = {}; 
+            let tmdbMoviesMap = {};
+            let allMoviesList = [];
             let sliderInterval;
             let searchTimeout;
 
@@ -7176,8 +7172,10 @@ def serve_mini_app():
                     const res = await fetch(API_URL);
                     const data = await res.json();
                     if (data.status === 'success') {
-                        allMovies = data.movies.filter(m => m.image);
-                        setupHome(allMovies);
+                        allMoviesList = data.movies.filter(m => m.image);
+                        // Save to Map
+                        allMoviesList.forEach(m => dbMoviesMap[m.id] = m);
+                        setupHome(allMoviesList);
                     }
                 } catch(e) {
                     document.getElementById('recentScroll').innerHTML = '<div class="loader">Server Error</div>';
@@ -7185,7 +7183,6 @@ def serve_mini_app():
             }
 
             function setupHome(movies) {
-                // Slider Logic
                 let sIdx = 0;
                 const top5 = movies.slice(0, 5);
                 const updateSlider = () => {
@@ -7195,18 +7192,12 @@ def serve_mini_app():
                     document.getElementById('heroMeta').innerText = `${m.year} • ${m.category}`;
                     sIdx = (sIdx + 1) % top5.length;
                 };
-                if(top5.length > 0) {
-                    updateSlider();
-                    sliderInterval = setInterval(updateSlider, 3000);
-                }
+                if(top5.length > 0) { updateSlider(); sliderInterval = setInterval(updateSlider, 3000); }
 
-                // Populate Rows (Horizontal)
                 document.getElementById('recentScroll').innerHTML = generateCardsHTML(movies.slice(0, 15), false, 'card');
                 document.getElementById('bollywoodScroll').innerHTML = generateCardsHTML(movies.filter(m => m.category.toLowerCase().includes('bollywood')).slice(0, 15), false, 'card');
                 document.getElementById('hollywoodScroll').innerHTML = generateCardsHTML(movies.filter(m => m.category.toLowerCase().includes('hollywood')).slice(0, 15), false, 'card');
                 document.getElementById('seriesScroll').innerHTML = generateCardsHTML(movies.filter(m => m.category.toLowerCase().includes('series') || m.category.toLowerCase().includes('web')).slice(0, 15), false, 'card');
-                
-                // Populate MORE SECTION (Vertical Grid)
                 document.getElementById('moreGrid').innerHTML = generateCardsHTML(movies.slice(15, 100), false, 'grid-card');
             }
 
@@ -7214,9 +7205,9 @@ def serve_mini_app():
                 if (movies.length === 0) return '';
                 return movies.map(m => {
                     const badge = isTMDB ? `<div class="not-in-db">Request It</div>` : `<div class="card-rating">⭐ ${m.rating || 'N/A'}</div>`;
-                    const mData = encodeURIComponent(JSON.stringify(m));
+                    // ✅ FIXED: Sirf ID pass kar rahe hain HTML me, Object nahi!
                     return `
-                        <div class="${cardClass}" onclick="openDetails('${mData}', ${isTMDB})">
+                        <div class="${cardClass}" onclick="openDetails('${m.id}', ${isTMDB})">
                             <img src="${m.image}" class="card-img" loading="lazy">
                             ${badge}
                             <div class="card-title">${m.title || m.name}</div>
@@ -7245,7 +7236,7 @@ def serve_mini_app():
                 mainContent.style.display = 'none';
                 searchContent.style.display = 'block';
                 
-                const localResults = allMovies.filter(m => m.title.toLowerCase().includes(term));
+                const localResults = allMoviesList.filter(m => m.title.toLowerCase().includes(term));
                 
                 if (localResults.length > 0) {
                     searchHeader.innerHTML = `<i class="fas fa-search"></i> Found in Database`;
@@ -7265,15 +7256,21 @@ def serve_mini_app():
                             
                             if(results.length > 0) {
                                 searchHeader.innerHTML = `<i class="fas fa-exclamation-circle" style="color:#ef4444;"></i> Not in Bot (Click to Request)`;
-                                const formattedTMDB = results.map(item => ({
-                                    title: item.title || item.name,
-                                    year: (item.release_date || item.first_air_date || '').substring(0,4),
-                                    image: `https://image.tmdb.org/t/p/w500${item.poster_path}`,
-                                    category: item.media_type === 'tv' ? 'Web Series' : 'Movie',
-                                    rating: item.vote_average ? item.vote_average.toFixed(1) : 'N/A',
-                                    description: item.overview || "Story details are not available.",
-                                    genre: "Action, Drama"
-                                }));
+                                
+                                const formattedTMDB = results.map(item => {
+                                    const obj = {
+                                        id: 'tmdb_' + item.id,
+                                        title: item.title || item.name,
+                                        year: (item.release_date || item.first_air_date || '').substring(0,4),
+                                        image: `https://image.tmdb.org/t/p/w500${item.poster_path}`,
+                                        category: item.media_type === 'tv' ? 'Web Series' : 'Movie',
+                                        rating: item.vote_average ? item.vote_average.toFixed(1) : 'N/A',
+                                        description: item.overview || "Story details are not available.",
+                                        genre: "Action, Drama"
+                                    };
+                                    tmdbMoviesMap[obj.id] = obj; // TMDB Map me save kiya
+                                    return obj;
+                                });
                                 searchGrid.innerHTML = generateCardsHTML(formattedTMDB, true, 'grid-card');
                             } else {
                                 searchHeader.innerHTML = `No Results`;
@@ -7287,39 +7284,61 @@ def serve_mini_app():
             });
 
             // DETAILS PAGE LOGIC
-            window.openDetails = function(movieStr, isTMDB) {
-                const movie = JSON.parse(decodeURIComponent(movieStr));
+            window.openDetails = function(id, isTMDB) {
+                // ✅ FIXED: ID se data nikalo (No stringify issues)
+                const movie = isTMDB ? tmdbMoviesMap[id] : dbMoviesMap[id];
+                if(!movie) return;
+
+                const title = movie.title || movie.name;
+                const isSeries = (movie.category || '').toLowerCase().includes('series');
                 
                 document.getElementById('dpImage').style.backgroundImage = `url(${movie.image})`;
-                document.getElementById('dpTitle').innerText = movie.title || movie.name;
-                document.getElementById('dpRating').innerText = movie.rating || 'N/A';
-                document.getElementById('dpYear').innerText = movie.year || '';
-                document.getElementById('dpType').innerText = movie.category || 'Movie';
+                document.getElementById('dpTitle').innerText = title;
+                document.getElementById('dpRating').innerText = `${movie.rating || 'N/A'}/10`;
+                document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
                 document.getElementById('dpDesc').innerText = movie.description || 'Watch trailer for more details.';
                 
-                // Tags (Genre)
-                let genres = (movie.genre || 'Action, Drama').split(',').slice(0, 3);
-                document.getElementById('dpTags').innerHTML = genres.map(g => `<span class="tag">${g.trim()}</span>`).join('');
+                // Show Episode Row only for Series
+                document.getElementById('episodesRow').style.display = isSeries ? 'block' : 'none';
                 
-                const actions = document.getElementById('dpActions');
-                const searchTitle = encodeURIComponent(movie.title || movie.name);
-                const trailerBtn = `<button class="btn-main btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')"><i class="fas fa-play"></i> Watch Trailer</button>`;
+                const searchTitle = encodeURIComponent(title);
+                document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="window.open('https://www.youtube.com/results?search_query=${searchTitle}+trailer', '_blank')"><i class="fas fa-play"></i> Watch Trailer</button>`;
+                
+                const linksBox = document.getElementById('dpLinks');
                 
                 if (isTMDB) {
-                    actions.innerHTML = `
-                        <button class="btn-main btn-watch" style="background:#ef4444; color:white;" onclick="requestSilent('${movie.title || movie.name}')">
-                            <i class="fas fa-hand-paper"></i> Request This Movie
+                    linksBox.innerHTML = `
+                        <button class="btn-request" onclick="requestSilent('${title}')">
+                            <i class="fas fa-hand-paper"></i> Request This Title
                         </button>
-                        ${trailerBtn}
+                        <p style="text-align:center; color:#ef4444; font-size:12px;">This title is currently not in our database.</p>
                     `;
                 } else {
-                    // ✅ FIXED: Name changed from "Download via Bot" to "Get Download Links"
-                    actions.innerHTML = `
-                        <button class="btn-main btn-watch" onclick="downloadBot(${movie.id})">
-                            <i class="fas fa-download"></i> Get Download Links
-                        </button>
-                        ${trailerBtn}
-                    `;
+                    if(isSeries) {
+                        linksBox.innerHTML = `
+                            <div class="dl-heading">: DOWNLOAD EPISODES :</div>
+                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
+                                <div><i class="fas fa-folder-open"></i> Get All Episodes (Zip/Folder)</div>
+                                <div class="action">Bot Link</div>
+                            </button>
+                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
+                                <div><i class="fas fa-play-circle"></i> Watch Online</div>
+                                <div class="action">Stream</div>
+                            </button>
+                        `;
+                    } else {
+                        linksBox.innerHTML = `
+                            <div class="dl-heading">: DOWNLOAD LINKS :</div>
+                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
+                                <div><i class="fas fa-film"></i> 4K UHD & 1080p (Original)</div>
+                                <div class="action">Get Link</div>
+                            </button>
+                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
+                                <div><i class="fas fa-video"></i> 720p HD & 480p</div>
+                                <div class="action">Get Link</div>
+                            </button>
+                        `;
+                    }
                 }
                 
                 document.getElementById('detailsPage').classList.add('open');
@@ -7329,14 +7348,9 @@ def serve_mini_app():
                 document.getElementById('detailsPage').classList.remove('open');
             };
 
-            // ✅ BUG FIX: 100% Guaranteed working Download Button using Deep Link
             window.downloadBot = function(id) {
                 tg.HapticFeedback.impactOccurred('heavy');
-                
-                // Method 1: Send Data (Works only if opened via inline keyboard)
                 try { tg.sendData("movie_" + id); } catch(e) {}
-                
-                // Method 2: Deep Link (Works ALWAYS, even from Menu Button)
                 setTimeout(() => {
                     tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=movie_${id}`);
                 }, 150);
