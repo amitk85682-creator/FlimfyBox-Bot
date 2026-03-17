@@ -4028,22 +4028,32 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.args = [imdb_id]
     await batch_add_command(update, context)
 
+import aiohttp
+
 async def upload_image_to_telegraph(bot, file_id):
     """Telegram image ko Telegraph par upload karke public URL deta hai."""
     try:
-        # Telegram se file get karo
+        # 1. Telegram se file get karo
         tg_file = await bot.get_file(file_id)
-        image_bytes = await tg_file.download_as_bytearray()
+        image_bytearray = await tg_file.download_as_bytearray()
+        image_bytes = bytes(image_bytearray) # ✅ FIX: bytearray ko bytes me convert karna zaroori hai
         
-        # Telegraph API par bhej do
-        res = requests.post(
-            'https://telegra.ph/upload',
-            files={'file': ('poster.jpg', image_bytes, 'image/jpeg')}
-        )
-        if res.status_code == 200:
-            return "https://telegra.ph" + res.json()[0]['src']
+        # 2. Form data prepare karo
+        data = aiohttp.FormData()
+        data.add_field('file', image_bytes, filename='poster.jpg', content_type='image/jpeg')
+        
+        # 3. aiohttp ke zariye asynchronously upload karo
+        async with aiohttp.ClientSession() as session:
+            async with session.post('https://telegra.ph/upload', data=data) as resp:
+                if resp.status == 200:
+                    json_resp = await resp.json()
+                    if isinstance(json_resp, list) and 'src' in json_resp[0]:
+                        return "https://telegra.ph" + json_resp[0]['src']
+                else:
+                    print(f"Telegraph API failed with status {resp.status}")
     except Exception as e:
-        logger.error(f"Telegraph Upload Error: {e}")
+        print(f"Telegraph Upload Error: {e}")
+        
     return None
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7152,1004 +7162,864 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
-# ==================== FLASK APP (unchanged except HTML) ====================
-from flask import Flask, jsonify, request
+# ==================== FLASK APP (Premium Edition) ====================
+
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import os
 import logging
-import requests  # Telegram API call ke liye
+import json
+import psycopg2
 from datetime import datetime
+import requests
+from urllib.parse import quote
+import random
 
-flask_app = Flask('')
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Create Flask app
+flask_app = Flask(__name__)
 CORS(flask_app, resources={r"/*": {"origins": "*"}})
 
-# ... (all your existing backend routes remain exactly the same) ...
+# --- TMDB API Key (for fetching trailers & cast) ---
+TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
-# 🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟
-#  PREMIUM WEB APP HTML (ULTRA LUXURY EDITION)
-# 🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟
+# ==================== DATABASE HELPERS (use existing functions) ====================
+# Make sure these functions are already defined in your main code:
+# get_db_connection(), close_db_connection(), store_user_request()
+# We'll assume they are available.
+
+# ==================== API ROUTES ====================
+
+@flask_app.route('/api/movies', methods=['GET'])
+def get_movies():
+    """
+    Return list of movies with basic info (for homepage).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, year, poster_url, rating, genre, category,
+                   COALESCE(language, '') as language
+            FROM movies
+            WHERE poster_url IS NOT NULL AND poster_url != ''
+            ORDER BY id DESC
+            LIMIT 200
+        """)
+        rows = cur.fetchall()
+        movies = []
+        for r in rows:
+            movies.append({
+                'id': r[0],
+                'title': r[1],
+                'year': r[2] if r[2] else '',
+                'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+                'rating': r[4] if r[4] else 'N/A',
+                'genre': r[5] if r[5] else 'Unknown',
+                'category': r[6] if r[6] else 'Movie',
+                'language': r[7]
+            })
+        cur.close()
+        close_db_connection(conn)
+        return jsonify({'status': 'success', 'movies': movies})
+    except Exception as e:
+        logger.error(f"Error in /api/movies: {e}")
+        close_db_connection(conn)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
+def get_movie_details(movie_id):
+    """
+    Return detailed info for a single movie (including files).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, year, poster_url, rating, genre, description, category, language
+            FROM movies WHERE id = %s
+        """, (movie_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        
+        movie = {
+            'id': row[0],
+            'title': row[1],
+            'year': row[2] if row[2] else '',
+            'image': row[3] if row[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+            'rating': row[4] if row[4] else 'N/A',
+            'genre': row[5] if row[5] else 'Unknown',
+            'description': row[6] if row[6] else 'No description available.',
+            'category': row[7] if row[7] else 'Movie',
+            'language': row[8] if row[8] else ''
+        }
+        
+        # Get available files (qualities)
+        cur.execute("SELECT quality, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
+        files = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
+        movie['files'] = files
+        
+        cur.close()
+        close_db_connection(conn)
+        
+        # Try to fetch additional data from TMDB (cast, trailer)
+        try:
+            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
+            resp = requests.get(search_url, timeout=5).json()
+            if resp.get('results'):
+                first = resp['results'][0]
+                media_type = first.get('media_type', 'movie')
+                tmdb_id = first['id']
+                # Get credits
+                credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
+                credits = requests.get(credits_url, timeout=5).json()
+                cast = credits.get('cast', [])[:5]
+                movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
+                # Get trailer
+                videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
+                videos = requests.get(videos_url, timeout=5).json()
+                trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
+                if trailer:
+                    movie['trailer_key'] = trailer['key']
+        except Exception as e:
+            logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
+            movie['cast'] = []
+            movie['trailer_key'] = None
+        
+        return jsonify({'status': 'success', 'movie': movie})
+    except Exception as e:
+        logger.error(f"Error in /api/movie/{movie_id}: {e}")
+        close_db_connection(conn)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@flask_app.route('/api/search', methods=['GET'])
+def search_movies_api():
+    """
+    Search movies by title (local DB + TMDB fallback).
+    """
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'status': 'error', 'message': 'Missing query'}), 400
+    
+    conn = get_db_connection()
+    local_results = []
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, title, year, poster_url, rating, genre, category
+                FROM movies
+                WHERE title ILIKE %s
+                LIMIT 20
+            """, (f'%{query}%',))
+            rows = cur.fetchall()
+            for r in rows:
+                local_results.append({
+                    'id': r[0],
+                    'title': r[1],
+                    'year': r[2] if r[2] else '',
+                    'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+                    'rating': r[4] if r[4] else 'N/A',
+                    'genre': r[5] if r[5] else 'Unknown',
+                    'category': r[6] if r[6] else 'Movie',
+                    'source': 'local'
+                })
+            cur.close()
+        except Exception as e:
+            logger.error(f"Local search error: {e}")
+        finally:
+            close_db_connection(conn)
+    
+    # If local results are few, fetch from TMDB
+    tmdb_results = []
+    if len(local_results) < 5:
+        try:
+            tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(query)}"
+            resp = requests.get(tmdb_url, timeout=5).json()
+            for item in resp.get('results', []):
+                if not item.get('poster_path'):
+                    continue
+                tmdb_results.append({
+                    'id': 'tmdb_' + str(item['id']),
+                    'title': item.get('title') or item.get('name') or 'Unknown',
+                    'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
+                    'image': f"https://image.tmdb.org/t/p/w500{item['poster_path']}",
+                    'rating': item.get('vote_average', 0),
+                    'genre': 'Action, Drama',  # Can be fetched later
+                    'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
+                    'source': 'tmdb',
+                    'description': item.get('overview', '')
+                })
+        except Exception as e:
+            logger.error(f"TMDB search error: {e}")
+    
+    # Combine local and TMDB, remove duplicates (by title approx)
+    seen_titles = set()
+    combined = []
+    for m in local_results:
+        key = m['title'].lower().strip()
+        if key not in seen_titles:
+            seen_titles.add(key)
+            combined.append(m)
+    for m in tmdb_results:
+        key = m['title'].lower().strip()
+        if key not in seen_titles and len(combined) < 20:
+            seen_titles.add(key)
+            combined.append(m)
+    
+    return jsonify({'status': 'success', 'results': combined})
+
+
+@flask_app.route('/api/request', methods=['POST'])
+def request_movie_api():
+    """
+    Store a user request from web app.
+    Expects JSON: {title, user_id, username, first_name}
+    """
+    data = request.get_json()
+    if not data or 'title' not in data:
+        return jsonify({'status': 'error', 'message': 'Missing movie title'}), 400
+    
+    title = data['title'][:200]
+    user_id = data.get('user_id', 0)
+    username = data.get('username', '')
+    first_name = data.get('first_name', 'WebApp User')
+    
+    success = store_user_request(user_id, username, first_name, title, None, None)
+    if success:
+        # Optionally notify admin via a background task
+        # But for simplicity, just return success
+        return jsonify({'status': 'success', 'message': 'Request saved'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Could not save request'}), 500
+
+
+# ==================== MAIN WEB APP PAGE (Premium HTML) ====================
+
 @flask_app.route('/webapp')
 def serve_mini_app():
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>FlimfyBox · GOLD</title>
-        <script src="https://telegram.org/js/telegram-web-app.js"></script>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
-        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-        <style>
-            /* RESET & GLOBAL */
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                user-select: none;
-                -webkit-tap-highlight-color: transparent;
-            }
-
-            :root {
-                --bg: #0b0a0f;
-                --surface: #14131a;
-                --surface-light: #1f1e26;
-                --primary: #ffd700;              /* Royal Gold */
-                --primary-soft: #c9a227;
-                --primary-glow: rgba(255, 215, 0, 0.25);
-                --text: #ffffff;
-                --text-muted: #a3a1aa;
-                --accent: #b8860b;               /* Dark Goldenrod */
-                --glass: rgba(20, 19, 26, 0.75);
-                --glass-edge: rgba(255, 215, 0, 0.15);
-                --border: rgba(255, 215, 0, 0.1);
-                --shadow-heavy: 0 20px 40px -10px black;
-                --shadow-glow: 0 8px 30px var(--primary-glow);
-            }
-
-            body {
-                background-color: var(--bg);
-                color: var(--text);
-                overflow-x: hidden;
-                padding-bottom: 40px;
-            }
-
-            /* SKELETON LOADER */
-            .skeleton {
-                background: linear-gradient(90deg, var(--surface) 0%, var(--surface-light) 50%, var(--surface) 100%);
-                background-size: 200% 100%;
-                animation: shimmer 1.2s infinite;
-                border-radius: 14px;
-            }
-            @keyframes shimmer {
-                0% { background-position: 200% 0; }
-                100% { background-position: -200% 0; }
-            }
-
-            /* GLASS HEADER */
-            header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 16px 24px;
-                background: var(--glass);
-                backdrop-filter: blur(20px);
-                -webkit-backdrop-filter: blur(20px);
-                border-bottom: 1px solid var(--border);
-                position: sticky;
-                top: 0;
-                z-index: 100;
-            }
-            .logo {
-                font-size: 28px;
-                font-weight: 800;
-                background: linear-gradient(135deg, #fff0b5, #ffd700, #f0c45a);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                letter-spacing: -0.5px;
-            }
-            .crown-icon {
-                color: var(--primary);
-                font-size: 24px;
-                filter: drop-shadow(0 0 8px gold);
-            }
-
-            /* SEARCH BAR */
-            .search-section {
-                padding: 20px 24px;
-            }
-            .search-box {
-                display: flex;
-                align-items: center;
-                background: var(--surface);
-                border-radius: 40px;
-                padding: 14px 24px;
-                border: 1px solid var(--border);
-                transition: all 0.3s ease;
-                box-shadow: var(--shadow-heavy);
-            }
-            .search-box:focus-within {
-                border-color: var(--primary);
-                box-shadow: var(--shadow-glow);
-            }
-            .search-box i {
-                color: var(--primary);
-                margin-right: 12px;
-                font-size: 18px;
-                opacity: 0.8;
-            }
-            .search-box input {
-                flex: 1;
-                background: transparent;
-                border: none;
-                color: white;
-                outline: none;
-                font-size: 16px;
-                font-weight: 400;
-            }
-            .search-box input::placeholder {
-                color: #5a5766;
-            }
-
-            /* GENRE PILLS */
-            .genre-scroll {
-                display: flex;
-                overflow-x: auto;
-                gap: 12px;
-                padding: 0 24px 20px 24px;
-                scrollbar-width: none;
-                scroll-behavior: smooth;
-            }
-            .genre-scroll::-webkit-scrollbar { display: none; }
-            .genre-pill {
-                background: var(--surface);
-                border: 1px solid var(--border);
-                padding: 8px 24px;
-                border-radius: 40px;
-                font-size: 14px;
-                font-weight: 600;
-                color: var(--text-muted);
-                white-space: nowrap;
-                cursor: pointer;
-                transition: all 0.2s;
-                backdrop-filter: blur(5px);
-            }
-            .genre-pill.active {
-                background: var(--primary);
-                color: #0b0a0f;
-                border-color: var(--primary);
-                box-shadow: 0 0 20px gold;
-                font-weight: 800;
-            }
-
-            /* HERO SLIDER (LUXURY) */
-            .hero-slider {
-                width: 100%;
-                height: 340px;
-                position: relative;
-                background-size: cover;
-                background-position: top 20% center;
-                transition: background-image 0.8s cubic-bezier(0.4, 0, 0.2, 1);
-                border-radius: 0 0 40px 40px;
-                box-shadow: 0 30px 40px -20px black;
-                margin-bottom: 10px;
-            }
-            .hero-overlay {
-                position: absolute;
-                inset: 0;
-                background: linear-gradient(to top, var(--bg) 0%, transparent 60%, rgba(0,0,0,0.4) 100%);
-                display: flex;
-                align-items: flex-end;
-                padding: 30px 24px;
-            }
-            .hero-info h2 {
-                font-size: 38px;
-                font-weight: 800;
-                text-shadow: 0 4px 20px black;
-                line-height: 1.1;
-                margin-bottom: 8px;
-                background: linear-gradient(180deg, #fff, #ffeaa3);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-            }
-            .hero-info span {
-                font-size: 13px;
-                font-weight: 600;
-                color: var(--primary);
-                background: rgba(0,0,0,0.5);
-                backdrop-filter: blur(10px);
-                padding: 5px 16px;
-                border-radius: 40px;
-                display: inline-block;
-                border: 1px solid rgba(255,215,0,0.3);
-            }
-
-            /* ROW HEADERS */
-            .row-header {
-                padding: 28px 24px 12px 24px;
-                font-size: 20px;
-                font-weight: 700;
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                color: var(--text);
-                letter-spacing: 0.5px;
-            }
-            .row-header i {
-                color: var(--primary);
-                font-size: 20px;
-            }
-
-            /* HORIZONTAL SCROLL */
-            .horizontal-scroll {
-                display: flex;
-                overflow-x: auto;
-                gap: 16px;
-                padding: 0 24px 10px 24px;
-                scroll-snap-type: x mandatory;
-                scrollbar-width: none;
-            }
-            .horizontal-scroll::-webkit-scrollbar { display: none; }
-
-            /* CARD STYLES */
-            .card, .grid-card {
-                position: relative;
-                cursor: pointer;
-                transition: transform 0.15s ease, filter 0.2s;
-                scroll-snap-align: start;
-                border-radius: 20px;
-                overflow: hidden;
-            }
-            .card {
-                flex: 0 0 145px;
-            }
-            .card:active, .grid-card:active {
-                transform: scale(0.96);
-            }
-            .card-img {
-                width: 100%;
-                aspect-ratio: 2/3;
-                object-fit: cover;
-                border-radius: 20px;
-                box-shadow: 0 15px 30px -8px black;
-                background: var(--surface);
-            }
-            .card-rating {
-                position: absolute;
-                top: 10px;
-                right: 10px;
-                background: rgba(0,0,0,0.6);
-                backdrop-filter: blur(8px);
-                font-size: 12px;
-                font-weight: 700;
-                padding: 4px 10px;
-                border-radius: 40px;
-                color: var(--primary);
-                border: 1px solid rgba(255,215,0,0.3);
-            }
-            .card-title {
-                margin-top: 10px;
-                font-size: 14px;
-                font-weight: 600;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                padding: 0 4px;
-            }
-            .card-meta {
-                font-size: 12px;
-                color: var(--text-muted);
-                padding: 0 4px;
-            }
-
-            /* MOVIE GRID (MORE COLLECTIONS) */
-            .movie-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-                gap: 16px;
-                padding: 0 24px;
-            }
-
-            /* DETAILS PAGE - CINEMATIC */
-            .details-page {
-                position: fixed;
-                inset: 0;
-                background: var(--bg);
-                z-index: 2000;
-                overflow-y: auto;
-                transform: translateX(100%);
-                transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
-                scrollbar-width: thin;
-                scrollbar-color: var(--primary) var(--surface);
-            }
-            .details-page.open {
-                transform: translateX(0);
-            }
-            .dp-header {
-                position: absolute;
-                top: 20px;
-                left: 20px;
-                z-index: 2010;
-            }
-            .btn-back {
-                background: var(--glass);
-                backdrop-filter: blur(16px);
-                border: 1px solid var(--border);
-                color: white;
-                width: 48px;
-                height: 48px;
-                border-radius: 50%;
-                font-size: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                cursor: pointer;
-                transition: 0.2s;
-                box-shadow: 0 8px 20px rgba(0,0,0,0.6);
-            }
-            .btn-back:active {
-                transform: scale(0.9);
-                border-color: var(--primary);
-            }
-            .dp-poster-bg {
-                width: 100%;
-                height: 420px;
-                background-size: cover;
-                background-position: center 20%;
-                position: relative;
-            }
-            .dp-poster-bg::after {
-                content: '';
-                position: absolute;
-                inset: 0;
-                background: linear-gradient(to top, var(--bg) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
-            }
-            .dp-info {
-                padding: 28px;
-                margin-top: -140px;
-                position: relative;
-                z-index: 2005;
-            }
-            .dp-title {
-                font-size: 40px;
-                font-weight: 800;
-                line-height: 1.1;
-                margin-bottom: 24px;
-                text-shadow: 0 8px 30px black;
-                background: linear-gradient(135deg, #fff, #ffefb0);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-            }
-
-            /* GLASS INFO BOX */
-            .rich-info-box {
-                background: var(--glass);
-                backdrop-filter: blur(20px);
-                border: 1px solid var(--border);
-                border-radius: 28px;
-                padding: 24px;
-                margin-bottom: 28px;
-                box-shadow: 0 30px 50px -20px black;
-            }
-            .rich-info-box > div {
-                margin-bottom: 14px;
-                font-size: 15px;
-                display: flex;
-                align-items: baseline;
-                gap: 12px;
-                flex-wrap: wrap;
-            }
-            .rich-info-box span {
-                color: var(--text-muted);
-                font-weight: 500;
-                min-width: 80px;
-            }
-            .rich-info-box label {
-                font-weight: 700;
-                color: var(--primary);
-            }
-            .rich-desc {
-                margin-top: 18px;
-                font-size: 14px;
-                color: var(--text-muted);
-                line-height: 1.7;
-                border-top: 1px dashed var(--border);
-                padding-top: 18px;
-            }
-
-            /* TRAILER BUTTON (GOLD) */
-            .btn-trailer {
-                width: 100%;
-                padding: 18px;
-                border-radius: 60px;
-                border: none;
-                font-size: 17px;
-                font-weight: 800;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 12px;
-                cursor: pointer;
-                background: linear-gradient(145deg, #ffd700, #b8860b);
-                color: #0b0a0f;
-                box-shadow: 0 15px 30px -5px rgba(255, 215, 0, 0.5);
-                margin-bottom: 28px;
-                transition: 0.2s;
-            }
-            .btn-trailer:active {
-                transform: scale(0.97);
-                box-shadow: 0 8px 20px gold;
-            }
-
-            /* REQUEST BUTTON */
-            .btn-request {
-                width: 100%;
-                padding: 18px;
-                border-radius: 60px;
-                border: 1px solid var(--border);
-                font-size: 17px;
-                font-weight: 800;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                gap: 12px;
-                cursor: pointer;
-                background: var(--surface);
-                color: var(--primary);
-                margin-bottom: 20px;
-            }
-
-            /* DOWNLOAD SECTION */
-            .dl-section {
-                margin-top: 25px;
-            }
-            .dl-heading {
-                font-size: 13px;
-                font-weight: 800;
-                color: var(--primary);
-                text-align: center;
-                margin-bottom: 20px;
-                letter-spacing: 2px;
-                opacity: 0.9;
-            }
-            .dl-btn {
-                width: 100%;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: 20px;
-                padding: 16px 20px;
-                margin-bottom: 12px;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                color: white;
-                font-size: 15px;
-                font-weight: 600;
-                cursor: pointer;
-                transition: 0.2s;
-                box-shadow: 0 6px 14px rgba(0,0,0,0.4);
-            }
-            .dl-btn:active {
-                border-color: var(--primary);
-                transform: scale(0.98);
-                background: var(--surface-light);
-            }
-            .quality-text {
-                display: flex;
-                align-items: center;
-                gap: 12px;
-            }
-            .file-size {
-                color: var(--text-muted);
-                font-size: 13px;
-                font-weight: 500;
-            }
-            .action {
-                color: #0b0a0f;
-                font-size: 13px;
-                font-weight: 800;
-                background: var(--primary);
-                padding: 8px 18px;
-                border-radius: 40px;
-                box-shadow: 0 0 15px gold;
-            }
-
-            /* TRAILER MODAL (IN-APP) */
-            .trailer-modal {
-                display: none;
-                position: fixed;
-                inset: 0;
-                background: rgba(0,0,0,0.95);
-                z-index: 3000;
-                align-items: center;
-                justify-content: center;
-                flex-direction: column;
-                padding: 20px;
-                backdrop-filter: blur(20px);
-            }
-            .trailer-modal.active {
-                display: flex;
-            }
-            .trailer-wrapper {
-                width: 100%;
-                max-width: 900px;
-                background: black;
-                border-radius: 24px;
-                overflow: hidden;
-                border: 2px solid gold;
-                box-shadow: 0 0 40px gold;
-            }
-            .trailer-modal iframe {
-                width: 100%;
-                aspect-ratio: 16/9;
-                border: none;
-                display: block;
-            }
-            .close-trailer-btn {
-                margin-top: 25px;
-                background: rgba(255,255,255,0.05);
-                border: 1px solid gold;
-                color: gold;
-                padding: 14px 40px;
-                border-radius: 60px;
-                font-weight: 700;
-                font-size: 16px;
-                cursor: pointer;
-                transition: 0.2s;
-            }
-            .close-trailer-btn:active {
-                background: gold;
-                color: black;
-            }
-
-            /* TOAST NOTIFICATION */
-            .toast {
-                position: fixed;
-                bottom: -60px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: var(--glass);
-                backdrop-filter: blur(20px);
-                border: 1px solid gold;
-                color: gold;
-                padding: 14px 30px;
-                border-radius: 60px;
-                font-size: 15px;
-                font-weight: 700;
-                transition: bottom 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
-                z-index: 3000;
-                box-shadow: 0 10px 30px gold;
-                white-space: nowrap;
-            }
-            .toast.show {
-                bottom: 30px;
-            }
-
-            /* LOADER */
-            .loader {
-                text-align: center;
-                padding: 40px;
-                color: var(--primary);
-                font-size: 16px;
-                font-weight: 600;
-                width: 100%;
-            }
-        </style>
-    </head>
-    <body>
-        <header>
-            <div class="logo">FlimfyBox</div>
-            <i class="fas fa-crown crown-icon"></i>
-        </header>
-
-        <div class="search-section">
-            <div class="search-box">
-                <i class="fas fa-search"></i>
-                <input type="text" id="searchInput" placeholder="Search movies, web series...">
-            </div>
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FlimfyBox · PREMIUM</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
+        :root {
+            --bg: #0f0f0f;
+            --surface: #1a1a1a;
+            --surface-light: #2a2a2a;
+            --primary: #ffd700;
+            --primary-soft: #e5b800;
+            --primary-glow: rgba(255, 215, 0, 0.25);
+            --text: #ffffff;
+            --text-muted: #a0a0a0;
+            --border: rgba(255, 215, 0, 0.15);
+            --shadow: 0 10px 30px -10px black;
+            --shadow-glow: 0 8px 30px var(--primary-glow);
+        }
+        body { background: var(--bg); color: var(--text); overflow-x: hidden; padding-bottom: 40px; }
+        /* Header */
+        header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 16px 24px; background: rgba(15,15,15,0.9); backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
+        }
+        .logo { font-size: 28px; font-weight: 800; background: linear-gradient(135deg, #fff0b5, #ffd700); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .crown-icon { color: var(--primary); font-size: 24px; filter: drop-shadow(0 0 8px gold); }
+        /* Search */
+        .search-section { padding: 20px 24px; }
+        .search-box {
+            display: flex; align-items: center; background: var(--surface); border-radius: 40px;
+            padding: 14px 24px; border: 1px solid var(--border); transition: 0.3s;
+            box-shadow: var(--shadow);
+        }
+        .search-box:focus-within { border-color: var(--primary); box-shadow: var(--shadow-glow); }
+        .search-box i { color: var(--primary); margin-right: 12px; font-size: 18px; opacity: 0.8; }
+        .search-box input {
+            flex: 1; background: transparent; border: none; color: white; outline: none;
+            font-size: 16px; font-weight: 400;
+        }
+        .search-box input::placeholder { color: #5a5a5a; }
+        /* Genre pills */
+        .genre-scroll {
+            display: flex; overflow-x: auto; gap: 12px; padding: 0 24px 20px 24px;
+            scrollbar-width: none; scroll-behavior: smooth;
+        }
+        .genre-scroll::-webkit-scrollbar { display: none; }
+        .genre-pill {
+            background: var(--surface); border: 1px solid var(--border); padding: 8px 24px;
+            border-radius: 40px; font-size: 14px; font-weight: 600; color: var(--text-muted);
+            white-space: nowrap; cursor: pointer; transition: 0.2s;
+        }
+        .genre-pill.active { background: var(--primary); color: #0f0f0f; border-color: var(--primary); box-shadow: 0 0 20px gold; }
+        /* Hero slider */
+        .hero-slider {
+            width: 100%; height: 380px; position: relative; background-size: cover;
+            background-position: top 20% center; transition: background-image 0.6s ease;
+            border-radius: 0 0 30px 30px; box-shadow: 0 30px 40px -20px black;
+            margin-bottom: 10px;
+        }
+        .hero-overlay {
+            position: absolute; inset: 0; background: linear-gradient(to top, var(--bg) 0%, transparent 70%);
+            display: flex; align-items: flex-end; padding: 30px 24px;
+        }
+        .hero-info h2 {
+            font-size: 40px; font-weight: 800; text-shadow: 0 4px 20px black; line-height: 1.1;
+            background: linear-gradient(180deg, #fff, #ffeaa3); -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .hero-info span {
+            font-size: 13px; font-weight: 600; color: var(--primary); background: rgba(0,0,0,0.5);
+            backdrop-filter: blur(10px); padding: 5px 16px; border-radius: 40px; display: inline-block;
+            border: 1px solid rgba(255,215,0,0.3);
+        }
+        /* Row header with scroll buttons */
+        .row-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 28px 24px 12px 24px; font-size: 20px; font-weight: 700;
+        }
+        .row-header-left { display: flex; align-items: center; gap: 12px; }
+        .row-header i { color: var(--primary); font-size: 20px; }
+        .scroll-buttons { display: flex; gap: 10px; }
+        .scroll-btn {
+            width: 36px; height: 36px; border-radius: 50%; background: var(--surface);
+            border: 1px solid var(--border); color: var(--primary); cursor: pointer;
+            display: flex; align-items: center; justify-content: center; transition: 0.2s;
+        }
+        .scroll-btn:active { background: var(--primary); color: black; }
+        /* Horizontal scroll */
+        .horizontal-scroll {
+            display: flex; overflow-x: auto; gap: 16px; padding: 0 24px 10px 24px;
+            scroll-snap-type: x mandatory; scrollbar-width: none; scroll-behavior: smooth;
+        }
+        .horizontal-scroll::-webkit-scrollbar { display: none; }
+        /* Card styles */
+        .card {
+            flex: 0 0 150px; position: relative; cursor: pointer; transition: transform 0.15s;
+            scroll-snap-align: start; border-radius: 16px; overflow: hidden;
+        }
+        .card:active { transform: scale(0.96); }
+        .card-img {
+            width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 16px;
+            box-shadow: 0 10px 20px -5px black; background: var(--surface);
+        }
+        .card-rating {
+            position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(4px); font-size: 12px; font-weight: 700; padding: 4px 8px;
+            border-radius: 40px; color: var(--primary); border: 1px solid rgba(255,215,0,0.3);
+        }
+        .card-title {
+            margin-top: 8px; font-size: 14px; font-weight: 600; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; padding: 0 4px;
+        }
+        .card-meta { font-size: 12px; color: var(--text-muted); padding: 0 4px; }
+        /* Grid card (for search results / genre view) */
+        .grid-card {
+            position: relative; cursor: pointer; transition: transform 0.15s;
+            border-radius: 16px; overflow: hidden;
+        }
+        .grid-card:active { transform: scale(0.96); }
+        .grid-card .card-img { aspect-ratio: 2/3; border-radius: 16px; }
+        /* Skeleton loader */
+        .skeleton {
+            background: linear-gradient(90deg, var(--surface) 25%, var(--surface-light) 50%, var(--surface) 75%);
+            background-size: 200% 100%; animation: shimmer 1.2s infinite; border-radius: 16px;
+        }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        .skeleton-card {
+            flex: 0 0 150px; height: 250px; border-radius: 16px; background: var(--surface);
+        }
+        /* Details page */
+        .details-page {
+            position: fixed; inset: 0; background: var(--bg); z-index: 2000; overflow-y: auto;
+            transform: translateX(100%); transition: transform 0.4s cubic-bezier(0.2,0.8,0.2,1);
+        }
+        .details-page.open { transform: translateX(0); }
+        .dp-header {
+            position: absolute; top: 20px; left: 20px; z-index: 2010;
+        }
+        .btn-back {
+            background: rgba(20,20,20,0.7); backdrop-filter: blur(16px); border: 1px solid var(--border);
+            color: white; width: 48px; height: 48px; border-radius: 50%; font-size: 20px;
+            display: flex; align-items: center; justify-content: center; cursor: pointer;
+            transition: 0.2s; box-shadow: 0 8px 20px rgba(0,0,0,0.6);
+        }
+        .btn-back:active { transform: scale(0.9); border-color: var(--primary); }
+        .dp-poster-bg {
+            width: 100%; height: 420px; background-size: cover; background-position: center 20%;
+            position: relative;
+        }
+        .dp-poster-bg::after {
+            content: ''; position: absolute; inset: 0;
+            background: linear-gradient(to top, var(--bg) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+        }
+        .dp-info { padding: 28px; margin-top: -140px; position: relative; z-index: 2005; }
+        .dp-title {
+            font-size: 40px; font-weight: 800; line-height: 1.1; margin-bottom: 24px;
+            text-shadow: 0 8px 30px black; background: linear-gradient(135deg, #fff, #ffefb0);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .rich-info-box {
+            background: rgba(20,20,20,0.7); backdrop-filter: blur(20px); border: 1px solid var(--border);
+            border-radius: 28px; padding: 24px; margin-bottom: 28px; box-shadow: 0 30px 50px -20px black;
+        }
+        .rich-info-box > div {
+            margin-bottom: 14px; font-size: 15px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+        }
+        .rich-info-box span { color: var(--text-muted); font-weight: 500; min-width: 80px; }
+        .rich-info-box label { font-weight: 700; color: var(--primary); }
+        .rich-desc { margin-top: 18px; font-size: 14px; color: var(--text-muted); line-height: 1.7; border-top: 1px dashed var(--border); padding-top: 18px; }
+        /* Cast */
+        .cast-list { display: flex; gap: 15px; overflow-x: auto; padding: 10px 0 20px; }
+        .cast-item { flex: 0 0 80px; text-align: center; }
+        .cast-item img { width: 70px; height: 70px; border-radius: 50%; object-fit: cover; border: 2px solid var(--primary); }
+        .cast-item span { display: block; font-size: 12px; margin-top: 5px; color: var(--text-muted); }
+        /* Buttons */
+        .btn-trailer {
+            width: 100%; padding: 18px; border-radius: 60px; border: none; font-size: 17px;
+            font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 12px;
+            cursor: pointer; background: linear-gradient(145deg, #ffd700, #b8860b); color: #0f0f0f;
+            box-shadow: 0 15px 30px -5px rgba(255,215,0,0.5); margin-bottom: 28px; transition: 0.2s;
+        }
+        .btn-trailer:active { transform: scale(0.97); box-shadow: 0 8px 20px gold; }
+        .btn-request {
+            width: 100%; padding: 18px; border-radius: 60px; border: 1px solid var(--border);
+            font-size: 17px; font-weight: 800; display: flex; align-items: center; justify-content: center;
+            gap: 12px; cursor: pointer; background: var(--surface); color: var(--primary); margin-bottom: 20px;
+        }
+        .dl-section { margin-top: 25px; }
+        .dl-heading { font-size: 13px; font-weight: 800; color: var(--primary); text-align: center; margin-bottom: 20px; letter-spacing: 2px; opacity: 0.9; }
+        .dl-btn {
+            width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 20px;
+            padding: 16px 20px; margin-bottom: 12px; display: flex; justify-content: space-between;
+            align-items: center; color: white; font-size: 15px; font-weight: 600; cursor: pointer;
+            transition: 0.2s; box-shadow: 0 6px 14px rgba(0,0,0,0.4);
+        }
+        .dl-btn:active { border-color: var(--primary); transform: scale(0.98); background: var(--surface-light); }
+        .quality-text { display: flex; align-items: center; gap: 12px; }
+        .file-size { color: var(--text-muted); font-size: 13px; font-weight: 500; }
+        .action {
+            color: #0f0f0f; font-size: 13px; font-weight: 800; background: var(--primary);
+            padding: 8px 18px; border-radius: 40px; box-shadow: 0 0 15px gold;
+        }
+        /* Trailer modal */
+        .trailer-modal {
+            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 3000;
+            align-items: center; justify-content: center; flex-direction: column; padding: 20px;
+            backdrop-filter: blur(20px);
+        }
+        .trailer-modal.active { display: flex; }
+        .trailer-wrapper {
+            width: 100%; max-width: 900px; background: black; border-radius: 24px; overflow: hidden;
+            border: 2px solid gold; box-shadow: 0 0 40px gold;
+        }
+        .trailer-modal iframe { width: 100%; aspect-ratio: 16/9; border: none; display: block; }
+        .close-trailer-btn {
+            margin-top: 25px; background: rgba(255,255,255,0.05); border: 1px solid gold; color: gold;
+            padding: 14px 40px; border-radius: 60px; font-weight: 700; font-size: 16px; cursor: pointer;
+            transition: 0.2s;
+        }
+        .close-trailer-btn:active { background: gold; color: black; }
+        /* Toast */
+        .toast {
+            position: fixed; bottom: -60px; left: 50%; transform: translateX(-50%);
+            background: rgba(20,20,20,0.9); backdrop-filter: blur(20px); border: 1px solid gold;
+            color: gold; padding: 14px 30px; border-radius: 60px; font-size: 15px; font-weight: 700;
+            transition: bottom 0.3s; z-index: 3000; box-shadow: 0 10px 30px gold; white-space: nowrap;
+        }
+        .toast.show { bottom: 30px; }
+        .loader { text-align: center; padding: 40px; color: var(--primary); font-size: 16px; }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">FlimfyBox</div>
+        <i class="fas fa-crown crown-icon"></i>
+    </header>
+    <div class="search-section">
+        <div class="search-box">
+            <i class="fas fa-search"></i>
+            <input type="text" id="searchInput" placeholder="Search movies, web series...">
         </div>
+    </div>
+    <div class="genre-scroll" id="genreContainer"></div>
 
-        <div class="genre-scroll" id="genreContainer"></div>
-
-        <div id="mainContent">
-            <div class="hero-slider" id="heroSlider">
-                <div class="hero-overlay">
-                    <div class="hero-info">
-                        <h2 id="heroTitle">Loading...</h2>
-                        <span id="heroMeta">✦ Premium Quality ✦</span>
-                    </div>
-                </div>
-            </div>
-
-            <div id="filteredContent">
-                <div class="movie-row-container" id="recentRow">
-                    <div class="row-header"><i class="fas fa-bolt"></i> Trending Now</div>
-                    <div class="horizontal-scroll" id="recentScroll"><div class="loader">Loading...</div></div>
-                </div>
-
-                <div class="movie-row-container" id="bollywoodRow">
-                    <div class="row-header"><i class="fas fa-film"></i> Bollywood Gold</div>
-                    <div class="horizontal-scroll" id="bollywoodScroll"></div>
-                </div>
-
-                <div class="movie-row-container" id="hollywoodRow">
-                    <div class="row-header"><i class="fas fa-globe"></i> Hollywood Hits</div>
-                    <div class="horizontal-scroll" id="hollywoodScroll"></div>
-                </div>
-
-                <div class="movie-row-container" style="margin-top: 40px;">
-                    <div class="row-header"><i class="fas fa-layer-group"></i> Explore All</div>
-                    <div class="movie-grid" id="moreGrid"></div>
+    <div id="mainContent">
+        <div class="hero-slider" id="heroSlider">
+            <div class="hero-overlay">
+                <div class="hero-info">
+                    <h2 id="heroTitle">Loading...</h2>
+                    <span id="heroMeta">✨ Premium Collection</span>
                 </div>
             </div>
         </div>
 
-        <div id="searchResultsContent" style="display: none;">
-            <div class="movie-row-container">
-                <div class="row-header" id="searchHeader"><i class="fas fa-search"></i> Search Results</div>
-                <div class="movie-grid" id="searchGrid"></div>
-            </div>
-        </div>
-
-        <div id="detailsPage" class="details-page">
-            <div class="dp-header">
-                <button class="btn-back" onclick="closeDetails()"><i class="fas fa-chevron-left"></i></button>
-            </div>
-            
-            <div class="dp-layout">
-                <div class="dp-poster-bg" id="dpImage"></div>
-                <div class="dp-info">
-                    <h1 class="dp-title" id="dpTitle">Title</h1>
-                    
-                    <div class="rich-info-box">
-                        <div><span>IMDb</span> <label id="dpRating" style="color:gold;">—</label></div>
-                        <div><span>Genre</span> <label id="dpGenre">—</label></div>
-                        <div><span>Stars</span> <label id="dpActors">Fetching...</label></div>
-                        <div><span>Audio</span> <label>Dual Audio [Hindi & English] + ESubs</label></div>
-                        <div class="rich-desc" id="dpDesc">Loading story details...</div>
-                    </div>
-                    
-                    <div id="dpTrailerBtn"></div>
-                    
-                    <div class="dl-section" id="dpLinks"></div>
+        <!-- Rows -->
+        <div class="movie-row" id="rowTrending">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-fire"></i> Trending Now</div>
+                <div class="scroll-buttons">
+                    <div class="scroll-btn" onclick="scrollRow('trendingScroll', -400)"><i class="fas fa-chevron-left"></i></div>
+                    <div class="scroll-btn" onclick="scrollRow('trendingScroll', 400)"><i class="fas fa-chevron-right"></i></div>
                 </div>
             </div>
+            <div class="horizontal-scroll" id="trendingScroll"></div>
         </div>
 
-        <div class="trailer-modal" id="trailerModal">
-            <div class="trailer-wrapper">
-                <iframe id="trailerIframe" src="" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+        <div class="movie-row" id="rowBollywood">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-film"></i> Bollywood Gold</div>
+                <div class="scroll-buttons">
+                    <div class="scroll-btn" onclick="scrollRow('bollywoodScroll', -400)"><i class="fas fa-chevron-left"></i></div>
+                    <div class="scroll-btn" onclick="scrollRow('bollywoodScroll', 400)"><i class="fas fa-chevron-right"></i></div>
+                </div>
             </div>
-            <button class="close-trailer-btn" onclick="closeTrailer()"><i class="fas fa-times"></i> Close Trailer</button>
+            <div class="horizontal-scroll" id="bollywoodScroll"></div>
         </div>
 
-        <div class="toast" id="toast">✅ Request Sent!</div>
+        <div class="movie-row" id="rowHollywood">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-globe"></i> Hollywood Hits</div>
+                <div class="scroll-buttons">
+                    <div class="scroll-btn" onclick="scrollRow('hollywoodScroll', -400)"><i class="fas fa-chevron-left"></i></div>
+                    <div class="scroll-btn" onclick="scrollRow('hollywoodScroll', 400)"><i class="fas fa-chevron-right"></i></div>
+                </div>
+            </div>
+            <div class="horizontal-scroll" id="hollywoodScroll"></div>
+        </div>
 
-        <script>
-            const tg = window.Telegram.WebApp;
-            tg.expand();
-            tg.ready();
+        <div style="margin-top: 40px;">
+            <div class="row-header"><i class="fas fa-layer-group"></i> Explore All</div>
+            <div class="movie-grid" id="moreGrid"></div>
+        </div>
+    </div>
 
-            const API_URL = 'https://flimfybox-bot-yht0.onrender.com/api/movies';
-            const REQUEST_URL = 'https://flimfybox-bot-yht0.onrender.com/api/request';
-            const TMDB_KEY = '9fa44f5e9fbd41415df930ce5b81c4d7';
-            const BOT_USERNAME = 'FlimfyBox_Bot';
-            
-            let dbMoviesMap = {};
-            let tmdbMoviesMap = {};
-            let allMoviesList = [];
-            let sliderInterval;
-            let searchTimeout;
+    <div id="searchResultsContent" style="display: none;">
+        <div class="row-header" id="searchHeader"><i class="fas fa-search"></i> Search Results</div>
+        <div class="movie-grid" id="searchGrid"></div>
+    </div>
 
-            function showToast(msg) {
-                const toast = document.getElementById('toast');
-                toast.innerText = msg;
-                toast.classList.add('show');
-                setTimeout(() => toast.classList.remove('show'), 2500);
-            }
+    <!-- Details Page -->
+    <div class="details-page" id="detailsPage">
+        <div class="dp-header">
+            <button class="btn-back" onclick="closeDetails()"><i class="fas fa-chevron-left"></i></button>
+        </div>
+        <div class="dp-layout">
+            <div class="dp-poster-bg" id="dpImage"></div>
+            <div class="dp-info">
+                <h1 class="dp-title" id="dpTitle">Title</h1>
+                <div class="rich-info-box">
+                    <div><span>IMDb</span> <label id="dpRating" style="color:gold;">—</label></div>
+                    <div><span>Genre</span> <label id="dpGenre">—</label></div>
+                    <div><span>Cast</span> <label id="dpActors">Fetching...</label></div>
+                    <div><span>Audio</span> <label>Dual Audio [Hindi & English] + Subs</label></div>
+                    <div class="rich-desc" id="dpDesc">Loading story...</div>
+                </div>
+                <div id="castSection" class="cast-list"></div>
+                <div id="dpTrailerBtn"></div>
+                <div class="dl-section" id="dpLinks"></div>
+            </div>
+        </div>
+    </div>
 
-            async function initApp() {
-                try {
-                    const res = await fetch(API_URL);
-                    const data = await res.json();
-                    if (data.status === 'success') {
-                        allMoviesList = data.movies.filter(m => m.image);
-                        allMoviesList.forEach(m => dbMoviesMap[m.id] = m);
-                        setupHome(allMoviesList);
-                        renderGenrePills(allMoviesList);
-                    }
-                } catch(e) {
-                    document.getElementById('recentScroll').innerHTML = '<div class="loader">⚠️ Server Error</div>';
-                }
-            }
+    <!-- Trailer Modal -->
+    <div class="trailer-modal" id="trailerModal">
+        <div class="trailer-wrapper">
+            <iframe id="trailerIframe" src="" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+        </div>
+        <button class="close-trailer-btn" onclick="closeTrailer()"><i class="fas fa-times"></i> Close</button>
+    </div>
 
-            function renderGenrePills(movies) {
-                const genres = new Set();
-                movies.forEach(m => {
-                    if(m.genre && m.genre !== 'Unknown') {
-                        m.genre.split(',').forEach(g => genres.add(g.trim()));
-                    }
-                });
-                const genreArr = ['All', 'Action', 'Drama', 'Romance', 'Comedy', 'Thriller', 'Horror', 'Sci-Fi'];
-                
-                const genreHtml = genreArr.map(g => 
-                    `<div class="genre-pill ${g === 'All' ? 'active' : ''}" onclick="filterByGenre('${g}', this)">${g}</div>`
-                ).join('');
-                document.getElementById('genreContainer').innerHTML = genreHtml;
-            }
+    <div class="toast" id="toast">✅ Done!</div>
 
-            window.filterByGenre = function(genre, element) {
-                tg.HapticFeedback.selectionChanged();
-                document.querySelectorAll('.genre-pill').forEach(p => p.classList.remove('active'));
-                element.classList.add('active');
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.ready();
+        const BOT_USERNAME = "FlimfyBox_Bot"; // change if needed
 
-                if(genre === 'All') {
-                    setupHome(allMoviesList);
-                    document.getElementById('recentRow').style.display = 'block';
-                    document.getElementById('bollywoodRow').style.display = 'block';
-                    document.getElementById('hollywoodRow').style.display = 'block';
+        // State
+        let allMovies = [];
+        let tmdbMoviesMap = {};
+
+        // Utility
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 2500);
+        }
+
+        function scrollRow(elementId, amount) {
+            const el = document.getElementById(elementId);
+            if (el) el.scrollBy({ left: amount, behavior: 'smooth' });
+        }
+
+        // Load movies from API
+        async function loadMovies() {
+            try {
+                const res = await fetch('/api/movies');
+                const data = await res.json();
+                if (data.status === 'success') {
+                    allMovies = data.movies.filter(m => m.image);
+                    renderHome(allMovies);
+                    renderGenrePills(allMovies);
                 } else {
-                    const filtered = allMoviesList.filter(m => m.genre && m.genre.includes(genre));
-                    document.getElementById('recentRow').style.display = 'none';
-                    document.getElementById('bollywoodRow').style.display = 'none';
-                    document.getElementById('hollywoodRow').style.display = 'none';
-                    document.getElementById('moreGrid').innerHTML = generateCardsHTML(filtered, false, 'grid-card');
+                    console.error('API error:', data.message);
                 }
+            } catch (e) {
+                console.error('Fetch failed', e);
+                document.getElementById('trendingScroll').innerHTML = '<div class="loader">⚠️ Server error</div>';
             }
+        }
 
-            function setupHome(movies) {
-                let sIdx = 0;
+        function renderGenrePills(movies) {
+            const genreSet = new Set();
+            movies.forEach(m => {
+                if (m.genre && m.genre !== 'Unknown') {
+                    m.genre.split(',').forEach(g => genreSet.add(g.trim()));
+                }
+            });
+            const genres = ['All', ...Array.from(genreSet).slice(0, 10)];
+            const container = document.getElementById('genreContainer');
+            container.innerHTML = genres.map(g => `<div class="genre-pill ${g==='All'?'active':''}" onclick="filterByGenre('${g}', this)">${g}</div>`).join('');
+        }
+
+        window.filterByGenre = function(genre, el) {
+            document.querySelectorAll('.genre-pill').forEach(p => p.classList.remove('active'));
+            el.classList.add('active');
+            if (genre === 'All') {
+                renderHome(allMovies);
+            } else {
+                const filtered = allMovies.filter(m => m.genre && m.genre.includes(genre));
+                // hide rows and show only grid with filtered
+                document.querySelectorAll('.movie-row').forEach(r => r.style.display = 'none');
+                document.getElementById('moreGrid').innerHTML = renderCards(filtered, 'grid-card', false);
+            }
+        };
+
+        function renderHome(movies) {
+            // Hero slider
+            if (movies.length > 0) {
+                let idx = 0;
                 const top5 = movies.slice(0, 5);
-                const updateSlider = () => {
-                    const m = top5[sIdx];
+                const updateHero = () => {
+                    const m = top5[idx];
                     document.getElementById('heroSlider').style.backgroundImage = `url(${m.image})`;
                     document.getElementById('heroTitle').innerText = m.title;
                     document.getElementById('heroMeta').innerText = `${m.year} • ${m.category}`;
-                    sIdx = (sIdx + 1) % top5.length;
+                    idx = (idx + 1) % top5.length;
                 };
-                if(top5.length > 0) { updateSlider(); sliderInterval = setInterval(updateSlider, 4000); }
-
-                document.getElementById('recentScroll').innerHTML = generateCardsHTML(movies.slice(0, 15), false, 'card');
-                document.getElementById('bollywoodScroll').innerHTML = generateCardsHTML(movies.filter(m => m.category.toLowerCase().includes('bollywood')).slice(0, 15), false, 'card');
-                document.getElementById('hollywoodScroll').innerHTML = generateCardsHTML(movies.filter(m => m.category.toLowerCase().includes('hollywood')).slice(0, 15), false, 'card');
-                document.getElementById('moreGrid').innerHTML = generateCardsHTML(movies.slice(15, 80), false, 'grid-card');
+                updateHero();
+                setInterval(updateHero, 5000);
             }
 
-            function generateCardsHTML(movies, isTMDB = false, cardClass = 'card') {
-                if (movies.length === 0) return '<div style="color:var(--text-muted); padding:10px;">No movies found.</div>';
-                return movies.map(m => {
-                    const badge = isTMDB ? `<div class="card-rating" style="color:white; border-color:var(--primary); background:var(--primary);">Request</div>` : `<div class="card-rating">⭐ ${m.rating || 'N/A'}</div>`;
-                    return `
-                        <div class="${cardClass}" onclick="openDetails('${m.id}', ${isTMDB})">
-                            <img src="${m.image}" class="card-img" loading="lazy" onerror="this.src='https://via.placeholder.com/300x450?text=No+Poster'">
-                            ${badge}
-                            <div class="card-title">${m.title || m.name}</div>
-                            <div class="card-meta">${m.year || ''}</div>
-                        </div>
-                    `;
-                }).join('');
+            // Trending (first 15)
+            document.getElementById('trendingScroll').innerHTML = renderCards(movies.slice(0, 15), 'card', false);
+            // Bollywood
+            const bolly = movies.filter(m => m.category?.toLowerCase().includes('bollywood')).slice(0, 15);
+            document.getElementById('bollywoodScroll').innerHTML = renderCards(bolly, 'card', false);
+            // Hollywood
+            const holy = movies.filter(m => m.category?.toLowerCase().includes('hollywood')).slice(0, 15);
+            document.getElementById('hollywoodScroll').innerHTML = renderCards(holy, 'card', false);
+            // More grid
+            document.getElementById('moreGrid').innerHTML = renderCards(movies.slice(15, 80), 'grid-card', false);
+        }
+
+        function renderCards(movies, cardClass = 'card', isTMDB = false) {
+            if (!movies.length) return '<div style="color:var(--text-muted); padding:10px;">No movies</div>';
+            return movies.map(m => {
+                const rating = m.rating && m.rating !== 'N/A' ? `⭐ ${m.rating}` : '';
+                const badge = isTMDB ? '<div class="card-rating" style="color:white; background:var(--primary);">Request</div>' : (rating ? `<div class="card-rating">${rating}</div>` : '');
+                return `
+                    <div class="${cardClass}" onclick="openDetails('${m.id}', ${isTMDB})">
+                        <img src="${m.image}" class="card-img" loading="lazy" onerror="this.src='https://via.placeholder.com/300x450?text=No+Poster'">
+                        ${badge}
+                        <div class="card-title">${m.title}</div>
+                        <div class="card-meta">${m.year || ''}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Search
+        let searchTimeout;
+        document.getElementById('searchInput').addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            const q = e.target.value.trim();
+            const main = document.getElementById('mainContent');
+            const searchRes = document.getElementById('searchResultsContent');
+            const genreCont = document.getElementById('genreContainer');
+            if (!q) {
+                main.style.display = 'block';
+                genreCont.style.display = 'flex';
+                searchRes.style.display = 'none';
+                return;
             }
+            main.style.display = 'none';
+            genreCont.style.display = 'none';
+            searchRes.style.display = 'block';
+            document.getElementById('searchGrid').innerHTML = '<div class="loader">Searching...</div>';
 
-            document.getElementById('searchInput').addEventListener('input', (e) => {
-                clearTimeout(searchTimeout);
-                const term = e.target.value.toLowerCase().trim();
-                
-                const mainContent = document.getElementById('mainContent');
-                const genreContainer = document.getElementById('genreContainer');
-                const searchContent = document.getElementById('searchResultsContent');
-                const searchGrid = document.getElementById('searchGrid');
-                const searchHeader = document.getElementById('searchHeader');
-
-                if (term === '') {
-                    mainContent.style.display = 'block';
-                    genreContainer.style.display = 'flex';
-                    searchContent.style.display = 'none';
-                    return;
-                }
-
-                mainContent.style.display = 'none';
-                genreContainer.style.display = 'none';
-                searchContent.style.display = 'block';
-                
-                const localResults = allMoviesList.filter(m => m.title.toLowerCase().includes(term));
-                
-                if (localResults.length > 0) {
-                    searchHeader.innerHTML = `<i class="fas fa-check-circle" style="color: #10b981;"></i> In Database`;
-                    searchGrid.innerHTML = generateCardsHTML(localResults, false, 'grid-card');
-                } else {
-                    searchHeader.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Global Search...`;
-                    searchGrid.innerHTML = '<div class="loader">Fetching from TMDB...</div>';
-                    
-                    searchTimeout = setTimeout(async () => {
-                        const currentTerm = document.getElementById('searchInput').value.toLowerCase().trim();
-                        if(currentTerm !== term) return; 
-                        
-                        try {
-                            const res = await fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_KEY}&query=${encodeURIComponent(term)}`);
-                            const tmdbData = await res.json();
-                            const results = tmdbData.results.filter(item => item.poster_path && (item.media_type === 'movie' || item.media_type === 'tv'));
-                            
-                            if(results.length > 0) {
-                                searchHeader.innerHTML = `<i class="fas fa-cloud-download-alt" style="color:var(--primary);"></i> Tap to Request`;
-                                const formattedTMDB = results.map(item => {
-                                    const obj = {
-                                        id: 'tmdb_' + item.id,
-                                        title: item.title || item.name,
-                                        year: (item.release_date || item.first_air_date || '').substring(0,4),
-                                        image: `https://image.tmdb.org/t/p/w500${item.poster_path}`,
-                                        category: item.media_type === 'tv' ? 'Web Series' : 'Movie',
-                                        rating: item.vote_average ? item.vote_average.toFixed(1) : 'N/A',
-                                        description: item.overview || "Story details are not available.",
-                                        genre: "Action, Drama",
-                                        backdrop: item.backdrop_path ? `https://image.tmdb.org/t/p/w1280${item.backdrop_path}` : null
-                                    };
-                                    tmdbMoviesMap[obj.id] = obj; 
-                                    return obj;
-                                });
-                                searchGrid.innerHTML = generateCardsHTML(formattedTMDB, true, 'grid-card');
-                            } else {
-                                searchHeader.innerHTML = `No Results`;
-                                searchGrid.innerHTML = '<div class="loader">Nothing found anywhere!</div>';
-                            }
-                        } catch(err) {
-                            searchGrid.innerHTML = '<div class="loader">API Error</div>';
-                        }
-                    }, 800);
-                }
-            });
-
-            // YOUTUBE IN-APP PLAYER
-            window.playTrailer = function(videoId) {
-                tg.HapticFeedback.impactOccurred('medium');
-                const modal = document.getElementById('trailerModal');
-                const iframe = document.getElementById('trailerIframe');
-                iframe.src = `https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0&modestbranding=1`;
-                modal.classList.add('active');
-            };
-
-            window.closeTrailer = function() {
-                const modal = document.getElementById('trailerModal');
-                const iframe = document.getElementById('trailerIframe');
-                iframe.src = '';
-                modal.classList.remove('active');
-            };
-
-            window.openDetails = function(id, isTMDB) {
-                const movie = isTMDB ? tmdbMoviesMap[id] : dbMoviesMap[id];
-                if(!movie) return;
-
-                const title = movie.title || movie.name;
-                const backdropUrl = movie.backdrop ? movie.backdrop : movie.image;
-                document.getElementById('dpImage').style.backgroundImage = `url(${backdropUrl})`;
-                document.getElementById('dpTitle').innerText = title;
-                document.getElementById('dpRating').innerText = `${movie.rating || 'N/A'} / 10`;
-                document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
-                document.getElementById('dpDesc').innerText = movie.description;
-                
-                document.getElementById('dpActors').innerText = "Fetching...";
-                
-                fetch(`https://api.themoviedb.org/3/search/multi?api_key=${TMDB_KEY}&query=${encodeURIComponent(title)}`)
-                    .then(res => res.json())
-                    .then(data => {
-                        if(data.results && data.results.length > 0) {
-                            const item = data.results[0];
-                            const type = item.media_type === 'tv' ? 'tv' : 'movie';
-                            
-                            fetch(`https://api.themoviedb.org/3/${type}/${item.id}/credits?api_key=${TMDB_KEY}`)
-                            .then(r => r.json())
-                            .then(d => {
-                                if(d.cast && d.cast.length > 0) {
-                                    document.getElementById('dpActors').innerText = d.cast.slice(0, 3).map(c => c.name).join(', ');
-                                } else { document.getElementById('dpActors').innerText = "N/A"; }
-                            });
-
-                            fetch(`https://api.themoviedb.org/3/${type}/${item.id}/videos?api_key=${TMDB_KEY}`)
-                            .then(r => r.json())
-                            .then(d => {
-                                const trailer = d.results?.find(v => v.type === 'Trailer' && v.site === 'YouTube');
-                                if(trailer) {
-                                    document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="playTrailer('${trailer.key}')"><i class="fab fa-youtube"></i> Watch Official Trailer</button>`;
-                                } else {
-                                    document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
-                                }
-                            });
-                        }
-                    }).catch(() => {
-                        document.getElementById('dpActors').innerText = "N/A";
-                        document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
-                    });
-
-                const linksBox = document.getElementById('dpLinks');
-                
-                if (isTMDB) {
-                    linksBox.innerHTML = `
-                        <button class="btn-request" onclick="requestSilent('${title}')">
-                            <i class="fas fa-hand-paper"></i> Request This Title
-                        </button>
-                        <p style="text-align:center; color:var(--text-muted); font-size:12px; margin-top:10px;">Not available in database yet.</p>
-                    `;
-                } else {
-                    if (movie.files && movie.files.length > 0) {
-                        let btnsHTML = `<div class="dl-heading">AVAILABLE QUALITIES</div>`;
-                        movie.files.forEach(f => {
-                            const icon = f.has_file ? '📁' : '🔗';
-                            const sizeTxt = f.size ? f.size : 'N/A';
-                            btnsHTML += `
-                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
-                                <span class="quality-text">${icon} ${f.quality} <span class="file-size">[${sizeTxt}]</span></span>
-                                <span class="action"><i class="fas fa-download"></i> Get</span>
-                            </button>`;
-                        });
-                        linksBox.innerHTML = btnsHTML;
-                    } else {
-                        linksBox.innerHTML = `
-                            <div class="dl-heading">DOWNLOAD MOVIE</div>
-                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
-                                <span class="quality-text">📁 1080p Full HD</span>
-                                <span class="action">Get</span>
-                            </button>
-                            <button class="dl-btn" onclick="downloadBot(${movie.id})">
-                                <span class="quality-text">📁 720p HD</span>
-                                <span class="action">Get</span>
-                            </button>
-                        `;
-                    }
-                }
-                document.getElementById('detailsPage').classList.add('open');
-            };
-
-            window.closeDetails = function() {
-                document.getElementById('detailsPage').classList.remove('open');
-            };
-
-            window.downloadBot = function(id) {
-                tg.HapticFeedback.impactOccurred('heavy');
-                try { tg.sendData("movie_" + id); } catch(e) {}
-                setTimeout(() => {
-                    tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=movie_${id}`);
-                }, 150);
-            };
-
-            window.requestSilent = async function(title) {
-                tg.HapticFeedback.notificationOccurred('success');
-                closeDetails();
-                showToast("⏳ Requesting...");
-                
-                const user = tg.initDataUnsafe?.user || {id: 0, username: 'Unknown', first_name: 'WebApp'};
+            searchTimeout = setTimeout(async () => {
                 try {
-                    const res = await fetch(REQUEST_URL, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({title: title, user_id: user.id, username: user.username, first_name: user.first_name})
-                    });
-                    if(res.ok) showToast("✅ Request Sent Successfully!");
-                    else showToast("❌ Failed to request.");
-                } catch(e) {
-                    showToast("❌ System Error.");
+                    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                    const data = await res.json();
+                    if (data.status === 'success') {
+                        const results = data.results;
+                        const local = results.filter(r => r.source === 'local');
+                        const tmdb = results.filter(r => r.source === 'tmdb');
+                        // store tmdb in map
+                        tmdb.forEach(t => tmdbMoviesMap[t.id] = t);
+                        document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
+                        document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
+                    } else {
+                        document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
+                    }
+                } catch (err) {
+                    document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
                 }
-            };
+            }, 500);
+        });
 
-            initApp();
-        </script>
-    </body>
-    </html>
-    """
-    return html_content
+        // Details
+        window.openDetails = function(id, isTMDB) {
+            const movie = isTMDB ? tmdbMoviesMap[id] : allMovies.find(m => m.id == id);
+            if (!movie) return;
+            if (isTMDB) {
+                // show request button
+                document.getElementById('dpImage').style.backgroundImage = `url(${movie.image})`;
+                document.getElementById('dpTitle').innerText = movie.title;
+                document.getElementById('dpRating').innerText = movie.rating || 'N/A';
+                document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
+                document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
+                document.getElementById('castSection').innerHTML = '';
+                document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-request" onclick="requestMovie('${movie.title}')"><i class="fas fa-hand-paper"></i> Request This Title</button>`;
+                document.getElementById('dpLinks').innerHTML = '';
+                document.getElementById('detailsPage').classList.add('open');
+                return;
+            }
 
-# ... (rest of your Flask app remains exactly the same) ...
+            // Fetch full details
+            fetch(`/api/movie/${id}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        const m = data.movie;
+                        document.getElementById('dpImage').style.backgroundImage = `url(${m.image})`;
+                        document.getElementById('dpTitle').innerText = m.title;
+                        document.getElementById('dpRating').innerText = m.rating + '/10';
+                        document.getElementById('dpGenre').innerText = m.genre;
+                        document.getElementById('dpDesc').innerText = m.description;
+                        // Cast
+                        if (m.cast && m.cast.length) {
+                            let castHtml = '<div class="cast-list">';
+                            m.cast.forEach(c => {
+                                castHtml += `<div class="cast-item"><img src="${c.profile || 'https://via.placeholder.com/70'}" alt="${c.name}"><span>${c.name}</span></div>`;
+                            });
+                            castHtml += '</div>';
+                            document.getElementById('castSection').innerHTML = castHtml;
+                        } else {
+                            document.getElementById('castSection').innerHTML = '';
+                        }
+                        // Trailer button
+                        if (m.trailer_key) {
+                            document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="playTrailer('${m.trailer_key}')"><i class="fab fa-youtube"></i> Watch Trailer</button>`;
+                        } else {
+                            document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(m.title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
+                        }
+                        // Download links
+                        if (m.files && m.files.length) {
+                            let links = '<div class="dl-heading">AVAILABLE QUALITIES</div>';
+                            m.files.forEach(f => {
+                                links += `
+                                    <button class="dl-btn" onclick="downloadMovie(${m.id})">
+                                        <span class="quality-text">📁 ${f.quality} <span class="file-size">[${f.size || 'N/A'}]</span></span>
+                                        <span class="action">Get</span>
+                                    </button>
+                                `;
+                            });
+                            document.getElementById('dpLinks').innerHTML = links;
+                        } else {
+                            document.getElementById('dpLinks').innerHTML = `
+                                <div class="dl-heading">DOWNLOAD</div>
+                                <button class="dl-btn" onclick="downloadMovie(${m.id})">
+                                    <span class="quality-text">📁 1080p Full HD</span>
+                                    <span class="action">Get</span>
+                                </button>
+                            `;
+                        }
+                        document.getElementById('detailsPage').classList.add('open');
+                    }
+                });
+        };
+
+        window.closeDetails = function() {
+            document.getElementById('detailsPage').classList.remove('open');
+        };
+
+        window.downloadMovie = function(id) {
+            tg.HapticFeedback.impactOccurred('heavy');
+            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=movie_${id}`);
+        };
+
+        window.playTrailer = function(key) {
+            document.getElementById('trailerIframe').src = `https://www.youtube.com/embed/${key}?autoplay=1&rel=0`;
+            document.getElementById('trailerModal').classList.add('active');
+        };
+
+        window.closeTrailer = function() {
+            document.getElementById('trailerIframe').src = '';
+            document.getElementById('trailerModal').classList.remove('active');
+        };
+
+        window.requestMovie = function(title) {
+            tg.HapticFeedback.notificationOccurred('success');
+            showToast('⏳ Requesting...');
+            const user = tg.initDataUnsafe?.user || {id: 0, username: 'webapp', first_name: 'User'};
+            fetch('/api/request', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title, user_id: user.id, username: user.username, first_name: user.first_name})
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.status === 'success') showToast('✅ Request sent!');
+                else showToast('❌ Failed');
+            })
+            .catch(() => showToast('❌ Error'));
+        };
+
+        // Start
+        loadMovies();
+    </script>
+</body>
+</html>"""
+    return html
+
+# ==================== RUN FLASK ====================
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    flask_app.secret_key = os.environ.get('FLASK_SECRET_KEY', None) or os.urandom(24)
+    flask_app.run(host='0.0.0.0', port=port, debug=False)
 
-    try:
-        from admin_views import admin as admin_blueprint
-        flask_app.register_blueprint(admin_blueprint)
-    except Exception as e:
-        logging.error(f"Blueprint Error: {e}")
-
-    flask_app.run(host='0.0.0.0', port=port)
+# Uncomment the following lines only if you want to run Flask standalone (not recommended inside main)
+# if __name__ == '__main__':
+#     run_flask()
 
 # ==================== BATCH UPLOAD HANDLERS (OLD - TO BE REMOVED) ====================
 
