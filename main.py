@@ -4028,106 +4028,116 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.args = [imdb_id]
     await batch_add_command(update, context)
 
+async def upload_image_to_telegraph(bot, file_id):
+    """Telegram image ko Telegraph par upload karke public URL deta hai."""
+    try:
+        # Telegram se file get karo
+        tg_file = await bot.get_file(file_id)
+        image_bytes = await tg_file.download_as_bytearray()
+        
+        # Telegraph API par bhej do
+        res = requests.post(
+            'https://telegra.ph/upload',
+            files={'file': ('poster.jpg', image_bytes, 'image/jpeg')}
+        )
+        if res.status_code == 200:
+            return "https://telegra.ph" + res.json()[0]['src']
+    except Exception as e:
+        logger.error(f"Telegraph Upload Error: {e}")
+    return None
+
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
 
     if not context.args: 
-        await update.message.reply_text("❌ Usage: `/batch Name`")
+        await update.message.reply_text(
+            "❌ **Galat Format!** Aise use karein:\n\n"
+            "`/batch Movie Name, Year, Language, Genre, Category`\n\n"
+            "**Example:**\n"
+            "`/batch Pink Bra, 2023, Hindi, Adult, Web Series`", 
+            parse_mode='Markdown'
+        )
         return
 
-    # 1. Loading Message
-    status_msg = await update.message.reply_text("⏳ Checking database & metadata...", parse_mode='Markdown')
+    # 1. Parsing Custom Format
+    raw_text = " ".join(context.args)
+    parts = [p.strip() for p in raw_text.split(',')]
     
-    query = " ".join(context.args).strip()
+    title = parts[0] if len(parts) > 0 else "Unknown Title"
+    year = parts[1] if len(parts) > 1 else ""
+    language = parts[2] if len(parts) > 2 else "Hindi"
+    genre = parts[3] if len(parts) > 3 else "Adult, Drama"
+    category = parts[4] if len(parts) > 4 else "Web Series"
     
-    # --- YAHAN CHANGE KIYA HAI (Smart Logic) ---
-    # Pehle metadata dhundo
-    metadata = await run_async(fetch_movie_metadata, query)
-    
-    if metadata:
-        # Agar IMDb/OMDb par mil gayi, to Original Data use karo
-        title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
-    else:
-        # Agar IMDb par NAHI mili, to Error mat do.
-        # Jo naam user ne diya hai, wahi use karo (Manual Mode)
-        title = query
-        year = 0
-        poster_url = None
-        genre = "Unknown"
-        imdb_id = None
-        rating = "N/A"
-        plot = "Custom Added"
-        category = "Custom"
-    # -------------------------------------------
-    
+    # Custom post me rating aur plot default daal dete hain
+    rating = "N/A"
+    plot = "Watch exclusive content on FlimfyBox Premium."
+    poster_url = None # Ye baad me photo bhejne par update hoga
+    imdb_id = None
+
+    status_msg = await update.message.reply_text(f"⏳ Saving '{title}' to Database...", parse_mode='Markdown')
+
     conn = get_db_connection()
     if not conn: return
     
     try:
         cur = conn.cursor()
         
-        # 2. Movie Data Insert/Update (Ye Logic same rahega)
-        # Agar movie pehle se hai (ON CONFLICT), to bas update karega, naya nahi banayega
+        # 2. Insert or Update Movie
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category) 
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s) 
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (title) DO UPDATE 
-            SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id), -- Purana ID safe rakho agar naya NULL hai
-                poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
-                year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END
+            SET year = EXCLUDED.year, genre = EXCLUDED.genre, category = EXCLUDED.category, language = EXCLUDED.language
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category)
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, language)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
 
-        # 3. Check for OLD FILES
+        # Check existing files
         cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
         file_count = cur.fetchone()[0]
-        
         cur.close()
-        close_db_connection(conn)
 
-        # 4. Activate Batch Session
+        # 3. Activate Batch Session
         BATCH_SESSION.update({
             'active': True,
             'movie_id': movie_id,
             'movie_title': title,
             'file_count': 0,
-            'admin_id': user_id
+            'admin_id': user_id,
+            'language': language,
+            'category': category
         })
 
-        # 5. Message Prepare Karo
         msg_text = (
-            f"🎬 **Batch Started:** {title}\n"
-            f"📂 **Existing Files in DB:** {file_count}\n"
+            f"✅ **Batch Custom Mode Started!**\n\n"
+            f"🎬 **Title:** {title}\n"
+            f"📅 **Year:** {year}\n"
+            f"🎭 **Genre:** {genre}\n"
+            f"🗣️ **Language:** {language}\n"
+            f"🏷️ **Category:** {category}\n\n"
+            f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
+            f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
+            f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
         )
-        
-        if not metadata:
-            msg_text += "⚠️ *Metadata not found (Custom Mode ON)*\n"
 
-        msg_text += "\n🚀 **Send NEW files now!** (Bot is listening...)"
-
-        # 6. Delete Button Logic & Cancel Button
         keyboard = []
         if file_count > 0:
-            msg_text += "\n\n⚠️ *Purani files mili hain. Delete button niche hai:* 👇"
-            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files (Clean Slate)", callback_data=f"clearfiles_{movie_id}")])
-            
+            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
         keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        # 7. Final Message Send
-        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=reply_markup)
+        
+        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
         logger.error(f"Batch Error: {e}")
         await status_msg.edit_text(f"❌ DB Error: {e}")
+    finally:
         if conn: close_db_connection(conn)
-
 
 # ============================================================================
 # 🚀 SUPER BATCH SYSTEM (Smart Grouping + Auto Post)
@@ -4413,12 +4423,40 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
-    if BATCH_18_SESSION.get('active'): return
-    
-    # 👇👇👇 NAYI LINE: Agar Super Batch ON hai, to normal batch shant rahega
     if SUPER_BATCH_SESSION.get('active'): return
-    # 👆👆👆
+    if BATCH_18_SESSION.get('active'): return
 
+    message = update.effective_message
+
+    # ==========================================
+    # 🖼️ CUSTOM POSTER UPLOAD LOGIC
+    # ==========================================
+    if BATCH_SESSION.get('active') and message.photo:
+        status_msg = await message.reply_text("🖼️ Image received! Uploading poster to cloud...")
+        photo_file_id = message.photo[-1].file_id
+        
+        # Telegraph par upload karke public URL lo
+        public_url = await upload_image_to_telegraph(context.bot, photo_file_id)
+        
+        if public_url:
+            movie_id = BATCH_SESSION['movie_id']
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE movies SET poster_url = %s WHERE id = %s", (public_url, movie_id))
+                conn.commit()
+                cur.close()
+                close_db_connection(conn)
+            
+            await status_msg.edit_text("✅ **Poster Successfully Updated!**\nAb aap files bhej sakte hain ya `/done` kar sakte hain.", parse_mode='Markdown')
+        else:
+            await status_msg.edit_text("❌ Poster upload fail ho gaya. Kripya image dobara bhejein.")
+        return # Yahan ruk jao taaki image ko file ki tarah save na kare
+        
+    # --- ISKE NEECHE TUMHARA PURANA PHASE 2 WALA CODE AAYEGA JO FILES SAVE KARTA HAI ---
+    if not (message.document or message.video): return
+    
+    # ... (purana file save aur forward logic) ...
     message = update.effective_message
     if not (message.document or message.video or message.photo): return
 
