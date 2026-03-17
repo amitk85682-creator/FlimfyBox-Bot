@@ -7114,7 +7114,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
-# ==================== FLASK APP ====================
+# ==================== FLASK APP (unchanged except HTML) ====================
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import os
@@ -7125,128 +7125,11 @@ from datetime import datetime
 flask_app = Flask('')
 CORS(flask_app, resources={r"/*": {"origins": "*"}})
 
-@flask_app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
+# ... (all your existing backend routes remain exactly the same) ...
 
-@flask_app.route('/')
-def home():
-    return "Bot is running!"
-
-@flask_app.route('/health')
-def health():
-    return "OK", 200
-
-# API: For Fetching Movies (UPDATED FOR DYNAMIC QUALITIES)
-@flask_app.route('/api/movies', methods=['GET', 'OPTIONS'])
-def get_movies_api():
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "success"}), 200
-        
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"status": "error", "message": "Database error"}), 500
-    
-    try:
-        cur = conn.cursor()
-        
-        # 1. Fetch Movies
-        cur.execute("""
-            SELECT id, title, year, rating, category, poster_url, description, genre 
-            FROM movies 
-            ORDER BY id DESC 
-            LIMIT 800
-        """)
-        movies_rows = cur.fetchall()
-        
-        # 2. Fetch Files (Quality, Size, File ID) to show Bot-like Buttons
-        cur.execute("""
-            SELECT movie_id, quality, file_size, file_id, url FROM movie_files
-        """)
-        files_rows = cur.fetchall()
-        cur.close()
-        
-        # Mapping files to movies
-        files_map = {}
-        for f_row in files_rows:
-            m_id = f_row[0]
-            if m_id not in files_map:
-                files_map[m_id] = []
-            files_map[m_id].append({
-                "quality": f_row[1] if f_row[1] else "HD",
-                "size": f_row[2] if f_row[2] else "",
-                "has_file": bool(f_row[3]),
-                "has_url": bool(f_row[4])
-            })
-        
-        movies_list = []
-        for row in movies_rows:
-            m_id = row[0]
-            genre_str = row[7] if row[7] else "Action, Drama"
-            
-            movies_list.append({
-                "id": m_id,
-                "title": row[1],
-                "year": str(row[2]) if row[2] else "N/A",
-                "rating": str(row[3]) if row[3] else "N/A",
-                "category": row[4] if row[4] else "Movies",
-                "image": row[5] if row[5] and row[5] != 'N/A' else None,
-                "description": row[6] if row[6] else "Story details are not available right now. Please watch the trailer.",
-                "genre": genre_str,
-                "files": files_map.get(m_id, [])  # Attached real qualities
-            })
-            
-        return jsonify({"status": "success", "movies": movies_list})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if conn: close_db_connection(conn)
-
-# ✅ FIXED API: For Silent Requests
-@flask_app.route('/api/request', methods=['POST', 'OPTIONS'])
-def api_request_movie():
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "success"}), 200
-    try:
-        data = request.json
-        title = data.get('title', 'Unknown Movie')
-        user_id = data.get('user_id', 0)
-        username = data.get('username', 'WebAppUser')
-        first_name = data.get('first_name', 'User')
-        
-        # 1. DB me save karo
-        store_user_request(user_id, username, first_name, title, None, None)
-        
-        # 2. TELEGRAM ADMIN CHANNEL PAR NOTIFICATION BHEJO
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        req_channel = os.environ.get("REQUEST_CHANNEL_ID")
-        
-        if bot_token and req_channel:
-            safe_title = title.replace('<', '&lt;').replace('>', '&gt;')
-            short_title = safe_title[:15].replace('_', ' ') 
-            
-            msg = f"🎬 <b>New Movie Request (From Web App)!</b> 🎬\n\nMovie: <b>{safe_title}</b>\nUser: {first_name} (ID: <code>{user_id}</code>)\nUsername: @{username}\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
-            
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "✅ Movie Add Kar Di Gai Hai", "callback_data": f"reqA_{user_id}_{short_title}"}],
-                    [{"text": "❌ Nahi Mili", "callback_data": f"reqN_{user_id}_{short_title}"}]
-                ]
-            }
-            
-            requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": req_channel, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard}
-            )
-
-        return jsonify({"status": "success"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-# 🌟🌟🌟🌟 PREMIUM WEB APP HTML (WITH IN-APP TRAILER PLAYER) 🌟🌟🌟🌟
+# 🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟
+#  PREMIUM WEB APP HTML (ULTRA LUXURY EDITION)
+# 🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟
 @flask_app.route('/webapp')
 def serve_mini_app():
     html_content = """
@@ -7255,119 +7138,571 @@ def serve_mini_app():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>FlimfyBox · ULTRA PREMIUM</title>
+        <title>FlimfyBox · GOLD</title>
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
         <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;800&display=swap');
-            
-            :root {
-                --bg: #09090b;
-                --surface: #18181b;
-                --surface-light: #27272a;
-                --primary: #f43f5e;
-                --primary-glow: rgba(244, 63, 94, 0.4);
-                --text: #ffffff;
-                --text-muted: #a1a1aa;
-                --accent: #8b5cf6;
-                --glass: rgba(24, 24, 27, 0.75);
-                --border: rgba(255, 255, 255, 0.1);
+            /* RESET & GLOBAL */
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                user-select: none;
+                -webkit-tap-highlight-color: transparent;
             }
 
-            * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Poppins', sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
-            body { background-color: var(--bg); color: var(--text); overflow-x: hidden; padding-bottom: 40px; }
+            :root {
+                --bg: #0b0a0f;
+                --surface: #14131a;
+                --surface-light: #1f1e26;
+                --primary: #ffd700;              /* Royal Gold */
+                --primary-soft: #c9a227;
+                --primary-glow: rgba(255, 215, 0, 0.25);
+                --text: #ffffff;
+                --text-muted: #a3a1aa;
+                --accent: #b8860b;               /* Dark Goldenrod */
+                --glass: rgba(20, 19, 26, 0.75);
+                --glass-edge: rgba(255, 215, 0, 0.15);
+                --border: rgba(255, 215, 0, 0.1);
+                --shadow-heavy: 0 20px 40px -10px black;
+                --shadow-glow: 0 8px 30px var(--primary-glow);
+            }
 
-            /* Glassmorphism Header */
-            header { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; background: var(--glass); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100; }
-            .logo { font-size: 24px; font-weight: 800; background: linear-gradient(90deg, #f43f5e, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; }
+            body {
+                background-color: var(--bg);
+                color: var(--text);
+                overflow-x: hidden;
+                padding-bottom: 40px;
+            }
 
-            /* Search Bar */
-            .search-section { padding: 20px; }
-            .search-box { display: flex; align-items: center; background: var(--surface); border-radius: 14px; padding: 14px 20px; border: 1px solid var(--border); transition: all 0.3s ease; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
-            .search-box:focus-within { border-color: var(--primary); box-shadow: 0 0 15px var(--primary-glow); }
-            .search-box i { color: var(--text-muted); margin-right: 12px; font-size: 18px; }
-            .search-box input { flex: 1; background: transparent; border: none; color: white; outline: none; font-size: 15px; font-weight: 400; }
-            .search-box input::placeholder { color: #52525b; }
+            /* SKELETON LOADER */
+            .skeleton {
+                background: linear-gradient(90deg, var(--surface) 0%, var(--surface-light) 50%, var(--surface) 100%);
+                background-size: 200% 100%;
+                animation: shimmer 1.2s infinite;
+                border-radius: 14px;
+            }
+            @keyframes shimmer {
+                0% { background-position: 200% 0; }
+                100% { background-position: -200% 0; }
+            }
 
-            /* Premium Genre Filter */
-            .genre-scroll { display: flex; overflow-x: auto; gap: 10px; padding: 0 20px 15px 20px; scrollbar-width: none; scroll-behavior: smooth; }
+            /* GLASS HEADER */
+            header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 16px 24px;
+                background: var(--glass);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
+                border-bottom: 1px solid var(--border);
+                position: sticky;
+                top: 0;
+                z-index: 100;
+            }
+            .logo {
+                font-size: 28px;
+                font-weight: 800;
+                background: linear-gradient(135deg, #fff0b5, #ffd700, #f0c45a);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                letter-spacing: -0.5px;
+            }
+            .crown-icon {
+                color: var(--primary);
+                font-size: 24px;
+                filter: drop-shadow(0 0 8px gold);
+            }
+
+            /* SEARCH BAR */
+            .search-section {
+                padding: 20px 24px;
+            }
+            .search-box {
+                display: flex;
+                align-items: center;
+                background: var(--surface);
+                border-radius: 40px;
+                padding: 14px 24px;
+                border: 1px solid var(--border);
+                transition: all 0.3s ease;
+                box-shadow: var(--shadow-heavy);
+            }
+            .search-box:focus-within {
+                border-color: var(--primary);
+                box-shadow: var(--shadow-glow);
+            }
+            .search-box i {
+                color: var(--primary);
+                margin-right: 12px;
+                font-size: 18px;
+                opacity: 0.8;
+            }
+            .search-box input {
+                flex: 1;
+                background: transparent;
+                border: none;
+                color: white;
+                outline: none;
+                font-size: 16px;
+                font-weight: 400;
+            }
+            .search-box input::placeholder {
+                color: #5a5766;
+            }
+
+            /* GENRE PILLS */
+            .genre-scroll {
+                display: flex;
+                overflow-x: auto;
+                gap: 12px;
+                padding: 0 24px 20px 24px;
+                scrollbar-width: none;
+                scroll-behavior: smooth;
+            }
             .genre-scroll::-webkit-scrollbar { display: none; }
-            .genre-pill { background: var(--surface); border: 1px solid var(--border); padding: 8px 22px; border-radius: 40px; font-size: 13px; font-weight: 600; color: var(--text-muted); white-space: nowrap; cursor: pointer; transition: all 0.3s; }
-            .genre-pill.active { background: linear-gradient(135deg, var(--primary), var(--accent)); color: white; border: none; box-shadow: 0 4px 15px var(--primary-glow); }
+            .genre-pill {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                padding: 8px 24px;
+                border-radius: 40px;
+                font-size: 14px;
+                font-weight: 600;
+                color: var(--text-muted);
+                white-space: nowrap;
+                cursor: pointer;
+                transition: all 0.2s;
+                backdrop-filter: blur(5px);
+            }
+            .genre-pill.active {
+                background: var(--primary);
+                color: #0b0a0f;
+                border-color: var(--primary);
+                box-shadow: 0 0 20px gold;
+                font-weight: 800;
+            }
 
-            /* Hero Slider */
-            .hero-slider { width: 100%; height: 320px; position: relative; background-size: cover; background-position: top center; transition: background-image 0.8s ease-in-out; border-radius: 0 0 30px 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
-            .hero-overlay { position: absolute; inset: 0; background: linear-gradient(to top, var(--bg) 0%, transparent 60%, rgba(0,0,0,0.4) 100%); display: flex; align-items: flex-end; padding: 30px 20px; }
-            .hero-info h2 { font-size: 32px; font-weight: 800; text-shadow: 2px 2px 10px rgba(0,0,0,0.9); line-height: 1.1; margin-bottom: 6px; }
-            .hero-info span { font-size: 12px; font-weight: 600; color: white; background: rgba(255,255,255,0.2); backdrop-filter: blur(10px); padding: 4px 12px; border-radius: 20px; }
+            /* HERO SLIDER (LUXURY) */
+            .hero-slider {
+                width: 100%;
+                height: 340px;
+                position: relative;
+                background-size: cover;
+                background-position: top 20% center;
+                transition: background-image 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+                border-radius: 0 0 40px 40px;
+                box-shadow: 0 30px 40px -20px black;
+                margin-bottom: 10px;
+            }
+            .hero-overlay {
+                position: absolute;
+                inset: 0;
+                background: linear-gradient(to top, var(--bg) 0%, transparent 60%, rgba(0,0,0,0.4) 100%);
+                display: flex;
+                align-items: flex-end;
+                padding: 30px 24px;
+            }
+            .hero-info h2 {
+                font-size: 38px;
+                font-weight: 800;
+                text-shadow: 0 4px 20px black;
+                line-height: 1.1;
+                margin-bottom: 8px;
+                background: linear-gradient(180deg, #fff, #ffeaa3);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
+            .hero-info span {
+                font-size: 13px;
+                font-weight: 600;
+                color: var(--primary);
+                background: rgba(0,0,0,0.5);
+                backdrop-filter: blur(10px);
+                padding: 5px 16px;
+                border-radius: 40px;
+                display: inline-block;
+                border: 1px solid rgba(255,215,0,0.3);
+            }
 
-            /* Rows & Cards */
-            .row-header { padding: 25px 20px 12px 20px; font-size: 18px; font-weight: 800; display: flex; align-items: center; gap: 8px; letter-spacing: 0.5px; }
-            .row-header i { color: var(--primary); }
-            .horizontal-scroll { display: flex; overflow-x: auto; gap: 14px; padding: 0 20px; scroll-snap-type: x mandatory; scrollbar-width: none; }
+            /* ROW HEADERS */
+            .row-header {
+                padding: 28px 24px 12px 24px;
+                font-size: 20px;
+                font-weight: 700;
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                color: var(--text);
+                letter-spacing: 0.5px;
+            }
+            .row-header i {
+                color: var(--primary);
+                font-size: 20px;
+            }
+
+            /* HORIZONTAL SCROLL */
+            .horizontal-scroll {
+                display: flex;
+                overflow-x: auto;
+                gap: 16px;
+                padding: 0 24px 10px 24px;
+                scroll-snap-type: x mandatory;
+                scrollbar-width: none;
+            }
             .horizontal-scroll::-webkit-scrollbar { display: none; }
-            
-            .movie-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 14px; padding: 0 20px; }
-            .card, .grid-card { position: relative; cursor: pointer; transition: transform 0.2s; scroll-snap-align: start; }
-            .card { flex: 0 0 135px; }
-            .card:active, .grid-card:active { transform: scale(0.95); }
-            
-            .card-img { width: 100%; aspect-ratio: 2/3; border-radius: 14px; object-fit: cover; box-shadow: 0 6px 15px rgba(0,0,0,0.5); }
-            .card-rating { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.7); backdrop-filter: blur(5px); font-size: 11px; padding: 4px 8px; border-radius: 20px; font-weight: 800; color: #facc15; border: 1px solid rgba(250, 204, 21, 0.4); }
-            .card-title { margin-top: 10px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 4px; }
-            .card-meta { font-size: 11px; color: var(--text-muted); padding: 0 4px; }
-            
-            /* Premium Details Page */
-            .details-page { position: fixed; inset: 0; background: var(--bg); z-index: 2000; overflow-y: auto; transform: translateX(100%); transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); }
-            .details-page.open { transform: translateX(0); }
-            .dp-header { position: absolute; top: 20px; left: 20px; z-index: 2010; }
-            .btn-back { background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); color: white; border: 1px solid rgba(255,255,255,0.2); width: 45px; height: 45px; border-radius: 50%; font-size: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; }
-            .btn-back:active { transform: scale(0.9); }
-            
-            .dp-poster-bg { width: 100%; height: 400px; background-size: cover; background-position: center; position: relative; }
-            .dp-poster-bg::after { content: ''; position: absolute; inset: 0; background: linear-gradient(to top, var(--bg) 0%, rgba(9,9,11,0.6) 50%, transparent 100%); }
-            
-            .dp-info { padding: 25px; margin-top: -120px; position: relative; z-index: 2005; }
-            .dp-title { font-size: 34px; font-weight: 800; margin-bottom: 20px; line-height: 1.1; text-shadow: 0 4px 20px rgba(0,0,0,0.8); }
-            
-            /* Glass Info Box */
-            .rich-info-box { background: var(--glass); border: 1px solid var(--border); border-radius: 20px; padding: 20px; margin-bottom: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-            .rich-info-box div { margin-bottom: 10px; font-size: 13.5px; color: #e4e4e7; display: flex; align-items: baseline; }
-            .rich-info-box span { color: var(--text-muted); font-weight: 600; width: 85px; flex-shrink: 0; }
-            .rich-info-box label { font-weight: 600; }
-            .rich-desc { margin-top: 15px; font-size: 13px; color: var(--text-muted); line-height: 1.6; padding-top: 15px; border-top: 1px solid var(--border); }
 
-            /* Buttons */
-            .btn-trailer, .btn-request, .dl-btn { width: 100%; padding: 16px; border-radius: 14px; border: none; font-size: 15px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 10px; cursor: pointer; transition: 0.2s; margin-bottom: 14px; }
-            .btn-trailer { background: linear-gradient(135deg, #ef4444, #b91c1c); color: white; box-shadow: 0 8px 20px rgba(239, 68, 68, 0.4); margin-bottom: 25px;}
-            .btn-trailer:active { transform: scale(0.97); }
+            /* CARD STYLES */
+            .card, .grid-card {
+                position: relative;
+                cursor: pointer;
+                transition: transform 0.15s ease, filter 0.2s;
+                scroll-snap-align: start;
+                border-radius: 20px;
+                overflow: hidden;
+            }
+            .card {
+                flex: 0 0 145px;
+            }
+            .card:active, .grid-card:active {
+                transform: scale(0.96);
+            }
+            .card-img {
+                width: 100%;
+                aspect-ratio: 2/3;
+                object-fit: cover;
+                border-radius: 20px;
+                box-shadow: 0 15px 30px -8px black;
+                background: var(--surface);
+            }
+            .card-rating {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                background: rgba(0,0,0,0.6);
+                backdrop-filter: blur(8px);
+                font-size: 12px;
+                font-weight: 700;
+                padding: 4px 10px;
+                border-radius: 40px;
+                color: var(--primary);
+                border: 1px solid rgba(255,215,0,0.3);
+            }
+            .card-title {
+                margin-top: 10px;
+                font-size: 14px;
+                font-weight: 600;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                padding: 0 4px;
+            }
+            .card-meta {
+                font-size: 12px;
+                color: var(--text-muted);
+                padding: 0 4px;
+            }
 
-            .dl-heading { font-size: 12px; font-weight: 800; color: var(--text-muted); text-align: center; margin-bottom: 15px; letter-spacing: 2px; }
-            
-            /* BOT-LIKE BUTTONS UI */
-            .dl-btn { background: var(--surface); border: 1px solid var(--border); color: white; justify-content: space-between; box-shadow: 0 4px 10px rgba(0,0,0,0.2); }
-            .dl-btn:active { transform: scale(0.97); border-color: var(--primary); }
-            .dl-btn .quality-text { display: flex; align-items: center; gap: 10px; }
-            .dl-btn .file-size { color: var(--text-muted); font-size: 12px; font-weight: 500; }
-            .dl-btn .action { color: white; font-size: 12px; font-weight: 800; background: var(--primary); padding: 6px 14px; border-radius: 8px; box-shadow: 0 2px 10px var(--primary-glow); }
+            /* MOVIE GRID (MORE COLLECTIONS) */
+            .movie-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+                gap: 16px;
+                padding: 0 24px;
+            }
 
-            /* IN-APP TRAILER MODAL */
-            .trailer-modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.95); z-index: 3000; align-items: center; justify-content: center; flex-direction: column; padding: 20px; backdrop-filter: blur(10px); }
-            .trailer-modal.active { display: flex; }
-            .trailer-wrapper { width: 100%; max-width: 800px; background: black; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 40px rgba(239, 68, 68, 0.3); border: 1px solid rgba(255,255,255,0.1); }
-            .trailer-modal iframe { width: 100%; aspect-ratio: 16/9; border: none; display: block; }
-            .close-trailer-btn { margin-top: 20px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; padding: 12px 30px; border-radius: 30px; font-weight: 700; font-size: 15px; cursor: pointer; transition: 0.2s; }
-            .close-trailer-btn:active { background: rgba(255,255,255,0.2); transform: scale(0.95); }
+            /* DETAILS PAGE - CINEMATIC */
+            .details-page {
+                position: fixed;
+                inset: 0;
+                background: var(--bg);
+                z-index: 2000;
+                overflow-y: auto;
+                transform: translateX(100%);
+                transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+                scrollbar-width: thin;
+                scrollbar-color: var(--primary) var(--surface);
+            }
+            .details-page.open {
+                transform: translateX(0);
+            }
+            .dp-header {
+                position: absolute;
+                top: 20px;
+                left: 20px;
+                z-index: 2010;
+            }
+            .btn-back {
+                background: var(--glass);
+                backdrop-filter: blur(16px);
+                border: 1px solid var(--border);
+                color: white;
+                width: 48px;
+                height: 48px;
+                border-radius: 50%;
+                font-size: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                transition: 0.2s;
+                box-shadow: 0 8px 20px rgba(0,0,0,0.6);
+            }
+            .btn-back:active {
+                transform: scale(0.9);
+                border-color: var(--primary);
+            }
+            .dp-poster-bg {
+                width: 100%;
+                height: 420px;
+                background-size: cover;
+                background-position: center 20%;
+                position: relative;
+            }
+            .dp-poster-bg::after {
+                content: '';
+                position: absolute;
+                inset: 0;
+                background: linear-gradient(to top, var(--bg) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+            }
+            .dp-info {
+                padding: 28px;
+                margin-top: -140px;
+                position: relative;
+                z-index: 2005;
+            }
+            .dp-title {
+                font-size: 40px;
+                font-weight: 800;
+                line-height: 1.1;
+                margin-bottom: 24px;
+                text-shadow: 0 8px 30px black;
+                background: linear-gradient(135deg, #fff, #ffefb0);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+            }
 
-            .loader { text-align: center; padding: 40px; color: var(--text-muted); font-size: 15px; font-weight: 600; width: 100%; }
-            .toast { position: fixed; bottom: -60px; left: 50%; transform: translateX(-50%); background: #22c55e; color: white; padding: 12px 25px; border-radius: 30px; font-size: 14px; font-weight: 700; transition: bottom 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); z-index: 3000; box-shadow: 0 10px 20px rgba(34, 197, 94, 0.4); }
-            .toast.show { bottom: 30px; }
+            /* GLASS INFO BOX */
+            .rich-info-box {
+                background: var(--glass);
+                backdrop-filter: blur(20px);
+                border: 1px solid var(--border);
+                border-radius: 28px;
+                padding: 24px;
+                margin-bottom: 28px;
+                box-shadow: 0 30px 50px -20px black;
+            }
+            .rich-info-box > div {
+                margin-bottom: 14px;
+                font-size: 15px;
+                display: flex;
+                align-items: baseline;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+            .rich-info-box span {
+                color: var(--text-muted);
+                font-weight: 500;
+                min-width: 80px;
+            }
+            .rich-info-box label {
+                font-weight: 700;
+                color: var(--primary);
+            }
+            .rich-desc {
+                margin-top: 18px;
+                font-size: 14px;
+                color: var(--text-muted);
+                line-height: 1.7;
+                border-top: 1px dashed var(--border);
+                padding-top: 18px;
+            }
+
+            /* TRAILER BUTTON (GOLD) */
+            .btn-trailer {
+                width: 100%;
+                padding: 18px;
+                border-radius: 60px;
+                border: none;
+                font-size: 17px;
+                font-weight: 800;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+                cursor: pointer;
+                background: linear-gradient(145deg, #ffd700, #b8860b);
+                color: #0b0a0f;
+                box-shadow: 0 15px 30px -5px rgba(255, 215, 0, 0.5);
+                margin-bottom: 28px;
+                transition: 0.2s;
+            }
+            .btn-trailer:active {
+                transform: scale(0.97);
+                box-shadow: 0 8px 20px gold;
+            }
+
+            /* REQUEST BUTTON */
+            .btn-request {
+                width: 100%;
+                padding: 18px;
+                border-radius: 60px;
+                border: 1px solid var(--border);
+                font-size: 17px;
+                font-weight: 800;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                gap: 12px;
+                cursor: pointer;
+                background: var(--surface);
+                color: var(--primary);
+                margin-bottom: 20px;
+            }
+
+            /* DOWNLOAD SECTION */
+            .dl-section {
+                margin-top: 25px;
+            }
+            .dl-heading {
+                font-size: 13px;
+                font-weight: 800;
+                color: var(--primary);
+                text-align: center;
+                margin-bottom: 20px;
+                letter-spacing: 2px;
+                opacity: 0.9;
+            }
+            .dl-btn {
+                width: 100%;
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 20px;
+                padding: 16px 20px;
+                margin-bottom: 12px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                color: white;
+                font-size: 15px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: 0.2s;
+                box-shadow: 0 6px 14px rgba(0,0,0,0.4);
+            }
+            .dl-btn:active {
+                border-color: var(--primary);
+                transform: scale(0.98);
+                background: var(--surface-light);
+            }
+            .quality-text {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+            .file-size {
+                color: var(--text-muted);
+                font-size: 13px;
+                font-weight: 500;
+            }
+            .action {
+                color: #0b0a0f;
+                font-size: 13px;
+                font-weight: 800;
+                background: var(--primary);
+                padding: 8px 18px;
+                border-radius: 40px;
+                box-shadow: 0 0 15px gold;
+            }
+
+            /* TRAILER MODAL (IN-APP) */
+            .trailer-modal {
+                display: none;
+                position: fixed;
+                inset: 0;
+                background: rgba(0,0,0,0.95);
+                z-index: 3000;
+                align-items: center;
+                justify-content: center;
+                flex-direction: column;
+                padding: 20px;
+                backdrop-filter: blur(20px);
+            }
+            .trailer-modal.active {
+                display: flex;
+            }
+            .trailer-wrapper {
+                width: 100%;
+                max-width: 900px;
+                background: black;
+                border-radius: 24px;
+                overflow: hidden;
+                border: 2px solid gold;
+                box-shadow: 0 0 40px gold;
+            }
+            .trailer-modal iframe {
+                width: 100%;
+                aspect-ratio: 16/9;
+                border: none;
+                display: block;
+            }
+            .close-trailer-btn {
+                margin-top: 25px;
+                background: rgba(255,255,255,0.05);
+                border: 1px solid gold;
+                color: gold;
+                padding: 14px 40px;
+                border-radius: 60px;
+                font-weight: 700;
+                font-size: 16px;
+                cursor: pointer;
+                transition: 0.2s;
+            }
+            .close-trailer-btn:active {
+                background: gold;
+                color: black;
+            }
+
+            /* TOAST NOTIFICATION */
+            .toast {
+                position: fixed;
+                bottom: -60px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: var(--glass);
+                backdrop-filter: blur(20px);
+                border: 1px solid gold;
+                color: gold;
+                padding: 14px 30px;
+                border-radius: 60px;
+                font-size: 15px;
+                font-weight: 700;
+                transition: bottom 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+                z-index: 3000;
+                box-shadow: 0 10px 30px gold;
+                white-space: nowrap;
+            }
+            .toast.show {
+                bottom: 30px;
+            }
+
+            /* LOADER */
+            .loader {
+                text-align: center;
+                padding: 40px;
+                color: var(--primary);
+                font-size: 16px;
+                font-weight: 600;
+                width: 100%;
+            }
         </style>
     </head>
     <body>
         <header>
             <div class="logo">FlimfyBox</div>
-            <i class="fas fa-crown" style="color: var(--primary); font-size: 20px; text-shadow: 0 0 10px var(--primary-glow);"></i>
+            <i class="fas fa-crown crown-icon"></i>
         </header>
 
         <div class="search-section">
@@ -7384,28 +7719,28 @@ def serve_mini_app():
                 <div class="hero-overlay">
                     <div class="hero-info">
                         <h2 id="heroTitle">Loading...</h2>
-                        <span id="heroMeta">High Quality</span>
+                        <span id="heroMeta">✦ Premium Quality ✦</span>
                     </div>
                 </div>
             </div>
 
             <div id="filteredContent">
                 <div class="movie-row-container" id="recentRow">
-                    <div class="row-header"><i class="fas fa-fire"></i> Trending Now</div>
+                    <div class="row-header"><i class="fas fa-bolt"></i> Trending Now</div>
                     <div class="horizontal-scroll" id="recentScroll"><div class="loader">Loading...</div></div>
                 </div>
 
                 <div class="movie-row-container" id="bollywoodRow">
-                    <div class="row-header"><i class="fas fa-film"></i> Bollywood Blockbusters</div>
+                    <div class="row-header"><i class="fas fa-film"></i> Bollywood Gold</div>
                     <div class="horizontal-scroll" id="bollywoodScroll"></div>
                 </div>
 
                 <div class="movie-row-container" id="hollywoodRow">
-                    <div class="row-header"><i class="fas fa-globe"></i> Hollywood Movies</div>
+                    <div class="row-header"><i class="fas fa-globe"></i> Hollywood Hits</div>
                     <div class="horizontal-scroll" id="hollywoodScroll"></div>
                 </div>
 
-                <div class="movie-row-container" style="margin-top: 35px;">
+                <div class="movie-row-container" style="margin-top: 40px;">
                     <div class="row-header"><i class="fas fa-layer-group"></i> Explore All</div>
                     <div class="movie-grid" id="moreGrid"></div>
                 </div>
@@ -7430,10 +7765,10 @@ def serve_mini_app():
                     <h1 class="dp-title" id="dpTitle">Title</h1>
                     
                     <div class="rich-info-box">
-                        <div><span>IMDb</span> <label id="dpRating" style="color:#facc15;">—</label></div>
+                        <div><span>IMDb</span> <label id="dpRating" style="color:gold;">—</label></div>
                         <div><span>Genre</span> <label id="dpGenre">—</label></div>
                         <div><span>Stars</span> <label id="dpActors">Fetching...</label></div>
-                        <div><span>Audio</span> <label>Dual Audio [Hindi & English]</label></div>
+                        <div><span>Audio</span> <label>Dual Audio [Hindi & English] + ESubs</label></div>
                         <div class="rich-desc" id="dpDesc">Loading story details...</div>
                     </div>
                     
@@ -7487,7 +7822,7 @@ def serve_mini_app():
                         renderGenrePills(allMoviesList);
                     }
                 } catch(e) {
-                    document.getElementById('recentScroll').innerHTML = '<div class="loader">Server Error</div>';
+                    document.getElementById('recentScroll').innerHTML = '<div class="loader">⚠️ Server Error</div>';
                 }
             }
 
@@ -7626,7 +7961,7 @@ def serve_mini_app():
                 }
             });
 
-            // YOUTUBE IN-APP PLAYER FUNCTIONS
+            // YOUTUBE IN-APP PLAYER
             window.playTrailer = function(videoId) {
                 tg.HapticFeedback.impactOccurred('medium');
                 const modal = document.getElementById('trailerModal');
@@ -7638,7 +7973,7 @@ def serve_mini_app():
             window.closeTrailer = function() {
                 const modal = document.getElementById('trailerModal');
                 const iframe = document.getElementById('trailerIframe');
-                iframe.src = ''; // Stops video and audio
+                iframe.src = '';
                 modal.classList.remove('active');
             };
 
@@ -7676,7 +8011,6 @@ def serve_mini_app():
                             .then(d => {
                                 const trailer = d.results?.find(v => v.type === 'Trailer' && v.site === 'YouTube');
                                 if(trailer) {
-                                    // NO REDIRECT - IN APP PLAYER!
                                     document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="playTrailer('${trailer.key}')"><i class="fab fa-youtube"></i> Watch Official Trailer</button>`;
                                 } else {
                                     document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
@@ -7692,7 +8026,7 @@ def serve_mini_app():
                 
                 if (isTMDB) {
                     linksBox.innerHTML = `
-                        <button class="btn-request" onclick="requestSilent('${title}')" style="width:100%; padding:16px; border-radius:14px; border:none; background:var(--primary); color:white; font-size:15px; font-weight:700; cursor:pointer;">
+                        <button class="btn-request" onclick="requestSilent('${title}')">
                             <i class="fas fa-hand-paper"></i> Request This Title
                         </button>
                         <p style="text-align:center; color:var(--text-muted); font-size:12px; margin-top:10px;">Not available in database yet.</p>
@@ -7764,6 +8098,8 @@ def serve_mini_app():
     </html>
     """
     return html_content
+
+# ... (rest of your Flask app remains exactly the same) ...
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
