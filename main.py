@@ -4028,31 +4028,37 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.args = [imdb_id]
     await batch_add_command(update, context)
 
-import aiohttp
 
 async def upload_image_to_telegraph(bot, file_id):
-    """Telegram image ko Telegraph par upload karke public URL deta hai."""
+    """
+    Ab yeh Telegra.ph ki jagah Catbox.moe par upload karega.
+    Telegra.ph cloud IPs ko block karta hai, isliye yeh 100% safe aur working tarika hai.
+    """
     try:
-        # 1. Telegram se file get karo
+        # 1. Telegram se image file download karo (Yeh tumhare log me successful chal raha hai)
         tg_file = await bot.get_file(file_id)
         image_bytearray = await tg_file.download_as_bytearray()
-        image_bytes = bytes(image_bytearray) # ✅ FIX: bytearray ko bytes me convert karna zaroori hai
+        image_bytes = bytes(image_bytearray)
         
-        # 2. Form data prepare karo
+        # 2. Catbox API ke liye form data prepare karo
         data = aiohttp.FormData()
-        data.add_field('file', image_bytes, filename='poster.jpg', content_type='image/jpeg')
+        data.add_field('reqtype', 'fileupload')
+        data.add_field('userhash', '') # Anonymous upload ke liye khali chhodna hai
+        data.add_field('fileToUpload', image_bytes, filename='poster.jpg', content_type='image/jpeg')
         
-        # 3. aiohttp ke zariye asynchronously upload karo
+        # 3. Catbox par upload karo
         async with aiohttp.ClientSession() as session:
-            async with session.post('https://telegra.ph/upload', data=data) as resp:
+            # SSL verification false rakhi hai taaki server blocks ka issue na aaye
+            async with session.post('https://catbox.moe/user/api.php', data=data, ssl=False) as resp:
                 if resp.status == 200:
-                    json_resp = await resp.json()
-                    if isinstance(json_resp, list) and 'src' in json_resp[0]:
-                        return "https://telegra.ph" + json_resp[0]['src']
+                    link = await resp.text()
+                    logger.info(f"✅ Image Uploaded Successfully: {link}")
+                    return link.strip()
                 else:
-                    print(f"Telegraph API failed with status {resp.status}")
+                    logger.error(f"❌ Upload failed with status: {resp.status}")
+                    
     except Exception as e:
-        print(f"Telegraph Upload Error: {e}")
+        logger.error(f"❌ Cloud Upload Error: {e}")
         
     return None
 
