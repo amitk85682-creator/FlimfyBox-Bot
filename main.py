@@ -354,10 +354,10 @@ _admin_id = os.environ.get('ADMIN_USER_ID', '0')
 ADMIN_USER_ID = int(_admin_id) if _admin_id.isdigit() else 0
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
-REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1003330141433')
+REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1002555232489')
 REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003460387180')
 FILMFYBOX_GROUP_URL = 'https://t.me/FlimfyBox'
-FILMFYBOX_CHANNEL_URL = 'https://t.me/FilmFyBoxMoviesHD'  # Yahan apna Channel Link dalein
+FILMFYBOX_CHANNEL_URL = 'https://t.me/MovieHdmoviehub'  # Yahan apna Channel Link dalein
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
 FORCE_JOIN_ENABLED = True
@@ -6158,7 +6158,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         sent_msg = None
         media_type = "unknown"
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/MovieHdmoviehub")]])
 
         if replied_message.document:
             media_type = "file"
@@ -6283,7 +6283,7 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/MovieHdmoviehub")]])
 
         for user_id, first_name, username in all_users:
             try:
@@ -6391,7 +6391,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FilmFyBoxMoviesHD")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/MovieHdmoviehub")]])
 
         for user_id, first_name, username in target_users:
             try:
