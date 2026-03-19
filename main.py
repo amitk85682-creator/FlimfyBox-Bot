@@ -5656,7 +5656,6 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
 
     for (m_id, ch_id, msg_id) in posts:
         try:
-            try:
             # --- SECURE LINK FOR OLD POSTS UPDATE ---
             secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{m_id}"
 
