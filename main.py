@@ -4802,13 +4802,13 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 
                 # --- SECURE LINK FOR SUPERBATCH POST ---
-            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+                secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
-            post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-                [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
-            ])
+                post_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+                    [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+                    [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+                ])
                 
                 photo_to_send = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
                 if not photo_to_send:
@@ -4818,11 +4818,11 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
                 try:
-                    # 🛑 HTML PARSE MODE LAGAYA HAI YAHAN
+                    # 🛑 HTML PARSE MODE - use post_keyboard instead of forum_kb
                     if topic_id == 1:
-                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=forum_kb)
+                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
                     else:
-                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=forum_kb)
+                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
                     forum_post_status = f"✅ Auto-Posted to Forum (Topic ID: {topic_id})"
                 except Exception as e:
                     logger.error(f"Auto Forum Post Error: {e}")
@@ -4857,13 +4857,11 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await status_msg.edit_text(f"❌ Error during /done: {e}")
 
     finally:
-        # ✅ SINGLE GUARANTEED RESET (Double hat gaya)
         BATCH_SESSION.update({
             'active': False, 'movie_id': None, 'movie_title': None, 
             'file_count': 0, 'admin_id': None, 'year': '', 'category': '', 
             'extracted_thumb': None
         })
-
 async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin se photo lekar clean caption ke sath channel me post karega"""
     user_id = update.effective_user.id
