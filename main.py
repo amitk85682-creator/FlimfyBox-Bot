@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import secrets
 import re
 import json
 import threading
@@ -244,28 +245,31 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
         f"👇 **Click Below to Download** 👇"
     )
 
-    # --- 6. DEEP LINKS ---
-    link_param    = f"movie_{movie_id}"
-    bot1_username = "FlimfyBox_SearchBot"
-    bot2_username = "urmoviebot"
-    bot3_username = "FlimfyBox_Bot"
-
-    link1 = f"https://t.me/{bot1_username}?start={link_param}"
-    link2 = f"https://t.me/{bot2_username}?start={link_param}"
-    link3 = f"https://t.me/{bot3_username}?start={link_param}"
+    # --- 6. DEEP LINKS (NEW SECURE LINKS) ---
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
     # Keyboard data (Restore ke liye save hoga)
     keyboard_data = {
         "inline_keyboard": [
             [
-                {"text": "📥 Download Now", "url": link1},
-                {"text": "📥 Download Now", "url": link2}
+                {"text": "📥 Download Now", "url": secure_url},
+                {"text": "📥 Download Now", "url": secure_url}
             ],
             [
-                {"text": "⚡ Download Now", "url": link3}
+                {"text": "⚡ Download Now", "url": secure_url}
             ]
         ]
     }
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 Download Now", url=secure_url),
+            InlineKeyboardButton("📥 Download Now", url=secure_url)
+        ],
+        [
+            InlineKeyboardButton("⚡ Download Now", url=secure_url)
+        ]
+    ])
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -1156,6 +1160,15 @@ def setup_database():
             )
         """)
 
+        # 👇👇👇 NAYA TABLE: Anti-Bot Temporary Links ke liye 👇👇👇
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS temp_links (
+                token VARCHAR(50) PRIMARY KEY,
+                movie_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # 👇👇👇 NAYA TABLE: Auto-Delete Queue ke liye 👇👇👇
         cur.execute("""
             CREATE TABLE IF NOT EXISTS auto_delete_queue (
@@ -2829,7 +2842,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with user_processing_locks[user_id]:
             
+            # 🔐 NAYA: ANTI-BOT TEMPORARY LINK SYSTEM (BURN ON READ)
+            if payload.startswith("tmp_"):
+                conn = get_db_connection()
+                if not conn:
+                    await context.bot.send_message(chat_id, "❌ System Error.")
+                    return
+
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT movie_id, created_at FROM temp_links WHERE token = %s", (payload,))
+                    res = cur.fetchone()
+                    
+                    # Token TURANT delete kar do (Single Use)
+                    cur.execute("DELETE FROM temp_links WHERE token = %s", (payload,))
+                    conn.commit()
+                    cur.close()
+                    
+                    if not res:
+                        msg = await context.bot.send_message(chat_id, "❌ <b>Link Expired ya Invalid hai!</b>\nKripya app par jaakar dobara click karein.", parse_mode='HTML')
+                        track_message_for_deletion(context, chat_id, msg.message_id, 15)
+                        return
+                    
+                    movie_id, created_at = res
+                    time_diff = (datetime.now() - created_at).total_seconds()
+                    
+                    if time_diff > 60:
+                        msg = await context.bot.send_message(chat_id, "❌ <b>Link Expired!</b>\nYeh link sirf 60 seconds ke liye valid tha.", parse_mode='HTML')
+                        track_message_for_deletion(context, chat_id, msg.message_id, 15)
+                        return
+                    
+                    # Sab sahi hai, movie bhej do!
+                    await deliver_movie_on_start(update, context, movie_id)
+                    logger.info(f"✅ Secure token {payload} used successfully for movie {movie_id}")
+                    return
+
+                except Exception as e:
+                    logger.error(f"Temp Link Error: {e}")
+                    await context.bot.send_message(chat_id, "❌ Processing error.")
+                    return
+                finally:
+                    close_db_connection(conn)
+
+        
             # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
+            
             if payload.startswith("movie_"):
                 try:
                     movie_id = int(payload.split('_')[1])
@@ -3307,12 +3364,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👇 <b>Download Below</b> 👇"
         )
 
-        link_param = f"movie_{movie_id}"
-        bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
+        # --- SECURE LINK FOR BATCH POST ---
+        secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
-            [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
+            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
@@ -4744,13 +4801,14 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     f"👇 <b>Download Below</b> 👇"
                 )
                 
-                link_param = f"movie_{movie_id}"
-                bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
-                
-                forum_kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("📥 Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
-                    [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")]
-                ])
+                # --- SECURE LINK FOR SUPERBATCH POST ---
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+
+            post_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+                [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            ])
                 
                 photo_to_send = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
                 if not photo_to_send:
@@ -4967,16 +5025,23 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 close_db_connection(conn)
 
-        # 5. Generate Links
+        # 5. Generate Secure Links (Anti-Bot)
         bot1 = "FlimfyBox_SearchBot"
         bot2 = "urmoviebot"
         bot3 = "FlimfyBox_Bot"
         
-        link_param = f"movie_{movie_id}" if movie_id else f"q_{query_text.replace(' ', '_')}"
-
-        link1 = f"https://t.me/{bot1}?start={link_param}"
-        link2 = f"https://t.me/{bot2}?start={link_param}"
-        link3 = f"https://t.me/{bot3}?start={link_param}"
+        if movie_id:
+            # ✅ Agar movie database me hai, to naya SECURE LINK banega
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+            link1 = secure_url
+            link2 = secure_url
+            link3 = secure_url
+        else:
+            # ⚠️ Agar movie DB me nahi hai (Sirf search query hai), to purana link chalega
+            link_param = f"q_{query_text.replace(' ', '_')}"
+            link1 = f"https://t.me/{bot1}?start={link_param}"
+            link2 = f"https://t.me/{bot2}?start={link_param}"
+            link3 = f"https://t.me/{bot3}?start={link_param}"
 
         # 6. Build Keyboard
         keyboard = InlineKeyboardMarkup([
@@ -5593,14 +5658,14 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
 
     for (m_id, ch_id, msg_id) in posts:
         try:
-            link_param = f"movie_{m_id}"
-            new_link = f"https://t.me/{new_bot}?start={link_param}"
+            try:
+            # --- SECURE LINK FOR OLD POSTS UPDATE ---
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{m_id}"
 
             new_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 Download Server 1", url=new_link)],
+                [InlineKeyboardButton("📥 Download Server 1", url=secure_url)],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
-
             await context.bot.edit_message_reply_markup(
                 chat_id=ch_id,
                 message_id=msg_id,
@@ -7412,6 +7477,72 @@ def request_movie_api():
 
 # ==================== MAIN WEB APP PAGE (Premium HTML) ====================
 
+# 🛡️ MIDDLEMAN REDIRECT PAGE (Anti-Bot)
+@flask_app.route('/watch/<int:movie_id>')
+def secure_watch(movie_id):
+    # Yeh HTML page user ko dikhega. Bots JS run nahi kar pate.
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>FlimfyBox - Verifying Secure Connection...</title>
+        <style>
+            body { background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+            .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        </style>
+    </head>
+    <body>
+        <div class="loader"></div>
+        <h3>Securely verifying your connection...</h3>
+        <p style="color: #a1a1aa; font-size: 13px;">Please wait 2 seconds. You will be redirected automatically.</p>
+        
+        <script>
+            // Invisible JS Challenge
+            setTimeout(() => {
+                fetch('/api/gen_link/""" + str(movie_id) + """', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if(data.url) {
+                        window.location.href = data.url; 
+                    } else {
+                        document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>";
+                    }
+                }).catch(e => {
+                    document.body.innerHTML = "<h3>❌ Connection failed.</h3>";
+                });
+            }, 1500); 
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
+# 🔐 SECRET LINK GENERATOR API (Auto Delete Logic)
+@flask_app.route('/api/gen_link/<int:movie_id>', methods=['POST'])
+def gen_secure_link(movie_id):
+    token = "tmp_" + secrets.token_hex(6)
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            # Delete old tokens (1 minute se purane)
+            cur.execute("DELETE FROM temp_links WHERE created_at < NOW() - INTERVAL '1 minute'")
+            # Save new token
+            cur.execute("INSERT INTO temp_links (token, movie_id) VALUES (%s, %s)", (token, movie_id))
+            conn.commit()
+            cur.close()
+        except Exception as e:
+            logger.error(f"Token Error: {e}")
+        finally:
+            close_db_connection(conn)
+            
+    bot_username = os.environ.get('BOT_USERNAME', 'FlimfyBox_Bot')
+    tg_url = f"tg://resolve?domain={bot_username}&start={token}"
+    return jsonify({"url": tg_url})
+
 @flask_app.route('/webapp')
 def serve_mini_app():
     html = """<!DOCTYPE html>
@@ -7978,10 +8109,8 @@ def serve_mini_app():
             document.getElementById('detailsPage').classList.remove('open');
         };
 
-        window.downloadMovie = function(id) {
-            tg.HapticFeedback.impactOccurred('heavy');
-            tg.openTelegramLink(`https://t.me/${BOT_USERNAME}?start=movie_${id}`);
-        };
+        // ===== पुराना downloadMovie हटा दिया गया है =====
+        // नीचे नए फंक्शन जोड़े गए हैं (Anti‑Bot Middleware)
 
         window.playTrailer = function(key) {
             document.getElementById('trailerIframe').src = `https://www.youtube.com/embed/${key}?autoplay=1&rel=0`;
@@ -8008,6 +8137,18 @@ def serve_mini_app():
                 else showToast('❌ Failed');
             })
             .catch(() => showToast('❌ Error'));
+        };
+
+        // 🛡️ NAYA: Anti-Bot Middleware Par Bhejne Wala Function
+        window.downloadBot = function(id) {
+            tg.HapticFeedback.impactOccurred('heavy');
+            // Seedha Bot ki jagah pehle Secure verification page par bhejenge
+            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
+        };
+
+        window.downloadMovie = function(id) {
+            tg.HapticFeedback.impactOccurred('heavy');
+            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
         };
 
         // Start
