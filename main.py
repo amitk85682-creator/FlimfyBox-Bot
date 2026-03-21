@@ -7619,7 +7619,7 @@ def gen_secure_link(movie_id):
 
 @flask_app.route('/webapp')
 def serve_mini_app():
-    html = """<!DOCTYPE html>
+    html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
