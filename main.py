@@ -7379,7 +7379,7 @@ def get_movie_details(movie_id):
 @flask_app.route('/api/search', methods=['GET'])
 def search_movies_api():
     """
-    Search movies by title (local DB + TMDB fallback).
+    Smart Search (Local DB + TMDB)
     """
     query = request.args.get('q', '').strip()
     if not query:
@@ -7390,12 +7390,13 @@ def search_movies_api():
     if conn:
         try:
             cur = conn.cursor()
+            # Database me thoda flexible search (typos ke liye)
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category
                 FROM movies
-                WHERE title ILIKE %s
+                WHERE title ILIKE %s OR title ILIKE %s
                 LIMIT 20
-            """, (f'%{query}%',))
+            """, (f'%{query}%', f'%{query.replace(" ", "%")}%'))
             rows = cur.fetchall()
             for r in rows:
                 local_results.append({
@@ -7414,22 +7415,29 @@ def search_movies_api():
         finally:
             close_db_connection(conn)
     
-    # If local results are few, fetch from TMDB
+    # 🔥 TMDB Fix for "Thamma 2025" -> API ko saal (year) se confusion hoti hai, isliye usko hata do
+    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() 
+    if not clean_query: 
+        clean_query = query # Agar user ne sirf saal hi likh diya ho
+
     tmdb_results = []
-    if len(local_results) < 5:
+    if len(local_results) < 15: # Agar local DB me kam movies mili tabhi TMDB me dhoondo
         try:
-            tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(query)}"
+            tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(clean_query)}"
             resp = requests.get(tmdb_url, timeout=5).json()
             for item in resp.get('results', []):
-                if not item.get('poster_path'):
+                # Agar poster na ho, toh backdrop image utha lo (Thamma ke liye fix)
+                img_path = item.get('poster_path') or item.get('backdrop_path')
+                if not img_path:
                     continue
+                
                 tmdb_results.append({
                     'id': 'tmdb_' + str(item['id']),
                     'title': item.get('title') or item.get('name') or 'Unknown',
                     'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
-                    'image': f"https://image.tmdb.org/t/p/w500{item['poster_path']}",
-                    'rating': item.get('vote_average', 0),
-                    'genre': 'Action, Drama',  # Can be fetched later
+                    'image': f"https://image.tmdb.org/t/p/w500{img_path}",
+                    'rating': round(item.get('vote_average', 0), 1),
+                    'genre': 'Action, Drama',
                     'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
                     'source': 'tmdb',
                     'description': item.get('overview', '')
@@ -7437,28 +7445,34 @@ def search_movies_api():
         except Exception as e:
             logger.error(f"TMDB search error: {e}")
     
-    # Combine local and TMDB, remove duplicates (by title approx)
+    # 🔥 FIX: "Avengers: Endgame" aur "Avengers Endgame" ko ek hi movie manega
+    def normalize_title(t):
+        return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
+
     seen_titles = set()
     combined = []
+    
+    # Pehle Local movies daalo (Taaki unpar Download ka button aaye)
     for m in local_results:
-        key = m['title'].lower().strip()
+        key = normalize_title(m['title'])
         if key not in seen_titles:
             seen_titles.add(key)
             combined.append(m)
+            
+    # Phir TMDB movies daalo (Jo duplicate nahi hain)
     for m in tmdb_results:
-        key = m['title'].lower().strip()
-        if key not in seen_titles and len(combined) < 20:
+        key = normalize_title(m['title'])
+        if key not in seen_titles and len(combined) < 30:
             seen_titles.add(key)
             combined.append(m)
-    
+            
     return jsonify({'status': 'success', 'results': combined})
 
 
 @flask_app.route('/api/request', methods=['POST'])
 def request_movie_api():
     """
-    Store a user request from web app.
-    Expects JSON: {title, user_id, username, first_name}
+    Store a user request from web app AND Notify Admin.
     """
     data = request.get_json()
     if not data or 'title' not in data:
@@ -7470,10 +7484,46 @@ def request_movie_api():
     first_name = data.get('first_name', 'WebApp User')
     
     success = store_user_request(user_id, username, first_name, title, None, None)
+    
     if success:
-        # Optionally notify admin via a background task
-        # But for simplicity, just return success
-        return jsonify({'status': 'success', 'message': 'Request saved'})
+        # 🔥 FIX: Web App se aayi request ko turant Admin Channel me send karein
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        request_channel = os.environ.get('REQUEST_CHANNEL_ID')
+        
+        if bot_token and request_channel:
+            try:
+                # Beautiful Admin Notification Format
+                msg_text = (
+                    f"🎬 <b>New WebApp Request!</b> 🎬\n\n"
+                    f"Movie: <b>{title}</b>\n"
+                    f"User: {first_name} (<code>{user_id}</code>)\n"
+                )
+                if username:
+                    msg_text += f"Username: @{username}\n"
+                msg_text += f"From: 🌐 Web Portal"
+
+                # Inline Buttons for Admin
+                short_title = title[:15].replace('_', ' ')
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "✅ Movie Add Kar Di Gai Hai", "callback_data": f"reqA_{user_id}_{short_title}"}],
+                        [{"text": "❌ Nahi Mili", "callback_data": f"reqN_{user_id}_{short_title}"}]
+                    ]
+                }
+                
+                # Direct Telegram API Call
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    "chat_id": request_channel,
+                    "text": msg_text,
+                    "parse_mode": "HTML",
+                    "reply_markup": reply_markup
+                }
+                requests.post(url, json=payload, timeout=5)
+            except Exception as e:
+                logger.error(f"Failed to notify admin from WebApp: {e}")
+
+        return jsonify({'status': 'success', 'message': 'Request saved & Admin Notified'})
     else:
         return jsonify({'status': 'error', 'message': 'Could not save request'}), 500
 
@@ -7998,11 +8048,14 @@ def serve_mini_app():
             document.getElementById('moreGrid').innerHTML = renderCards(movies.slice(15, 80), 'grid-card', false);
         }
 
-        function renderCards(movies, cardClass = 'card', isTMDB = false) {
+        function renderCards(movies, cardClass = 'card', forceTMDB = false) {
             if (!movies.length) return '<div style="color:var(--text-muted); padding:10px;">No movies</div>';
             return movies.map(m => {
+                // 🔥 FIX: Automatically detect karega ki poster TMDB (Request) ka hai ya Local DB ka
+                const isTMDB = forceTMDB || m.source === 'tmdb'; 
                 const rating = m.rating && m.rating !== 'N/A' ? `⭐ ${m.rating}` : '';
                 const badge = isTMDB ? '<div class="card-rating" style="color:white; background:var(--primary);">Request</div>' : (rating ? `<div class="card-rating">${rating}</div>` : '');
+                
                 return `
                     <div class="${cardClass}" onclick="openDetails('${m.id}', ${isTMDB})">
                         <img src="${m.image}" class="card-img" loading="lazy" onerror="this.src='https://via.placeholder.com/300x450?text=No+Poster'">
@@ -8045,6 +8098,13 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 const local = results.filter(r => r.source === 'local');
                 const tmdb = results.filter(r => r.source === 'tmdb');
                 
+                // 🔥 FIX: Local Search me aayi movies ko main array me save karo (Taaki unpar click ho sake)
+                local.forEach(l => {
+                    if (!allMovies.find(m => m.id == l.id)) {
+                        allMovies.push(l);
+                    }
+                });
+
                 tmdb.forEach(t => tmdbMoviesMap[t.id] = t);
                 document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
                 document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
