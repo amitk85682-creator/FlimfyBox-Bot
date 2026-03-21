@@ -3092,11 +3092,15 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "─────────────────────\n"
                 "𝑨𝒔𝒖𝒓 𝑺𝟎𝟏 𝑬𝟎𝟑✔️ | 𝑨𝒔𝒖𝒓 𝑺𝒆𝒂𝒔𝒐𝒏𝟑❌\n"
                 "─────────────────────\n\n"
-                "अगर फिर भी न मिले तो नीचे Request करे."
+                "👇 <b>सही स्पेलिंग ढूँढने और Request करने के लिए नीचे क्लिक करें:</b>"
             )
 
+            # 🌐 NAYA JUGAD: Web App URL jisme user ki galat spelling (query) attach hogi
+            safe_query = quote(query)
+            web_app_url = f"https://flimfybox-bot-yht0.onrender.com/webapp?req={safe_query}"
+
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query[:20]}")]
+                [InlineKeyboardButton("🌐 Open Request Portal", web_app=WebAppInfo(url=web_app_url))]
             ])
             
             msg = await update.message.reply_text(
@@ -8018,12 +8022,14 @@ def serve_mini_app():
             const main = document.getElementById('mainContent');
             const searchRes = document.getElementById('searchResultsContent');
             const genreCont = document.getElementById('genreContainer');
+            
             if (!q) {
                 main.style.display = 'block';
                 genreCont.style.display = 'flex';
                 searchRes.style.display = 'none';
                 return;
             }
+            
             main.style.display = 'none';
             genreCont.style.display = 'none';
             searchRes.style.display = 'block';
@@ -8033,16 +8039,17 @@ def serve_mini_app():
                 try {
                     const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
                     const data = await res.json();
-                    if (data.status === 'success') {
+                    
+                    if (data.status === 'success' && data.results.length > 0) {
                         const results = data.results;
                         const local = results.filter(r => r.source === 'local');
                         const tmdb = results.filter(r => r.source === 'tmdb');
-                        // store tmdb in map
+                        
                         tmdb.forEach(t => tmdbMoviesMap[t.id] = t);
                         document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
                         document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
                     } else {
-                        // NAYA JUGAD START
+                        // 🔥 NAYA JUGAD START: Agar TMDB par na mile to Google API se pucho
                         const term = q;
                         const searchHeader = document.getElementById('searchHeader');
                         const searchGrid = document.getElementById('searchGrid');
@@ -8050,44 +8057,46 @@ def serve_mini_app():
                         searchHeader.innerHTML = `<i class="fas fa-exclamation-circle" style="color:#ef4444;"></i> Not Found`;
                         searchGrid.innerHTML = '<div class="loader">Checking spelling...</div>';
                         
-                        // 🔥 NAYA JUGAD: Google jaisa sleek list design
-                                        let buttonsHtml = suggs.map(s => 
-                                            `<div onclick="document.getElementById('searchInput').value='${s}'; document.getElementById('searchInput').dispatchEvent(new Event('input'));" 
-                                            style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: white; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background 0.2s;"
-                                            onmouseover="this.style.background='rgba(255,215,0,0.1)'" onmouseout="this.style.background='transparent'">
-                                                <i class="fas fa-search" style="color: var(--text-muted); font-size: 14px;"></i> 
-                                                <span style="font-weight: 500;">${s}</span>
-                                            </div>`
-                                        ).join('');
-                                        
-                                        searchGrid.innerHTML = `
-                                            <div style="grid-column: 1 / -1; padding: 15px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
-                                                <p style="color: var(--primary); margin-bottom: 10px; font-size: 13px; font-weight: bold; padding-left: 10px;">✨ DID YOU MEAN:</p>
-                                                <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
-                                                    ${buttonsHtml}
-                                                </div>
-                                                <div style="margin-top: 15px; padding: 0 10px;">
-                                                    <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
-                                                        <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        `;
+                        // Yahan se Google ko request jaati hai (Ye line miss ho gayi thi)
+                        fetch(`/api/suggest?q=${encodeURIComponent(term)}`)
+                        .then(r => r.json())
+                        .then(suggs => {
+                            if (suggs && suggs.length > 0) {
+                                let buttonsHtml = suggs.map(s => 
+                                    `<div onclick="document.getElementById('searchInput').value='${s}'; document.getElementById('searchInput').dispatchEvent(new Event('input'));" 
+                                    style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: white; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background 0.2s;"
+                                    onmouseover="this.style.background='rgba(255,215,0,0.1)'" onmouseout="this.style.background='transparent'">
+                                        <i class="fas fa-search" style="color: var(--text-muted); font-size: 14px;"></i> 
+                                        <span style="font-weight: 500;">${s}</span>
+                                    </div>`
+                                ).join('');
+                                
+                                searchGrid.innerHTML = `
+                                    <div style="grid-column: 1 / -1; padding: 15px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+                                        <p style="color: var(--primary); margin-bottom: 10px; font-size: 13px; font-weight: bold; padding-left: 10px;">✨ DID YOU MEAN:</p>
+                                        <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
+                                            ${buttonsHtml}
+                                        </div>
+                                        <div style="margin-top: 15px; padding: 0 10px;">
+                                            <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
+                                                <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
+                                            </button>
+                                        </div>
+                                    </div>
+                                `;
                             } else {
-                                // Agar Google ko bhi kuch na mile
                                 searchGrid.innerHTML = `
                                     <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
                                         <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
-                                        <button onclick="requestMovie('${term}')" style="background: linear-gradient(135deg, var(--primary), #b8860b); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
+                                        <button onclick="requestSilent('${term}')" style="background: linear-gradient(135deg, var(--primary), #b8860b); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
                                             <i class="fas fa-paper-plane"></i> Request This Movie
                                         </button>
                                     </div>
                                 `;
                             }
                         }).catch(() => {
-                            searchGrid.innerHTML = `<div style="grid-column: 1/-1; text-align:center;"><button onclick="requestMovie('${term}')" class="btn-request">Request Anyway</button></div>`;
+                            searchGrid.innerHTML = `<div style="grid-column: 1/-1; text-align:center;"><button onclick="requestSilent('${term}')" class="btn-request">Request Anyway</button></div>`;
                         });
-                        // NAYA JUGAD END
                     }
                 } catch (err) {
                     document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
@@ -8239,6 +8248,20 @@ def serve_mini_app():
 
         // Start
         loadMovies();
+        
+        // 🪄 NAYA JUGAD: URL se query nikal kar auto-search karna
+        setTimeout(() => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const reqQuery = urlParams.get('req');
+            
+            if (reqQuery) {
+                const searchInput = document.getElementById('searchInput');
+                searchInput.value = reqQuery;
+                showToast("🔍 Finding correct spelling...");
+                // Search ko trigger karo
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }, 500); // Thoda ruk kar karenge taaki app load ho jaye
     </script>
 </body>
 </html>"""
