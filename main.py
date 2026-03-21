@@ -2669,18 +2669,20 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
 
         # 2. Result Handle karein
         if not movies_found:
-            # Delete loading msg
             try: await status_msg.delete() 
             except: pass
             
-            # Create request button
+            safe_query = quote(query_text)
+            web_app_url = f"https://flimfybox-bot-yht0.onrender.com/webapp?req={safe_query}"
+            
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🙋 Request This Movie", callback_data=f"request_{query_text[:40]}")]
+                [InlineKeyboardButton("🌐 Open Request Portal", web_app=WebAppInfo(url=web_app_url))]
             ])
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"😕 Sorry, '{query_text}' not found.\nWould you like to request it?",
-                reply_markup=keyboard
+                text=f"😕 Sorry, <b>'{query_text}'</b> not found.\n\nस्पेलिंग चेक करने और Request भेजने के लिए नीचे क्लिक करें 👇",
+                reply_markup=keyboard,
+                parse_mode='HTML'
             )
             return
 
@@ -7471,6 +7473,27 @@ def request_movie_api():
     else:
         return jsonify({'status': 'error', 'message': 'Could not save request'}), 500
 
+# 🤖 GOOGLE AUTO-SUGGEST PROXY (Spelling Fixer)
+@flask_app.route('/api/suggest', methods=['GET'])
+def get_suggestions():
+    q = request.args.get('q', '').strip()
+    if not q:
+        return jsonify([])
+    try:
+        # Firefox client wali API direct JSON list deti hai, jo use karne me aasan hai
+        url = f"https://suggestqueries.google.com/complete/search?client=firefox&q={quote(q + ' movie')}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = requests.get(url, headers=headers, timeout=3).json()
+        
+        # resp ka format: ["query", ["suggestion1", "suggestion2", ...]]
+        suggestions = resp[1] if len(resp) > 1 else []
+        
+        # 'movie' word hata kar clean naam nikalna aur top 6 suggestions dikhana
+        clean_suggs = [s.replace(' movie', '').title() for s in suggestions][:6] 
+        return jsonify(clean_suggs)
+    except Exception as e:
+        logger.error(f"Suggest API Error: {e}")
+        return jsonify([])
 
 # ==================== MAIN WEB APP PAGE (Premium HTML) ====================
 
@@ -7802,7 +7825,6 @@ def serve_mini_app():
             </div>
         </div>
 
-        <!-- Rows -->
         <div class="movie-row" id="rowTrending">
             <div class="row-header">
                 <div class="row-header-left"><i class="fas fa-fire"></i> Trending Now</div>
@@ -7847,7 +7869,6 @@ def serve_mini_app():
         <div class="movie-grid" id="searchGrid"></div>
     </div>
 
-    <!-- Details Page -->
     <div class="details-page" id="detailsPage">
         <div class="dp-header">
             <button class="btn-back" onclick="closeDetails()"><i class="fas fa-chevron-left"></i></button>
@@ -7870,7 +7891,6 @@ def serve_mini_app():
         </div>
     </div>
 
-    <!-- Trailer Modal -->
     <div class="trailer-modal" id="trailerModal">
         <div class="trailer-wrapper">
             <iframe id="trailerIframe" src="" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
@@ -8022,7 +8042,52 @@ def serve_mini_app():
                         document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
                         document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
                     } else {
-                        document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
+                        // NAYA JUGAD START
+                        const term = q;
+                        const searchHeader = document.getElementById('searchHeader');
+                        const searchGrid = document.getElementById('searchGrid');
+                        
+                        searchHeader.innerHTML = `<i class="fas fa-exclamation-circle" style="color:#ef4444;"></i> Not Found`;
+                        searchGrid.innerHTML = '<div class="loader">Checking spelling...</div>';
+                        
+                        // 🔥 NAYA JUGAD: Google jaisa sleek list design
+                                        let buttonsHtml = suggs.map(s => 
+                                            `<div onclick="document.getElementById('searchInput').value='${s}'; document.getElementById('searchInput').dispatchEvent(new Event('input'));" 
+                                            style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: white; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background 0.2s;"
+                                            onmouseover="this.style.background='rgba(255,215,0,0.1)'" onmouseout="this.style.background='transparent'">
+                                                <i class="fas fa-search" style="color: var(--text-muted); font-size: 14px;"></i> 
+                                                <span style="font-weight: 500;">${s}</span>
+                                            </div>`
+                                        ).join('');
+                                        
+                                        searchGrid.innerHTML = `
+                                            <div style="grid-column: 1 / -1; padding: 15px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+                                                <p style="color: var(--primary); margin-bottom: 10px; font-size: 13px; font-weight: bold; padding-left: 10px;">✨ DID YOU MEAN:</p>
+                                                <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
+                                                    ${buttonsHtml}
+                                                </div>
+                                                <div style="margin-top: 15px; padding: 0 10px;">
+                                                    <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
+                                                        <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        `;
+                            } else {
+                                // Agar Google ko bhi kuch na mile
+                                searchGrid.innerHTML = `
+                                    <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
+                                        <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
+                                        <button onclick="requestMovie('${term}')" style="background: linear-gradient(135deg, var(--primary), #b8860b); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
+                                            <i class="fas fa-paper-plane"></i> Request This Movie
+                                        </button>
+                                    </div>
+                                `;
+                            }
+                        }).catch(() => {
+                            searchGrid.innerHTML = `<div style="grid-column: 1/-1; text-align:center;"><button onclick="requestMovie('${term}')" class="btn-request">Request Anyway</button></div>`;
+                        });
+                        // NAYA JUGAD END
                     }
                 } catch (err) {
                     document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
@@ -8134,6 +8199,30 @@ def serve_mini_app():
                 else showToast('❌ Failed');
             })
             .catch(() => showToast('❌ Error'));
+        };
+
+        // 🔥 NAYA: Silent Request (Jab TMDB aur Google dono fail ho jayein)
+        window.requestSilent = function(title) {
+            tg.HapticFeedback.notificationOccurred('success');
+            showToast('⏳ Sending Request...');
+            const user = tg.initDataUnsafe?.user || {id: 0, username: 'webapp', first_name: 'User'};
+            
+            fetch('/api/request', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title: title, user_id: user.id, username: user.username, first_name: user.first_name})
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.status === 'success') {
+                    showToast('✅ Request Sent to Admin!');
+                    // Request bhejte hi Mini app close kar do (Seamless feel ke liye)
+                    setTimeout(() => { tg.close(); }, 1500);
+                } else {
+                    showToast('❌ Failed to send');
+                }
+            })
+            .catch(() => showToast('❌ Network Error'));
         };
 
         // 🛡️ NAYA: Anti-Bot Middleware Par Bhejne Wala Function
@@ -8345,10 +8434,15 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Handle 'Request Movie' button (Guidance)
     elif query_text == '🙋 Request Movie':
+        web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🙋 Request A Movie", callback_data="request_manual")]
+            [InlineKeyboardButton("🌐 Open Request Portal", web_app=WebAppInfo(url=web_app_url))]
         ])
-        msg = await update.message.reply_text("👇 **Click the button below to start your request:**", reply_markup=keyboard, parse_mode='Markdown')
+        msg = await update.message.reply_text(
+            "👇 **स्मार्ट रिक्वेस्ट पोर्टल:**\n\nयहाँ मूवी का नाम सर्च करें। अगर स्पेलिंग गलत हुई, तो हमारा AI उसे सही कर देगा और आप सीधा रिक्वेस्ट भेज पाएंगे!", 
+            reply_markup=keyboard, 
+            parse_mode='Markdown'
+        )
         track_message_for_deletion(context, chat_id, msg.message_id, 60)
         return
     # ============================================
