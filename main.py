@@ -5497,22 +5497,21 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             display_title = get_safe_font(clean_title)
 
-            # 2. Shorten Link (GPLinks API se)
+            # 2. Shorten Link
             short_link = await shorten_link(post['links'][0])
 
-            # 3. Caption Banao (Bina Buttons Ke - Seedha Text Mein Link)
-        caption = (
-            f"🎬 <b>{movie_title}</b>\n"
-            f"✨ Genre: {safe_genre}\n"
-            f"Language: {display_lang}\n"
-            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-            f"👇 <b>Download Below</b> 👇"
-        )
+            # ✅ FIX: Indented this block so it stays inside the 'try'
+            # Also using 'display_title' instead of undefined 'movie_title'
+            channel_caption = (
+                f"🎬 <b>{display_title}</b>\n"
+                f"🔗 Link: {short_link}\n" # Added link since you shortened it!
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"👇 <b>Download Below</b> 👇"
+            )
 
-            # 4. Post to Channel (reply_markup hata diya gaya hai)
+            # 4. Post to Channel
             if post['media_type'] == 'photo':
                 await context.bot.send_photo(chat_id=target_channel, photo=post['file_id'], caption=channel_caption, parse_mode='HTML')
             elif post['media_type'] == 'video':
@@ -5524,18 +5523,15 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             success_count += 1
 
-            # Har 5 post ke baad status update karo taaki lag na lage
             if i % 5 == 0:
                 try: await status_msg.edit_text(f"🚀 Processing: {i}/{len(posts)}\n✅ Success: {success_count}")
                 except: pass
 
-            # 🛑 SABSE ZAROORI: 3 Second ka Gap taaki Telegram FloodWait na de
             await asyncio.sleep(3)
 
         except Exception as e:
             logger.error(f"18+ Batch Post Error: {e}")
             failed_count += 1
-
     # Final Report
     await status_msg.edit_text(
         f"🎉 **Batch Complete!**\n\n"
