@@ -7408,48 +7408,6 @@ TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 # get_db_connection(), close_db_connection(), store_user_request()
 # We'll assume they are available.
 
-# ==================== API ROUTES ====================
-
-@flask_app.route('/api/movies', methods=['GET'])
-def get_movies():
-    """
-    Return list of movies with basic info (for homepage).
-    """
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, title, year, poster_url, rating, genre, category,
-                   COALESCE(language, '') as language
-            FROM movies
-            WHERE poster_url IS NOT NULL AND poster_url != ''
-            ORDER BY id DESC
-            LIMIT 200
-        """)
-        rows = cur.fetchall()
-        movies = []
-        for r in rows:
-            movies.append({
-                'id': r[0],
-                'title': r[1],
-                'year': r[2] if r[2] else '',
-                'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
-                'rating': r[4] if r[4] else 'N/A',
-                'genre': r[5] if r[5] else 'Unknown',
-                'category': r[6] if r[6] else 'Movie',
-                'language': r[7]
-            })
-        cur.close()
-        close_db_connection(conn)
-        return jsonify({'status': 'success', 'movies': movies})
-    except Exception as e:
-        logger.error(f"Error in /api/movies: {e}")
-        close_db_connection(conn)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
     """
@@ -7492,8 +7450,8 @@ def get_movie_details(movie_id):
         try:
             search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
             resp = requests.get(search_url, timeout=5).json()
+            
             if resp.get('results'):
-                
                 # 🎯 NAYA CODE: TMDB results ko Year ke hisaab se match karein
                 db_year = str(movie.get('year', '')).strip()
                 target_movie = None
@@ -7532,24 +7490,11 @@ def get_movie_details(movie_id):
                 trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
                 if trailer:
                     movie['trailer_key'] = trailer['key']
-        except Exception as e:
-            logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
-            movie['cast'] = []
-            movie['trailer_key'] = None
-            movie['backdrop'] = None
-                
-                # Get credits
-                credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
-                credits = requests.get(credits_url, timeout=5).json()
-                cast = credits.get('cast', [])[:5]
-                movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
-                
-                # Get trailer
-                videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
-                videos = requests.get(videos_url, timeout=5).json()
-                trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
-                if trailer:
-                    movie['trailer_key'] = trailer['key']
+            else:
+                movie['cast'] = []
+                movie['trailer_key'] = None
+                movie['backdrop'] = None
+
         except Exception as e:
             logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
             movie['cast'] = []
@@ -7557,6 +7502,7 @@ def get_movie_details(movie_id):
             movie['backdrop'] = None
         
         return jsonify({'status': 'success', 'movie': movie})
+
     except Exception as e:
         logger.error(f"Error in /api/movie/{movie_id}: {e}")
         close_db_connection(conn)
