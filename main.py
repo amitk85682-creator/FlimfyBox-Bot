@@ -1296,20 +1296,19 @@ def migrate_add_imdb_columns():
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS description TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT;")
-        
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS language TEXT;")
-        # 👇👇 NAYI LINE: COMBiNED aur Episodes ke liye 👇👇
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS extra_info TEXT;")
-
+        # NEW: cast column
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS cast TEXT;")
+        
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
-
         conn.commit()
         cur.close()
         close_db_connection(conn)
         return True
     except Exception as e:
-        pass
+        logger.error(f"Migration error: {e}")
         close_db_connection(conn)
         return False
 
@@ -1749,6 +1748,31 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     except Exception as e:
         logger.error(f"Error in auto_fetch_and_update_metadata: {e}")
         return False
+
+def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
+    """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
+    try:
+        # TMDB API key (you already have it)
+        api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+        # First, find TMDB ID by IMDb ID
+        find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&external_source=imdb_id"
+        resp = requests.get(find_url, timeout=10).json()
+        tmdb_results = resp.get('movie_results', [])
+        if not tmdb_results:
+            tmdb_results = resp.get('tv_results', [])
+        if not tmdb_results:
+            return ""
+        tmdb_id = tmdb_results[0]['id']
+        media_type = 'movie' if resp.get('movie_results') else 'tv'
+        # Get credits
+        credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={api_key}"
+        credits = requests.get(credits_url, timeout=10).json()
+        cast = credits.get('cast', [])[:limit]
+        if cast:
+            return ', '.join([c['name'] for c in cast])
+    except Exception as e:
+        logger.error(f"Failed to fetch cast for {imdb_id}: {e}")
+    return ""
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
@@ -4068,7 +4092,7 @@ def generate_basic_aliases(movie_title, year=""):
 # ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
 
 async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct IMDb ID batch command"""
+    """Direct IMDb ID batch command (fetches metadata, cast, and starts batch)"""
     if update.effective_user.id != ADMIN_USER_ID:
         return
         
@@ -4078,52 +4102,42 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     imdb_id = context.args[0].strip()
     
-    # Check if helper function exists, otherwise simple regex check
-    if 'is_valid_imdb_id' in globals():
-        if not is_valid_imdb_id(imdb_id):
-            await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
-            return
-    elif not re.match(r'^tt\d{7,8}$', imdb_id):
-         await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
-         return
+    if not re.match(r'^tt\d{7,8}$', imdb_id):
+        await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
+        return
         
-    # Reuse batch_add_command logic
-    context.args = [imdb_id]
-    await batch_add_command(update, context)
-
-
-async def upload_image_to_telegraph(bot, file_id):
-    """
-    Ab yeh Telegra.ph ki jagah Catbox.moe par upload karega.
-    Telegra.ph cloud IPs ko block karta hai, isliye yeh 100% safe aur working tarika hai.
-    """
+    status_msg = await update.message.reply_text(f"⏳ Fetching metadata for IMDb ID: {imdb_id}...", parse_mode='Markdown')
     try:
-        # 1. Telegram se image file download karo (Yeh tumhare log me successful chal raha hai)
-        tg_file = await bot.get_file(file_id)
-        image_bytearray = await tg_file.download_as_bytearray()
-        image_bytes = bytes(image_bytearray)
+        # 1. Fetch basic metadata (title, year, genre, category)
+        metadata = await run_async(fetch_movie_metadata, imdb_id)
+        if not metadata:
+            await status_msg.edit_text("❌ Could not fetch metadata for that IMDb ID.")
+            return
         
-        # 2. Catbox API ke liye form data prepare karo
-        data = aiohttp.FormData()
-        data.add_field('reqtype', 'fileupload')
-        data.add_field('userhash', '') # Anonymous upload ke liye khali chhodna hai
-        data.add_field('fileToUpload', image_bytes, filename='poster.jpg', content_type='image/jpeg')
+        title, year, poster_url, genre, imdb_id_fetched, rating, plot, category = metadata
+        year_str = str(year) if year and year != 0 else ""
+        language = "Hindi"  # default, can be detected later
         
-        # 3. Catbox par upload karo
-        async with aiohttp.ClientSession() as session:
-            # SSL verification false rakhi hai taaki server blocks ka issue na aaye
-            async with session.post('https://catbox.moe/user/api.php', data=data, ssl=False) as resp:
-                if resp.status == 200:
-                    link = await resp.text()
-                    logger.info(f"✅ Image Uploaded Successfully: {link}")
-                    return link.strip()
-                else:
-                    logger.error(f"❌ Upload failed with status: {resp.status}")
-                    
+        # 2. Fetch cast from TMDB using IMDb ID
+        cast_str = await run_async(fetch_cast_from_imdb, imdb_id_fetched, 5)
+        if cast_str:
+            await status_msg.edit_text(f"✅ Metadata fetched. Cast: {cast_str[:50]}...")
+        else:
+            await status_msg.edit_text("✅ Metadata fetched. (No cast info)")
+        
+        # Store all data in user_data for batch_add_command
+        context.user_data['batch_imdb_id'] = imdb_id_fetched
+        context.user_data['batch_cast'] = cast_str
+        
+        # Construct args string exactly as batch_add_command expects
+        args_string = f"{title}, {year_str}, {language}, {genre}, {category}"
+        context.args = [args_string]
+        
+        await batch_add_command(update, context)
+        
     except Exception as e:
-        logger.error(f"❌ Cloud Upload Error: {e}")
-        
-    return None
+        logger.error(f"Error in batch_id_command: {e}")
+        await status_msg.edit_text(f"❌ Error: {e}")
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -4149,11 +4163,13 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     genre = parts[3] if len(parts) > 3 else "Adult, Drama"
     category = parts[4] if len(parts) > 4 else "Web Series"
     
-    # Custom post me rating aur plot default daal dete hain
     rating = "N/A"
     plot = "Watch exclusive content on FlimfyBox Premium."
-    poster_url = None # Ye baad me photo bhejne par update hoga
-    imdb_id = None
+    poster_url = None
+    
+    # Retrieve stored IMDb ID and cast from user_data (if batchid was used)
+    imdb_id = context.user_data.pop('batch_imdb_id', None)
+    cast_str = context.user_data.pop('batch_cast', None)
 
     status_msg = await update.message.reply_text(f"⏳ Saving '{title}' to Database...", parse_mode='Markdown')
 
@@ -4163,26 +4179,25 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cur = conn.cursor()
         
-        # 2. Insert or Update Movie
+        # Insert or update with optional cast
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, cast) 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (title) DO UPDATE 
-            SET year = EXCLUDED.year, genre = EXCLUDED.genre, category = EXCLUDED.category, language = EXCLUDED.language
+            SET year = EXCLUDED.year, genre = EXCLUDED.genre, category = EXCLUDED.category, language = EXCLUDED.language,
+                cast = COALESCE(EXCLUDED.cast, movies.cast)
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, language)
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
 
-        # Check existing files
         cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
         file_count = cur.fetchone()[0]
         cur.close()
 
-        # 3. Activate Batch Session
         BATCH_SESSION.update({
             'active': True,
             'movie_id': movie_id,
@@ -4199,7 +4214,8 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 **Year:** {year}\n"
             f"🎭 **Genre:** {genre}\n"
             f"🗣️ **Language:** {language}\n"
-            f"🏷️ **Category:** {category}\n\n"
+            f"🏷️ **Category:** {category}\n"
+            f"👥 **Cast:** {cast_str if cast_str else 'Not available'}\n\n"
             f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
             f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
             f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
