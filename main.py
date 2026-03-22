@@ -7493,16 +7493,50 @@ def get_movie_details(movie_id):
             search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
             resp = requests.get(search_url, timeout=5).json()
             if resp.get('results'):
-                first = resp['results'][0]
-                media_type = first.get('media_type', 'movie')
-                tmdb_id = first['id']
+                
+                # 🎯 NAYA CODE: TMDB results ko Year ke hisaab se match karein
+                db_year = str(movie.get('year', '')).strip()
+                target_movie = None
+                
+                # Agar hamare DB me year hai, toh use TMDB ke release date se match karo
+                if db_year and db_year != '0':
+                    for item in resp['results']:
+                        item_year = str(item.get('release_date') or item.get('first_air_date') or '')[:4]
+                        if item_year == db_year:
+                            target_movie = item
+                            break
+                            
+                # Agar exact year match nahi mila (ya year 0 hai), toh default pehla result lo
+                if not target_movie:
+                    target_movie = resp['results'][0]
+
+                media_type = target_movie.get('media_type', 'movie')
+                tmdb_id = target_movie['id']
                 
                 # Get backdrop (landscape)
-                backdrop_path = first.get('backdrop_path')
+                backdrop_path = target_movie.get('backdrop_path')
                 if backdrop_path:
                     movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
                 else:
                     movie['backdrop'] = None
+                
+                # Get credits
+                credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
+                credits = requests.get(credits_url, timeout=5).json()
+                cast = credits.get('cast', [])[:5]
+                movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
+                
+                # Get trailer
+                videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
+                videos = requests.get(videos_url, timeout=5).json()
+                trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
+                if trailer:
+                    movie['trailer_key'] = trailer['key']
+        except Exception as e:
+            logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
+            movie['cast'] = []
+            movie['trailer_key'] = None
+            movie['backdrop'] = None
                 
                 # Get credits
                 credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
