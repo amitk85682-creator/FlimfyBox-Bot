@@ -7236,12 +7236,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
-isme thodi kaami hai premium look me.
-1. Netflix ki taraha red ui nahi hai.
-2. background poster nahi hai.
-3. admin panel nahi hai sirf admin ke liye jime movie edit ho sake.
-4. or koi kaam ho to tum dekh lena.
-
 # ==================== FLASK APP (Premium Edition) ====================
 
 from flask import Flask, jsonify, request, send_file
