@@ -4090,108 +4090,67 @@ def generate_basic_aliases(movie_title, year=""):
 # 🎬 BATCH ID COMMAND (Fully Automatic via TMDB/IMDb)
 # ============================================================================
 async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct IMDb ID batch command (fetches metadata, cast, and starts batch independently)"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID:
-        return
-        
+    if update.effective_user.id != ADMIN_USER_ID: return
     if not context.args:
         await update.message.reply_text("❌ Usage: `/batchid tt1234567`", parse_mode='Markdown')
         return
         
     imdb_id = context.args[0].strip()
-    
-    if not re.match(r'^tt\d{7,8}$', imdb_id):
-        await update.message.reply_text("❌ Invalid IMDb ID format. Must be tt + 7-8 digits (e.g., tt15462578)")
-        return
-        
-    status_msg = await update.message.reply_text(f"⏳ Fetching metadata for IMDb ID: {imdb_id}...", parse_mode='Markdown')
+    status_msg = await update.message.reply_text(f"⏳ Fetching metadata for: {imdb_id}...")
     
     try:
-        # 1. Fetch basic metadata
         metadata = await run_async(fetch_movie_metadata, imdb_id)
         if not metadata:
-            await status_msg.edit_text("❌ Could not fetch metadata for that IMDb ID.")
+            await status_msg.edit_text("❌ Metadata fetch failed.")
             return
         
         title, year, poster_url, genre, imdb_id_fetched, rating, plot, category = metadata
-        year_str = str(year) if year and year != 0 else ""
-        language = "Hindi"  # Default
         
-        # 2. Fetch cast from TMDB
+        # 🟢 FIX: Year को Integer में बदलें, खाली स्ट्रिंग न भेजें
+        year_val = int(year) if year and str(year).isdigit() else 0
+        
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id_fetched, 5)
         
-        await status_msg.edit_text("✅ Metadata fetched. Saving to Database...")
-        
-        # 3. DIRECT DATABASE INSERT (Independent from /batch)
         conn = get_db_connection()
-        if not conn:
-            await status_msg.edit_text("❌ Database connection failed.")
-            return
-            
-        try:
-            cur = conn.cursor()
-            # 🛑 CRITICAL FIX: "cast" MUST BE IN DOUBLE QUOTES
-            cur.execute(
-                """
-                INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
-                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                ON CONFLICT (title) DO UPDATE 
-                SET imdb_id = EXCLUDED.imdb_id,
-                    poster_url = EXCLUDED.poster_url,
-                    year = EXCLUDED.year,
-                    genre = EXCLUDED.genre,
-                    rating = EXCLUDED.rating,
-                    description = EXCLUDED.description,
-                    category = EXCLUDED.category,
-                    language = EXCLUDED.language,
-                    "cast" = COALESCE(EXCLUDED."cast", movies."cast")
-                RETURNING id
-                """,
-                (title, imdb_id_fetched, poster_url, year_str, genre, rating, plot, category, language, cast_str)
-            )
-            movie_id = cur.fetchone()[0]
-            conn.commit()
+        cur = conn.cursor()
+        
+        # 🛑 SQL FIX: "cast" को कोट्स में रखें और year_val का इस्तेमाल करें
+        cur.execute("""
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            ON CONFLICT (title) DO UPDATE SET 
+            imdb_id = EXCLUDED.imdb_id, 
+            poster_url = EXCLUDED.poster_url, 
+            year = EXCLUDED.year,
+            genre = EXCLUDED.genre, 
+            rating = EXCLUDED.rating, 
+            description = EXCLUDED.description, 
+            category = EXCLUDED.category, 
+            language = EXCLUDED.language, 
+            "cast" = EXCLUDED."cast"
+            RETURNING id
+        """, (title, imdb_id_fetched, poster_url, year_val, genre, rating, plot, category, "Hindi", cast_str))
+        
+        movie_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        close_db_connection(conn)
 
-            cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-            file_count = cur.fetchone()[0]
-            cur.close()
-
-            # 4. SET BATCH SESSION
-            BATCH_SESSION.update({
-                'active': True,
-                'movie_id': movie_id,
-                'movie_title': title,
-                'file_count': file_count,
-                'admin_id': user_id,
-                'language': language,
-                'category': category
-            })
-
-            cast_display = f"👥 **Cast:** {cast_str}\n" if cast_str else ""
-            msg_text = (
-                f"✅ **Batch ID Mode Started!**\n\n"
-                f"🎬 **Title:** {title}\n"
-                f"📅 **Year:** {year_str}\n"
-                f"🎭 **Genre:** {genre}\n"
-                f"🗣️ **Language:** {language}\n"
-                f"🏷️ **Category:** {category}\n"
-                f"{cast_display}"
-                f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
-                f"🖼️ **Step 2:** Poster ke liye Image bhej do (Agar change karna ho).\n"
-                f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
-            )
-
-            keyboard = []
-            if file_count > 0:
-                keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
-            keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
-            
-            await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-        except Exception as db_err:
-            logger.error(f"BatchID DB Error: {db_err}")
-            await status_msg.edit_text(f"❌ DB Error: {db_err}")
+        BATCH_SESSION.update({
+            'active': True, 
+            'movie_id': movie_id, 
+            'movie_title': title, 
+            'file_count': 0, 
+            'admin_id': update.effective_user.id, 
+            'language': 'Hindi', 
+            'category': category
+        })
+        
+        await status_msg.edit_text(f"✅ **Metadata Saved!**\n🎬 **Title:** {title}\n🚀 Files भेजना शुरू करें, फिर `/done` लिखें।", parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"BatchID Error: {e}")
+        await status_msg.edit_text(f"❌ Error: {e}")
         finally:
             close_db_connection(conn)
             
