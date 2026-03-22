@@ -5114,17 +5114,17 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     m_title = res[0]
 
-# Ensure there are no "invisible" characters or extra spaces here
-channel_caption = (
-    f"🎬 <b>{m_title}</b>\n"
-    f"✨ Genre: {m_genre}\n"
-    f"Language: {m_lang}\n"
-    f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-    f"👇 <b>Download Below</b> 👇"
-)
+    # 🎯 FIX: This block must be indented to match the rest of the function
+    channel_caption = (
+        f"🎬 <b>{m_title}</b>\n"
+        f"✨ Genre: {m_genre}\n"
+        f"Language: {m_lang}\n"
+        f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+        f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+        f"👇 <b>Download Below</b> 👇"
+    )
 
     # 3. Download Buttons Banao
     link_param = f"movie_{movie_id}"
