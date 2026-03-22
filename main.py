@@ -7407,14 +7407,12 @@ TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
-    """
-    Return detailed info for a single movie (Ultra-Safe Version).
-    """
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+            # 500 hata kar 200 kiya taaki App actual message dikhaye
+            return jsonify({'status': 'error', 'message': 'DATABASE OFFLINE: Render dashboard par check karein'}), 200
             
         cur = conn.cursor()
         cur.execute("""
@@ -7425,7 +7423,7 @@ def get_movie_details(movie_id):
         
         if not row:
             cur.close()
-            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 200
             
         movie = {
             'id': row[0],
@@ -7439,14 +7437,13 @@ def get_movie_details(movie_id):
             'language': str(row[8] or '')
         }
         
-        # Get available files
         cur.execute("SELECT quality, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
         movie['files'] = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
         cur.close()
         
     except Exception as e:
-        logger.error(f"DATABASE ERROR in /api/movie: {e}\n{traceback.format_exc()}")
-        return jsonify({'status': 'error', 'message': f'Database error: {str(e)}'}), 500
+        # App ko crash hone se roke aur exact error dikhaye
+        return jsonify({'status': 'error', 'message': f'DB ERROR: {str(e)[:50]}'}), 200
     finally:
         if conn:
             try:
@@ -7454,7 +7451,7 @@ def get_movie_details(movie_id):
             except:
                 pass
 
-    # --- TMDB Fetch (Completely Isolated) ---
+    # --- TMDB Fetch ---
     movie['cast'] = []
     movie['trailer_key'] = None
     movie['backdrop'] = None
@@ -7481,37 +7478,30 @@ def get_movie_details(movie_id):
                 media_type = target_movie.get('media_type', 'movie')
                 tmdb_id = target_movie.get('id')
                 
-                # Backdrop
                 backdrop_path = target_movie.get('backdrop_path')
                 if backdrop_path:
                     movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
                 
-                # Cast
                 credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
                 credits = requests.get(credits_url, timeout=5).json()
-                cast = credits.get('cast', [])[:5]
-                movie['cast'] = [{'name': c.get('name', ''), 'character': c.get('character', ''), 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
+                movie['cast'] = [{'name': c.get('name', ''), 'character': c.get('character', ''), 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in credits.get('cast', [])[:5]]
                 
-                # Trailer
                 videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
                 videos = requests.get(videos_url, timeout=5).json()
                 trailer = next((v for v in videos.get('results', []) if v.get('type') == 'Trailer' and v.get('site') == 'YouTube'), None)
                 if trailer:
                     movie['trailer_key'] = trailer.get('key')
                     
-    except BaseException as e:
-        logger.error(f"TMDB ERROR: {e}\n{traceback.format_exc()}")
+    except Exception as e:
+        pass # TMDB fail ho to app rukni nahi chahiye
 
     return jsonify({'status': 'success', 'movie': movie})
 
 @flask_app.route('/api/search', methods=['GET'])
 def search_movies_api():
-    """
-    Smart Search (Local DB + TMDB)
-    """
     query = request.args.get('q', '').strip()
     if not query:
-        return jsonify({'status': 'error', 'message': 'Missing query'}), 400
+        return jsonify({'status': 'error', 'message': 'Missing query'}), 200
     
     conn = None
     local_results = []
@@ -7521,36 +7511,24 @@ def search_movies_api():
             cur = conn.cursor()
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category
-                FROM movies
-                WHERE title ILIKE %s OR title ILIKE %s
-                LIMIT 20
+                FROM movies WHERE title ILIKE %s OR title ILIKE %s LIMIT 20
             """, (f'%{query}%', f'%{query.replace(" ", "%")}%'))
-            rows = cur.fetchall()
-            for r in rows:
+            for r in cur.fetchall():
                 local_results.append({
-                    'id': r[0],
-                    'title': r[1],
-                    'year': r[2] if r[2] else '',
-                    'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
-                    'rating': r[4] if r[4] else 'N/A',
-                    'genre': r[5] if r[5] else 'Unknown',
-                    'category': r[6] if r[6] else 'Movie',
-                    'source': 'local'
+                    'id': r[0], 'title': r[1], 'year': r[2] or '',
+                    'image': r[3] or 'https://via.placeholder.com/300x450?text=No+Poster',
+                    'rating': r[4] or 'N/A', 'genre': r[5] or 'Unknown',
+                    'category': r[6] or 'Movie', 'source': 'local'
                 })
             cur.close()
     except Exception as e:
-        logger.error(f"Local search error: {e}")
+        return jsonify({'status': 'error', 'message': f'DB ERROR: {str(e)[:50]}'}), 200
     finally:
         if conn:
-            try:
-                close_db_connection(conn)
-            except:
-                pass
+            try: close_db_connection(conn)
+            except: pass
     
-    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip()
-    if not clean_query:
-        clean_query = query 
-
+    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() or query
     tmdb_results = []
     if len(local_results) < 15: 
         try:
@@ -7558,37 +7536,23 @@ def search_movies_api():
             resp = requests.get(tmdb_url, timeout=5).json()
             for item in resp.get('results', []):
                 img_path = item.get('poster_path') or item.get('backdrop_path')
-                if not img_path:
-                    continue
-                
-                tmdb_results.append({
-                    'id': 'tmdb_' + str(item['id']),
-                    'title': item.get('title') or item.get('name') or 'Unknown',
-                    'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
-                    'image': f"https://image.tmdb.org/t/p/w500{img_path}",
-                    'rating': round(item.get('vote_average', 0), 1),
-                    'genre': 'Action, Drama',
-                    'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
-                    'source': 'tmdb',
-                    'description': item.get('overview', '')
-                })
-        except Exception as e:
-            logger.error(f"TMDB search error: {e}")
+                if img_path:
+                    tmdb_results.append({
+                        'id': 'tmdb_' + str(item['id']),
+                        'title': item.get('title') or item.get('name') or 'Unknown',
+                        'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
+                        'image': f"https://image.tmdb.org/t/p/w500{img_path}",
+                        'rating': round(item.get('vote_average', 0), 1),
+                        'genre': 'Action, Drama',
+                        'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
+                        'source': 'tmdb', 'description': item.get('overview', '')
+                    })
+        except: pass
     
-    def normalize_title(t):
-        return re.sub(r'[^\w\s]', '', str(t)).lower().replace(" ", "")
-
     seen_titles = set()
     combined = []
-    
-    for m in local_results:
-        key = normalize_title(m['title'])
-        if key not in seen_titles:
-            seen_titles.add(key)
-            combined.append(m)
-            
-    for m in tmdb_results:
-        key = normalize_title(m['title'])
+    for m in local_results + tmdb_results:
+        key = re.sub(r'[^\w\s]', '', str(m['title'])).lower().replace(" ", "")
         if key not in seen_titles and len(combined) < 30:
             seen_titles.add(key)
             combined.append(m)
