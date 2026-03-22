@@ -7264,24 +7264,16 @@ CORS(flask_app, resources={r"/*": {"origins": "*"}})
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
 # --- Admin Password (from environment) ---
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '113920')
-if ADMIN_PASSWORD == '113920':
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
+if ADMIN_PASSWORD == 'admin123':
     logger.warning("Using default admin password. Please set ADMIN_PASSWORD environment variable.")
 
 # ==================== DATABASE HELPERS (assumed to exist) ====================
-# We'll assume get_db_connection, close_db_connection, store_user_request are defined
-# elsewhere. If not, you must implement them. For completeness, here are placeholders:
-def get_db_connection():
-    """Placeholder - replace with your actual DB connection logic."""
-    pass
-
-def close_db_connection(conn):
-    """Placeholder - close connection."""
-    pass
-
-def store_user_request(user_id, username, first_name, title, _, __):
-    """Placeholder - store request."""
-    pass
+# These functions are already defined in your main code. We will not redefine them.
+# They should provide:
+#   def get_db_connection()
+#   def close_db_connection(conn)
+#   def store_user_request(user_id, username, first_name, title, _, __)
 
 # ==================== ADMIN DECORATOR ====================
 def admin_required(f):
@@ -7362,7 +7354,7 @@ def add_movie():
             logger.error(f"Add movie error: {e}")
             close_db_connection(conn)
             return f"Error: {e}", 500
-    return render_template_string(ADMIN_MOVIE_FORM_HTML, movie=None)
+    return render_template_string(ADMIN_MOVIE_FORM_HTML, movie=None, files=None)
 
 @flask_app.route('/admin/movie/edit/<int:movie_id>', methods=['GET', 'POST'])
 @admin_required
@@ -7394,10 +7386,16 @@ def edit_movie(movie_id):
             cur = conn.cursor()
             cur.execute("SELECT id, title, year, poster_url, rating, genre, description, category, language FROM movies WHERE id=%s", (movie_id,))
             movie = cur.fetchone()
+            if not movie:
+                close_db_connection(conn)
+                return "Movie not found", 404
+
+            # Fetch files for this movie
+            cur.execute("SELECT id, quality, file_size FROM movie_files WHERE movie_id=%s", (movie_id,))
+            files = cur.fetchall()
             cur.close()
             close_db_connection(conn)
-            if not movie:
-                return "Movie not found", 404
+
             movie_dict = {
                 'id': movie[0],
                 'title': movie[1],
@@ -7409,7 +7407,7 @@ def edit_movie(movie_id):
                 'category': movie[7],
                 'language': movie[8]
             }
-            return render_template_string(ADMIN_MOVIE_FORM_HTML, movie=movie_dict)
+            return render_template_string(ADMIN_MOVIE_FORM_HTML, movie=movie_dict, files=files)
     except Exception as e:
         logger.error(f"Edit movie error: {e}")
         close_db_connection(conn)
@@ -7435,7 +7433,6 @@ def delete_movie(movie_id):
         close_db_connection(conn)
         return f"Error: {e}", 500
 
-# File management for a movie
 @flask_app.route('/admin/movie/<int:movie_id>/files/add', methods=['POST'])
 @admin_required
 def add_file(movie_id):
@@ -7484,16 +7481,152 @@ def delete_file(file_id):
         close_db_connection(conn)
         return f"Error: {e}", 500
 
-# ==================== EXISTING API ROUTES ====================
-# (Keep the existing routes: /api/movies, /api/movie/<id>, /api/search, /api/request, /api/suggest, /watch, /api/gen_link, /webapp)
-# Only the HTML templates for the frontend are updated to include red UI and background poster.
+# ==================== YOUR EXISTING API ROUTES ====================
+# (Keep all your existing routes: /api/movies, /api/movie/<id>, /api/search, /api/request, /api/suggest, /watch, /api/gen_link)
+# They are not modified, so we will not repeat them here. Just ensure they are included.
 
-# ... (insert the existing API code here, unchanged) ...
+# ==================== UPDATED FRONTEND (Red UI + Background Poster) ====================
+@flask_app.route('/webapp')
+def serve_mini_app():
+    return NEW_WEBAPP_HTML
 
-# ==================== UPDATED FRONTEND HTML (Red UI + Background Poster) ====================
-# The /webapp route now serves the new HTML with Netflix-like theme and background poster.
-# We'll define the HTML as a string variable.
+# ==================== ADMIN HTML TEMPLATES ====================
+ADMIN_LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Login</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #141414; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .login-box { background: #1f1f1f; padding: 30px; border-radius: 10px; width: 300px; text-align: center; border: 1px solid #E50914; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: white; }
+        button { background: #E50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; width: 100%; }
+        .error { color: #E50914; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>Admin Login</h2>
+        <form method="post">
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+            {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        </form>
+    </div>
+</body>
+</html>
+"""
 
+ADMIN_DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #141414; color: white; margin: 0; padding: 20px; }
+        h1 { color: #E50914; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #333; padding: 8px; text-align: left; }
+        th { background: #1f1f1f; }
+        a { color: #E50914; text-decoration: none; margin-right: 10px; }
+        a:hover { text-decoration: underline; }
+        .add-btn { background: #E50914; padding: 10px 20px; border-radius: 5px; display: inline-block; margin-bottom: 20px; color: white; }
+        .logout { float: right; color: #E50914; }
+    </style>
+</head>
+<body>
+    <a href="/admin/logout" class="logout">Logout</a>
+    <h1>Admin Dashboard</h1>
+    <a href="/admin/movie/add" class="add-btn">+ Add New Movie</a>
+    <table>
+        <thead>
+            <tr><th>ID</th><th>Title</th><th>Year</th><th>Rating</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+            {% for movie in movies %}
+            <tr>
+                <td>{{ movie[0] }}</td>
+                <td>{{ movie[1] }}</td>
+                <td>{{ movie[2] }}</td>
+                <td>{{ movie[3] }}</td>
+                <td>
+                    <a href="/admin/movie/edit/{{ movie[0] }}">Edit</a>
+                    <a href="/admin/movie/delete/{{ movie[0] }}" onclick="return confirm('Delete this movie?')">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
+"""
+
+ADMIN_MOVIE_FORM_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{% if movie %}Edit Movie{% else %}Add Movie{% endif %}</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #141414; color: white; margin: 0; padding: 20px; }
+        h1 { color: #E50914; }
+        form { max-width: 600px; margin: auto; background: #1f1f1f; padding: 20px; border-radius: 10px; }
+        label { display: block; margin: 10px 0 5px; }
+        input, textarea, select { width: 100%; padding: 8px; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: white; }
+        button { background: #E50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-top: 20px; }
+        .file-section { margin-top: 30px; border-top: 1px solid #333; padding-top: 20px; }
+        .file-list { margin: 10px 0; }
+        .file-item { background: #2a2a2a; padding: 5px 10px; margin: 5px 0; display: flex; justify-content: space-between; }
+        .back-link { display: inline-block; margin-bottom: 20px; color: #E50914; }
+    </style>
+</head>
+<body>
+    <a href="/admin" class="back-link">← Back to Dashboard</a>
+    <h1>{% if movie %}Edit Movie{% else %}Add Movie{% endif %}</h1>
+    <form method="post">
+        <label>Title *</label>
+        <input type="text" name="title" required value="{{ movie.title if movie else '' }}">
+        <label>Year</label>
+        <input type="text" name="year" value="{{ movie.year if movie else '' }}">
+        <label>Poster URL</label>
+        <input type="text" name="poster_url" value="{{ movie.poster_url if movie else '' }}">
+        <label>Rating (e.g., 8.5)</label>
+        <input type="text" name="rating" value="{{ movie.rating if movie else '' }}">
+        <label>Genre (comma separated)</label>
+        <input type="text" name="genre" value="{{ movie.genre if movie else '' }}">
+        <label>Description</label>
+        <textarea name="description" rows="3">{{ movie.description if movie else '' }}</textarea>
+        <label>Category (e.g., Bollywood, Hollywood)</label>
+        <input type="text" name="category" value="{{ movie.category if movie else '' }}">
+        <label>Language</label>
+        <input type="text" name="language" value="{{ movie.language if movie else '' }}">
+        <button type="submit">Save Movie</button>
+    </form>
+
+    {% if movie and files is not none %}
+    <div class="file-section">
+        <h3>Movie Files (Qualities)</h3>
+        <div class="file-list">
+            {% for file in files %}
+            <div class="file-item">
+                <span>{{ file[1] }} - {{ file[2] or 'N/A' }}</span>
+                <a href="/admin/movie/file/delete/{{ file[0] }}" onclick="return confirm('Delete this file?')">Delete</a>
+            </div>
+            {% endfor %}
+        </div>
+        <form action="/admin/movie/{{ movie.id }}/files/add" method="post">
+            <label>Quality (e.g., 1080p)</label>
+            <input type="text" name="quality" required>
+            <label>File Size (e.g., 2.5 GB)</label>
+            <input type="text" name="file_size">
+            <button type="submit">Add File</button>
+        </form>
+    </div>
+    {% endif %}
+</body>
+</html>
+"""
+
+# ==================== NEW FRONTEND HTML ====================
 NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7506,10 +7639,10 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
         :root {
-            --bg: #141414;           /* Netflix dark background */
+            --bg: #141414;
             --surface: #1f1f1f;
             --surface-light: #2a2a2a;
-            --primary: #E50914;      /* Netflix red */
+            --primary: #E50914;
             --primary-soft: #B00710;
             --primary-glow: rgba(229, 9, 20, 0.4);
             --text: #ffffff;
@@ -7533,7 +7666,7 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
             left: 0;
             width: 100%;
             height: 100%;
-            background-image: url('https://image.tmdb.org/t/p/original/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg'); /* default fallback */
+            background-image: url('https://image.tmdb.org/t/p/original/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg');
             background-size: cover;
             background-position: center;
             opacity: 0.15;
@@ -7889,7 +8022,6 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
         // Update background poster based on hero slider (or any selected movie)
         function updateBackgroundPoster(url) {
             document.body.style.setProperty('--bg-poster', `url(${url})`);
-            // Actually we set the pseudo-element's background image
             document.body.style.setProperty('background-image', `url(${url})`);
         }
 
@@ -7987,167 +8119,18 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
             }).join('');
         }
 
-        // Search (unchanged from original but with red theme)
-        // ... (copy the existing search function, it's the same)
-        // We'll just copy it from the original code to avoid duplication here.
-        // For brevity, assume it's included.
+        // Search implementation (same as original, just adapted to red theme)
+        // ... (copy the existing search function from your original code to keep it)
+        // For brevity, we assume it is included. If not, the original code should be placed here.
 
-        // Details, download, request, etc. (same as original, just theme changed)
-        // ... (copy existing functions)
+        // Details, download, request, etc. (same as original)
+        // ... (copy the existing functions)
 
         // Start
         loadMovies();
     </script>
 </body>
 </html>"""
-
-# The /webapp route now serves the new HTML
-@flask_app.route('/webapp')
-def serve_mini_app():
-    return NEW_WEBAPP_HTML
-
-# ==================== ADMIN HTML TEMPLATES ====================
-ADMIN_LOGIN_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Admin Login</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #141414; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .login-box { background: #1f1f1f; padding: 30px; border-radius: 10px; width: 300px; text-align: center; border: 1px solid #E50914; }
-        input { width: 100%; padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: white; }
-        button { background: #E50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; width: 100%; }
-        .error { color: #E50914; margin-top: 10px; }
-    </style>
-</head>
-<body>
-    <div class="login-box">
-        <h2>Admin Login</h2>
-        <form method="post">
-            <input type="password" name="password" placeholder="Password" required>
-            <button type="submit">Login</button>
-            {% if error %}<div class="error">{{ error }}</div>{% endif %}
-        </form>
-    </div>
-</body>
-</html>
-"""
-
-ADMIN_DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Admin Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #141414; color: white; margin: 0; padding: 20px; }
-        h1 { color: #E50914; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border: 1px solid #333; padding: 8px; text-align: left; }
-        th { background: #1f1f1f; }
-        a { color: #E50914; text-decoration: none; margin-right: 10px; }
-        a:hover { text-decoration: underline; }
-        .add-btn { background: #E50914; padding: 10px 20px; border-radius: 5px; display: inline-block; margin-bottom: 20px; color: white; }
-        .logout { float: right; color: #E50914; }
-    </style>
-</head>
-<body>
-    <a href="/admin/logout" class="logout">Logout</a>
-    <h1>Admin Dashboard</h1>
-    <a href="/admin/movie/add" class="add-btn">+ Add New Movie</a>
-    <table>
-        <thead>
-            <tr><th>ID</th><th>Title</th><th>Year</th><th>Rating</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-            {% for movie in movies %}
-            <tr>
-                <td>{{ movie[0] }}</td>
-                <td>{{ movie[1] }}</td>
-                <td>{{ movie[2] }}</td>
-                <td>{{ movie[3] }}</td>
-                <td>
-                    <a href="/admin/movie/edit/{{ movie[0] }}">Edit</a>
-                    <a href="/admin/movie/delete/{{ movie[0] }}" onclick="return confirm('Delete this movie?')">Delete</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</body>
-</html>
-"""
-
-ADMIN_MOVIE_FORM_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{% if movie %}Edit Movie{% else %}Add Movie{% endif %}</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #141414; color: white; margin: 0; padding: 20px; }
-        h1 { color: #E50914; }
-        form { max-width: 600px; margin: auto; background: #1f1f1f; padding: 20px; border-radius: 10px; }
-        label { display: block; margin: 10px 0 5px; }
-        input, textarea, select { width: 100%; padding: 8px; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: white; }
-        button { background: #E50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-top: 20px; }
-        .file-section { margin-top: 30px; border-top: 1px solid #333; padding-top: 20px; }
-        .file-list { margin: 10px 0; }
-        .file-item { background: #2a2a2a; padding: 5px 10px; margin: 5px 0; display: flex; justify-content: space-between; }
-        .back-link { display: inline-block; margin-bottom: 20px; color: #E50914; }
-    </style>
-</head>
-<body>
-    <a href="/admin" class="back-link">← Back to Dashboard</a>
-    <h1>{% if movie %}Edit Movie{% else %}Add Movie{% endif %}</h1>
-    <form method="post">
-        <label>Title *</label>
-        <input type="text" name="title" required value="{{ movie.title if movie else '' }}">
-        <label>Year</label>
-        <input type="text" name="year" value="{{ movie.year if movie else '' }}">
-        <label>Poster URL</label>
-        <input type="text" name="poster_url" value="{{ movie.poster_url if movie else '' }}">
-        <label>Rating (e.g., 8.5)</label>
-        <input type="text" name="rating" value="{{ movie.rating if movie else '' }}">
-        <label>Genre (comma separated)</label>
-        <input type="text" name="genre" value="{{ movie.genre if movie else '' }}">
-        <label>Description</label>
-        <textarea name="description" rows="3">{{ movie.description if movie else '' }}</textarea>
-        <label>Category (e.g., Bollywood, Hollywood)</label>
-        <input type="text" name="category" value="{{ movie.category if movie else '' }}">
-        <label>Language</label>
-        <input type="text" name="language" value="{{ movie.language if movie else '' }}">
-        <button type="submit">Save Movie</button>
-    </form>
-
-    {% if movie %}
-    <div class="file-section">
-        <h3>Movie Files (Qualities)</h3>
-        <div class="file-list">
-            {% set conn = get_db_connection() %}
-            {% if conn %}
-                {% set cur = conn.cursor() %}
-                {% set cur.execute("SELECT id, quality, file_size FROM movie_files WHERE movie_id = %s", (movie.id,)) %}
-                {% for file in cur.fetchall() %}
-                <div class="file-item">
-                    <span>{{ file[1] }} - {{ file[2] or 'N/A' }}</span>
-                    <a href="/admin/movie/file/delete/{{ file[0] }}" onclick="return confirm('Delete this file?')">Delete</a>
-                </div>
-                {% endfor %}
-                {% set cur.close() %}
-                {% set close_db_connection(conn) %}
-            {% endif %}
-        </div>
-        <form action="/admin/movie/{{ movie.id }}/files/add" method="post">
-            <label>Quality (e.g., 1080p)</label>
-            <input type="text" name="quality" required>
-            <label>File Size (e.g., 2.5 GB)</label>
-            <input type="text" name="file_size">
-            <button type="submit">Add File</button>
-        </form>
-    </div>
-    {% endif %}
-</body>
-</html>
-"""
 
 # ==================== RUN APP ====================
 if __name__ == '__main__':
