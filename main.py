@@ -4151,12 +4151,6 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"BatchID Error: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
-        finally:
-            close_db_connection(conn)
-            
-    except Exception as e:
-        logger.error(f"Error in batch_id_command: {e}")
-        await status_msg.edit_text(f"❌ Error: {e}")
 
 
 # ============================================================================
