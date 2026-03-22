@@ -1802,106 +1802,62 @@ def get_tmdb_backdrop(query, search_year=""):
     return None
 
 def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """Smart Metadata Fetcher (OMDb + Cinemagoer + TMDB HD Posters) - NOW SUPPORTS IMDb IDs!"""
-    if not ia: return query, 0, '', '', '', 'N/A', '', 'Unknown'
+    """IMDb से डेटा और TMDb से पोस्टर निकालने वाला इंजन"""
+    omdb_api_key = os.environ.get("OMDB_API_KEY")
+    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" # TMDb Key
+    
+    if not omdb_api_key:
+        logger.error("❌ OMDB_API_KEY missing in .env")
+        return None
 
-    def get_smart_category(country, language, genre):
-        c, l, g = str(country).lower(), str(language).lower(), str(genre).lower()
-        if 'japan' in c or 'animation' in g: return "Anime"
-        if 'series' in g or 'episode' in g: return "Series"
-        if 'india' not in c: return "Hollywood"
-        if any(x in l for x in ['telugu', 'tamil', 'kannada', 'malayalam', 'marathi']): return "South"
-        return "Bollywood"
-
-    title, year, poster, genres, imdb_id, rating, plot, category = query, 0, '', '', '', 'N/A', '', 'Unknown'
-
-    # 🟢 NAYA: Check karo ki 'query' me IMDb ID hai ya Title
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
 
     try:
-        # 📝 1. OMDb Strategy
-        omdb_api_key = os.environ.get("OMDB_API_KEY")
-        if omdb_api_key:
-            try:
-                # Agar ID hai to '?i=' lagao, varna '?t=' lagao
-                if is_imdb_id:
-                    base_url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}"
-                    url = base_url
-                else:
-                    base_url = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}"
-                    url = base_url
-                    if search_year and search_year.isdigit(): 
-                        url += f"&y={search_year}"
+        # --- STEP 1: IMDb (OMDb) से बेसिक डेटा लाना ---
+        if is_imdb_id:
+            url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}&plot=full"
+        else:
+            url = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}&plot=full"
 
-                response = requests.get(url, timeout=10).json()
-                
-                # Agar title + year se nahi mili, to sirf title se try karo
-                if response.get("Response") != "True" and not is_imdb_id and search_year:
-                    response = requests.get(base_url, timeout=10).json()
-                
-                if response.get("Response") == "True":
-                    title = response['Title']
-                    year = int(response.get('Year', 0).split('–')[0]) if response.get('Year') else 0
-                    poster = response.get('Poster', '') if response.get('Poster') != 'N/A' else ''
-                    genres = response.get('Genre', '')
-                    imdb_id = response.get('imdbID', '')
-                    rating = response.get('imdbRating', 'N/A')
-                    plot = response.get('Plot', '')
-                    category = get_smart_category(response.get('Country', ''), response.get('Language', ''), genres)
-            except Exception as e:
-                logger.warning(f"OMDb Error: {e}")
+        resp = requests.get(url, timeout=10).json()
+        if resp.get("Response") != "True":
+            return None
 
-        # 🔍 2. Cinemagoer Strategy (Fallback)
-        # Agar OMDb ne kaam nahi kiya (imdb_id abhi bhi khali hai)
-        if not imdb_id or title == query:
-            if is_imdb_id:
-                # Cinemagoer me ID numbers me chahiye hoti hai (tt hatakar)
-                num_id = search_query[2:]
-                try:
-                    best_match = ia.get_movie(num_id)
-                    title = best_match.get('title', title)
-                    year = best_match.get('year', year)
-                    poster = best_match.get('full-size cover url', poster)
-                    genres = ', '.join(best_match.get('genres', [])[:3])
-                    imdb_id = search_query
-                    rating = best_match.get('rating', rating)
-                    plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else plot)
-                    category = get_smart_category(best_match.get('countries', []), best_match.get('languages', []), genres)
-                except Exception as e:
-                    logger.warning(f"Cinemagoer ID fetch error: {e}")
-            else:
-                movies = ia.search_movie(query)
-                if movies:
-                    best_match = movies[0]
-                    for m in movies:
-                        m_year = str(m.get('year', ''))
-                        if search_year and search_year == m_year:
-                            best_match = m
-                            break
-                    ia.update(best_match)
-                    
-                    title = best_match.get('title', title)
-                    year = best_match.get('year', year)
-                    poster = best_match.get('full-size cover url', poster)
-                    genres = ', '.join(best_match.get('genres', [])[:3])
-                    imdb_id = f"tt{best_match.movieID}"
-                    rating = best_match.get('rating', rating)
-                    plot = best_match.get('plot outline') or (best_match.get('plot')[0] if best_match.get('plot') else plot)
-                    category = get_smart_category(best_match.get('countries', []), best_match.get('languages', []), genres)
+        title = resp.get('Title')
+        year = int(resp.get('Year', '0').split('–')[0]) if resp.get('Year') else 0
+        genre = resp.get('Genre', 'Action, Drama')
+        rating = resp.get('imdbRating', 'N/A')
+        plot = resp.get('Plot', 'No story available.')
+        imdb_id = resp.get('imdbID')
+        country = resp.get('Country', '')
+        lang = resp.get('Language', '').lower()
 
-        # 🚀🚀 3. TMDB MAGIC: HD LANDSCAPE POSTER OVERRIDE 🚀🚀
-        # Agar user ne IMDb ID di thi, toh TMDB ko ID nahi balki original Title pass karo (jo OMDb se abhi nikala hai)
-        tmdb_search_term = title if is_imdb_id and title != query else query
-        tmdb_landscape = get_tmdb_backdrop(tmdb_search_term, search_year)
-        if tmdb_landscape:
-            poster = tmdb_landscape
+        # --- STEP 2: Smart Category Detection ---
+        category = "Movies"
+        g_low = genre.lower()
+        if "animation" in g_low or "anime" in g_low: category = "Anime"
+        elif "series" in g_low or "episode" in g_low: category = "Web Series"
+        elif "india" in country.lower():
+            if any(x in lang for x in ['telugu', 'tamil', 'kannada', 'malayalam']): category = "South"
+            else: category = "Bollywood"
+        else: category = "Hollywood"
 
-        return title, year, poster, genres, imdb_id, rating, plot, category
+        # --- STEP 3: TMDb से HD Poster लाना (Landscape) ---
+        poster_url = resp.get('Poster') # Default OMDb
+        tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
+        t_resp = requests.get(tmdb_search, timeout=10).json()
+        if t_resp.get('results'):
+            res = t_resp['results'][0]
+            path = res.get('backdrop_path') or res.get('poster_path')
+            if path:
+                poster_url = f"https://image.tmdb.org/t/p/original{path}"
+
+        return title, year, poster_url, genre, imdb_id, rating, plot, category
 
     except Exception as e:
-        logger.error(f"Metadata Error: {e}")
-        return title, year, poster, genres, imdb_id, rating, plot, category
+        logger.error(f"Metadata Fetch Error: {e}")
+        return None
 
 # ==================== AI INTENT ANALYSIS ====================
 # 👇👇👇 START COPY HERE 👇👇👇
@@ -4092,65 +4048,67 @@ def generate_basic_aliases(movie_title, year=""):
 async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID: return
     if not context.args:
-        await update.message.reply_text("❌ Usage: `/batchid tt1234567`", parse_mode='Markdown')
+        await update.message.reply_text("❌ Usage: `/batchid tt1234567`")
         return
         
     imdb_id = context.args[0].strip()
-    status_msg = await update.message.reply_text(f"⏳ Fetching metadata for: {imdb_id}...")
+    status_msg = await update.message.reply_text(f"⏳ Extracting all details for {imdb_id}...")
     
     try:
-        metadata = await run_async(fetch_movie_metadata, imdb_id)
-        if not metadata:
-            await status_msg.edit_text("❌ Metadata fetch failed.")
+        # 1. Metadata + Poster
+        data = await run_async(fetch_movie_metadata, imdb_id)
+        if not data:
+            await status_msg.edit_text("❌ IMDb से डेटा नहीं मिला। API Key चेक करें।")
             return
         
-        title, year, poster_url, genre, imdb_id_fetched, rating, plot, category = metadata
+        title, year, poster, genre, imdb_id_f, rating, plot, category = data
         
-        # 🟢 FIX: Year को Integer में बदलें, खाली स्ट्रिंग न भेजें
-        year_val = int(year) if year and str(year).isdigit() else 0
+        # 2. Cast/Stars लाना
+        cast_str = await run_async(fetch_cast_from_imdb, imdb_id_f, 5)
         
-        cast_str = await run_async(fetch_cast_from_imdb, imdb_id_fetched, 5)
-        
+        # 3. DB Insertion (All Fields)
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # 🛑 SQL FIX: "cast" को कोट्स में रखें और year_val का इस्तेमाल करें
+        # 🛑 "cast" quoted and year is integer
         cur.execute("""
             INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
             VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (title) DO UPDATE SET 
-            imdb_id = EXCLUDED.imdb_id, 
-            poster_url = EXCLUDED.poster_url, 
-            year = EXCLUDED.year,
-            genre = EXCLUDED.genre, 
-            rating = EXCLUDED.rating, 
-            description = EXCLUDED.description, 
-            category = EXCLUDED.category, 
-            language = EXCLUDED.language, 
-            "cast" = EXCLUDED."cast"
+            imdb_id = EXCLUDED.imdb_id, poster_url = EXCLUDED.poster_url, year = EXCLUDED.year,
+            genre = EXCLUDED.genre, rating = EXCLUDED.rating, description = EXCLUDED.description, 
+            category = EXCLUDED.category, "cast" = EXCLUDED."cast"
             RETURNING id
-        """, (title, imdb_id_fetched, poster_url, year_val, genre, rating, plot, category, "Hindi", cast_str))
+        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str))
         
         movie_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
         close_db_connection(conn)
 
+        # 4. Start Batch Session
         BATCH_SESSION.update({
-            'active': True, 
-            'movie_id': movie_id, 
-            'movie_title': title, 
-            'file_count': 0, 
-            'admin_id': update.effective_user.id, 
-            'language': 'Hindi', 
-            'category': category
+            'active': True, 'movie_id': movie_id, 'movie_title': title, 
+            'file_count': 0, 'admin_id': update.effective_user.id, 
+            'language': 'Hindi', 'category': category
         })
-        
-        await status_msg.edit_text(f"✅ **Metadata Saved!**\n🎬 **Title:** {title}\n🚀 Files भेजना शुरू करें, फिर `/done` लिखें।", parse_mode='Markdown')
+
+        # 5. Success Message with Details
+        success_msg = (
+            f"✅ **Dada! Metadata Fetched Successfully**\n\n"
+            f"🎬 **Title:** `{title}`\n"
+            f"📅 **Year:** {year}\n"
+            f"🎭 **Genre:** {genre}\n"
+            f"⭐️ **Rating:** {rating}\n"
+            f"🏷️ **Category:** {category}\n"
+            f"👥 **Cast:** {cast_str}\n\n"
+            f"🚀 **अब फाइल्स भेजें, फिर /done लिखें।**"
+        )
+        await status_msg.edit_text(success_msg, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"BatchID Error: {e}")
-        await status_msg.edit_text(f"❌ Error: {e}")
+        logger.error(f"BatchID Critical Error: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 
 # ============================================================================
@@ -4864,49 +4822,36 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 close_db_connection(conn)
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Batch complete + AI Aliases generate + Auto Post to Forum"""
-    if not BATCH_SESSION.get('active'): 
-        await update.message.reply_text("❌ Koi batch active nahi hai!")
-        return
+    if not BATCH_SESSION.get('active'): return
+    
+    movie_id = BATCH_SESSION['movie_id']
+    movie_title = BATCH_SESSION['movie_title']
+    
+    # DB से क्वालिटी और डेटा निकालें
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT genre, language, \"cast\" FROM movies WHERE id = %s", (movie_id,))
+    minfo = cur.fetchone()
+    cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+    qrows = cur.fetchall()
+    cur.close()
+    close_db_connection(conn)
 
-    status_msg = await update.message.reply_text("🔄 **Batch complete kar raha hoon...**\n🧠 AI Aliases generate ho rahe hain...", parse_mode='Markdown')
+    # क्वालिटी अलाइनमेंट
+    res_list = sorted(list(set(re.search(r'(\d{3,4}p)', r[0]).group(1) for r in qrows if re.search(r'(\d{3,4}p)', r[0]))), key=lambda x: int(x.replace('p','')), reverse=True)
+    dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
 
-    try:
-        movie_title = BATCH_SESSION.get('movie_title', 'Unknown')
-        movie_id = BATCH_SESSION.get('movie_id')
-        
-        # --- 👇 यहाँ पेस्ट करें (Dynamic Quality Logic) 👇 ---
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-        rows = cur.fetchall()
-        cur.close()
-        close_db_connection(conn)
-
-        res_list = []
-        for r in rows:
-            match = re.search(r'(\d{3,4}p)', r[0])
-            if match: res_list.append(match.group(1))
-
-        res_list = sorted(list(set(res_list)), key=lambda x: int(x.replace('p','')), reverse=True)
-        dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
-        
-        # भाषा चेक करें
-        raw_lang = BATCH_SESSION.get('language', '')
-        display_lang = raw_lang if raw_lang and raw_lang.strip() else "Hindi (LiNE) + HC-ESubs"
-        # --- 👆 यहाँ तक 👆 ---
-
-        # अब आपका नया क्लीन कैप्शन फॉर्मेट
-        caption = (
-            f"🎬 <b>{movie_title}</b>\n"
-            f"✨ Genre: {safe_genre}\n"
-            f"Language: {display_lang}\n"
-            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-            f"👇 <b>Download Below</b> 👇"
-        )
+    # 🎯 आपका पसंदीदा क्लीन फॉर्मेट
+    caption = (
+        f"🎬 <b>{movie_title}</b>\n"
+        f"✨ Genre: {minfo[0]}\n"
+        f"Language: {minfo[1]}\n"
+        f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+        f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+        f"👇 <b>Download Below</b> 👇"
+    )
         
         aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
         alias_count = 0
