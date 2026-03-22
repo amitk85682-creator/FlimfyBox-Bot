@@ -4118,12 +4118,18 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success_msg += f"🚀 **अब फाइल्स भेजें, फिर /done लिखें।**"
         
         # 👇 NAYA: Button Add Karein (Agar files hain tabhi delete button aayega)
+        # 👇 NAYA: Button Add Karein (Agar files hain tabhi delete button aayega)
         keyboard = []
         if file_count > 0:
             keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
         keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
         
         await status_msg.edit_text(success_msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    # ✅ BAS YE 3 LINES YAHAN ADD KARNI HAIN 👇
+    except Exception as e:
+        print(f"Error in batch_id_command: {e}")
+        await status_msg.edit_text(f"❌ Kuch galat ho gaya: {e}")
 
 
 # ============================================================================
