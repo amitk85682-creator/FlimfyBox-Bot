@@ -4874,76 +4874,117 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 if conn: conn.rollback()
             finally:
+                close_db_connection(conn)async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BATCH_SESSION.get('active'): 
+        await update.message.reply_text("❌ Koi batch active nahi hai!")
+        return
+    
+    status_msg = await update.message.reply_text("🔄 **Batch complete kar raha hoon...**\n🧠 AI Aliases generate ho rahe hain...", parse_mode='Markdown')
+
+    try:
+        movie_id = BATCH_SESSION.get('movie_id')
+        movie_title = BATCH_SESSION.get('movie_title', 'Unknown')
+        movie_year = BATCH_SESSION.get('year', '')
+        movie_category = BATCH_SESSION.get('category', '')
+        
+        # DB से क्वालिटी और डेटा निकालें
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT genre, language, \"cast\", poster_url, rating FROM movies WHERE id = %s", (movie_id,))
+        minfo = cur.fetchone()
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        qrows = cur.fetchall()
+        cur.close()
+        close_db_connection(conn)
+
+        db_genre = minfo[0] if minfo and minfo[0] else "Unknown"
+        db_lang = minfo[1] if minfo and minfo[1] else "Hindi (LiNE) + HC-ESubs"
+        m_poster = minfo[3] if minfo else None
+        m_rating = minfo[4] if minfo else "N/A"
+
+        # क्वालिटी अलाइनमेंट
+        res_list = sorted(list(set(re.search(r'(\d{3,4}p)', r[0]).group(1) for r in qrows if re.search(r'(\d{3,4}p)', r[0]))), key=lambda x: int(x.replace('p','')), reverse=True)
+        dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+
+        # 🎯 आपका पसंदीदा क्लीन फॉर्मेट
+        caption = (
+            f"🎬 <b>{movie_title}</b>\n"
+            f"✨ Genre: {db_genre}\n"
+            f"Language: {db_lang}\n"
+            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
+        
+        # 👇 यहाँ स्पेसिंग (Indentation) ठीक कर दी गई है
+        aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
+        alias_count = 0
+        conn = get_db_connection()
+        
+        if conn and aliases:
+            try:
+                cur = conn.cursor()
+                for alias in aliases:
+                    if not alias or len(alias) > 255: continue
+                    try:
+                        cur.execute("SAVEPOINT sp_alias")
+                        cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
+                        cur.execute("RELEASE SAVEPOINT sp_alias")
+                        alias_count += 1
+                    except Exception:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
+                conn.commit()
+                cur.close()
+            except Exception:
+                if conn: conn.rollback()
+            finally:
                 close_db_connection(conn)
 
         # 🚀 POST TO FORUM
         forum_post_status = "⏳ Posting to Forum..."
-        conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            cur.execute("SELECT genre, poster_url, description, rating FROM movies WHERE id = %s", (movie_id,))
-            res = cur.fetchone()
-            cur.close()
-            close_db_connection(conn)
+        
+        topic_id = 1
+        cat_lower = str(movie_category or "").lower()
+        for tid, keywords in TOPIC_MAPPING.items():
+            if any(k.lower() in cat_lower for k in keywords):
+                topic_id = tid
+                break
+        if topic_id == 1:
+            if "south" in cat_lower: topic_id = 20
+            elif "hollywood" in cat_lower: topic_id = 32
+            elif "bollywood" in cat_lower: topic_id = 16
+            elif "anime" in cat_lower: topic_id = 22
+            elif "series" in cat_lower: topic_id = 18
             
-            if res:
-                m_genre, m_poster, m_desc, m_rating = res
-                
-                topic_id = 1
-                cat_lower = str(movie_category or "").lower()
-                for tid, keywords in TOPIC_MAPPING.items():
-                    if any(k.lower() in cat_lower for k in keywords):
-                        topic_id = tid
-                        break
-                if topic_id == 1:
-                    if "south" in cat_lower: topic_id = 20
-                    elif "hollywood" in cat_lower: topic_id = 32
-                    elif "bollywood" in cat_lower: topic_id = 16
-                    elif "anime" in cat_lower: topic_id = 22
-                    elif "series" in cat_lower: topic_id = 18
-                    
-                # 🛑 100% SAFE HTML BOLD CAPTION
-                safe_rating = m_rating if m_rating else "N/A"
-                safe_genre = m_genre if m_genre else "Unknown"
-                
-                caption = (
-                    f"🎬 <b>{movie_title} ({movie_year})</b>\n\n"
-                    f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
-                    f"🎭 <b>Genre:</b> {safe_genre}\n\n"
-                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                    f"👇 <b>Download Below</b> 👇"
-                )
-                
-                # --- SECURE LINK FOR SUPERBATCH POST ---
-                secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+        # --- SECURE LINK FOR SUPERBATCH POST ---
+        secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
-                post_keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-                    [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-                    [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
-                ])
-                
-                photo_to_send = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
-                if not photo_to_send:
-                    thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
-                    if thumb_file_id:
-                        photo_to_send = thumb_file_id
-                if not photo_to_send: photo_to_send = DEFAULT_POSTER
+        post_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+            [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+        ])
+        
+        photo_to_send = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
+        if not photo_to_send:
+            thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
+            if thumb_file_id:
+                photo_to_send = thumb_file_id
+        if not photo_to_send: photo_to_send = DEFAULT_POSTER
 
-                try:
-                    # 🛑 HTML PARSE MODE - use post_keyboard instead of forum_kb
-                    if topic_id == 1:
-                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
-                    else:
-                        await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
-                    forum_post_status = f"✅ Auto-Posted to Forum (Topic ID: {topic_id})"
-                except Exception as e:
-                    logger.error(f"Auto Forum Post Error: {e}")
-                    forum_post_status = f"⚠️ Forum Post Failed"
+        target_channels = [ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',') if ch.strip()]
+        
+        try:
+            if topic_id == 1:
+                await context.bot.send_photo(chat_id=FORUM_GROUP_ID, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
             else:
-                forum_post_status = "⚠️ Movie info missing for Forum Post"
+                await context.bot.send_photo(chat_id=FORUM_GROUP_ID, message_thread_id=topic_id, photo=photo_to_send, caption=caption, parse_mode='HTML', reply_markup=post_keyboard)
+            forum_post_status = f"✅ Auto-Posted to Forum (Topic ID: {topic_id})"
+        except Exception as e:
+            logger.error(f"Auto Forum Post Error: {e}")
+            forum_post_status = f"⚠️ Forum Post Failed"
 
         channels_count = len(get_storage_channels())
         report = (
@@ -4966,7 +5007,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ])
 
         await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
-        
+
     except Exception as e:
         logger.error(f"Error in batch_done_command: {e}", exc_info=True)
         await status_msg.edit_text(f"❌ Error during /done: {e}")
