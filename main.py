@@ -4822,59 +4822,6 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 close_db_connection(conn)
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BATCH_SESSION.get('active'): return
-    
-    movie_id = BATCH_SESSION['movie_id']
-    movie_title = BATCH_SESSION['movie_title']
-    
-    # DB से क्वालिटी और डेटा निकालें
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT genre, language, \"cast\" FROM movies WHERE id = %s", (movie_id,))
-    minfo = cur.fetchone()
-    cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-    qrows = cur.fetchall()
-    cur.close()
-    close_db_connection(conn)
-
-    # क्वालिटी अलाइनमेंट
-    res_list = sorted(list(set(re.search(r'(\d{3,4}p)', r[0]).group(1) for r in qrows if re.search(r'(\d{3,4}p)', r[0]))), key=lambda x: int(x.replace('p','')), reverse=True)
-    dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
-
-    # 🎯 आपका पसंदीदा क्लीन फॉर्मेट
-    caption = (
-        f"🎬 <b>{movie_title}</b>\n"
-        f"✨ Genre: {minfo[0]}\n"
-        f"Language: {minfo[1]}\n"
-        f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-        f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-        f"👇 <b>Download Below</b> 👇"
-    )
-        
-        aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
-        alias_count = 0
-        conn = get_db_connection()
-        
-        if conn and aliases:
-            try:
-                cur = conn.cursor()
-                for alias in aliases:
-                    if not alias or len(alias) > 255: continue
-                    try:
-                        cur.execute("SAVEPOINT sp_alias")
-                        cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
-                        cur.execute("RELEASE SAVEPOINT sp_alias")
-                        alias_count += 1
-                    except Exception:
-                        cur.execute("ROLLBACK TO SAVEPOINT sp_alias")
-                conn.commit()
-                cur.close()
-            except Exception:
-                if conn: conn.rollback()
-            finally:
-                close_db_connection(conn)async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BATCH_SESSION.get('active'): 
         await update.message.reply_text("❌ Koi batch active nahi hai!")
         return
@@ -5018,6 +4965,8 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             'file_count': 0, 'admin_id': None, 'year': '', 'category': '', 
             'extracted_thumb': None
         })
+
+                
 async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin se photo lekar clean caption ke sath channel me post karega"""
     user_id = update.effective_user.id
