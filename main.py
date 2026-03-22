@@ -1284,7 +1284,7 @@ def setup_database():
 
 
 def migrate_add_imdb_columns():
-    """One-time migration to add missing columns safely"""
+    """One-time migration to add missing columns safely (including cast)"""
     conn = get_db_connection()
     if not conn: return False
     try:
@@ -1298,8 +1298,8 @@ def migrate_add_imdb_columns():
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS language TEXT;")
         cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS extra_info TEXT;")
-        # NEW: cast column
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS cast TEXT;")
+        # Important: quote column name with double quotes in SQL
+        cur.execute('ALTER TABLE movies ADD COLUMN IF NOT EXISTS "cast" TEXT;')
         
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
@@ -1752,9 +1752,7 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
     """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
     try:
-        # TMDB API key (you already have it)
         api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
-        # First, find TMDB ID by IMDb ID
         find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&external_source=imdb_id"
         resp = requests.get(find_url, timeout=10).json()
         tmdb_results = resp.get('movie_results', [])
@@ -1764,7 +1762,6 @@ def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
             return ""
         tmdb_id = tmdb_results[0]['id']
         media_type = 'movie' if resp.get('movie_results') else 'tv'
-        # Get credits
         credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={api_key}"
         credits = requests.get(credits_url, timeout=10).json()
         cast = credits.get('cast', [])[:limit]
@@ -4179,14 +4176,17 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cur = conn.cursor()
         
-        # Insert or update with optional cast
+        # ✅ FIXED: Quote "cast" because it's a reserved keyword
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, cast) 
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
             VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (title) DO UPDATE 
-            SET year = EXCLUDED.year, genre = EXCLUDED.genre, category = EXCLUDED.category, language = EXCLUDED.language,
-                cast = COALESCE(EXCLUDED.cast, movies.cast)
+            SET year = EXCLUDED.year, 
+                genre = EXCLUDED.genre, 
+                category = EXCLUDED.category, 
+                language = EXCLUDED.language,
+                "cast" = COALESCE(EXCLUDED."cast", movies."cast")
             RETURNING id
             """,
             (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str)
@@ -4208,6 +4208,8 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'category': category
         })
 
+        # Show cast in confirmation message (if any)
+        cast_display = f"👥 **Cast:** {cast_str}\n" if cast_str else ""
         msg_text = (
             f"✅ **Batch Custom Mode Started!**\n\n"
             f"🎬 **Title:** {title}\n"
@@ -4215,7 +4217,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎭 **Genre:** {genre}\n"
             f"🗣️ **Language:** {language}\n"
             f"🏷️ **Category:** {category}\n"
-            f"👥 **Cast:** {cast_str if cast_str else 'Not available'}\n\n"
+            f"{cast_display}"
             f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
             f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
             f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
