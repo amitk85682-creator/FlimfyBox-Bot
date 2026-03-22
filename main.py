@@ -3515,6 +3515,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.close()
                 close_db_connection(conn)
                 
+                # 👇 NAYA: BATCH_SESSION ke counter ko bhi zero (0) kar do
+                if BATCH_SESSION.get('movie_id') == movie_id:
+                    BATCH_SESSION['file_count'] = 0
+                
                 await query.answer(f"✅ {deleted_count} purani files delete ho gayi!", show_alert=True)
                 await query.edit_message_text(
                     f"🗑️ **Deleted {deleted_count} old files.**\n\n"
@@ -3525,7 +3529,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Delete Error: {e}")
                 await query.answer("❌ Error deleting files", show_alert=True)
         return
-    # 👆👆👆 YAHAN TAK 👆👆👆
     
     
     # === CANCEL BATCH LOGIC ===
@@ -4082,6 +4085,11 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str))
         
         movie_id = cur.fetchone()[0]
+        
+        # 👇 NAYA: Database se check karein ki kya pehle se files hain
+        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+        file_count = cur.fetchone()[0]
+        
         conn.commit()
         cur.close()
         close_db_connection(conn)
@@ -4089,7 +4097,7 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 4. Start Batch Session
         BATCH_SESSION.update({
             'active': True, 'movie_id': movie_id, 'movie_title': title, 
-            'file_count': 0, 'admin_id': update.effective_user.id, 
+            'file_count': file_count, 'admin_id': update.effective_user.id, 
             'language': 'Hindi', 'category': category
         })
 
@@ -4102,13 +4110,20 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐️ **Rating:** {rating}\n"
             f"🏷️ **Category:** {category}\n"
             f"👥 **Cast:** {cast_str}\n\n"
-            f"🚀 **अब फाइल्स भेजें, फिर /done लिखें।**"
         )
-        await status_msg.edit_text(success_msg, parse_mode='Markdown')
         
-    except Exception as e:
-        logger.error(f"BatchID Critical Error: {e}")
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
+        if file_count > 0:
+            success_msg += f"⚠️ **Old Files Found:** {file_count} (Aap inhe delete kar sakte hain ya nayi add kar sakte hain)\n\n"
+            
+        success_msg += f"🚀 **अब फाइल्स भेजें, फिर /done लिखें।**"
+        
+        # 👇 NAYA: Button Add Karein (Agar files hain tabhi delete button aayega)
+        keyboard = []
+        if file_count > 0:
+            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
+        
+        await status_msg.edit_text(success_msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 # ============================================================================
@@ -4410,12 +4425,15 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     image_bytes = bytes(await tg_file.download_as_bytearray())
                 except Exception: pass
             
+            # 🎯 1. SMART EXTRACTION (Gemini Vision)
             ai_data = await get_movie_name_from_caption(first_file['caption'] or first_file['file_name'], image_bytes)
             movie_name = ai_data.get("title", temp_title)
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
             gemini_category = ai_data.get("category", "Movies")
+            movie_extra = ai_data.get("extra_info", "") # Naya: Extra Info
 
+            # 🎯 2. TMDB & IMDB METADATA
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             
             if metadata:
@@ -4424,15 +4442,22 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
                 genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
 
+            # 🎯 3. CAST FETCHING
+            cast_str = ""
+            if imdb_id:
+                cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+
             conn = get_db_connection()
             if not conn: continue
             
             try:  
                 cur = conn.cursor()
+                
+                # 🎯 4. SMART DB INSERTION (Same as pm_file_listener)
                 cur.execute(
                     """
-                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language) 
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s) 
+                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast") 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
                     ON CONFLICT (title) DO UPDATE 
                     SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
                         year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
@@ -4440,10 +4465,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         rating = COALESCE(EXCLUDED.rating, movies.rating),
                         description = COALESCE(EXCLUDED.description, movies.description),
                         category = COALESCE(EXCLUDED.category, movies.category),
-                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END
+                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
+                        extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END,
+                        "cast" = COALESCE(EXCLUDED."cast", movies."cast")
                     RETURNING id
                     """,
-                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang)
+                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, movie_extra, cast_str)
                 )
                 movie_id = cur.fetchone()[0]
 
@@ -4451,6 +4478,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for f in movie_files:
                     backup_map = {}
                     main_url = ""
+                    # ... [Aapka purana channel forward wala code yahan continue hoga] ...
                     if channels:
                         try:
                             sent = await f['message_obj'].copy(chat_id=channels[0])
@@ -4515,15 +4543,16 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_rating = rating if rating else "N/A"
             safe_genre = genre if genre else "Unknown"
             
-            caption = (
-                f"🎬 <b>{title} ({year})</b>\n\n"
-                f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
-                f"🎭 <b>Genre:</b> {safe_genre}\n\n"
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"👇 <b>Download Below</b> 👇"
-            )
+        caption = (
+            f"🎬 <b>{movie_title}</b>\n"
+            f"✨ Genre: {db_genre}\n"
+            f"Language: {db_lang}\n"
+            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
 
             link_param = f"movie_{movie_id}"
             bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
@@ -4703,15 +4732,21 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 genre, rating, plot = "Unknown", "N/A", "Auto Added"
                 category = gemini_category if gemini_category else "Movies"
 
+            # 👇 NAYA CODE: IMDb ID milne par Cast (Stars) fetch karein
+            cast_str = ""
+            if imdb_id:
+                cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+
             # Database Insert...
             conn = get_db_connection()
             if conn:
                 try:
                     cur = conn.cursor()
+                    # 👇 UPDATE: "cast" column aur COALESCE logic add kiya gaya hai
                     cur.execute(
                         """
-                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info) 
-                        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast") 
+                        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
                         ON CONFLICT (title) DO UPDATE 
                         SET imdb_id = COALESCE(EXCLUDED.imdb_id, movies.imdb_id),
                             poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
@@ -4721,10 +4756,11 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             rating = COALESCE(EXCLUDED.rating, movies.rating),
                             description = COALESCE(EXCLUDED.description, movies.description),
                             language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
-                            extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END
+                            extra_info = CASE WHEN EXCLUDED.extra_info != '' THEN EXCLUDED.extra_info ELSE movies.extra_info END,
+                            "cast" = COALESCE(EXCLUDED."cast", movies."cast")
                         RETURNING id
                         """,
-                        (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, movie_extra)
+                        (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, movie_extra, cast_str)
                     )
                     movie_id = cur.fetchone()[0]
                     conn.commit()
