@@ -3351,45 +3351,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Smart HD Poster)
     # =======================================================
     if query.data.startswith("autopost_"):
-        if update.effective_user.id != ADMIN_USER_ID:
-            await query.answer("❌ Admin only!", show_alert=True)
-            return
-
         movie_id = int(query.data.split("_")[1])
-        await query.answer("⏳ Posting HD Poster directly to channels...", show_alert=False)
-
+        
+        # --- 👇 यहाँ पेस्ट करें 👇 ---
         conn = get_db_connection()
-        if not conn: return
         cur = conn.cursor()
-        cur.execute("SELECT title, year, rating, genre, poster_url FROM movies WHERE id = %s", (movie_id,))
-        res = cur.fetchone()
+        # क्वालिटी निकालें
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        rows = cur.fetchall()
+        # मूवी की भाषा भी निकालें
+        cur.execute("SELECT title, genre, language FROM movies WHERE id = %s", (movie_id,))
+        m_data = cur.fetchone()
         cur.close()
         close_db_connection(conn)
 
-        if res:
-            title, year, rating, genre, poster_url = res
-        else:
-            title, year, rating, genre, poster_url = "Movie", "", "N/A", "Unknown", None
+        # क्वालिटी फॉर्मेटिंग
+        res_list = []
+        for r in rows:
+            match = re.search(r'(\d{3,4}p)', r[0])
+            if match: res_list.append(match.group(1))
+        res_list = sorted(list(set(res_list)), key=lambda x: int(x.replace('p','')), reverse=True)
+        dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
 
-        photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
-        if not photo_to_send:
-            thumb_file_id = context.bot_data.get(f"auto_thumb_{movie_id}")
-            if thumb_file_id: photo_to_send = thumb_file_id
-        if not photo_to_send: photo_to_send = DEFAULT_POSTER
+        # डेटा सेट करें
+        m_title = m_data[0] if m_data else "Movie"
+        m_genre = m_data[1] if m_data else "Action"
+        m_lang = m_data[2] if m_data and m_data[2] else "Hindi (LiNE) + HC-ESubs"
+        # --- 👆 यहाँ तक 👆 ---
 
-        # 🛑 100% SAFE HTML BOLD CAPTION
-        safe_rating = rating if rating else "N/A"
-        safe_genre = genre if genre else "Unknown"
-        
         channel_caption = (
-            f"🎬 <b>{title} ({year})</b>\n\n"
-            f"⭐️ <b>Rating:</b> {safe_rating}/10\n"
-            f"🎭 <b>Genre:</b> {safe_genre}\n\n"
+            f"🎬 <b>{m_title}</b>\n"
+            f"✨ Genre: {m_genre}\n"
+            f"Language: {m_lang}\n"
+            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
             f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
             f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
             f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
             f"👇 <b>Download Below</b> 👇"
         )
+        # ... (आगे का send_photo वाला कोड)
 
         # --- SECURE LINK FOR BATCH POST ---
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
@@ -4086,11 +4086,13 @@ def generate_basic_aliases(movie_title, year=""):
     return aliases
 
 
-# ==================== NEW BATCH COMMAND WITH MULTI-CHANNEL UPLOAD ====================
-
+# ============================================================================
+# 🎬 BATCH ID COMMAND (Fully Automatic via TMDB/IMDb)
+# ============================================================================
 async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct IMDb ID batch command (fetches metadata, cast, and starts batch)"""
-    if update.effective_user.id != ADMIN_USER_ID:
+    """Direct IMDb ID batch command (fetches metadata, cast, and starts batch independently)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID:
         return
         
     if not context.args:
@@ -4104,8 +4106,9 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     status_msg = await update.message.reply_text(f"⏳ Fetching metadata for IMDb ID: {imdb_id}...", parse_mode='Markdown')
+    
     try:
-        # 1. Fetch basic metadata (title, year, genre, category)
+        # 1. Fetch basic metadata
         metadata = await run_async(fetch_movie_metadata, imdb_id)
         if not metadata:
             await status_msg.edit_text("❌ Could not fetch metadata for that IMDb ID.")
@@ -4113,28 +4116,187 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         title, year, poster_url, genre, imdb_id_fetched, rating, plot, category = metadata
         year_str = str(year) if year and year != 0 else ""
-        language = "Hindi"  # default, can be detected later
+        language = "Hindi"  # Default
         
-        # 2. Fetch cast from TMDB using IMDb ID
+        # 2. Fetch cast from TMDB
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id_fetched, 5)
-        if cast_str:
-            await status_msg.edit_text(f"✅ Metadata fetched. Cast: {cast_str[:50]}...")
-        else:
-            await status_msg.edit_text("✅ Metadata fetched. (No cast info)")
         
-        # Store all data in user_data for batch_add_command
-        context.user_data['batch_imdb_id'] = imdb_id_fetched
-        context.user_data['batch_cast'] = cast_str
+        await status_msg.edit_text("✅ Metadata fetched. Saving to Database...")
         
-        # Construct args string exactly as batch_add_command expects
-        args_string = f"{title}, {year_str}, {language}, {genre}, {category}"
-        context.args = [args_string]
-        
-        await batch_add_command(update, context)
-        
+        # 3. DIRECT DATABASE INSERT (Independent from /batch)
+        conn = get_db_connection()
+        if not conn:
+            await status_msg.edit_text("❌ Database connection failed.")
+            return
+            
+        try:
+            cur = conn.cursor()
+            # 🛑 CRITICAL FIX: "cast" MUST BE IN DOUBLE QUOTES
+            cur.execute(
+                """
+                INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE 
+                SET imdb_id = EXCLUDED.imdb_id,
+                    poster_url = EXCLUDED.poster_url,
+                    year = EXCLUDED.year,
+                    genre = EXCLUDED.genre,
+                    rating = EXCLUDED.rating,
+                    description = EXCLUDED.description,
+                    category = EXCLUDED.category,
+                    language = EXCLUDED.language,
+                    "cast" = COALESCE(EXCLUDED."cast", movies."cast")
+                RETURNING id
+                """,
+                (title, imdb_id_fetched, poster_url, year_str, genre, rating, plot, category, language, cast_str)
+            )
+            movie_id = cur.fetchone()[0]
+            conn.commit()
+
+            cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+            file_count = cur.fetchone()[0]
+            cur.close()
+
+            # 4. SET BATCH SESSION
+            BATCH_SESSION.update({
+                'active': True,
+                'movie_id': movie_id,
+                'movie_title': title,
+                'file_count': file_count,
+                'admin_id': user_id,
+                'language': language,
+                'category': category
+            })
+
+            cast_display = f"👥 **Cast:** {cast_str}\n" if cast_str else ""
+            msg_text = (
+                f"✅ **Batch ID Mode Started!**\n\n"
+                f"🎬 **Title:** {title}\n"
+                f"📅 **Year:** {year_str}\n"
+                f"🎭 **Genre:** {genre}\n"
+                f"🗣️ **Language:** {language}\n"
+                f"🏷️ **Category:** {category}\n"
+                f"{cast_display}"
+                f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
+                f"🖼️ **Step 2:** Poster ke liye Image bhej do (Agar change karna ho).\n"
+                f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
+            )
+
+            keyboard = []
+            if file_count > 0:
+                keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
+            keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
+            
+            await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+        except Exception as db_err:
+            logger.error(f"BatchID DB Error: {db_err}")
+            await status_msg.edit_text(f"❌ DB Error: {db_err}")
+        finally:
+            close_db_connection(conn)
+            
     except Exception as e:
         logger.error(f"Error in batch_id_command: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
+
+
+# ============================================================================
+# ✍️ BATCH MANUAL COMMAND (For Custom Names & Details)
+# ============================================================================
+async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual batch command via comma separated arguments"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_USER_ID: return
+
+    if not context.args: 
+        await update.message.reply_text(
+            "❌ **Galat Format!** Aise use karein:\n\n"
+            "`/batch Movie Name, Year, Language, Genre, Category`\n\n"
+            "**Example:**\n"
+            "`/batch Pink Bra, 2023, Hindi, Adult, Web Series`", 
+            parse_mode='Markdown'
+        )
+        return
+
+    # 1. Parsing Custom Format
+    raw_text = " ".join(context.args)
+    parts = [p.strip() for p in raw_text.split(',')]
+    
+    title = parts[0] if len(parts) > 0 else "Unknown Title"
+    year = parts[1] if len(parts) > 1 else ""
+    language = parts[2] if len(parts) > 2 else "Hindi"
+    genre = parts[3] if len(parts) > 3 else "Adult, Drama"
+    category = parts[4] if len(parts) > 4 else "Web Series"
+    
+    rating = "N/A"
+    plot = "Watch exclusive content on FlimfyBox Premium."
+    poster_url = None
+    imdb_id = None
+    cast_str = None
+
+    status_msg = await update.message.reply_text(f"⏳ Saving '{title}' to Database...", parse_mode='Markdown')
+
+    conn = get_db_connection()
+    if not conn: return
+    
+    try:
+        cur = conn.cursor()
+        
+        # 🛑 CRITICAL FIX: "cast" is safely quoted here as well
+        cur.execute(
+            """
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            ON CONFLICT (title) DO UPDATE 
+            SET year = EXCLUDED.year, 
+                genre = EXCLUDED.genre, 
+                category = EXCLUDED.category, 
+                language = EXCLUDED.language
+            RETURNING id
+            """,
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str)
+        )
+        movie_id = cur.fetchone()[0]
+        conn.commit()
+
+        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+        file_count = cur.fetchone()[0]
+        cur.close()
+
+        BATCH_SESSION.update({
+            'active': True,
+            'movie_id': movie_id,
+            'movie_title': title,
+            'file_count': file_count,
+            'admin_id': user_id,
+            'language': language,
+            'category': category
+        })
+
+        msg_text = (
+            f"✅ **Batch Custom Mode Started!**\n\n"
+            f"🎬 **Title:** {title}\n"
+            f"📅 **Year:** {year}\n"
+            f"🎭 **Genre:** {genre}\n"
+            f"🗣️ **Language:** {language}\n"
+            f"🏷️ **Category:** {category}\n"
+            f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
+            f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
+            f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
+        )
+
+        keyboard = []
+        if file_count > 0:
+            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
+        
+        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except Exception as e:
+        logger.error(f"Batch Error: {e}")
+        await status_msg.edit_text(f"❌ DB Error: {e}")
+    finally:
+        if conn: close_db_connection(conn)
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -4759,8 +4921,39 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         movie_title = BATCH_SESSION.get('movie_title', 'Unknown')
         movie_id = BATCH_SESSION.get('movie_id')
-        movie_year = BATCH_SESSION.get('year', '')
-        movie_category = BATCH_SESSION.get('category', '')
+        
+        # --- 👇 यहाँ पेस्ट करें (Dynamic Quality Logic) 👇 ---
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        rows = cur.fetchall()
+        cur.close()
+        close_db_connection(conn)
+
+        res_list = []
+        for r in rows:
+            match = re.search(r'(\d{3,4}p)', r[0])
+            if match: res_list.append(match.group(1))
+
+        res_list = sorted(list(set(res_list)), key=lambda x: int(x.replace('p','')), reverse=True)
+        dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+        
+        # भाषा चेक करें
+        raw_lang = BATCH_SESSION.get('language', '')
+        display_lang = raw_lang if raw_lang and raw_lang.strip() else "Hindi (LiNE) + HC-ESubs"
+        # --- 👆 यहाँ तक 👆 ---
+
+        # अब आपका नया क्लीन कैप्शन फॉर्मेट
+        caption = (
+            f"🎬 <b>{movie_title}</b>\n"
+            f"✨ Genre: {safe_genre}\n"
+            f"Language: {display_lang}\n"
+            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
         
         aliases = generate_aliases_gemini(movie_title, movie_year, movie_category)
         alias_count = 0
@@ -4922,15 +5115,16 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     m_title = res[0]
 
     # 2. 🎯 EXACT CLEAN CAPTION BANAO
-    channel_caption = (
-        f"🎬 <b>{m_title}</b>\n\n"
-        f"➖➖➖➖➖➖➖\n"
-        f"<b>Please drop the movie name, and I’ll find it for you as soon as possible. 🎬✨</b>\n"
-        f"👇🏻👇🏻\n"
-        f"<a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a>\n"
-        f"➖➖➖➖➖➖➖\n"
-        f"<b>👇 Download Below</b>"
-    )
+            channel_caption = (
+            f"🎬 <b>{m_title}</b>\n"
+            f"✨ Genre: {m_genre}\n"
+            f"Language: {m_lang}\n"
+            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
 
     # 3. Download Buttons Banao
     link_param = f"movie_{movie_id}"
@@ -5307,14 +5501,16 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             short_link = await shorten_link(post['links'][0])
 
             # 3. Caption Banao (Bina Buttons Ke - Seedha Text Mein Link)
-            channel_caption = (
-                f"🔞 <b>{display_title}</b>\n\n"
-                f"🔥 <b>Exclusive 18+ Web Series & Leaks</b>\n"
-                f"➖➖➖➖➖➖➖\n"
-                f"📺 <b>Watch Online & Download:</b>\n"
-                f"👉 {short_link}\n\n"
-                f"🔞 <b>Join Premium:</b> https://t.me/+wcYoTQhIz-ZmOTY1" 
-            )
+        caption = (
+            f"🎬 <b>{movie_title}</b>\n"
+            f"✨ Genre: {safe_genre}\n"
+            f"Language: {display_lang}\n"
+            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
 
             # 4. Post to Channel (reply_markup hata diya gaya hai)
             if post['media_type'] == 'photo':
