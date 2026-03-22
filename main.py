@@ -4549,16 +4549,17 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_rating = rating if rating else "N/A"
             safe_genre = genre if genre else "Unknown"
             
-        caption = (
-            f"🎬 <b>{movie_title}</b>\n"
-            f"✨ Genre: {db_genre}\n"
-            f"Language: {db_lang}\n"
-            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-            f"👇 <b>Download Below</b> 👇"
-        )
+            # 👇 YAHAN SPACING THEEK KI GAYI HAI 👇
+            caption = (
+                f"🎬 <b>{movie_title}</b>\n"
+                f"✨ Genre: {db_genre}\n"
+                f"Language: {db_lang}\n"
+                f"Quality: V2 HQ-HDTC {dynamic_res}\n"
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"👇 <b>Download Below</b> 👇"
+            )
 
             link_param = f"movie_{movie_id}"
             bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
