@@ -7502,12 +7502,6 @@ def get_movie_details(movie_id):
 
     return jsonify({'status': 'success', 'movie': movie})
 
-    except Exception as e:
-        logger.error(f"Error in /api/movie/{movie_id}: {e}")
-        close_db_connection(conn)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
 @flask_app.route('/api/search', methods=['GET'])
 def search_movies_api():
     """
