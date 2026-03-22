@@ -7236,9 +7236,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
-# ==================== FLASK APP (Premium Edition) ====================
+# ==================== FLASK APP (Premium Edition - Admin Removed) ====================
 
-from flask import Flask, jsonify, request, send_file, render_template_string, redirect, session, url_for
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import os
 import logging
@@ -7249,7 +7249,7 @@ import requests
 from urllib.parse import quote
 import secrets
 import re
-import functools
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -7257,377 +7257,375 @@ logger = logging.getLogger(__name__)
 
 # Create Flask app
 flask_app = Flask(__name__)
-flask_app.secret_key = os.environ.get('SECRET_KEY', 'supersecretkey')  # Needed for session
 CORS(flask_app, resources={r"/*": {"origins": "*"}})
 
 # --- TMDB API Key (for fetching trailers & cast) ---
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
-# --- Admin Password (from environment) ---
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'admin123')
-if ADMIN_PASSWORD == 'admin123':
-    logger.warning("Using default admin password. Please set ADMIN_PASSWORD environment variable.")
+# ==================== DATABASE HELPERS (use existing functions) ====================
+# These functions are already defined in your main code:
+# get_db_connection(), close_db_connection(), store_user_request()
+# We'll assume they are available.
 
-# ==================== DATABASE HELPERS (assumed to exist) ====================
-# These functions are already defined in your main code. We will not redefine them.
-# They should provide:
-#   def get_db_connection()
-#   def close_db_connection(conn)
-#   def store_user_request(user_id, username, first_name, title, _, __)
+# ==================== API ROUTES ====================
 
-# ==================== ADMIN DECORATOR ====================
-def admin_required(f):
-    @functools.wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('admin_logged_in'):
-            return redirect(url_for('admin_login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-# ==================== ADMIN ROUTES ====================
-@flask_app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
-    if request.method == 'POST':
-        password = request.form.get('password')
-        if password == ADMIN_PASSWORD:
-            session['admin_logged_in'] = True
-            return redirect(url_for('admin_dashboard'))
-        else:
-            return render_template_string(ADMIN_LOGIN_HTML, error="Wrong password")
-    return render_template_string(ADMIN_LOGIN_HTML)
-
-@flask_app.route('/admin/logout')
-def admin_logout():
-    session.pop('admin_logged_in', None)
-    return redirect(url_for('admin_login'))
-
-@flask_app.route('/admin')
-@admin_required
-def admin_dashboard():
+@flask_app.route('/api/movies', methods=['GET'])
+def get_movies():
+    """
+    Return list of movies with basic info (for homepage).
+    """
     conn = get_db_connection()
     if not conn:
-        return "Database connection failed", 500
+        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, title, year, poster_url, rating, genre, category, language FROM movies ORDER BY id DESC")
-        movies = cur.fetchall()
+        cur.execute("""
+            SELECT id, title, year, poster_url, rating, genre, category,
+                   COALESCE(language, '') as language
+            FROM movies
+            WHERE poster_url IS NOT NULL AND poster_url != ''
+            ORDER BY id DESC
+            LIMIT 200
+        """)
+        rows = cur.fetchall()
+        movies = []
+        for r in rows:
+            movies.append({
+                'id': r[0],
+                'title': r[1],
+                'year': r[2] if r[2] else '',
+                'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+                'rating': r[4] if r[4] else 'N/A',
+                'genre': r[5] if r[5] else 'Unknown',
+                'category': r[6] if r[6] else 'Movie',
+                'language': r[7]
+            })
         cur.close()
         close_db_connection(conn)
-        return render_template_string(ADMIN_DASHBOARD_HTML, movies=movies)
+        return jsonify({'status': 'success', 'movies': movies})
     except Exception as e:
-        logger.error(f"Admin dashboard error: {e}")
+        logger.error(f"Error in /api/movies: {e}")
         close_db_connection(conn)
-        return f"Error: {e}", 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@flask_app.route('/admin/movie/add', methods=['GET', 'POST'])
-@admin_required
-def add_movie():
-    if request.method == 'POST':
-        title = request.form.get('title')
-        year = request.form.get('year')
-        poster_url = request.form.get('poster_url')
-        rating = request.form.get('rating')
-        genre = request.form.get('genre')
-        description = request.form.get('description')
-        category = request.form.get('category')
-        language = request.form.get('language')
 
-        if not title:
-            return "Title required", 400
+@flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
+def get_movie_details(movie_id):
+    """
+    Return detailed info for a single movie (including files).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, year, poster_url, rating, genre, description, category, language
+            FROM movies WHERE id = %s
+        """, (movie_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        
+        movie = {
+            'id': row[0],
+            'title': row[1],
+            'year': row[2] if row[2] else '',
+            'image': row[3] if row[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+            'rating': row[4] if row[4] else 'N/A',
+            'genre': row[5] if row[5] else 'Unknown',
+            'description': row[6] if row[6] else 'No description available.',
+            'category': row[7] if row[7] else 'Movie',
+            'language': row[8] if row[8] else ''
+        }
+        
+        # Get available files (qualities)
+        cur.execute("SELECT quality, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
+        files = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
+        movie['files'] = files
+        
+        cur.close()
+        close_db_connection(conn)
+        
+        # Try to fetch additional data from TMDB (cast, trailer)
+        try:
+            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
+            resp = requests.get(search_url, timeout=5).json()
+            if resp.get('results'):
+                first = resp['results'][0]
+                media_type = first.get('media_type', 'movie')
+                tmdb_id = first['id']
+                # Get credits
+                credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
+                credits = requests.get(credits_url, timeout=5).json()
+                cast = credits.get('cast', [])[:5]
+                movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
+                # Get trailer
+                videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
+                videos = requests.get(videos_url, timeout=5).json()
+                trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
+                if trailer:
+                    movie['trailer_key'] = trailer['key']
+        except Exception as e:
+            logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
+            movie['cast'] = []
+            movie['trailer_key'] = None
+        
+        return jsonify({'status': 'success', 'movie': movie})
+    except Exception as e:
+        logger.error(f"Error in /api/movie/{movie_id}: {e}")
+        close_db_connection(conn)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-        conn = get_db_connection()
-        if not conn:
-            return "Database connection failed", 500
+
+@flask_app.route('/api/search', methods=['GET'])
+def search_movies_api():
+    """
+    Smart Search (Local DB + TMDB)
+    """
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'status': 'error', 'message': 'Missing query'}), 400
+    
+    conn = get_db_connection()
+    local_results = []
+    if conn:
         try:
             cur = conn.cursor()
+            # Database me thoda flexible search (typos ke liye)
             cur.execute("""
-                INSERT INTO movies (title, year, poster_url, rating, genre, description, category, language)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (title, year, poster_url, rating, genre, description, category, language))
-            movie_id = cur.fetchone()[0]
-            conn.commit()
+                SELECT id, title, year, poster_url, rating, genre, category
+                FROM movies
+                WHERE title ILIKE %s OR title ILIKE %s
+                LIMIT 20
+            """, (f'%{query}%', f'%{query.replace(" ", "%")}%'))
+            rows = cur.fetchall()
+            for r in rows:
+                local_results.append({
+                    'id': r[0],
+                    'title': r[1],
+                    'year': r[2] if r[2] else '',
+                    'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+                    'rating': r[4] if r[4] else 'N/A',
+                    'genre': r[5] if r[5] else 'Unknown',
+                    'category': r[6] if r[6] else 'Movie',
+                    'source': 'local'
+                })
             cur.close()
-            close_db_connection(conn)
-            return redirect(url_for('edit_movie', movie_id=movie_id))
         except Exception as e:
-            logger.error(f"Add movie error: {e}")
+            logger.error(f"Local search error: {e}")
+        finally:
             close_db_connection(conn)
-            return f"Error: {e}", 500
-    return render_template_string(ADMIN_MOVIE_FORM_HTML, movie=None, files=None)
+    
+    # 🔥 TMDB Fix for "Thamma 2025" -> API ko saal (year) se confusion hoti hai, isliye usko hata do
+    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() 
+    if not clean_query: 
+        clean_query = query # Agar user ne sirf saal hi likh diya ho
 
-@flask_app.route('/admin/movie/edit/<int:movie_id>', methods=['GET', 'POST'])
-@admin_required
-def edit_movie(movie_id):
-    conn = get_db_connection()
-    if not conn:
-        return "Database connection failed", 500
+    tmdb_results = []
+    if len(local_results) < 15: # Agar local DB me kam movies mili tabhi TMDB me dhoondo
+        try:
+            tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(clean_query)}"
+            resp = requests.get(tmdb_url, timeout=5).json()
+            for item in resp.get('results', []):
+                # Agar poster na ho, toh backdrop image utha lo (Thamma ke liye fix)
+                img_path = item.get('poster_path') or item.get('backdrop_path')
+                if not img_path:
+                    continue
+                
+                tmdb_results.append({
+                    'id': 'tmdb_' + str(item['id']),
+                    'title': item.get('title') or item.get('name') or 'Unknown',
+                    'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
+                    'image': f"https://image.tmdb.org/t/p/w500{img_path}",
+                    'rating': round(item.get('vote_average', 0), 1),
+                    'genre': 'Action, Drama',
+                    'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
+                    'source': 'tmdb',
+                    'description': item.get('overview', '')
+                })
+        except Exception as e:
+            logger.error(f"TMDB search error: {e}")
+    
+    # 🔥 FIX: "Avengers: Endgame" aur "Avengers Endgame" ko ek hi movie manega
+    def normalize_title(t):
+        return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
+
+    seen_titles = set()
+    combined = []
+    
+    # Pehle Local movies daalo (Taaki unpar Download ka button aaye)
+    for m in local_results:
+        key = normalize_title(m['title'])
+        if key not in seen_titles:
+            seen_titles.add(key)
+            combined.append(m)
+            
+    # Phir TMDB movies daalo (Jo duplicate nahi hain)
+    for m in tmdb_results:
+        key = normalize_title(m['title'])
+        if key not in seen_titles and len(combined) < 30:
+            seen_titles.add(key)
+            combined.append(m)
+            
+    return jsonify({'status': 'success', 'results': combined})
+
+
+@flask_app.route('/api/request', methods=['POST'])
+def request_movie_api():
+    """
+    Store a user request from web app AND Notify Admin.
+    """
+    data = request.get_json()
+    if not data or 'title' not in data:
+        return jsonify({'status': 'error', 'message': 'Missing movie title'}), 400
+    
+    title = data['title'][:200]
+    user_id = data.get('user_id', 0)
+    username = data.get('username', '')
+    first_name = data.get('first_name', 'WebApp User')
+    
+    success = store_user_request(user_id, username, first_name, title, None, None)
+    
+    if success:
+        # 🔥 FIX: Web App se aayi request ko turant Admin Channel me send karein
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        request_channel = os.environ.get('REQUEST_CHANNEL_ID')
+        
+        if bot_token and request_channel:
+            try:
+                # Beautiful Admin Notification Format
+                msg_text = (
+                    f"🎬 <b>New WebApp Request!</b> 🎬\n\n"
+                    f"Movie: <b>{title}</b>\n"
+                    f"User: {first_name} (<code>{user_id}</code>)\n"
+                )
+                if username:
+                    msg_text += f"Username: @{username}\n"
+                msg_text += f"From: 🌐 Web Portal"
+
+                # Inline Buttons for Admin
+                short_title = title[:15].replace('_', ' ')
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "✅ Movie Add Kar Di Gai Hai", "callback_data": f"reqA_{user_id}_{short_title}"}],
+                        [{"text": "❌ Nahi Mili", "callback_data": f"reqN_{user_id}_{short_title}"}]
+                    ]
+                }
+                
+                # Direct Telegram API Call
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    "chat_id": request_channel,
+                    "text": msg_text,
+                    "parse_mode": "HTML",
+                    "reply_markup": reply_markup
+                }
+                requests.post(url, json=payload, timeout=5)
+            except Exception as e:
+                logger.error(f"Failed to notify admin from WebApp: {e}")
+
+        return jsonify({'status': 'success', 'message': 'Request saved & Admin Notified'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Could not save request'}), 500
+
+# 🤖 GOOGLE AUTO-SUGGEST PROXY (Spelling Fixer)
+@flask_app.route('/api/suggest', methods=['GET'])
+def get_suggestions():
+    q = request.args.get('q', '').strip()
+    if not q:
+        return jsonify([])
     try:
-        if request.method == 'POST':
-            title = request.form.get('title')
-            year = request.form.get('year')
-            poster_url = request.form.get('poster_url')
-            rating = request.form.get('rating')
-            genre = request.form.get('genre')
-            description = request.form.get('description')
-            category = request.form.get('category')
-            language = request.form.get('language')
+        # Firefox client wali API direct JSON list deti hai, jo use karne me aasan hai
+        url = f"https://suggestqueries.google.com/complete/search?client=firefox&q={quote(q + ' movie')}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = requests.get(url, headers=headers, timeout=3).json()
+        
+        # resp ka format: ["query", ["suggestion1", "suggestion2", ...]]
+        suggestions = resp[1] if len(resp) > 1 else []
+        
+        # 'movie' word hata kar clean naam nikalna aur top 6 suggestions dikhana
+        clean_suggs = [s.replace(' movie', '').title() for s in suggestions][:6] 
+        return jsonify(clean_suggs)
+    except Exception as e:
+        logger.error(f"Suggest API Error: {e}")
+        return jsonify([])
+
+# ==================== BOT RELATED ROUTES ====================
+
+# 🛡️ MIDDLEMAN REDIRECT PAGE (Anti-Bot)
+@flask_app.route('/watch/<int:movie_id>')
+def secure_watch(movie_id):
+    # Yeh HTML page user ko dikhega. Bots JS run nahi kar pate.
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>FlimfyBox - Verifying Secure Connection...</title>
+        <style>
+            body { background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+            .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        </style>
+    </head>
+    <body>
+        <div class="loader"></div>
+        <h3>Securely verifying your connection...</h3>
+        <p style="color: #a1a1aa; font-size: 13px;">Please wait 2 seconds. You will be redirected automatically.</p>
+        
+        <script>
+            // Invisible JS Challenge
+            setTimeout(() => {
+                fetch('/api/gen_link/""" + str(movie_id) + """', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if(data.url) {
+                        window.location.href = data.url; 
+                    } else {
+                        document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>";
+                    }
+                }).catch(e => {
+                    document.body.innerHTML = "<h3>❌ Connection failed.</h3>";
+                });
+            }, 1500); 
+        </script>
+    </body>
+    </html>
+    """
+    return html
+
+# 🔐 SECRET LINK GENERATOR API (Auto Delete Logic)
+@flask_app.route('/api/gen_link/<int:movie_id>', methods=['POST'])
+def gen_secure_link(movie_id):
+    token = "tmp_" + secrets.token_hex(6)
+    conn = get_db_connection()
+    if conn:
+        try:
             cur = conn.cursor()
-            cur.execute("""
-                UPDATE movies SET title=%s, year=%s, poster_url=%s, rating=%s, genre=%s,
-                description=%s, category=%s, language=%s
-                WHERE id=%s
-            """, (title, year, poster_url, rating, genre, description, category, language, movie_id))
+            # Delete old tokens (1 minute se purane)
+            cur.execute("DELETE FROM temp_links WHERE created_at < NOW() - INTERVAL '1 minute'")
+            # Save new token
+            cur.execute("INSERT INTO temp_links (token, movie_id) VALUES (%s, %s)", (token, movie_id))
             conn.commit()
             cur.close()
+        except Exception as e:
+            logger.error(f"Token Error: {e}")
+        finally:
             close_db_connection(conn)
-            return redirect(url_for('admin_dashboard'))
-        else:
-            cur = conn.cursor()
-            cur.execute("SELECT id, title, year, poster_url, rating, genre, description, category, language FROM movies WHERE id=%s", (movie_id,))
-            movie = cur.fetchone()
-            if not movie:
-                close_db_connection(conn)
-                return "Movie not found", 404
+            
+    bot_username = os.environ.get('BOT_USERNAME', 'FlimfyBox_Bot')
+    tg_url = f"tg://resolve?domain={bot_username}&start={token}"
+    return jsonify({"url": tg_url})
 
-            # Fetch files for this movie
-            cur.execute("SELECT id, quality, file_size FROM movie_files WHERE movie_id=%s", (movie_id,))
-            files = cur.fetchall()
-            cur.close()
-            close_db_connection(conn)
+# ==================== MAIN WEB APP PAGE (Premium HTML with Red UI) ====================
 
-            movie_dict = {
-                'id': movie[0],
-                'title': movie[1],
-                'year': movie[2],
-                'poster_url': movie[3],
-                'rating': movie[4],
-                'genre': movie[5],
-                'description': movie[6],
-                'category': movie[7],
-                'language': movie[8]
-            }
-            return render_template_string(ADMIN_MOVIE_FORM_HTML, movie=movie_dict, files=files)
-    except Exception as e:
-        logger.error(f"Edit movie error: {e}")
-        close_db_connection(conn)
-        return f"Error: {e}", 500
-
-@flask_app.route('/admin/movie/delete/<int:movie_id>')
-@admin_required
-def delete_movie(movie_id):
-    conn = get_db_connection()
-    if not conn:
-        return "Database connection failed", 500
-    try:
-        cur = conn.cursor()
-        # Delete movie_files first (cascade if foreign key)
-        cur.execute("DELETE FROM movie_files WHERE movie_id=%s", (movie_id,))
-        cur.execute("DELETE FROM movies WHERE id=%s", (movie_id,))
-        conn.commit()
-        cur.close()
-        close_db_connection(conn)
-        return redirect(url_for('admin_dashboard'))
-    except Exception as e:
-        logger.error(f"Delete movie error: {e}")
-        close_db_connection(conn)
-        return f"Error: {e}", 500
-
-@flask_app.route('/admin/movie/<int:movie_id>/files/add', methods=['POST'])
-@admin_required
-def add_file(movie_id):
-    quality = request.form.get('quality')
-    file_size = request.form.get('file_size')
-    if not quality:
-        return "Quality required", 400
-    conn = get_db_connection()
-    if not conn:
-        return "Database connection failed", 500
-    try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO movie_files (movie_id, quality, file_size) VALUES (%s, %s, %s)", (movie_id, quality, file_size))
-        conn.commit()
-        cur.close()
-        close_db_connection(conn)
-        return redirect(url_for('edit_movie', movie_id=movie_id))
-    except Exception as e:
-        logger.error(f"Add file error: {e}")
-        close_db_connection(conn)
-        return f"Error: {e}", 500
-
-@flask_app.route('/admin/movie/file/delete/<int:file_id>')
-@admin_required
-def delete_file(file_id):
-    conn = get_db_connection()
-    if not conn:
-        return "Database connection failed", 500
-    try:
-        cur = conn.cursor()
-        # Get movie_id to redirect back
-        cur.execute("SELECT movie_id FROM movie_files WHERE id=%s", (file_id,))
-        row = cur.fetchone()
-        if row:
-            movie_id = row[0]
-            cur.execute("DELETE FROM movie_files WHERE id=%s", (file_id,))
-            conn.commit()
-            cur.close()
-            close_db_connection(conn)
-            return redirect(url_for('edit_movie', movie_id=movie_id))
-        else:
-            close_db_connection(conn)
-            return "File not found", 404
-    except Exception as e:
-        logger.error(f"Delete file error: {e}")
-        close_db_connection(conn)
-        return f"Error: {e}", 500
-
-# ==================== YOUR EXISTING API ROUTES ====================
-# (Keep all your existing routes: /api/movies, /api/movie/<id>, /api/search, /api/request, /api/suggest, /watch, /api/gen_link)
-# They are not modified, so we will not repeat them here. Just ensure they are included.
-
-# ==================== UPDATED FRONTEND (Red UI + Background Poster) ====================
 @flask_app.route('/webapp')
 def serve_mini_app():
-    return NEW_WEBAPP_HTML
-
-# ==================== ADMIN HTML TEMPLATES ====================
-ADMIN_LOGIN_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Admin Login</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #141414; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .login-box { background: #1f1f1f; padding: 30px; border-radius: 10px; width: 300px; text-align: center; border: 1px solid #E50914; }
-        input { width: 100%; padding: 10px; margin: 10px 0; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: white; }
-        button { background: #E50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; width: 100%; }
-        .error { color: #E50914; margin-top: 10px; }
-    </style>
-</head>
-<body>
-    <div class="login-box">
-        <h2>Admin Login</h2>
-        <form method="post">
-            <input type="password" name="password" placeholder="Password" required>
-            <button type="submit">Login</button>
-            {% if error %}<div class="error">{{ error }}</div>{% endif %}
-        </form>
-    </div>
-</body>
-</html>
-"""
-
-ADMIN_DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Admin Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #141414; color: white; margin: 0; padding: 20px; }
-        h1 { color: #E50914; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border: 1px solid #333; padding: 8px; text-align: left; }
-        th { background: #1f1f1f; }
-        a { color: #E50914; text-decoration: none; margin-right: 10px; }
-        a:hover { text-decoration: underline; }
-        .add-btn { background: #E50914; padding: 10px 20px; border-radius: 5px; display: inline-block; margin-bottom: 20px; color: white; }
-        .logout { float: right; color: #E50914; }
-    </style>
-</head>
-<body>
-    <a href="/admin/logout" class="logout">Logout</a>
-    <h1>Admin Dashboard</h1>
-    <a href="/admin/movie/add" class="add-btn">+ Add New Movie</a>
-    <table>
-        <thead>
-            <tr><th>ID</th><th>Title</th><th>Year</th><th>Rating</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-            {% for movie in movies %}
-            <tr>
-                <td>{{ movie[0] }}</td>
-                <td>{{ movie[1] }}</td>
-                <td>{{ movie[2] }}</td>
-                <td>{{ movie[3] }}</td>
-                <td>
-                    <a href="/admin/movie/edit/{{ movie[0] }}">Edit</a>
-                    <a href="/admin/movie/delete/{{ movie[0] }}" onclick="return confirm('Delete this movie?')">Delete</a>
-                </td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</body>
-</html>
-"""
-
-ADMIN_MOVIE_FORM_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>{% if movie %}Edit Movie{% else %}Add Movie{% endif %}</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #141414; color: white; margin: 0; padding: 20px; }
-        h1 { color: #E50914; }
-        form { max-width: 600px; margin: auto; background: #1f1f1f; padding: 20px; border-radius: 10px; }
-        label { display: block; margin: 10px 0 5px; }
-        input, textarea, select { width: 100%; padding: 8px; border-radius: 5px; border: 1px solid #333; background: #2a2a2a; color: white; }
-        button { background: #E50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin-top: 20px; }
-        .file-section { margin-top: 30px; border-top: 1px solid #333; padding-top: 20px; }
-        .file-list { margin: 10px 0; }
-        .file-item { background: #2a2a2a; padding: 5px 10px; margin: 5px 0; display: flex; justify-content: space-between; }
-        .back-link { display: inline-block; margin-bottom: 20px; color: #E50914; }
-    </style>
-</head>
-<body>
-    <a href="/admin" class="back-link">← Back to Dashboard</a>
-    <h1>{% if movie %}Edit Movie{% else %}Add Movie{% endif %}</h1>
-    <form method="post">
-        <label>Title *</label>
-        <input type="text" name="title" required value="{{ movie.title if movie else '' }}">
-        <label>Year</label>
-        <input type="text" name="year" value="{{ movie.year if movie else '' }}">
-        <label>Poster URL</label>
-        <input type="text" name="poster_url" value="{{ movie.poster_url if movie else '' }}">
-        <label>Rating (e.g., 8.5)</label>
-        <input type="text" name="rating" value="{{ movie.rating if movie else '' }}">
-        <label>Genre (comma separated)</label>
-        <input type="text" name="genre" value="{{ movie.genre if movie else '' }}">
-        <label>Description</label>
-        <textarea name="description" rows="3">{{ movie.description if movie else '' }}</textarea>
-        <label>Category (e.g., Bollywood, Hollywood)</label>
-        <input type="text" name="category" value="{{ movie.category if movie else '' }}">
-        <label>Language</label>
-        <input type="text" name="language" value="{{ movie.language if movie else '' }}">
-        <button type="submit">Save Movie</button>
-    </form>
-
-    {% if movie and files is not none %}
-    <div class="file-section">
-        <h3>Movie Files (Qualities)</h3>
-        <div class="file-list">
-            {% for file in files %}
-            <div class="file-item">
-                <span>{{ file[1] }} - {{ file[2] or 'N/A' }}</span>
-                <a href="/admin/movie/file/delete/{{ file[0] }}" onclick="return confirm('Delete this file?')">Delete</a>
-            </div>
-            {% endfor %}
-        </div>
-        <form action="/admin/movie/{{ movie.id }}/files/add" method="post">
-            <label>Quality (e.g., 1080p)</label>
-            <input type="text" name="quality" required>
-            <label>File Size (e.g., 2.5 GB)</label>
-            <input type="text" name="file_size">
-            <button type="submit">Add File</button>
-        </form>
-    </div>
-    {% endif %}
-</body>
-</html>
-"""
-
-# ==================== NEW FRONTEND HTML ====================
-NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
+    # The HTML is the same as the latest version (with red UI, background poster, no admin link)
+    # We'll embed it directly (use the NEW_WEBAPP_HTML string from previous version, minus the admin link)
+    html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -7888,13 +7886,6 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
         }
         .toast.show { bottom: 30px; }
         .loader { text-align: center; padding: 40px; color: var(--primary); font-size: 16px; }
-        /* Admin link */
-        .admin-link {
-            position: fixed; bottom: 20px; right: 20px; background: var(--surface); border: 1px solid var(--border);
-            border-radius: 40px; padding: 8px 16px; font-size: 12px; color: var(--text-muted); cursor: pointer;
-            z-index: 1000; backdrop-filter: blur(10px);
-        }
-        .admin-link:hover { color: var(--primary); }
     </style>
 </head>
 <body>
@@ -7994,7 +7985,6 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="toast" id="toast">✅ Done!</div>
-    <div class="admin-link" onclick="window.open('/admin', '_blank')">⚙️ Admin</div>
 
     <script>
         const tg = window.Telegram.WebApp;
@@ -8119,20 +8109,269 @@ NEW_WEBAPP_HTML = r"""<!DOCTYPE html>
             }).join('');
         }
 
-        // Search implementation (same as original, just adapted to red theme)
-        // ... (copy the existing search function from your original code to keep it)
-        // For brevity, we assume it is included. If not, the original code should be placed here.
+        // Search implementation (copy from your original code)
+        let searchTimeout;
+        document.getElementById('searchInput').addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            const q = e.target.value.trim();
+            const main = document.getElementById('mainContent');
+            const searchRes = document.getElementById('searchResultsContent');
+            const genreCont = document.getElementById('genreContainer');
+            
+            if (!q) {
+                main.style.display = 'block';
+                genreCont.style.display = 'flex';
+                searchRes.style.display = 'none';
+                return;
+            }
+            
+            main.style.display = 'none';
+            genreCont.style.display = 'none';
+            searchRes.style.display = 'block';
+            document.getElementById('searchGrid').innerHTML = '<div class="loader">Searching...</div>';
 
-        // Details, download, request, etc. (same as original)
-        // ... (copy the existing functions)
+            searchTimeout = setTimeout(async () => {
+                try {
+                    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+                    const data = await res.json();
+                    
+                    if (data.status === 'success' && data.results.length > 0) {
+                        const results = data.results;
+                        const local = results.filter(r => r.source === 'local');
+                        const tmdb = results.filter(r => r.source === 'tmdb');
+                        
+                        local.forEach(l => {
+                            if (!allMovies.find(m => m.id == l.id)) {
+                                allMovies.push(l);
+                            }
+                        });
+                        tmdb.forEach(t => tmdbMoviesMap[t.id] = t);
+                        document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
+                        document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
+                    } else {
+                        const term = q;
+                        const searchHeader = document.getElementById('searchHeader');
+                        const searchGrid = document.getElementById('searchGrid');
+                        
+                        searchHeader.innerHTML = `<i class="fas fa-exclamation-circle" style="color:#ef4444;"></i> Not Found`;
+                        searchGrid.innerHTML = '<div class="loader">Checking spelling...</div>';
+                        
+                        // Google suggestions
+                        const script = document.createElement('script');
+                        window.googleSuggestCb = function(data) {
+                            let suggs = data[1] || [];
+                            suggs = suggs.map(s => s.replace(/ movie$/i, '').replace(/\b\w/g, c => c.toUpperCase())).slice(0, 6);
+                            
+                            if(suggs.length > 0) {
+                                let buttonsHtml = suggs.map(s => 
+                                    `<div onclick="document.getElementById('searchInput').value='${s}'; document.getElementById('searchInput').dispatchEvent(new Event('input'));" 
+                                    style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: white; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background 0.2s;"
+                                    onmouseover="this.style.background='rgba(255,215,0,0.1)'" onmouseout="this.style.background='transparent'">
+                                        <i class="fas fa-search" style="color: var(--text-muted); font-size: 14px;"></i> 
+                                        <span style="font-weight: 500;">${s}</span>
+                                    </div>`
+                                ).join('');
+                                
+                                searchGrid.innerHTML = `
+                                    <div style="grid-column: 1 / -1; padding: 15px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+                                        <p style="color: var(--primary); margin-bottom: 10px; font-size: 13px; font-weight: bold; padding-left: 10px;">✨ DID YOU MEAN:</p>
+                                        <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
+                                            ${buttonsHtml}
+                                        </div>
+                                        <div style="margin-top: 15px; padding: 0 10px;">
+                                            <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
+                                                <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
+                                            </button>
+                                        </div>
+                                    </div>
+                                `;
+                            } else {
+                                showFallbackUI(term);
+                            }
+                            document.head.removeChild(script);
+                            delete window.googleSuggestCb;
+                        };
+                        
+                        script.onerror = function() {
+                            showFallbackUI(term);
+                        };
+                        
+                        function showFallbackUI(term) {
+                            searchGrid.innerHTML = `
+                                <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
+                                    <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
+                                    <button onclick="requestSilent('${term}')" style="background: linear-gradient(135deg, var(--primary), #b8860b); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
+                                        <i class="fas fa-paper-plane"></i> Request This Movie
+                                    </button>
+                                </div>
+                            `;
+                        }
+                        
+                        script.src = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(term + ' movie')}&callback=googleSuggestCb`;
+                        document.head.appendChild(script);
+                    }
+                } catch (err) {
+                    document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
+                }
+            }, 500);
+        });
+
+        // Details
+        window.openDetails = function(id, isTMDB) {
+            const movie = isTMDB ? tmdbMoviesMap[id] : allMovies.find(m => m.id == id);
+            if (!movie) return;
+            if (isTMDB) {
+                // show request button
+                document.getElementById('dpImage').style.backgroundImage = `url(${movie.image})`;
+                document.getElementById('dpTitle').innerText = movie.title;
+                document.getElementById('dpRating').innerText = movie.rating || 'N/A';
+                document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
+                document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
+                document.getElementById('castSection').innerHTML = '';
+                document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-request" onclick="requestMovie('${movie.title}')"><i class="fas fa-hand-paper"></i> Request This Title</button>`;
+                document.getElementById('dpLinks').innerHTML = '';
+                document.getElementById('detailsPage').classList.add('open');
+                return;
+            }
+
+            // Fetch full details
+            fetch(`/api/movie/${id}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        const m = data.movie;
+                        document.getElementById('dpImage').style.backgroundImage = `url(${m.image})`;
+                        document.getElementById('dpTitle').innerText = m.title;
+                        document.getElementById('dpRating').innerText = m.rating + '/10';
+                        document.getElementById('dpGenre').innerText = m.genre;
+                        document.getElementById('dpDesc').innerText = m.description;
+                        // Cast
+                        if (m.cast && m.cast.length) {
+                            let castHtml = '<div class="cast-list">';
+                            m.cast.forEach(c => {
+                                castHtml += `<div class="cast-item"><img src="${c.profile || 'https://via.placeholder.com/70'}" alt="${c.name}"><span>${c.name}</span></div>`;
+                            });
+                            castHtml += '</div>';
+                            document.getElementById('castSection').innerHTML = castHtml;
+                        } else {
+                            document.getElementById('castSection').innerHTML = '';
+                        }
+                        // Trailer button
+                        if (m.trailer_key) {
+                            document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="playTrailer('${m.trailer_key}')"><i class="fab fa-youtube"></i> Watch Trailer</button>`;
+                        } else {
+                            document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(m.title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
+                        }
+                        // Download links
+                        if (m.files && m.files.length) {
+                            let links = '<div class="dl-heading">AVAILABLE QUALITIES</div>';
+                            m.files.forEach(f => {
+                                links += `
+                                    <button class="dl-btn" onclick="downloadMovie(${m.id})">
+                                        <span class="quality-text">📁 ${f.quality} <span class="file-size">[${f.size || 'N/A'}]</span></span>
+                                        <span class="action">Get</span>
+                                    </button>
+                                `;
+                            });
+                            document.getElementById('dpLinks').innerHTML = links;
+                        } else {
+                            document.getElementById('dpLinks').innerHTML = `
+                                <div class="dl-heading">DOWNLOAD</div>
+                                <button class="dl-btn" onclick="downloadMovie(${m.id})">
+                                    <span class="quality-text">📁 1080p Full HD</span>
+                                    <span class="action">Get</span>
+                                </button>
+                            `;
+                        }
+                        document.getElementById('detailsPage').classList.add('open');
+                    }
+                });
+        };
+
+        window.closeDetails = function() {
+            document.getElementById('detailsPage').classList.remove('open');
+        };
+
+        window.playTrailer = function(key) {
+            document.getElementById('trailerIframe').src = `https://www.youtube.com/embed/${key}?autoplay=1&rel=0`;
+            document.getElementById('trailerModal').classList.add('active');
+        };
+
+        window.closeTrailer = function() {
+            document.getElementById('trailerIframe').src = '';
+            document.getElementById('trailerModal').classList.remove('active');
+        };
+
+        window.requestMovie = function(title) {
+            tg.HapticFeedback.notificationOccurred('success');
+            showToast('⏳ Requesting...');
+            const user = tg.initDataUnsafe?.user || {id: 0, username: 'webapp', first_name: 'User'};
+            fetch('/api/request', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title, user_id: user.id, username: user.username, first_name: user.first_name})
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.status === 'success') showToast('✅ Request sent!');
+                else showToast('❌ Failed');
+            })
+            .catch(() => showToast('❌ Error'));
+        };
+
+        window.requestSilent = function(title) {
+            tg.HapticFeedback.notificationOccurred('success');
+            showToast('⏳ Sending Request...');
+            const user = tg.initDataUnsafe?.user || {id: 0, username: 'webapp', first_name: 'User'};
+            
+            fetch('/api/request', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title: title, user_id: user.id, username: user.username, first_name: user.first_name})
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (d.status === 'success') {
+                    showToast('✅ Request Sent to Admin!');
+                    setTimeout(() => { tg.close(); }, 1500);
+                } else {
+                    showToast('❌ Failed to send');
+                }
+            })
+            .catch(() => showToast('❌ Network Error'));
+        };
+
+        window.downloadBot = function(id) {
+            tg.HapticFeedback.impactOccurred('heavy');
+            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
+        };
+
+        window.downloadMovie = function(id) {
+            tg.HapticFeedback.impactOccurred('heavy');
+            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
+        };
 
         // Start
         loadMovies();
+        
+        // Auto-search from URL parameter
+        setTimeout(() => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const reqQuery = urlParams.get('req');
+            if (reqQuery) {
+                const searchInput = document.getElementById('searchInput');
+                searchInput.value = reqQuery;
+                showToast("🔍 Finding correct spelling...");
+                searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }, 500);
     </script>
 </body>
 </html>"""
+    return html
 
-# ==================== RUN APP ====================
+# ==================== RUN FLASK ====================
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     flask_app.run(host='0.0.0.0', port=port, debug=False)
