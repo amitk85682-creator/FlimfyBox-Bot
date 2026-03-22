@@ -7236,7 +7236,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
-# ==================== FLASK APP (Premium Edition - Admin Removed) ====================
+isme thodi kaami hai premium look me.
+1. Netflix ki taraha red ui nahi hai.
+2. background poster nahi hai.
+3. admin panel nahi hai sirf admin ke liye jime movie edit ho sake.
+4. or koi kaam ho to tum dekh lena.
+
+# ==================== FLASK APP (Premium Edition) ====================
 
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
@@ -7247,9 +7253,9 @@ import psycopg2
 from datetime import datetime
 import requests
 from urllib.parse import quote
-import secrets
-import re
 import random
+import re
+import secrets
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -7263,7 +7269,7 @@ CORS(flask_app, resources={r"/*": {"origins": "*"}})
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
 # ==================== DATABASE HELPERS (use existing functions) ====================
-# These functions are already defined in your main code:
+# Make sure these functions are already defined in your main code:
 # get_db_connection(), close_db_connection(), store_user_request()
 # We'll assume they are available.
 
@@ -7312,7 +7318,7 @@ def get_movies():
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
     """
-    Return detailed info for a single movie (including files).
+    Return detailed info for a single movie (including files and TMDB backdrop).
     """
     conn = get_db_connection()
     if not conn:
@@ -7347,7 +7353,7 @@ def get_movie_details(movie_id):
         cur.close()
         close_db_connection(conn)
         
-        # Try to fetch additional data from TMDB (cast, trailer)
+        # Try to fetch additional data from TMDB (cast, trailer, backdrop)
         try:
             search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
             resp = requests.get(search_url, timeout=5).json()
@@ -7355,11 +7361,20 @@ def get_movie_details(movie_id):
                 first = resp['results'][0]
                 media_type = first.get('media_type', 'movie')
                 tmdb_id = first['id']
+                
+                # Get backdrop (landscape)
+                backdrop_path = first.get('backdrop_path')
+                if backdrop_path:
+                    movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
+                else:
+                    movie['backdrop'] = None
+                
                 # Get credits
                 credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
                 credits = requests.get(credits_url, timeout=5).json()
                 cast = credits.get('cast', [])[:5]
                 movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
+                
                 # Get trailer
                 videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
                 videos = requests.get(videos_url, timeout=5).json()
@@ -7370,6 +7385,7 @@ def get_movie_details(movie_id):
             logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
             movie['cast'] = []
             movie['trailer_key'] = None
+            movie['backdrop'] = None
         
         return jsonify({'status': 'success', 'movie': movie})
     except Exception as e:
@@ -7551,7 +7567,7 @@ def get_suggestions():
         logger.error(f"Suggest API Error: {e}")
         return jsonify([])
 
-# ==================== BOT RELATED ROUTES ====================
+# ==================== MAIN WEB APP PAGE (Premium HTML) ====================
 
 # 🛡️ MIDDLEMAN REDIRECT PAGE (Anti-Bot)
 @flask_app.route('/watch/<int:movie_id>')
@@ -7619,12 +7635,8 @@ def gen_secure_link(movie_id):
     tg_url = f"tg://resolve?domain={bot_username}&start={token}"
     return jsonify({"url": tg_url})
 
-# ==================== MAIN WEB APP PAGE (Premium HTML with Red UI) ====================
-
 @flask_app.route('/webapp')
 def serve_mini_app():
-    # The HTML is the same as the latest version (with red UI, background poster, no admin link)
-    # We'll embed it directly (use the NEW_WEBAPP_HTML string from previous version, minus the admin link)
     html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7637,52 +7649,26 @@ def serve_mini_app():
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; user-select: none; -webkit-tap-highlight-color: transparent; }
         :root {
-            --bg: #141414;
-            --surface: #1f1f1f;
+            --bg: #0f0f0f;
+            --surface: #1a1a1a;
             --surface-light: #2a2a2a;
-            --primary: #E50914;
-            --primary-soft: #B00710;
+            --primary: #e50914;       /* Netflix red */
+            --primary-soft: #b20710;
             --primary-glow: rgba(229, 9, 20, 0.4);
             --text: #ffffff;
-            --text-muted: #b3b3b3;
-            --border: rgba(229, 9, 20, 0.3);
+            --text-muted: #a0a0a0;
+            --border: rgba(229, 9, 20, 0.25);
             --shadow: 0 10px 30px -10px black;
             --shadow-glow: 0 8px 30px var(--primary-glow);
         }
-        body {
-            background: var(--bg);
-            color: var(--text);
-            overflow-x: hidden;
-            padding-bottom: 40px;
-            position: relative;
-        }
-        /* Background poster (semi-transparent, blurred) */
-        body::before {
-            content: "";
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image: url('https://image.tmdb.org/t/p/original/6oom5QYQ2yQTMJIbnvbkBL9cHo6.jpg');
-            background-size: cover;
-            background-position: center;
-            opacity: 0.15;
-            filter: blur(8px);
-            z-index: -1;
-            transition: background-image 0.5s ease;
-        }
+        body { background: var(--bg); color: var(--text); overflow-x: hidden; padding-bottom: 40px; }
         /* Header */
         header {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 16px 24px; background: rgba(20,20,20,0.9); backdrop-filter: blur(20px);
+            padding: 16px 24px; background: rgba(15,15,15,0.9); backdrop-filter: blur(20px);
             border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 100;
         }
-        .logo {
-            font-size: 28px; font-weight: 800;
-            background: linear-gradient(135deg, #fff, #E50914);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        }
+        .logo { font-size: 28px; font-weight: 800; background: linear-gradient(135deg, #fff, #e50914); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .crown-icon { color: var(--primary); font-size: 24px; filter: drop-shadow(0 0 8px var(--primary)); }
         /* Search */
         .search-section { padding: 20px 24px; }
@@ -7709,7 +7695,7 @@ def serve_mini_app():
             border-radius: 40px; font-size: 14px; font-weight: 600; color: var(--text-muted);
             white-space: nowrap; cursor: pointer; transition: 0.2s;
         }
-        .genre-pill.active { background: var(--primary); color: white; border-color: var(--primary); box-shadow: 0 0 20px rgba(229,9,20,0.5); }
+        .genre-pill.active { background: var(--primary); color: #0f0f0f; border-color: var(--primary); box-shadow: 0 0 20px var(--primary); }
         /* Hero slider */
         .hero-slider {
             width: 100%; height: 380px; position: relative; background-size: cover;
@@ -7728,9 +7714,9 @@ def serve_mini_app():
         .hero-info span {
             font-size: 13px; font-weight: 600; color: var(--primary); background: rgba(0,0,0,0.5);
             backdrop-filter: blur(10px); padding: 5px 16px; border-radius: 40px; display: inline-block;
-            border: 1px solid var(--border);
+            border: 1px solid rgba(229,9,20,0.3);
         }
-        /* Row header */
+        /* Row header with scroll buttons */
         .row-header {
             display: flex; justify-content: space-between; align-items: center;
             padding: 28px 24px 12px 24px; font-size: 20px; font-weight: 700;
@@ -7743,7 +7729,7 @@ def serve_mini_app():
             border: 1px solid var(--border); color: var(--primary); cursor: pointer;
             display: flex; align-items: center; justify-content: center; transition: 0.2s;
         }
-        .scroll-btn:active { background: var(--primary); color: white; }
+        .scroll-btn:active { background: var(--primary); color: black; }
         /* Horizontal scroll */
         .horizontal-scroll {
             display: flex; overflow-x: auto; gap: 16px; padding: 0 24px 10px 24px;
@@ -7763,14 +7749,14 @@ def serve_mini_app():
         .card-rating {
             position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.7);
             backdrop-filter: blur(4px); font-size: 12px; font-weight: 700; padding: 4px 8px;
-            border-radius: 40px; color: var(--primary); border: 1px solid var(--border);
+            border-radius: 40px; color: var(--primary); border: 1px solid rgba(229,9,20,0.3);
         }
         .card-title {
             margin-top: 8px; font-size: 14px; font-weight: 600; white-space: nowrap;
             overflow: hidden; text-overflow: ellipsis; padding: 0 4px;
         }
         .card-meta { font-size: 12px; color: var(--text-muted); padding: 0 4px; }
-        /* Grid card (for search results) */
+        /* Grid card (for search results / genre view) */
         .grid-card {
             position: relative; cursor: pointer; transition: transform 0.15s;
             border-radius: 16px; overflow: hidden;
@@ -7786,7 +7772,7 @@ def serve_mini_app():
         .skeleton-card {
             flex: 0 0 150px; height: 250px; border-radius: 16px; background: var(--surface);
         }
-        /* Details page */
+        /* Details page - Netflix style backdrop + floating poster */
         .details-page {
             position: fixed; inset: 0; background: var(--bg); z-index: 2000; overflow-y: auto;
             transform: translateX(100%); transition: transform 0.4s cubic-bezier(0.2,0.8,0.2,1);
@@ -7802,26 +7788,65 @@ def serve_mini_app():
             transition: 0.2s; box-shadow: 0 8px 20px rgba(0,0,0,0.6);
         }
         .btn-back:active { transform: scale(0.9); border-color: var(--primary); }
-        .dp-poster-bg {
-            width: 100%; height: 420px; background-size: cover; background-position: center 20%;
+        .dp-backdrop {
             position: relative;
+            width: 100%;
+            height: 50vh;
+            min-height: 320px;
+            background-size: cover;
+            background-position: center 20%;
+            overflow: hidden;
         }
-        .dp-poster-bg::after {
-            content: ''; position: absolute; inset: 0;
-            background: linear-gradient(to top, var(--bg) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+        .dp-backdrop::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(to top, var(--bg) 0%, rgba(0,0,0,0.6) 70%, transparent 100%);
         }
-        .dp-info { padding: 28px; margin-top: -140px; position: relative; z-index: 2005; }
+        .dp-poster-float {
+            position: absolute;
+            bottom: -80px;
+            left: 28px;
+            z-index: 2015;
+            width: 140px;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px -10px black;
+            border: 2px solid rgba(255,255,255,0.2);
+        }
+        .dp-poster-float img {
+            width: 100%;
+            border-radius: 12px;
+            display: block;
+        }
+        .dp-info {
+            padding: 28px;
+            margin-top: 70px;
+            position: relative;
+            z-index: 2005;
+        }
         .dp-title {
-            font-size: 40px; font-weight: 800; line-height: 1.1; margin-bottom: 24px;
-            text-shadow: 0 8px 30px black; background: linear-gradient(135deg, #fff, #ffb3b3);
-            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            font-size: 32px;
+            font-weight: 800;
+            line-height: 1.2;
+            margin-bottom: 16px;
+            text-shadow: 0 4px 20px black;
         }
         .rich-info-box {
-            background: rgba(20,20,20,0.7); backdrop-filter: blur(20px); border: 1px solid var(--border);
-            border-radius: 28px; padding: 24px; margin-bottom: 28px; box-shadow: 0 30px 50px -20px black;
+            background: rgba(20,20,20,0.7);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border);
+            border-radius: 28px;
+            padding: 24px;
+            margin-bottom: 28px;
+            box-shadow: 0 30px 50px -20px black;
         }
         .rich-info-box > div {
-            margin-bottom: 14px; font-size: 15px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+            margin-bottom: 14px;
+            font-size: 15px;
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            flex-wrap: wrap;
         }
         .rich-info-box span { color: var(--text-muted); font-weight: 500; min-width: 80px; }
         .rich-info-box label { font-weight: 700; color: var(--primary); }
@@ -7835,8 +7860,8 @@ def serve_mini_app():
         .btn-trailer {
             width: 100%; padding: 18px; border-radius: 60px; border: none; font-size: 17px;
             font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 12px;
-            cursor: pointer; background: linear-gradient(145deg, var(--primary), #8b0000); color: white;
-            box-shadow: 0 15px 30px -5px rgba(229,9,20,0.5); margin-bottom: 28px; transition: 0.2s;
+            cursor: pointer; background: linear-gradient(145deg, var(--primary), var(--primary-soft)); color: white;
+            box-shadow: 0 15px 30px -5px var(--primary-glow); margin-bottom: 28px; transition: 0.2s;
         }
         .btn-trailer:active { transform: scale(0.97); box-shadow: 0 8px 20px var(--primary); }
         .btn-request {
@@ -7857,7 +7882,7 @@ def serve_mini_app():
         .file-size { color: var(--text-muted); font-size: 13px; font-weight: 500; }
         .action {
             color: white; font-size: 13px; font-weight: 800; background: var(--primary);
-            padding: 8px 18px; border-radius: 40px; box-shadow: 0 0 15px rgba(229,9,20,0.5);
+            padding: 8px 18px; border-radius: 40px; box-shadow: 0 0 15px var(--primary-glow);
         }
         /* Trailer modal */
         .trailer-modal {
@@ -7868,7 +7893,7 @@ def serve_mini_app():
         .trailer-modal.active { display: flex; }
         .trailer-wrapper {
             width: 100%; max-width: 900px; background: black; border-radius: 24px; overflow: hidden;
-            border: 2px solid var(--primary); box-shadow: 0 0 40px var(--primary);
+            border: 2px solid var(--primary); box-shadow: 0 0 40px var(--primary-glow);
         }
         .trailer-modal iframe { width: 100%; aspect-ratio: 16/9; border: none; display: block; }
         .close-trailer-btn {
@@ -7882,7 +7907,7 @@ def serve_mini_app():
             position: fixed; bottom: -60px; left: 50%; transform: translateX(-50%);
             background: rgba(20,20,20,0.9); backdrop-filter: blur(20px); border: 1px solid var(--primary);
             color: var(--primary); padding: 14px 30px; border-radius: 60px; font-size: 15px; font-weight: 700;
-            transition: bottom 0.3s; z-index: 3000; box-shadow: 0 10px 30px var(--primary); white-space: nowrap;
+            transition: bottom 0.3s; z-index: 3000; box-shadow: 0 10px 30px var(--primary-glow); white-space: nowrap;
         }
         .toast.show { bottom: 30px; }
         .loader { text-align: center; padding: 40px; color: var(--primary); font-size: 16px; }
@@ -7960,11 +7985,14 @@ def serve_mini_app():
             <button class="btn-back" onclick="closeDetails()"><i class="fas fa-chevron-left"></i></button>
         </div>
         <div class="dp-layout">
-            <div class="dp-poster-bg" id="dpImage"></div>
+            <div class="dp-backdrop" id="dpBackdrop"></div>
+            <div class="dp-poster-float" id="dpPosterFloat">
+                <img id="dpFloatPoster" src="" alt="Poster">
+            </div>
             <div class="dp-info">
                 <h1 class="dp-title" id="dpTitle">Title</h1>
                 <div class="rich-info-box">
-                    <div><span>IMDb</span> <label id="dpRating" style="color:gold;">—</label></div>
+                    <div><span>IMDb</span> <label id="dpRating" style="color:var(--primary);">—</label></div>
                     <div><span>Genre</span> <label id="dpGenre">—</label></div>
                     <div><span>Cast</span> <label id="dpActors">Fetching...</label></div>
                     <div><span>Audio</span> <label>Dual Audio [Hindi & English] + Subs</label></div>
@@ -8009,12 +8037,6 @@ def serve_mini_app():
             if (el) el.scrollBy({ left: amount, behavior: 'smooth' });
         }
 
-        // Update background poster based on hero slider (or any selected movie)
-        function updateBackgroundPoster(url) {
-            document.body.style.setProperty('--bg-poster', `url(${url})`);
-            document.body.style.setProperty('background-image', `url(${url})`);
-        }
-
         // Load movies from API
         async function loadMovies() {
             try {
@@ -8024,10 +8046,6 @@ def serve_mini_app():
                     allMovies = data.movies.filter(m => m.image);
                     renderHome(allMovies);
                     renderGenrePills(allMovies);
-                    // Set initial background poster from first movie
-                    if (allMovies.length > 0) {
-                        updateBackgroundPoster(allMovies[0].image);
-                    }
                 } else {
                     console.error('API error:', data.message);
                 }
@@ -8072,7 +8090,6 @@ def serve_mini_app():
                     document.getElementById('heroSlider').style.backgroundImage = `url(${m.image})`;
                     document.getElementById('heroTitle').innerText = m.title;
                     document.getElementById('heroMeta').innerText = `${m.year} • ${m.category}`;
-                    updateBackgroundPoster(m.image);
                     idx = (idx + 1) % top5.length;
                 };
                 updateHero();
@@ -8094,6 +8111,7 @@ def serve_mini_app():
         function renderCards(movies, cardClass = 'card', forceTMDB = false) {
             if (!movies.length) return '<div style="color:var(--text-muted); padding:10px;">No movies</div>';
             return movies.map(m => {
+                // 🔥 FIX: Automatically detect karega ki poster TMDB (Request) ka hai ya Local DB ka
                 const isTMDB = forceTMDB || m.source === 'tmdb'; 
                 const rating = m.rating && m.rating !== 'N/A' ? `⭐ ${m.rating}` : '';
                 const badge = isTMDB ? '<div class="card-rating" style="color:white; background:var(--primary);">Request</div>' : (rating ? `<div class="card-rating">${rating}</div>` : '');
@@ -8109,120 +8127,127 @@ def serve_mini_app():
             }).join('');
         }
 
-        // Search implementation (copy from your original code)
-        let searchTimeout;
-        document.getElementById('searchInput').addEventListener('input', (e) => {
-            clearTimeout(searchTimeout);
-            const q = e.target.value.trim();
-            const main = document.getElementById('mainContent');
-            const searchRes = document.getElementById('searchResultsContent');
-            const genreCont = document.getElementById('genreContainer');
-            
-            if (!q) {
-                main.style.display = 'block';
-                genreCont.style.display = 'flex';
-                searchRes.style.display = 'none';
-                return;
-            }
-            
-            main.style.display = 'none';
-            genreCont.style.display = 'none';
-            searchRes.style.display = 'block';
-            document.getElementById('searchGrid').innerHTML = '<div class="loader">Searching...</div>';
+        // Search
+let searchTimeout;
+document.getElementById('searchInput').addEventListener('input', (e) => {
+    clearTimeout(searchTimeout);
+    const q = e.target.value.trim();
+    const main = document.getElementById('mainContent');
+    const searchRes = document.getElementById('searchResultsContent');
+    const genreCont = document.getElementById('genreContainer');
+    
+    if (!q) {
+        main.style.display = 'block';
+        genreCont.style.display = 'flex';
+        searchRes.style.display = 'none';
+        return;
+    }
+    
+    main.style.display = 'none';
+    genreCont.style.display = 'none';
+    searchRes.style.display = 'block';
+    document.getElementById('searchGrid').innerHTML = '<div class="loader">Searching...</div>';
 
-            searchTimeout = setTimeout(async () => {
-                try {
-                    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-                    const data = await res.json();
+    searchTimeout = setTimeout(async () => {
+        try {
+            const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const data = await res.json();
+            
+            if (data.status === 'success' && data.results.length > 0) {
+                const results = data.results;
+                const local = results.filter(r => r.source === 'local');
+                const tmdb = results.filter(r => r.source === 'tmdb');
+                
+                // 🔥 FIX: Local Search me aayi movies ko main array me save karo (Taaki unpar click ho sake)
+                local.forEach(l => {
+                    if (!allMovies.find(m => m.id == l.id)) {
+                        allMovies.push(l);
+                    }
+                });
+
+                tmdb.forEach(t => tmdbMoviesMap[t.id] = t);
+                document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
+                document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
+            } else {
+                const term = q;
+                const searchHeader = document.getElementById('searchHeader');
+                const searchGrid = document.getElementById('searchGrid');
+                
+                searchHeader.innerHTML = `<i class="fas fa-exclamation-circle" style="color:#ef4444;"></i> Not Found`;
+                searchGrid.innerHTML = '<div class="loader">Checking spelling...</div>';
+                
+                // 🔥 FRONTEND JUGAD: Direct user ke mobile se Google ko call (No Server Block!)
+                const script = document.createElement('script');
+                window.googleSuggestCb = function(data) {
+                    let suggs = data[1] || [];
+                    // 'movie' word hata kar clean title banana
+                    suggs = suggs.map(s => s.replace(/ movie$/i, '').replace(/\b\w/g, c => c.toUpperCase())).slice(0, 6);
                     
-                    if (data.status === 'success' && data.results.length > 0) {
-                        const results = data.results;
-                        const local = results.filter(r => r.source === 'local');
-                        const tmdb = results.filter(r => r.source === 'tmdb');
+                    if(suggs.length > 0) {
+                        let buttonsHtml = suggs.map(s => 
+                            `<div onclick="document.getElementById('searchInput').value='${s}'; document.getElementById('searchInput').dispatchEvent(new Event('input'));" 
+                            style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: white; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background 0.2s;"
+                            onmouseover="this.style.background='rgba(229,9,20,0.1)'" onmouseout="this.style.background='transparent'">
+                                <i class="fas fa-search" style="color: var(--text-muted); font-size: 14px;"></i> 
+                                <span style="font-weight: 500;">${s}</span>
+                            </div>`
+                        ).join('');
                         
-                        local.forEach(l => {
-                            if (!allMovies.find(m => m.id == l.id)) {
-                                allMovies.push(l);
-                            }
-                        });
-                        tmdb.forEach(t => tmdbMoviesMap[t.id] = t);
-                        document.getElementById('searchHeader').innerHTML = `<i class="fas fa-search"></i> Found ${results.length} results`;
-                        document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card', false);
-                    } else {
-                        const term = q;
-                        const searchHeader = document.getElementById('searchHeader');
-                        const searchGrid = document.getElementById('searchGrid');
-                        
-                        searchHeader.innerHTML = `<i class="fas fa-exclamation-circle" style="color:#ef4444;"></i> Not Found`;
-                        searchGrid.innerHTML = '<div class="loader">Checking spelling...</div>';
-                        
-                        // Google suggestions
-                        const script = document.createElement('script');
-                        window.googleSuggestCb = function(data) {
-                            let suggs = data[1] || [];
-                            suggs = suggs.map(s => s.replace(/ movie$/i, '').replace(/\b\w/g, c => c.toUpperCase())).slice(0, 6);
-                            
-                            if(suggs.length > 0) {
-                                let buttonsHtml = suggs.map(s => 
-                                    `<div onclick="document.getElementById('searchInput').value='${s}'; document.getElementById('searchInput').dispatchEvent(new Event('input'));" 
-                                    style="padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); color: white; cursor: pointer; display: flex; align-items: center; gap: 12px; transition: background 0.2s;"
-                                    onmouseover="this.style.background='rgba(255,215,0,0.1)'" onmouseout="this.style.background='transparent'">
-                                        <i class="fas fa-search" style="color: var(--text-muted); font-size: 14px;"></i> 
-                                        <span style="font-weight: 500;">${s}</span>
-                                    </div>`
-                                ).join('');
-                                
-                                searchGrid.innerHTML = `
-                                    <div style="grid-column: 1 / -1; padding: 15px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
-                                        <p style="color: var(--primary); margin-bottom: 10px; font-size: 13px; font-weight: bold; padding-left: 10px;">✨ DID YOU MEAN:</p>
-                                        <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
-                                            ${buttonsHtml}
-                                        </div>
-                                        <div style="margin-top: 15px; padding: 0 10px;">
-                                            <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
-                                                <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
-                                            </button>
-                                        </div>
-                                    </div>
-                                `;
-                            } else {
-                                showFallbackUI(term);
-                            }
-                            document.head.removeChild(script);
-                            delete window.googleSuggestCb;
-                        };
-                        
-                        script.onerror = function() {
-                            showFallbackUI(term);
-                        };
-                        
-                        function showFallbackUI(term) {
-                            searchGrid.innerHTML = `
-                                <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
-                                    <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
-                                    <button onclick="requestSilent('${term}')" style="background: linear-gradient(135deg, var(--primary), #b8860b); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
-                                        <i class="fas fa-paper-plane"></i> Request This Movie
+                        searchGrid.innerHTML = `
+                            <div style="grid-column: 1 / -1; padding: 15px; background: var(--surface); border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+                                <p style="color: var(--primary); margin-bottom: 10px; font-size: 13px; font-weight: bold; padding-left: 10px;">✨ DID YOU MEAN:</p>
+                                <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
+                                    ${buttonsHtml}
+                                </div>
+                                <div style="margin-top: 15px; padding: 0 10px;">
+                                    <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
+                                        <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
                                     </button>
                                 </div>
-                            `;
-                        }
-                        
-                        script.src = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(term + ' movie')}&callback=googleSuggestCb`;
-                        document.head.appendChild(script);
+                            </div>
+                        `;
+                    } else {
+                        showFallbackUI(term);
                     }
-                } catch (err) {
-                    document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
+                    
+                    // Script ka kaam khatam, safai kar do
+                    document.head.removeChild(script);
+                    delete window.googleSuggestCb;
+                };
+                
+                script.onerror = function() {
+                    showFallbackUI(term);
+                };
+                
+                function showFallbackUI(term) {
+                    searchGrid.innerHTML = `
+                        <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
+                            <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
+                            <button onclick="requestSilent('${term}')" style="background: linear-gradient(135deg, var(--primary), var(--primary-soft)); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
+                                <i class="fas fa-paper-plane"></i> Request This Movie
+                            </button>
+                        </div>
+                    `;
                 }
-            }, 500);
-        });
-
+                
+                // Google ki API ko call (Client side)
+                script.src = `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(term + ' movie')}&callback=googleSuggestCb`;
+                document.head.appendChild(script);
+            }
+        } catch (err) {
+            document.getElementById('searchGrid').innerHTML = '<div class="loader">Error</div>';
+        }
+    }, 500);
+});
         // Details
         window.openDetails = function(id, isTMDB) {
             const movie = isTMDB ? tmdbMoviesMap[id] : allMovies.find(m => m.id == id);
             if (!movie) return;
             if (isTMDB) {
                 // show request button
-                document.getElementById('dpImage').style.backgroundImage = `url(${movie.image})`;
+                const backdropImg = movie.image; // fallback
+                document.getElementById('dpBackdrop').style.backgroundImage = `url(${backdropImg})`;
+                document.getElementById('dpFloatPoster').src = movie.image;
                 document.getElementById('dpTitle').innerText = movie.title;
                 document.getElementById('dpRating').innerText = movie.rating || 'N/A';
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
@@ -8240,7 +8265,10 @@ def serve_mini_app():
                 .then(data => {
                     if (data.status === 'success') {
                         const m = data.movie;
-                        document.getElementById('dpImage').style.backgroundImage = `url(${m.image})`;
+                        // Set backdrop (use TMDB backdrop if exists, else poster)
+                        const backdropUrl = m.backdrop ? m.backdrop : m.image;
+                        document.getElementById('dpBackdrop').style.backgroundImage = `url(${backdropUrl})`;
+                        document.getElementById('dpFloatPoster').src = m.image;
                         document.getElementById('dpTitle').innerText = m.title;
                         document.getElementById('dpRating').innerText = m.rating + '/10';
                         document.getElementById('dpGenre').innerText = m.genre;
@@ -8319,6 +8347,7 @@ def serve_mini_app():
             .catch(() => showToast('❌ Error'));
         };
 
+        // 🔥 NAYA: Silent Request (Jab TMDB aur Google dono fail ho jayein)
         window.requestSilent = function(title) {
             tg.HapticFeedback.notificationOccurred('success');
             showToast('⏳ Sending Request...');
@@ -8333,6 +8362,7 @@ def serve_mini_app():
             .then(d => {
                 if (d.status === 'success') {
                     showToast('✅ Request Sent to Admin!');
+                    // Request bhejte hi Mini app close kar do (Seamless feel ke liye)
                     setTimeout(() => { tg.close(); }, 1500);
                 } else {
                     showToast('❌ Failed to send');
@@ -8341,8 +8371,10 @@ def serve_mini_app():
             .catch(() => showToast('❌ Network Error'));
         };
 
+        // 🛡️ NAYA: Anti-Bot Middleware Par Bhejne Wala Function
         window.downloadBot = function(id) {
             tg.HapticFeedback.impactOccurred('heavy');
+            // Seedha Bot ki jagah pehle Secure verification page par bhejenge
             tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
         };
 
@@ -8354,17 +8386,19 @@ def serve_mini_app():
         // Start
         loadMovies();
         
-        // Auto-search from URL parameter
+        // 🪄 NAYA JUGAD: URL se query nikal kar auto-search karna
         setTimeout(() => {
             const urlParams = new URLSearchParams(window.location.search);
             const reqQuery = urlParams.get('req');
+            
             if (reqQuery) {
                 const searchInput = document.getElementById('searchInput');
                 searchInput.value = reqQuery;
                 showToast("🔍 Finding correct spelling...");
+                // Search ko trigger karo
                 searchInput.dispatchEvent(new Event('input', { bubbles: true }));
             }
-        }, 500);
+        }, 500); // Thoda ruk kar karenge taaki app load ho jaye
     </script>
 </body>
 </html>"""
@@ -8372,10 +8406,9 @@ def serve_mini_app():
 
 # ==================== RUN FLASK ====================
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+def run_flask():
+    port = int(os.environ.get('PORT', 8080))
     flask_app.run(host='0.0.0.0', port=port, debug=False)
-
 
 
 # Uncomment the following lines only if you want to run Flask standalone (not recommended inside main)
