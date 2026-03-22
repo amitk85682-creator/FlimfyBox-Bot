@@ -7392,6 +7392,7 @@ from urllib.parse import quote
 import random
 import re
 import secrets
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -7403,13 +7404,6 @@ CORS(flask_app, resources={r"/*": {"origins": "*"}})
 
 # --- TMDB API Key (for fetching trailers & cast) ---
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
-
-# ==================== DATABASE HELPERS (use existing functions) ====================
-# Make sure these functions are already defined in your main code:
-# get_db_connection(), close_db_connection(), store_user_request()
-# We'll assume they are available.
-
-import traceback  # Isko ekdum top pe add karne ki zaroorat nahi, maine andar handle kar liya hai
 
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
@@ -7451,7 +7445,7 @@ def get_movie_details(movie_id):
         cur.close()
         
     except Exception as e:
-        logger.error(f"🔴 DATABASE ERROR in /api/movie: {e}\n{traceback.format_exc()}")
+        logger.error(f"DATABASE ERROR in /api/movie: {e}\n{traceback.format_exc()}")
         return jsonify({'status': 'error', 'message': f'Database error: {str(e)}'}), 500
     finally:
         if conn:
@@ -7466,7 +7460,6 @@ def get_movie_details(movie_id):
     movie['backdrop'] = None
     
     try:
-        from urllib.parse import quote
         if movie.get('title') and movie['title'] != 'Unknown':
             search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
             resp = requests.get(search_url, timeout=5).json()
@@ -7507,8 +7500,7 @@ def get_movie_details(movie_id):
                     movie['trailer_key'] = trailer.get('key')
                     
     except BaseException as e:
-        logger.error(f"🔴 TMDB ERROR: {e}\n{traceback.format_exc()}")
-        # Error aane par app crash nahi hogi, bas TMDB ka data blank chala jayega
+        logger.error(f"TMDB ERROR: {e}\n{traceback.format_exc()}")
 
     return jsonify({'status': 'success', 'movie': movie})
 
@@ -7521,12 +7513,12 @@ def search_movies_api():
     if not query:
         return jsonify({'status': 'error', 'message': 'Missing query'}), 400
     
-    conn = get_db_connection()
+    conn = None
     local_results = []
-    if conn:
-        try:
+    try:
+        conn = get_db_connection()
+        if conn:
             cur = conn.cursor()
-            # Database me thoda flexible search (typos ke liye)
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category
                 FROM movies
@@ -7546,23 +7538,25 @@ def search_movies_api():
                     'source': 'local'
                 })
             cur.close()
-        except Exception as e:
-            logger.error(f"Local search error: {e}")
-        finally:
-            close_db_connection(conn)
+    except Exception as e:
+        logger.error(f"Local search error: {e}")
+    finally:
+        if conn:
+            try:
+                close_db_connection(conn)
+            except:
+                pass
     
-    # 🔥 TMDB Fix for "Thamma 2025" -> API ko saal (year) se confusion hoti hai, isliye usko hata do
-    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() 
-    if not clean_query: 
-        clean_query = query # Agar user ne sirf saal hi likh diya ho
+    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip()
+    if not clean_query:
+        clean_query = query 
 
     tmdb_results = []
-    if len(local_results) < 15: # Agar local DB me kam movies mili tabhi TMDB me dhoondo
+    if len(local_results) < 15: 
         try:
             tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(clean_query)}"
             resp = requests.get(tmdb_url, timeout=5).json()
             for item in resp.get('results', []):
-                # Agar poster na ho, toh backdrop image utha lo (Thamma ke liye fix)
                 img_path = item.get('poster_path') or item.get('backdrop_path')
                 if not img_path:
                     continue
@@ -7581,21 +7575,18 @@ def search_movies_api():
         except Exception as e:
             logger.error(f"TMDB search error: {e}")
     
-    # 🔥 FIX: "Avengers: Endgame" aur "Avengers Endgame" ko ek hi movie manega
     def normalize_title(t):
-        return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
+        return re.sub(r'[^\w\s]', '', str(t)).lower().replace(" ", "")
 
     seen_titles = set()
     combined = []
     
-    # Pehle Local movies daalo (Taaki unpar Download ka button aaye)
     for m in local_results:
         key = normalize_title(m['title'])
         if key not in seen_titles:
             seen_titles.add(key)
             combined.append(m)
             
-    # Phir TMDB movies daalo (Jo duplicate nahi hain)
     for m in tmdb_results:
         key = normalize_title(m['title'])
         if key not in seen_titles and len(combined) < 30:
