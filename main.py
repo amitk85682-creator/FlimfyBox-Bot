@@ -7413,19 +7413,23 @@ def get_movie_details(movie_id):
     """
     Return detailed info for a single movie (including files and TMDB backdrop).
     """
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+    conn = None
     try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+            
         cur = conn.cursor()
         cur.execute("""
             SELECT id, title, year, poster_url, rating, genre, description, category, language
             FROM movies WHERE id = %s
         """, (movie_id,))
         row = cur.fetchone()
-        if not row:
-            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
         
+        if not row:
+            cur.close()
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            
         movie = {
             'id': row[0],
             'title': row[1],
@@ -7440,68 +7444,63 @@ def get_movie_details(movie_id):
         
         # Get available files (qualities)
         cur.execute("SELECT quality, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
-        files = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
-        movie['files'] = files
-        
+        movie['files'] = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
         cur.close()
-        close_db_connection(conn)
         
-        # Try to fetch additional data from TMDB (cast, trailer, backdrop)
-        try:
-            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
-            resp = requests.get(search_url, timeout=5).json()
+    except Exception as e:
+        logger.error(f"DB Error in /api/movie/{movie_id}: {e}")
+        return jsonify({'status': 'error', 'message': 'Database error occurred'}), 500
+    finally:
+        # Ye line ensure karegi ki database lock na ho
+        if conn:
+            close_db_connection(conn)
             
-            if resp.get('results'):
-                # 🎯 NAYA CODE: TMDB results ko Year ke hisaab se match karein
-                db_year = str(movie.get('year', '')).strip()
-                target_movie = None
-                
-                # Agar hamare DB me year hai, toh use TMDB ke release date se match karo
-                if db_year and db_year != '0':
-                    for item in resp['results']:
-                        item_year = str(item.get('release_date') or item.get('first_air_date') or '')[:4]
-                        if item_year == db_year:
-                            target_movie = item
-                            break
-                            
-                # Agar exact year match nahi mila (ya year 0 hai), toh default pehla result lo
-                if not target_movie:
-                    target_movie = resp['results'][0]
-
-                media_type = target_movie.get('media_type', 'movie')
-                tmdb_id = target_movie['id']
-                
-                # Get backdrop (landscape)
-                backdrop_path = target_movie.get('backdrop_path')
-                if backdrop_path:
-                    movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
-                else:
-                    movie['backdrop'] = None
-                
-                # Get credits
-                credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
-                credits = requests.get(credits_url, timeout=5).json()
-                cast = credits.get('cast', [])[:5]
-                movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
-                
-                # Get trailer
-                videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
-                videos = requests.get(videos_url, timeout=5).json()
-                trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
-                if trailer:
-                    movie['trailer_key'] = trailer['key']
-            else:
-                movie['cast'] = []
-                movie['trailer_key'] = None
-                movie['backdrop'] = None
-
-        except Exception as e:
-            logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
-            movie['cast'] = []
-            movie['trailer_key'] = None
-            movie['backdrop'] = None
+    # --- TMDB Fetch (Database close hone ke baad chalega taaki crash na ho) ---
+    try:
+        search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
+        resp = requests.get(search_url, timeout=5).json()
         
-        return jsonify({'status': 'success', 'movie': movie})
+        if resp.get('results'):
+            db_year = str(movie.get('year', '')).strip()
+            target_movie = None
+            
+            # Year matching logic
+            if db_year and db_year != '0':
+                for item in resp['results']:
+                    item_year = str(item.get('release_date') or item.get('first_air_date') or '')[:4]
+                    if item_year == db_year:
+                        target_movie = item
+                        break
+                        
+            if not target_movie:
+                target_movie = resp['results'][0]
+
+            media_type = target_movie.get('media_type', 'movie')
+            tmdb_id = target_movie['id']
+            
+            # Backdrop
+            backdrop_path = target_movie.get('backdrop_path')
+            movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None
+            
+            # Cast
+            credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
+            credits = requests.get(credits_url, timeout=5).json()
+            cast = credits.get('cast', [])[:5]
+            movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
+            
+            # Trailer
+            videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
+            videos = requests.get(videos_url, timeout=5).json()
+            trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
+            movie['trailer_key'] = trailer['key'] if trailer else None
+            
+    except Exception as e:
+        logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
+        movie['cast'] = []
+        movie['trailer_key'] = None
+        movie['backdrop'] = None
+
+    return jsonify({'status': 'success', 'movie': movie})
 
     except Exception as e:
         logger.error(f"Error in /api/movie/{movie_id}: {e}")
