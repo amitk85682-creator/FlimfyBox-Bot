@@ -7453,9 +7453,6 @@ def get_movies():
 
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
-    """
-    Return detailed info for a single movie (including files and TMDB backdrop).
-    """
     conn = get_db_connection()
     if not conn:
         return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
@@ -7468,7 +7465,7 @@ def get_movie_details(movie_id):
         row = cur.fetchone()
         if not row:
             return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
-        
+
         movie = {
             'id': row[0],
             'title': row[1],
@@ -7480,38 +7477,42 @@ def get_movie_details(movie_id):
             'category': row[7] if row[7] else 'Movie',
             'language': row[8] if row[8] else ''
         }
-        
-        # Get available files (qualities)
+
+        # Get files
         cur.execute("SELECT quality, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
         files = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
         movie['files'] = files
-        
+
         cur.close()
         close_db_connection(conn)
-        
-        # Try to fetch additional data from TMDB (cast, trailer, backdrop)
+
+        # TMDB: include year to disambiguate
         try:
-            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
+            # Build search query with title and year if present
+            search_term = movie['title']
+            if movie['year']:
+                search_term += f" {movie['year']}"
+            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(search_term)}"
             resp = requests.get(search_url, timeout=5).json()
             if resp.get('results'):
                 first = resp['results'][0]
                 media_type = first.get('media_type', 'movie')
                 tmdb_id = first['id']
-                
-                # Get backdrop (landscape)
+
+                # Backdrop
                 backdrop_path = first.get('backdrop_path')
                 if backdrop_path:
                     movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
                 else:
                     movie['backdrop'] = None
-                
-                # Get credits
+
+                # Cast
                 credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
                 credits = requests.get(credits_url, timeout=5).json()
                 cast = credits.get('cast', [])[:5]
                 movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
-                
-                # Get trailer
+
+                # Trailer
                 videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
                 videos = requests.get(videos_url, timeout=5).json()
                 trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
@@ -7522,7 +7523,7 @@ def get_movie_details(movie_id):
             movie['cast'] = []
             movie['trailer_key'] = None
             movie['backdrop'] = None
-        
+
         return jsonify({'status': 'success', 'movie': movie})
     except Exception as e:
         logger.error(f"Error in /api/movie/{movie_id}: {e}")
@@ -7532,19 +7533,15 @@ def get_movie_details(movie_id):
 
 @flask_app.route('/api/search', methods=['GET'])
 def search_movies_api():
-    """
-    Smart Search (Local DB + TMDB)
-    """
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify({'status': 'error', 'message': 'Missing query'}), 400
-    
+
     conn = get_db_connection()
     local_results = []
     if conn:
         try:
             cur = conn.cursor()
-            # Database me thoda flexible search (typos ke liye)
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category
                 FROM movies
@@ -7568,6 +7565,52 @@ def search_movies_api():
             logger.error(f"Local search error: {e}")
         finally:
             close_db_connection(conn)
+
+    tmdb_results = []
+    if len(local_results) < 15:
+        try:
+            # Use original query (including year) – no stripping
+            tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(query)}"
+            resp = requests.get(tmdb_url, timeout=5).json()
+            for item in resp.get('results', []):
+                img_path = item.get('poster_path') or item.get('backdrop_path')
+                if not img_path:
+                    continue
+
+                tmdb_results.append({
+                    'id': 'tmdb_' + str(item['id']),
+                    'title': item.get('title') or item.get('name') or 'Unknown',
+                    'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
+                    'image': f"https://image.tmdb.org/t/p/w500{img_path}",
+                    'rating': round(item.get('vote_average', 0), 1),
+                    'genre': 'Action, Drama',
+                    'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
+                    'source': 'tmdb',
+                    'description': item.get('overview', '')
+                })
+        except Exception as e:
+            logger.error(f"TMDB search error: {e}")
+
+    # Deduplicate: normalize title (remove punctuation, spaces, lowercase)
+    def normalize_title(t):
+        return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
+
+    seen = set()
+    combined = []
+    # Local movies first
+    for m in local_results:
+        key = normalize_title(m['title'])
+        if key not in seen:
+            seen.add(key)
+            combined.append(m)
+    # Then TMDB movies (only if not already seen)
+    for m in tmdb_results:
+        key = normalize_title(m['title'])
+        if key not in seen and len(combined) < 30:
+            seen.add(key)
+            combined.append(m)
+
+    return jsonify({'status': 'success', 'results': combined})
     
     # 🔥 TMDB Fix for "Thamma 2025" -> API ko saal (year) se confusion hoti hai, isliye usko hata do
     clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() 
