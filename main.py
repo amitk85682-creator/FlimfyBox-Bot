@@ -7392,7 +7392,6 @@ from urllib.parse import quote
 import random
 import re
 import secrets
-import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -7405,154 +7404,218 @@ CORS(flask_app, resources={r"/*": {"origins": "*"}})
 # --- TMDB API Key (for fetching trailers & cast) ---
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
+# ==================== DATABASE HELPERS (use existing functions) ====================
+# Make sure these functions are already defined in your main code:
+# get_db_connection(), close_db_connection(), store_user_request()
+# We'll assume they are available.
+
+# ==================== API ROUTES ====================
+
+@flask_app.route('/api/movies', methods=['GET'])
+def get_movies():
+    """
+    Return list of movies with basic info (for homepage).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, year, poster_url, rating, genre, category,
+                   COALESCE(language, '') as language
+            FROM movies
+            WHERE poster_url IS NOT NULL AND poster_url != ''
+            ORDER BY id DESC
+            LIMIT 200
+        """)
+        rows = cur.fetchall()
+        movies = []
+        for r in rows:
+            movies.append({
+                'id': r[0],
+                'title': r[1],
+                'year': r[2] if r[2] else '',
+                'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+                'rating': r[4] if r[4] else 'N/A',
+                'genre': r[5] if r[5] else 'Unknown',
+                'category': r[6] if r[6] else 'Movie',
+                'language': r[7]
+            })
+        cur.close()
+        close_db_connection(conn)
+        return jsonify({'status': 'success', 'movies': movies})
+    except Exception as e:
+        logger.error(f"Error in /api/movies: {e}")
+        close_db_connection(conn)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
-    conn = None
+    """
+    Return detailed info for a single movie (including files and TMDB backdrop).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
     try:
-        conn = get_db_connection()
-        if not conn:
-            # 500 hata kar 200 kiya taaki App actual message dikhaye
-            return jsonify({'status': 'error', 'message': 'DATABASE OFFLINE: Render dashboard par check karein'}), 200
-            
         cur = conn.cursor()
         cur.execute("""
             SELECT id, title, year, poster_url, rating, genre, description, category, language
             FROM movies WHERE id = %s
         """, (movie_id,))
         row = cur.fetchone()
-        
         if not row:
-            cur.close()
-            return jsonify({'status': 'error', 'message': 'Movie not found'}), 200
-            
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        
         movie = {
             'id': row[0],
-            'title': str(row[1] or 'Unknown'),
-            'year': str(row[2] or ''),
-            'image': str(row[3] or 'https://via.placeholder.com/300x450?text=No+Poster'),
-            'rating': str(row[4] or 'N/A'),
-            'genre': str(row[5] or 'Unknown'),
-            'description': str(row[6] or 'No description available.'),
-            'category': str(row[7] or 'Movie'),
-            'language': str(row[8] or '')
+            'title': row[1],
+            'year': row[2] if row[2] else '',
+            'image': row[3] if row[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+            'rating': row[4] if row[4] else 'N/A',
+            'genre': row[5] if row[5] else 'Unknown',
+            'description': row[6] if row[6] else 'No description available.',
+            'category': row[7] if row[7] else 'Movie',
+            'language': row[8] if row[8] else ''
         }
         
+        # Get available files (qualities)
         cur.execute("SELECT quality, file_size FROM movie_files WHERE movie_id = %s", (movie_id,))
-        movie['files'] = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
-        cur.close()
+        files = [{'quality': f[0], 'size': f[1]} for f in cur.fetchall()]
+        movie['files'] = files
         
-    except Exception as e:
-        # App ko crash hone se roke aur exact error dikhaye
-        return jsonify({'status': 'error', 'message': f'DB ERROR: {str(e)[:50]}'}), 200
-    finally:
-        if conn:
-            try:
-                close_db_connection(conn)
-            except:
-                pass
-
-    # --- TMDB Fetch ---
-    movie['cast'] = []
-    movie['trailer_key'] = None
-    movie['backdrop'] = None
-    
-    try:
-        if movie.get('title') and movie['title'] != 'Unknown':
+        cur.close()
+        close_db_connection(conn)
+        
+        # Try to fetch additional data from TMDB (cast, trailer, backdrop)
+        try:
             search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(movie['title'])}"
             resp = requests.get(search_url, timeout=5).json()
-            
             if resp.get('results'):
-                db_year = str(movie.get('year', '')).strip()
-                target_movie = None
+                first = resp['results'][0]
+                media_type = first.get('media_type', 'movie')
+                tmdb_id = first['id']
                 
-                if db_year and db_year != '0':
-                    for item in resp['results']:
-                        item_year = str(item.get('release_date') or item.get('first_air_date') or '')[:4]
-                        if item_year == db_year:
-                            target_movie = item
-                            break
-                            
-                if not target_movie:
-                    target_movie = resp['results'][0]
-
-                media_type = target_movie.get('media_type', 'movie')
-                tmdb_id = target_movie.get('id')
-                
-                backdrop_path = target_movie.get('backdrop_path')
+                # Get backdrop (landscape)
+                backdrop_path = first.get('backdrop_path')
                 if backdrop_path:
                     movie['backdrop'] = f"https://image.tmdb.org/t/p/w1280{backdrop_path}"
+                else:
+                    movie['backdrop'] = None
                 
+                # Get credits
                 credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
                 credits = requests.get(credits_url, timeout=5).json()
-                movie['cast'] = [{'name': c.get('name', ''), 'character': c.get('character', ''), 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in credits.get('cast', [])[:5]]
+                cast = credits.get('cast', [])[:5]
+                movie['cast'] = [{'name': c['name'], 'character': c['character'], 'profile': f"https://image.tmdb.org/t/p/w185{c['profile_path']}" if c.get('profile_path') else None} for c in cast]
                 
+                # Get trailer
                 videos_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/videos?api_key={TMDB_API_KEY}"
                 videos = requests.get(videos_url, timeout=5).json()
-                trailer = next((v for v in videos.get('results', []) if v.get('type') == 'Trailer' and v.get('site') == 'YouTube'), None)
+                trailer = next((v for v in videos.get('results', []) if v['type'] == 'Trailer' and v['site'] == 'YouTube'), None)
                 if trailer:
-                    movie['trailer_key'] = trailer.get('key')
-                    
+                    movie['trailer_key'] = trailer['key']
+        except Exception as e:
+            logger.warning(f"TMDB fetch failed for {movie['title']}: {e}")
+            movie['cast'] = []
+            movie['trailer_key'] = None
+            movie['backdrop'] = None
+        
+        return jsonify({'status': 'success', 'movie': movie})
     except Exception as e:
-        pass # TMDB fail ho to app rukni nahi chahiye
+        logger.error(f"Error in /api/movie/{movie_id}: {e}")
+        close_db_connection(conn)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-    return jsonify({'status': 'success', 'movie': movie})
 
 @flask_app.route('/api/search', methods=['GET'])
 def search_movies_api():
+    """
+    Smart Search (Local DB + TMDB)
+    """
     query = request.args.get('q', '').strip()
     if not query:
-        return jsonify({'status': 'error', 'message': 'Missing query'}), 200
+        return jsonify({'status': 'error', 'message': 'Missing query'}), 400
     
-    conn = None
+    conn = get_db_connection()
     local_results = []
-    try:
-        conn = get_db_connection()
-        if conn:
+    if conn:
+        try:
             cur = conn.cursor()
+            # Database me thoda flexible search (typos ke liye)
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category
-                FROM movies WHERE title ILIKE %s OR title ILIKE %s LIMIT 20
+                FROM movies
+                WHERE title ILIKE %s OR title ILIKE %s
+                LIMIT 20
             """, (f'%{query}%', f'%{query.replace(" ", "%")}%'))
-            for r in cur.fetchall():
+            rows = cur.fetchall()
+            for r in rows:
                 local_results.append({
-                    'id': r[0], 'title': r[1], 'year': r[2] or '',
-                    'image': r[3] or 'https://via.placeholder.com/300x450?text=No+Poster',
-                    'rating': r[4] or 'N/A', 'genre': r[5] or 'Unknown',
-                    'category': r[6] or 'Movie', 'source': 'local'
+                    'id': r[0],
+                    'title': r[1],
+                    'year': r[2] if r[2] else '',
+                    'image': r[3] if r[3] else 'https://via.placeholder.com/300x450?text=No+Poster',
+                    'rating': r[4] if r[4] else 'N/A',
+                    'genre': r[5] if r[5] else 'Unknown',
+                    'category': r[6] if r[6] else 'Movie',
+                    'source': 'local'
                 })
             cur.close()
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': f'DB ERROR: {str(e)[:50]}'}), 200
-    finally:
-        if conn:
-            try: close_db_connection(conn)
-            except: pass
+        except Exception as e:
+            logger.error(f"Local search error: {e}")
+        finally:
+            close_db_connection(conn)
     
-    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() or query
+    # 🔥 TMDB Fix for "Thamma 2025" -> API ko saal (year) se confusion hoti hai, isliye usko hata do
+    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() 
+    if not clean_query: 
+        clean_query = query # Agar user ne sirf saal hi likh diya ho
+
     tmdb_results = []
-    if len(local_results) < 15: 
+    if len(local_results) < 15: # Agar local DB me kam movies mili tabhi TMDB me dhoondo
         try:
             tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(clean_query)}"
             resp = requests.get(tmdb_url, timeout=5).json()
             for item in resp.get('results', []):
+                # Agar poster na ho, toh backdrop image utha lo (Thamma ke liye fix)
                 img_path = item.get('poster_path') or item.get('backdrop_path')
-                if img_path:
-                    tmdb_results.append({
-                        'id': 'tmdb_' + str(item['id']),
-                        'title': item.get('title') or item.get('name') or 'Unknown',
-                        'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
-                        'image': f"https://image.tmdb.org/t/p/w500{img_path}",
-                        'rating': round(item.get('vote_average', 0), 1),
-                        'genre': 'Action, Drama',
-                        'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
-                        'source': 'tmdb', 'description': item.get('overview', '')
-                    })
-        except: pass
+                if not img_path:
+                    continue
+                
+                tmdb_results.append({
+                    'id': 'tmdb_' + str(item['id']),
+                    'title': item.get('title') or item.get('name') or 'Unknown',
+                    'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
+                    'image': f"https://image.tmdb.org/t/p/w500{img_path}",
+                    'rating': round(item.get('vote_average', 0), 1),
+                    'genre': 'Action, Drama',
+                    'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
+                    'source': 'tmdb',
+                    'description': item.get('overview', '')
+                })
+        except Exception as e:
+            logger.error(f"TMDB search error: {e}")
     
+    # 🔥 FIX: "Avengers: Endgame" aur "Avengers Endgame" ko ek hi movie manega
+    def normalize_title(t):
+        return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
+
     seen_titles = set()
     combined = []
-    for m in local_results + tmdb_results:
-        key = re.sub(r'[^\w\s]', '', str(m['title'])).lower().replace(" ", "")
+    
+    # Pehle Local movies daalo (Taaki unpar Download ka button aaye)
+    for m in local_results:
+        key = normalize_title(m['title'])
+        if key not in seen_titles:
+            seen_titles.add(key)
+            combined.append(m)
+            
+    # Phir TMDB movies daalo (Jo duplicate nahi hain)
+    for m in tmdb_results:
+        key = normalize_title(m['title'])
         if key not in seen_titles and len(combined) < 30:
             seen_titles.add(key)
             combined.append(m)
