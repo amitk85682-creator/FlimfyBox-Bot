@@ -4541,12 +4541,21 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 🛑 100% SAFE HTML BOLD CAPTION
             safe_rating = rating if rating else "N/A"
             safe_genre = genre if genre else "Unknown"
-            
-            # 👇 YAHAN SPACING THEEK KI GAYI HAI 👇
+
+            # 👇 FIX 1: Resolution automatically nikalne ka logic
+            res_set = set()
+            for f in movie_files:
+                match = re.search(r'(\d{3,4}p)', str(f.get('file_name', '')).lower())
+                if match:
+                    res_set.add(match.group(1))
+            res_list = sorted(list(res_set), key=lambda x: int(x.replace('p','')), reverse=True)
+            dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+
+            # 👇 FIX 2: Sahi variables ka use kiya (title, safe_genre, movie_lang)
             caption = (
-                f"🎬 <b>{movie_title}</b>\n"
-                f"✨ Genre: {db_genre}\n"
-                f"Language: {db_lang}\n"
+                f"🎬 <b>{title}</b>\n"
+                f"✨ Genre: {safe_genre}\n"
+                f"Language: {movie_lang if movie_lang else 'Hindi'}\n"
                 f"Quality: V2 HQ-HDTC {dynamic_res}\n"
                 f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
                 f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
@@ -4554,12 +4563,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👇 <b>Download Below</b> 👇"
             )
 
-            link_param = f"movie_{movie_id}"
-            bot1, bot2, bot3 = "FlimfyBox_SearchBot", "urmoviebot", "FlimfyBox_Bot"
+            # --- SECURE LINK FOR SUPERBATCH POST (With Web App) ---
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
             post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"), InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")],
-                [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
+                [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)), InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))],
+                [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
