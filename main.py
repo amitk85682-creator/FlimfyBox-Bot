@@ -1798,7 +1798,7 @@ def get_tmdb_backdrop(query, search_year=""):
     return None
 
 def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """IMDb से डेटा और TMDb से पोस्टर निकालने वाला इंजन"""
+    """IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन"""
     omdb_api_key = os.environ.get("OMDB_API_KEY")
     tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" # TMDb Key
     
@@ -1839,13 +1839,15 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             else: category = "Bollywood"
         else: category = "Hollywood"
 
-        # --- STEP 3: TMDb से HD Poster लाना (Landscape) ---
+        # --- STEP 3: TMDb से HD Poster लाना (Sirf LAMBA Wala) ---
         poster_url = resp.get('Poster') # Default OMDb
         tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
         t_resp = requests.get(tmdb_search, timeout=10).json()
         if t_resp.get('results'):
             res = t_resp['results'][0]
-            path = res.get('backdrop_path') or res.get('poster_path')
+            
+            # 👇 FIX: Pehle yahan 'backdrop_path' (landscape) utha raha tha. Ab strictly 'poster_path' (Lamba) lega.
+            path = res.get('poster_path')
             if path:
                 poster_url = f"https://image.tmdb.org/t/p/original{path}"
 
@@ -4542,8 +4544,13 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # --- POSTER & POSTING LOGIC ---
             photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
-            if not photo_to_send and first_file['thumb_id']: photo_to_send = first_file['thumb_id']
-            if not photo_to_send: photo_to_send = DEFAULT_POSTER
+            
+            # 👇 FIX: Telegram API video/document ke 'thumb_id' ko as a Photo bhejna reject kar deti hai.
+            # Isliye hum wahi 'image_bytes' use karenge jo bot ne Gemini ke liye download ki thi.
+            if not photo_to_send and image_bytes: 
+                photo_to_send = image_bytes
+            elif not photo_to_send: 
+                photo_to_send = DEFAULT_POSTER
 
             # 🛑 100% SAFE HTML BOLD CAPTION
             safe_rating = rating if rating else "N/A"
