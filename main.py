@@ -588,13 +588,24 @@ Example format: alias1, alias2, alias3, alias4"""
             
             ai_text = response.text.strip()
             aliases = []
-            for item in ai_text.split(','):
+            
+            # 👇 FIX 1: Ab bot comma (,) aur New Line (\n) dono ko split kar lega
+            raw_items = re.split(r',|\n', ai_text)
+            
+            for item in raw_items:
                 alias = item.strip().lower()
-                alias = re.sub(r'^\d+[\.\)]\s*', '', alias).strip('"\'').strip()
+                # Numbers, bullets (*, -) sab hata dega
+                alias = re.sub(r'^[\d\.\-\*\)]+\s*', '', alias).strip('"\'').strip()
                 if alias and len(alias) >= 2 and len(alias) <= 100:
                     aliases.append(alias)
             
             aliases = list(dict.fromkeys(aliases))[:50]
+            
+            # 👇 FIX 2: Agar AI ne ajeeb format diya aur 0 alias bache, toh Basic aliases (Fallback) use kar lo
+            if not aliases:
+                logger.warning("AI returned bad format. Using fallback aliases.")
+                return generate_basic_aliases(movie_title, year)
+                
             logger.info(f"✅ Generated {len(aliases)} aliases (Key used: {key[:5]}...)")
             return aliases
 
@@ -3873,7 +3884,7 @@ def get_storage_channels():
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
 def generate_quality_label(file_name, file_size_str, ai_language=""):
-    """Bina hardcode kiye AI language ko use karta hai + Series Episodes extract karta hai"""
+    """Bina hardcode kiye AI language ko use karta hai + Series/Seasons extract karta hai"""
     name_lower = file_name.lower()
     quality = "HD"
     
@@ -3888,15 +3899,13 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     # 2. Add AI Detected Language
     lang_tag = f" ({ai_language})" if ai_language else ""
     
-    # 3. Detect Series (S01 [E01-E10], [E01-12], S01E01)
-    # Yeh naya regex smart hai, brackets aur range sab nikal lega
-    season_match = re.search(r'(s\d{1,2}\s*\[?e\d{1,2}[-~e\d]*\]?|\[?e\d{1,2}[-~]\d{1,2}\]?|s\d{1,2}e\d{1,2}|ep\s?\d+)', file_name, re.IGNORECASE)
+    # 3. Detect Series (S01, S02, S01 [E01-E10], [E01-12], S01E01, Season 1)
+    # 👇 FIX: Naya Regex ab akela 'S01' ya 'Season 2' bhi aasaani se pakad lega!
+    season_match = re.search(r'(s\d{1,2}\s*\[?e\d{1,2}[-~e\d]*\]?|\[?e\d{1,2}[-~]\d{1,2}\]?|s\d{1,2}e\d{1,2}|ep\s?\d+|s\d{1,2}\b|season\s?\d+\b)', name_lower)
     
     if season_match:
         episode_tag = season_match.group(0).upper()
         return f"{episode_tag} {quality}{lang_tag} [{file_size_str}]"
-        
-    return f"{quality}{lang_tag} [{file_size_str}]"
         
     return f"{quality}{lang_tag} [{file_size_str}]"
 
