@@ -250,27 +250,25 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
     # Keyboard data (Restore ke liye save hoga)
-    # ⚠️ FIX: yahan 'url' ki jagah 'web_app' use karna zaroori hai
     keyboard_data = {
         "inline_keyboard": [
             [
-                {"text": "📥 Download Now", "web_app": {"url": secure_url}},
-                {"text": "📥 Download Now", "web_app": {"url": secure_url}}
+                {"text": "📥 Download Now", "url": secure_url},
+                {"text": "📥 Download Now", "url": secure_url}
             ],
             [
-                {"text": "⚡ Download Now", "web_app": {"url": secure_url}}
+                {"text": "⚡ Download Now", "url": secure_url}
             ]
         ]
     }
 
-    # ⚠️ FIX: Use WebAppInfo to force Mini App popup
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📥 Download Now", web_app=WebAppInfo(url=secure_url)),
-            InlineKeyboardButton("📥 Download Now", web_app=WebAppInfo(url=secure_url))
+            InlineKeyboardButton("📥 Download Now", url=secure_url),
+            InlineKeyboardButton("📥 Download Now", url=secure_url)
         ],
         [
-            InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))
+            InlineKeyboardButton("⚡ Download Now", url=secure_url)
         ]
     ])
 
@@ -3344,8 +3342,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)), InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))],
-            [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
+            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
@@ -4563,12 +4561,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👇 <b>Download Below</b> 👇"
             )
 
-            # --- SECURE LINK FOR SUPERBATCH POST (With Web App) ---
+            # --- SECURE LINK FOR SUPERBATCH POST ---
             secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
             post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)), InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))],
-                [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
+                [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+                [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
@@ -5818,7 +5816,7 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
             secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{m_id}"
 
             new_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 Download Server 1", web_app=WebAppInfo(url=secure_url))],
+                [InlineKeyboardButton("📥 Download Server 1", url=secure_url)],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
             await context.bot.edit_message_reply_markup(
@@ -7983,7 +7981,7 @@ def serve_mini_app():
             height: 50vh;
             min-height: 320px;
             background-size: cover;
-            background-position: center 20%;
+            background-position: top center; /* 👉 'center 20%' ki jagah 'top center' karein taaki landscape image ka main hissa dikhe */
             overflow: hidden;
         }
         .dp-backdrop::after {
@@ -8004,21 +8002,27 @@ def serve_mini_app():
         }
         .dp-poster-float img {
             width: 100%;
+            aspect-ratio: 2 / 3; /* 👉 Yeh poster ko hamesha LAMBA (Vertical) banayega */
+            object-fit: cover;   /* 👉 Yeh image ko pichakne nahi dega, perfectly crop karega */
             border-radius: 12px;
             display: block;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.8); /* Poster ko thoda background se alag dikhane ke liye */
         }
         .dp-info {
             padding: 28px;
-            margin-top: 70px;
+            margin-top: 40px; /* Ise thoda kam kar dein */
             position: relative;
             z-index: 2005;
         }
+        
         .dp-title {
             font-size: 32px;
             font-weight: 800;
             line-height: 1.2;
             margin-bottom: 16px;
             text-shadow: 0 4px 20px black;
+            margin-left: 155px; /* 👈 Title ko chote poster ke right side dhakel dega */
+            min-height: 80px;   /* 👈 Poster ki height ko balance karne ke liye */
         }
         .rich-info-box {
             background: rgba(20,20,20,0.7);
