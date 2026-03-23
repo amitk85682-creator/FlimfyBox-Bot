@@ -250,35 +250,27 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
     # Keyboard data (Restore ke liye save hoga)
+    # ⚠️ FIX: yahan 'url' ki jagah 'web_app' use karna zaroori hai
     keyboard_data = {
         "inline_keyboard": [
             [
-                {"text": "📥 Download Now", "url": secure_url},
-                {"text": "📥 Download Now", "url": secure_url}
+                {"text": "📥 Download Now", "web_app": {"url": secure_url}},
+                {"text": "📥 Download Now", "web_app": {"url": secure_url}}
             ],
             [
-                {"text": "⚡ Download Now", "url": secure_url}
+                {"text": "⚡ Download Now", "web_app": {"url": secure_url}}
             ]
         ]
     }
 
+    # ⚠️ FIX: Use WebAppInfo to force Mini App popup
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📥 Download Now", url=secure_url),
-            InlineKeyboardButton("📥 Download Now", url=secure_url)
+            InlineKeyboardButton("📥 Download Now", web_app=WebAppInfo(url=secure_url)),
+            InlineKeyboardButton("📥 Download Now", web_app=WebAppInfo(url=secure_url))
         ],
         [
-            InlineKeyboardButton("⚡ Download Now", url=secure_url)
-        ]
-    ])
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📥 Download Now", url=link1),
-            InlineKeyboardButton("📥 Download Now", url=link2)
-        ],
-        [
-            InlineKeyboardButton("⚡ Download Now", url=link3)
+            InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))
         ]
     ])
 
@@ -3352,8 +3344,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+            [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)), InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))],
+            [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
@@ -4953,8 +4945,8 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+            [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)), InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))],
+            [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
         
@@ -5059,17 +5051,14 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     # 3. Download Buttons Banao
-    link_param = f"movie_{movie_id}"
-    bot1 = "FlimfyBox_SearchBot"
-    bot2 = "urmoviebot"
-    bot3 = "FlimfyBox_Bot"
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Download Now", url=f"https://t.me/{bot1}?start={link_param}"),
-            InlineKeyboardButton("Download Now", url=f"https://t.me/{bot2}?start={link_param}")
+            InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)),
+            InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))
         ],
-        [InlineKeyboardButton("⚡ Download Now", url=f"https://t.me/{bot3}?start={link_param}")],
+        [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
         [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
     ])
 
@@ -5192,14 +5181,26 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             link3 = f"https://t.me/{bot3}?start={link_param}"
 
         # 6. Build Keyboard
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Download Now", url=link1),
-                InlineKeyboardButton("Download Now", url=link2),
-            ],
-            [InlineKeyboardButton("Download Now", url=link3)],
-            [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
-        ])
+        if movie_id:
+            # Agar secure_url (HTTPS) hai, tabhi Mini App open karo
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=link1)),
+                    InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=link2)),
+                ],
+                [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=link3))],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            ])
+        else:
+            # Agar fallback tg:// link hai, toh normal URL rehne do (Mini app tg:// par crash ho jata hai)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Download Now", url=link1),
+                    InlineKeyboardButton("Download Now", url=link2),
+                ],
+                [InlineKeyboardButton("Download Now", url=link3)],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            ])
 
         # 7. Build Caption
         channel_caption = f"🎬 <b>{query_text}</b>\n"
@@ -5808,7 +5809,7 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
             secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{m_id}"
 
             new_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 Download Server 1", url=secure_url)],
+                [InlineKeyboardButton("📥 Download Server 1", web_app=WebAppInfo(url=secure_url))],
                 [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
             await context.bot.edit_message_reply_markup(
