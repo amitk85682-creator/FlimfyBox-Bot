@@ -3866,7 +3866,7 @@ def get_storage_channels():
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
 def generate_quality_label(file_name, file_size_str, ai_language=""):
-    """Bina hardcode kiye AI language ko use karta hai"""
+    """Bina hardcode kiye AI language ko use karta hai + Series Episodes extract karta hai"""
     name_lower = file_name.lower()
     quality = "HD"
     
@@ -3878,14 +3878,18 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     elif "360p" in name_lower: quality = "360p"
     elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
     
-    # 2. Add AI Detected Language (e.g., Gujarati, Dual Audio)
+    # 2. Add AI Detected Language
     lang_tag = f" ({ai_language})" if ai_language else ""
     
-    # 3. Detect Series (S01E01)
-    season_match = re.search(r'(s\d+e\d+|ep\s?\d+|season\s?\d+)', name_lower)
+    # 3. Detect Series (S01 [E01-E10], [E01-12], S01E01)
+    # Yeh naya regex smart hai, brackets aur range sab nikal lega
+    season_match = re.search(r'(s\d{1,2}\s*\[?e\d{1,2}[-~e\d]*\]?|\[?e\d{1,2}[-~]\d{1,2}\]?|s\d{1,2}e\d{1,2}|ep\s?\d+)', file_name, re.IGNORECASE)
+    
     if season_match:
         episode_tag = season_match.group(0).upper()
-        return f"{episode_tag} - {quality}{lang_tag} [{file_size_str}]"
+        return f"{episode_tag} {quality}{lang_tag} [{file_size_str}]"
+        
+    return f"{quality}{lang_tag} [{file_size_str}]"
         
     return f"{quality}{lang_tag} [{file_size_str}]"
 
@@ -4858,7 +4862,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
                 cur.close()
                 BATCH_SESSION['file_count'] += 1
-                await upload_status.edit_text(f"✅ **Saved:** `{label}`\n🔢 Total Files: {BATCH_SESSION['file_count']}", parse_mode='Markdown')
+                movie_title = BATCH_SESSION.get('movie_title', 'Movie')
+                await upload_status.edit_text(f"✅ **Saved:** `{movie_title} {label}`\n🔢 Total Files: {BATCH_SESSION['file_count']}", parse_mode='Markdown')
             except Exception as e:
                 await upload_status.edit_text(f"❌ DB Save Failed: {e}")
             finally:
