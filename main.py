@@ -457,94 +457,25 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
+# 👇 NAYA HELPER FUNCTION: Yeh aapki saari keys .env se nikal lega
+def get_gemini_keys():
+    keys = []
+    # Purani standard key check karein
+    std_key = os.environ.get("GEMINI_API_KEY")
+    if std_key: keys.append(std_key)
+    
+    # Nayi numbered keys check karein (1 se 5 tak)
+    for i in range(1, 6):
+        k = os.environ.get(f"GEMINI_API_KEY_{i}")
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+# 👇 UPDATED FUNCTION 1: Name Extraction (With Multi-Key Rotation)
 async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
-    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL 2-STEP VERIFICATION)
-    Gemini ab Caption + Video Thumbnail dono dekhega!
-    """
-    if not caption_text or len(caption_text.strip()) < 2:
-        return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
-
-    first_line = caption_text.split('\n')[0].strip()
-
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            return await fallback_extraction(first_line)
-
-        genai.configure(api_key=api_key)
-        # Vision aur Text dono ke liye 'gemini-2.0-flash' (ya 'gemini-1.5-flash') best hai
-        model = genai.GenerativeModel('gemini-2.0-flash')
-
-        # 🧠 SUPER SMART PROMPT FOR VISION & TEXT
-        prompt = f"""You are an advanced Movie/Series Metadata Extractor.
-        I am providing you a Telegram filename/caption and possibly a thumbnail image from the video.
-
-        FILENAME/CAPTION: "{first_line}"
-
-        Analyze the text AND the image (if provided) to identify the exact movie or web series.
-
-        Extract the data into JSON with these exact keys:
-        1. "title": The clean, official name of the movie/show. Remove junk words like 'Full', 'Movie', 'HD', '1080p'. (e.g., "Taarzan The Wonder Car Full" -> "Taarzan The Wonder Car").
-        2. "year": The 4-digit release year. If the text doesn't have it, but you recognize the movie from the image, provide its actual release year!
-        3. "language": Any audio languages mentioned.
-        4. "extra_info": Tags indicating Batch, Seasons, Episodes (e.g., "S01 COMBINED").
-        5. "category": Guess the exact category from these: 'Bollywood', 'Hollywood', 'South', 'Anime', 'Web Series', or 'Movies'.
-
-        Return ONLY a valid JSON object. No markdown formatting like ```json."""
-
-        contents = [prompt]
-
-        # 🚀 JADOO: Agar thumbnail image aayi hai, to usko Gemini ko 'dekhne' ke liye de do!
-        if image_bytes:
-            contents.append({
-                "mime_type": "image/jpeg",
-                "data": image_bytes
-            })
-
-        response = await run_async(model.generate_content, contents)
-
-        if not response or not response.text:
-            return await fallback_extraction(first_line)
-
-        text = response.text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-        if match:
-            text = match.group(0)
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning(f"⚠️ JSON parse failed: {text}")
-            return await fallback_extraction(first_line)
-
-        title = data.get("title", "").strip()
-        year = str(data.get("year", "")).strip()
-        language = data.get("language", "").strip()
-        extra_info = data.get("extra_info", "").strip()
-        category = data.get("category", "").strip()
-
-        if not title or len(title) < 2:
-            return await fallback_extraction(first_line)
-
-        logger.info(f"🤖 GEMINI VISION RESULT: Title='{title}', Year='{year}', Cat='{category}'")
-        return {
-            "title": title,
-            "year": year,
-            "language": language,
-            "extra_info": extra_info,
-            "category": category
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Gemini Error: {e}")
-        return await fallback_extraction(first_line)
-
-
-async def get_movie_name_from_caption(caption_text, image_bytes=None):
-    """
-    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL 2-STEP VERIFICATION)
+    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL WITH AUTO-KEY ROTATION)
     """
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
@@ -552,17 +483,11 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
     first_line = caption_text.split('\n')[0].strip()
     logger.info(f"📝 Processing caption: {first_line[:100]}...")
 
-    # TRY GEMINI FIRST
-    try:
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-2.0-flash')
+    gemini_keys = get_gemini_keys()
 
-            prompt = f"""Extract movie/series info from this filename. Return ONLY JSON.
-
+    if gemini_keys:
+        prompt = f"""Extract movie/series info from this filename. Return ONLY JSON.
 Filename: "{first_line}"
-
 Rules:
 - title: Clean name without S01, E01, group names, quality, etc.
 - year: 4-digit year if present
@@ -573,36 +498,116 @@ Rules:
 Example:
 Input: "A Gatherer's Adventure In Isekai S01 [E01-12] COMBiNED 720p AMZN WEB-DL HEVC Multi DDP2.0 MSub KEИ !! Shubham.mkv"
 Output: {{"title": "A Gatherer's Adventure In Isekai", "year": "", "language": "Multi Audio", "extra_info": "S01 E01-12 COMBINED", "category": "Web Series"}}
-
 JSON:"""
 
-            contents = [prompt]
-            if image_bytes:
-                contents.append({"mime_type": "image/jpeg", "data": image_bytes})
+        contents = [prompt]
+        if image_bytes:
+            contents.append({"mime_type": "image/jpeg", "data": image_bytes})
 
-            response = await run_async(model.generate_content, contents)
-            
-            if response and response.text:
-                logger.info(f"🤖 Gemini Response: {response.text[:200]}")
+        # 🚀 KEY ROTATION LOOP
+        for key in gemini_keys:
+            try:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                response = await run_async(model.generate_content, contents)
                 
-                # Clean JSON
-                text = response.text.strip()
-                text = re.sub(r'```json|```', '', text)
-                json_match = re.search(r'\{.*\}', text, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group())
-                    
-                    # Validate
-                    if data.get("title") and len(data["title"]) > 2:
-                        logger.info(f"✅ Gemini Success: {data['title']}")
-                        return data
-
-    except Exception as e:
-        logger.error(f"❌ Gemini failed: {e}")
+                if response and response.text:
+                    text = response.text.strip()
+                    text = re.sub(r'```json|```', '', text)
+                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if json_match:
+                        data = json.loads(json_match.group())
+                        if data.get("title") and len(data["title"]) > 2:
+                            logger.info(f"✅ Gemini Success (Key used: {key[:5]}...): {data['title']}")
+                            return data
+                break # Agar response mila par JSON galat hai, toh aage wali key waste mat karo
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Agar Quota/Limit ka error aaya toh agli key try karo
+                if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                    logger.warning(f"⚠️ Key {key[:5]}... limit reached. Shifting to next key...")
+                    continue
+                else:
+                    logger.error(f"❌ Gemini Error on key {key[:5]}...: {e}")
+                    break
 
     # FALLBACK: Improved version
-    logger.info("⚠️ Using fallback extraction...")
+    logger.info("⚠️ Keys exhausted or failed. Using fallback extraction...")
     return await fallback_extraction(first_line)
+
+
+# 👇 UPDATED FUNCTION 2: Alias Generation (With Multi-Key Rotation)
+def generate_aliases_gemini(movie_title, year="", category=""):
+    """
+    🎯 AI se 50 search aliases generate karta hai (WITH AUTO-KEY ROTATION)
+    """
+    logger.info(f"🚀 Generating aliases for: '{movie_title}' ({year}) [{category}]")
+    
+    if not movie_title or movie_title == "UNKNOWN":
+        return []
+    
+    gemini_keys = get_gemini_keys()
+    if not gemini_keys:
+        logger.error("❌ No GEMINI_API_KEY found!")
+        return generate_basic_aliases(movie_title, year)
+
+    prompt = f"""Generate 50 search aliases for the movie/show: "{movie_title}"
+Year: {year if year else "N/A"}
+Category: {category if category else "N/A"}
+
+Include these types of variations:
+1. Common misspellings (typos people make)
+2. With and without year
+3. Hindi transliterations if applicable
+4. Short forms and abbreviations
+5. With "movie", "film", "download" keywords
+6. Without spaces, with hyphens
+7. Regional language spellings
+
+IMPORTANT: Return ONLY comma-separated aliases, nothing else.
+Example format: alias1, alias2, alias3, alias4"""
+
+    safety_settings = {
+        genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+        genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
+        genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+        genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+    }
+
+    # 🚀 KEY ROTATION LOOP
+    for key in gemini_keys:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            response = model.generate_content(prompt, safety_settings=safety_settings)
+            
+            if not response or not response.parts:
+                logger.warning("Gemini response was empty or blocked. Trying basic.")
+                return generate_basic_aliases(movie_title, year)
+            
+            ai_text = response.text.strip()
+            aliases = []
+            for item in ai_text.split(','):
+                alias = item.strip().lower()
+                alias = re.sub(r'^\d+[\.\)]\s*', '', alias).strip('"\'').strip()
+                if alias and len(alias) >= 2 and len(alias) <= 100:
+                    aliases.append(alias)
+            
+            aliases = list(dict.fromkeys(aliases))[:50]
+            logger.info(f"✅ Generated {len(aliases)} aliases (Key used: {key[:5]}...)")
+            return aliases
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                logger.warning(f"⚠️ Key {key[:5]}... limit reached. Shifting to next key...")
+                continue
+            else:
+                logger.warning(f"❌ Alias Gemini error on key {key[:5]}...: {e}")
+                break
+
+    return generate_basic_aliases(movie_title, year)
 
 
 async def fallback_extraction(caption_text):
