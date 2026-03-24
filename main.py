@@ -1223,6 +1223,9 @@ def setup_database():
             )
         """)
         
+        # 🚀 YEH LINE ADD KARO (Quality save karne ke liye)
+        cur.execute("ALTER TABLE temp_links ADD COLUMN IF NOT EXISTS quality TEXT;")
+        
         # 👇👇👇 NAYA TABLE: Auto-Delete Queue ke liye 👇👇👇
         cur.execute("""
             CREATE TABLE IF NOT EXISTS auto_delete_queue (
@@ -2743,55 +2746,44 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             pass
 
 # ==================== CLEAN LOADING FUNCTION (FIXED) ====================
-async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
-    """
-    Fetches and sends a movie with a clean 'Loading' animation.
-    No technical details shown to the user.
-    """
+async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, requested_quality: str = None):
     chat_id = update.effective_chat.id
     
-    # 1. Loading Effect
-    status_msg = None
-    try:
-        status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
-        
-        # Backup Auto-delete
-        track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
-    except:
-        pass
-
+    # ... loading message wala code same rahega ...
+    
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            # User ko technical error mat dikhao, bas chupchap delete kar do
-            if status_msg: 
-                try: 
-                    await status_msg.delete() 
-                except: 
-                    pass
             return
 
         cur = conn.cursor()
         cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
         movie_data = cur.fetchone()
+        
+        # 🚀 NAYA: Agar specific quality mangi hai toh database se wo exact file nikal lo
+        specific_file = None
+        if requested_quality:
+            cur.execute("SELECT url, file_id FROM movie_files WHERE movie_id = %s AND quality = %s LIMIT 1", (movie_id, requested_quality))
+            specific_file = cur.fetchone()
+
         cur.close()
         close_db_connection(conn)
 
-        # 2. Movie milne ke baad turant Loading Msg delete karo
-        if status_msg:
-            try: 
-                await status_msg.delete()
-            except: 
-                pass
+        # ... loading msg delete wala code same rahega ...
 
         if movie_data:
-            title, url, file_id = movie_data
-            # Movie bhejo
-            await send_movie_to_user(update, context, movie_id, title, url, file_id)
+            title, base_url, base_file_id = movie_data
+            
+            # 🚀 NAYA: Agar quality file mili, toh seedha uski url/id bhejo
+            if specific_file:
+                file_url, file_id = specific_file
+                await send_movie_to_user(update, context, movie_id, title, file_url, file_id)
+            else:
+                # Agar kuch gadbad hui (quality na ho), toh default behavior
+                await send_movie_to_user(update, context, movie_id, title, base_url, base_file_id)
         else:
-            # Agar movie nahi mili
-            fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
+            await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
             track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
 
     except Exception as e:
@@ -2892,7 +2884,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 try:
                     cur = conn.cursor()
-                    cur.execute("SELECT movie_id, created_at FROM temp_links WHERE token = %s", (payload,))
+                    # ✅ FIX 1: Sirf ek hi baar query karenge aur quality bhi nikal lenge
+                    cur.execute("SELECT movie_id, created_at, quality FROM temp_links WHERE token = %s", (payload,))
                     res = cur.fetchone()
                     
                     # Token TURANT delete kar do (Single Use)
@@ -2905,7 +2898,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         track_message_for_deletion(context, chat_id, msg.message_id, 15)
                         return
                     
-                    movie_id, created_at = res
+                    movie_id, created_at, quality = res
                     time_diff = (datetime.now() - created_at).total_seconds()
                     
                     if time_diff > 60:
@@ -2913,8 +2906,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         track_message_for_deletion(context, chat_id, msg.message_id, 15)
                         return
                     
-                    # Sab sahi hai, movie bhej do!
-                    await deliver_movie_on_start(update, context, movie_id)
+                    # ✅ FIX 2: Sab sahi hai, sirf ek hi baar call karenge quality ke sath
+                    await deliver_movie_on_start(update, context, movie_id, quality)
                     logger.info(f"✅ Secure token {payload} used successfully for movie {movie_id}")
                     return
 
@@ -2932,7 +2925,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     movie_id = int(payload.split('_')[1])
                     
-                    # ✅ FIX 3: send_message use karein
                     status_msg = await context.bot.send_message(
                         chat_id=chat_id,
                         text=f"🎬 Deep link detected!\nMovie ID: {movie_id}\nFetching... Please wait ⏳"
@@ -2957,7 +2949,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Invalid movie link: {e}")
                     await context.bot.send_message(chat_id=chat_id, text="❌ Invalid Link Format")
                     return
-
             # --- CASE 2: AUTO SEARCH (q_kalki) ---
             # ✅ RESTORED: Ye logic maine wapas add kar di hai
             elif payload.startswith("q_"):
@@ -7843,8 +7834,9 @@ def get_suggestions():
 # 🛡️ MIDDLEMAN REDIRECT PAGE (Anti-Bot)
 @flask_app.route('/watch/<int:movie_id>')
 def secure_watch(movie_id):
-    # Yeh HTML page user ko dikhega. Bots JS run nahi kar pate.
-    html = """
+    quality = request.args.get('q', '') # 👈 NAYA: URL se quality nikalna
+    
+    html = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -7852,9 +7844,9 @@ def secure_watch(movie_id):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>FlimfyBox - Verifying Secure Connection...</title>
         <style>
-            body { background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-            .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
-            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+            body {{ background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }}
+            .loader {{ border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }}
+            @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
         </style>
     </head>
     <body>
@@ -7863,38 +7855,35 @@ def secure_watch(movie_id):
         <p style="color: #a1a1aa; font-size: 13px;">Please wait 2 seconds. You will be redirected automatically.</p>
         
         <script>
-            // Invisible JS Challenge
-            setTimeout(() => {
-                fetch('/api/gen_link/""" + str(movie_id) + """', { method: 'POST' })
+            setTimeout(() => {{
+                // 👇 NAYA: API ko Quality pass karna
+                fetch('/api/gen_link/{movie_id}?q=' + encodeURIComponent('{quality}'), {{ method: 'POST' }})
                 .then(response => response.json())
-                .then(data => {
-                    if(data.url) {
-                        window.location.href = data.url; 
-                    } else {
-                        document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>";
-                    }
-                }).catch(e => {
+                .then(data => {{
+                    if(data.url) {{ window.location.href = data.url; }} 
+                    else {{ document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>"; }}
+                }}).catch(e => {{
                     document.body.innerHTML = "<h3>❌ Connection failed.</h3>";
-                });
-            }, 1500); 
+                }});
+            }}, 1500); 
         </script>
     </body>
     </html>
     """
     return html
 
-# 🔐 SECRET LINK GENERATOR API (Auto Delete Logic)
+# 🔐 SECRET LINK GENERATOR API
 @flask_app.route('/api/gen_link/<int:movie_id>', methods=['POST'])
 def gen_secure_link(movie_id):
+    quality = request.args.get('q', '') # 👈 NAYA
     token = "tmp_" + secrets.token_hex(6)
     conn = get_db_connection()
     if conn:
         try:
             cur = conn.cursor()
-            # Delete old tokens (1 minute se purane)
             cur.execute("DELETE FROM temp_links WHERE created_at < NOW() - INTERVAL '1 minute'")
-            # Save new token
-            cur.execute("INSERT INTO temp_links (token, movie_id) VALUES (%s, %s)", (token, movie_id))
+            # 👇 NAYA: Database mein token ke sath Quality bhi save kar di
+            cur.execute("INSERT INTO temp_links (token, movie_id, quality) VALUES (%s, %s, %s)", (token, movie_id, quality))
             conn.commit()
             cur.close()
         except Exception as e:
@@ -8567,19 +8556,20 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                         } else {
                             document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(m.title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
                         }
-                        // Download links
+                        /// Download links
                         if (m.files && m.files.length) {
                             let links = '<div class="dl-heading">AVAILABLE QUALITIES</div>';
                             m.files.forEach(f => {
+                                // 👇 YAHAN onclick mein f.quality add kiya
                                 links += `
-                                    <button class="dl-btn" onclick="downloadMovie(${m.id})">
+                                    <button class="dl-btn" onclick="downloadMovie(${m.id}, '${f.quality}')">
                                         <span class="quality-text">📁 ${f.quality} <span class="file-size">[${f.size || 'N/A'}]</span></span>
                                         <span class="action">Get</span>
                                     </button>
                                 `;
                             });
                             document.getElementById('dpLinks').innerHTML = links;
-                        } else {
+                        }
                             document.getElementById('dpLinks').innerHTML = `
                                 <div class="dl-heading">DOWNLOAD</div>
                                 <button class="dl-btn" onclick="downloadMovie(${m.id})">
@@ -8655,9 +8645,14 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
             tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
         };
 
-        window.downloadMovie = function(id) {
+        window.downloadMovie = function(id, quality) {
             tg.HapticFeedback.impactOccurred('heavy');
-            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
+            let link = `https://flimfybox-bot-yht0.onrender.com/watch/${id}`;
+            // 👇 Agar quality hai, toh link mein add kardo
+            if (quality && quality !== 'undefined') {
+                link += `?q=${encodeURIComponent(quality)}`;
+            }
+            tg.openLink(link);
         };
 
         // Start
