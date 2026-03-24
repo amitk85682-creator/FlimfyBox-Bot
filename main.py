@@ -8556,13 +8556,14 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                         } else {
                             document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-trailer" onclick="tg.openLink('https://www.youtube.com/results?search_query=${encodeURIComponent(m.title)}+trailer')"><i class="fas fa-play"></i> Search Trailer</button>`;
                         }
-                        /// Download links
+                        // Download links
                         if (m.files && m.files.length) {
                             let links = '<div class="dl-heading">AVAILABLE QUALITIES</div>';
                             m.files.forEach(f => {
-                                // 👇 YAHAN onclick mein f.quality add kiya
+                                // Safe quality taaki single quotes se code break na ho
+                                let safeQuality = f.quality ? f.quality.replace(/'/g, "") : "Unknown";
                                 links += `
-                                    <button class="dl-btn" onclick="downloadMovie(${m.id}, '${f.quality}')">
+                                    <button class="dl-btn" onclick="downloadMovie(${m.id}, '${safeQuality}')">
                                         <span class="quality-text">📁 ${f.quality} <span class="file-size">[${f.size || 'N/A'}]</span></span>
                                         <span class="action">Get</span>
                                     </button>
