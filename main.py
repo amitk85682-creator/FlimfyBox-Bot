@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import traceback
 import os
+from groq import AsyncGroq
 import secrets
 import re
 import json
@@ -361,6 +362,10 @@ FORCE_JOIN_ENABLED = True
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")  # ✅ NEW: Claude API Key
 STORAGE_CHANNELS = os.environ.get("STORAGE_CHANNELS", "")  # ✅ NEW: Backup Channels List
 
+# 👇 GROQ API KEYS (PYTHON FORMAT) 👇
+GROQ_API_KEY_1 = os.environ.get("GROQ_API_KEY_1")
+GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2")
+
 # Verified users cache (Taaki baar baar API call na ho)
 verified_users = {}
 VERIFICATION_CACHE_TIME = 3600  # 1 Hour
@@ -457,19 +462,46 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
-# 👇 NAYA HELPER FUNCTION: Yeh aapki saari keys .env se nikal lega
-def get_gemini_keys():
-    keys = []
-    # Purani standard key check karein
-    std_key = os.environ.get("GEMINI_API_KEY")
-    if std_key: keys.append(std_key)
-    
-    # Nayi numbered keys check karein (1 se 5 tak)
-    for i in range(1, 6):
-        k = os.environ.get(f"GEMINI_API_KEY_{i}")
-        if k and k not in keys:
-            keys.append(k)
-    return keys
+def get_groq_client():
+    """Groq API Keys ko rotate karne ke liye"""
+    keys = [os.environ.get("GROQ_API_KEY_1"), os.environ.get("GROQ_API_KEY_2")]
+    keys = [k for k in keys if k] # Remove empty
+    if not keys:
+        return None
+    # Random key pick karega taaki limit bachi rahe
+    return AsyncGroq(api_key=random.choice(keys))
+
+async def normalize_query_with_groq(user_query: str) -> str:
+    """
+    On-the-Fly Normalization:
+    User type karega: 'kalki hindi dubbed' -> Groq banayega: 'Kalki 2898 AD'
+    """
+    client = get_groq_client()
+    if not client:
+        return user_query # Agar key nahi hai toh normal query return kar do
+        
+    prompt = f"""You are a movie search assistant. Fix the spelling of the following user query and return ONLY the official movie/series name. 
+Do not include words like 'download', 'hindi', 'movie', 'full'. Do not add any extra text, punctuation, or explanation.
+User Query: "{user_query}"
+Official Name:"""
+
+    try:
+        response = await client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama3-8b-8192", # Llama 3 8B bahut fast aur sasta hai
+            temperature=0, # 0 means strictly accurate
+            max_tokens=20
+        )
+        normalized_name = response.choices[0].message.content.strip()
+        
+        # Agar Llama ne faltu text nahi diya aur naam theek diya, toh use karo
+        if len(normalized_name) > 1 and "here is" not in normalized_name.lower():
+            return normalized_name
+            
+    except Exception as e:
+        print(f"Groq API Error: {e}")
+        
+    return user_query # Fallback
 
 
 # 👇 UPDATED FUNCTION 1: Name Extraction (With Multi-Key Rotation)
@@ -3034,70 +3066,26 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search for movies in the database"""
-    try:
-        # Agar ye button click se aya hai (cancel/back)
-        if update.callback_query:
-            query = update.callback_query
-            await query.answer()
-            # Yahan hum kuch return nahi kar rahe, bas message bhej rahe hain
-            return
-
-        # Agar message text nahi hai
-        if not update.message or not update.message.text:
-            return 
-
-        query = update.message.text.strip()
+    # ... purana code ...
+    query = update.message.text.strip()
+    
+    # 🚀 STEP 1: FAST SQL SEARCH (Phonetic + Self-Learning) 
+    # Jo pichle message mein `get_movies_fast_sql` diya tha
+    movies = await run_async(get_movies_fast_sql, query, limit=10)
+    
+    # 🧠 STEP 2: GROQ AI NORMALIZATION (Agar DB mein kuch nahi mila)
+    if not movies:
+        status_msg = await update.message.reply_text("🤖 AI checking spelling... Please wait.")
         
-        # Safety check
-        if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
-             return await main_menu_or_search(update, context)
-
-        # 1. Search DB
-        movies = await run_async(get_movies_from_db, query, limit=10)
+        # Groq se sahi naam nikalo (Takes ~0.5 seconds)
+        smart_query = await normalize_query_with_groq(query)
         
-        # 2. Not Found
-        if not movies:
-            if SEARCH_ERROR_GIFS:
-                try:
-                    gif = random.choice(SEARCH_ERROR_GIFS)
-                    msg_gif = await update.message.reply_animation(animation=gif)
-                    track_message_for_deletion(context, update.effective_chat.id, msg_gif.message_id, 60)
-                except:
-                    pass
-
-            not_found_text = (
-                "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
-                "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
-                "मूवी की स्पेलिंग गूगल पर सर्च करके, कॉपी करे, उसके बाद यहां टाइप करें।✔️\n\n"
-                "बस मूवी का नाम + वर्ष:::: लिखें, उसके आगे पीछे कुछ भी ना लिखे..।♻️\n\n"
-                "✐ᝰ𝗘𝘅𝗮𝗺𝗽𝗹𝗲\n\n"
-                "सही है.!‼️    \n"
-                "─────────────────────\n"
-                "𝑲𝒈𝒇 𝟐✔️ | 𝑲𝒈𝒇 𝟐 𝑴𝒐𝒗𝒊𝒆 ❌\n"
-                "─────────────────────\n"
-                "𝑨𝒔𝒖𝒓 𝑺𝟎𝟏 𝑬𝟎𝟑✔️ | 𝑨𝒔𝒖𝒓 𝑺𝒆𝒂𝒔𝒐𝒏𝟑❌\n"
-                "─────────────────────\n\n"
-                "👇 <b>सही स्पेलिंग ढूँढने और Request करने के लिए नीचे क्लिक करें:</b>"
-            )
-
-            # 🌐 NAYA JUGAD: Web App URL jisme user ki galat spelling (query) attach hogi
-            safe_query = quote(query)
-            web_app_url = f"https://flimfybox-bot-yht0.onrender.com/webapp?req={safe_query}"
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌐 Open Request Portal", web_app=WebAppInfo(url=web_app_url))]
-            ])
+        if smart_query.lower() != query.lower():
+            # Agar Groq ne spelling theek ki hai, toh naye naam se dubara SQL search karo
+            movies = await run_async(get_movies_fast_sql, smart_query, limit=10)
             
-            msg = await update.message.reply_text(
-                text=not_found_text,
-                reply_markup=keyboard,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            # Auto Delete Not Found Msg
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-            return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
+        try: await status_msg.delete() 
+        except: pass
 
         # 3. Found
         context.user_data['search_results'] = movies
