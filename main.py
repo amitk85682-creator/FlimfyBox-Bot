@@ -3066,28 +3066,77 @@ Just use the buttons below to navigate!
         return MAIN_MENU
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... purana code ...
-    query = update.message.text.strip()
-    
-    # 🚀 STEP 1: FAST SQL SEARCH (Phonetic + Self-Learning) 
-    # Jo pichle message mein `get_movies_fast_sql` diya tha
-    movies = await run_async(get_movies_fast_sql, query, limit=10)
-    
-    # 🧠 STEP 2: GROQ AI NORMALIZATION (Agar DB mein kuch nahi mila)
-    if not movies:
-        status_msg = await update.message.reply_text("🤖 AI checking spelling... Please wait.")
-        
-        # Groq se sahi naam nikalo (Takes ~0.5 seconds)
-        smart_query = await normalize_query_with_groq(query)
-        
-        if smart_query.lower() != query.lower():
-            # Agar Groq ne spelling theek ki hai, toh naye naam se dubara SQL search karo
-            movies = await run_async(get_movies_fast_sql, smart_query, limit=10)
-            
-        try: await status_msg.delete() 
-        except: pass
+    """Search for movies in the database"""
+    # 👇 YAHAN TRY MISSING THA
+    try:
+        # Agar ye button click se aya hai (cancel/back)
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            return
 
-        # 3. Found
+        # Agar message text nahi hai
+        if not update.message or not update.message.text:
+            return 
+
+        query = update.message.text.strip()
+        
+        # Safety check
+        if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
+             return await main_menu_or_search(update, context)
+
+        # 🚀 STEP 1: FAST SQL SEARCH (Phonetic + Self-Learning) 
+        movies = await run_async(get_movies_fast_sql, query, limit=10)
+        
+        # 🧠 STEP 2: GROQ AI NORMALIZATION (Agar DB mein kuch nahi mila)
+        if not movies:
+            status_msg = await update.message.reply_text("🤖 AI checking spelling... Please wait.")
+            
+            # Groq se sahi naam nikalo
+            smart_query = await normalize_query_with_groq(query)
+            
+            if smart_query.lower() != query.lower():
+                # Agar Groq ne spelling theek ki hai, toh naye naam se dubara SQL search karo
+                movies = await run_async(get_movies_fast_sql, smart_query, limit=10)
+                
+            try: await status_msg.delete() 
+            except: pass
+
+        # 🛑 STEP 3: NOT FOUND LOGIC
+        if not movies:
+            if SEARCH_ERROR_GIFS:
+                try:
+                    gif = random.choice(SEARCH_ERROR_GIFS)
+                    msg_gif = await update.message.reply_animation(animation=gif)
+                    track_message_for_deletion(context, update.effective_chat.id, msg_gif.message_id, 60)
+                except:
+                    pass
+
+            not_found_text = (
+                "माफ़ करें, मुझे कोई मिलती-जुलती फ़िल्म नहीं मिली\n\n"
+                "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
+                "मूवी की स्पेलिंग गूगल पर सर्च करके, कॉपी करे, उसके बाद यहां टाइप करें।✔️\n\n"
+                "बस मूवी का नाम + वर्ष:::: लिखें, उसके आगे पीछे कुछ भी ना लिखे..।♻️\n\n"
+                "👇 <b>सही स्पेलिंग ढूँढने और Request करने के लिए नीचे क्लिक करें:</b>"
+            )
+
+            safe_query = quote(query)
+            web_app_url = f"https://flimfybox-bot-yht0.onrender.com/webapp?req={safe_query}"
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 Open Request Portal", web_app=WebAppInfo(url=web_app_url))]
+            ])
+            
+            msg = await update.message.reply_text(
+                text=not_found_text,
+                reply_markup=keyboard,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            return 
+
+        # ✅ STEP 4: FOUND LOGIC
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
 
@@ -3101,11 +3150,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-        return # <--- YAHAN SE BHI MAIN_MENU HATA DIYA HAI
+        return 
 
+    # 👇 YEH EXCEPT AB THEEK SE KAAM KAREGA
     except Exception as e:
         logger.error(f"Error in search_movies: {e}")
-        # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
         return
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
