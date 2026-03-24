@@ -462,6 +462,21 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
+# 👇 YEH FUNCTION MISSING HO GAYA THA, ISKO WAPAS PASTE KARO 👇
+def get_gemini_keys():
+    keys = []
+    # Purani standard key check karein
+    std_key = os.environ.get("GEMINI_API_KEY")
+    if std_key: keys.append(std_key)
+    
+    # Nayi numbered keys check karein (1 se 5 tak)
+    for i in range(1, 6):
+        k = os.environ.get(f"GEMINI_API_KEY_{i}")
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+# 👆 YAHAN TAK 👆
+
 def get_groq_client():
     """Groq API Keys ko rotate karne ke liye"""
     keys = [os.environ.get("GROQ_API_KEY_1"), os.environ.get("GROQ_API_KEY_2")]
