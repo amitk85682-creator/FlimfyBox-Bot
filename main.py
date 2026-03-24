@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import traceback
 import os
-from groq import AsyncGroq
 import secrets
 import re
 import json
@@ -362,10 +361,6 @@ FORCE_JOIN_ENABLED = True
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY")  # ✅ NEW: Claude API Key
 STORAGE_CHANNELS = os.environ.get("STORAGE_CHANNELS", "")  # ✅ NEW: Backup Channels List
 
-# 👇 GROQ API KEYS (PYTHON FORMAT) 👇
-GROQ_API_KEY_1 = os.environ.get("GROQ_API_KEY_1")
-GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2")
-
 # Verified users cache (Taaki baar baar API call na ho)
 verified_users = {}
 VERIFICATION_CACHE_TIME = 3600  # 1 Hour
@@ -462,7 +457,7 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
-# 👇 YEH FUNCTION MISSING HO GAYA THA, ISKO WAPAS PASTE KARO 👇
+# 👇 NAYA HELPER FUNCTION: Yeh aapki saari keys .env se nikal lega
 def get_gemini_keys():
     keys = []
     # Purani standard key check karein
@@ -475,48 +470,6 @@ def get_gemini_keys():
         if k and k not in keys:
             keys.append(k)
     return keys
-# 👆 YAHAN TAK 👆
-
-def get_groq_client():
-    """Groq API Keys ko rotate karne ke liye"""
-    keys = [os.environ.get("GROQ_API_KEY_1"), os.environ.get("GROQ_API_KEY_2")]
-    keys = [k for k in keys if k] # Remove empty
-    if not keys:
-        return None
-    # Random key pick karega taaki limit bachi rahe
-    return AsyncGroq(api_key=random.choice(keys))
-
-async def normalize_query_with_groq(user_query: str) -> str:
-    """
-    On-the-Fly Normalization:
-    User type karega: 'kalki hindi dubbed' -> Groq banayega: 'Kalki 2898 AD'
-    """
-    client = get_groq_client()
-    if not client:
-        return user_query # Agar key nahi hai toh normal query return kar do
-        
-    prompt = f"""You are a movie search assistant. Fix the spelling of the following user query and return ONLY the official movie/series name. 
-Do not include words like 'download', 'hindi', 'movie', 'full'. Do not add any extra text, punctuation, or explanation.
-User Query: "{user_query}"
-Official Name:"""
-
-    try:
-        response = await client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama3-8b-8192", # Llama 3 8B bahut fast aur sasta hai
-            temperature=0, # 0 means strictly accurate
-            max_tokens=20
-        )
-        normalized_name = response.choices[0].message.content.strip()
-        
-        # Agar Llama ne faltu text nahi diya aur naam theek diya, toh use karo
-        if len(normalized_name) > 1 and "here is" not in normalized_name.lower():
-            return normalized_name
-            
-    except Exception as e:
-        print(f"Groq API Error: {e}")
-        
-    return user_query # Fallback
 
 
 # 👇 UPDATED FUNCTION 1: Name Extraction (With Multi-Key Rotation)
@@ -1223,9 +1176,6 @@ def setup_database():
             )
         """)
         
-        # 🚀 YEH LINE ADD KARO (Quality save karne ke liye)
-        cur.execute("ALTER TABLE temp_links ADD COLUMN IF NOT EXISTS quality TEXT;")
-        
         # 👇👇👇 NAYA TABLE: Auto-Delete Queue ke liye 👇👇👇
         cur.execute("""
             CREATE TABLE IF NOT EXISTS auto_delete_queue (
@@ -1550,7 +1500,7 @@ def update_movies_in_db():
 
 
 def get_movies_from_db(user_query, limit=10):
-    """Search for MULTIPLE movies in database with Fast SQL Word-Similarity"""
+    """Search for MULTIPLE movies in database with fuzzy matching"""
     conn = None
     try:
         conn = get_db_connection()
@@ -1558,14 +1508,14 @@ def get_movies_from_db(user_query, limit=10):
             return []
 
         cur = conn.cursor()
-        clean_query = user_query.strip()
-        logger.info(f"Searching for: '{clean_query}'")
 
-        # 1. Exact Match Check (Super Fast)
+        logger.info(f"Searching for: '{user_query}'")
+
+        # ✅ Updated to include new columns
         cur.execute(
             """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
-               FROM movies WHERE title ILIKE %s ORDER BY title LIMIT %s""",
-            (f'%{clean_query}%', limit)
+               FROM movies WHERE LOWER(title) LIKE LOWER(%s) ORDER BY title LIMIT %s""",
+            (f'%{user_query}%', limit)
         )
         exact_matches = cur.fetchall()
 
@@ -1575,15 +1525,14 @@ def get_movies_from_db(user_query, limit=10):
             close_db_connection(conn)
             return exact_matches
 
-        # 2. Alias Match Check
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
-            WHERE ma.alias ILIKE %s
+            WHERE LOWER(ma.alias) LIKE LOWER(%s)
             ORDER BY m.title
             LIMIT %s
-        """, (f'%{clean_query}%', limit))
+        """, (f'%{user_query}%', limit))
         alias_matches = cur.fetchall()
 
         if alias_matches:
@@ -1592,31 +1541,26 @@ def get_movies_from_db(user_query, limit=10):
             close_db_connection(conn)
             return alias_matches
 
-        # 🚀 3. THE ULTIMATE FIX: PostgreSQL Word Similarity
-        # Yeh extension humne pehle hi setup mein add ki thi
-        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+        cur.execute("SELECT id, title, url, file_id, imdb_id, poster_url, year, genre FROM movies")
+        all_movies = cur.fetchall()
 
-        # Yeh 'calki' ko 'Kalki 2898 AD' ke sirf 'Kalki' wale hisse se match karega!
-        sql = """
-            SELECT id, title, url, file_id, imdb_id, poster_url, year, genre,
-                   word_similarity(%s, title) as sim_score
-            FROM movies
-            WHERE word_similarity(%s, title) > 0.35
-            ORDER BY sim_score DESC
-            LIMIT %s
-        """
-        cur.execute(sql, (clean_query, clean_query, limit))
-        smart_matches = cur.fetchall()
+        if not all_movies:
+            cur.close()
+            close_db_connection(conn)
+            return []
 
-        if smart_matches:
-            logger.info(f"Found {len(smart_matches)} Smart SQL matches")
+        movie_titles = [movie[1] for movie in all_movies]
+        movie_dict = {movie[1]: movie for movie in all_movies}
 
-        # Format results (sim_score ko list se hata do taaki purane format se match ho)
-        filtered_movies = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in smart_matches]
+        matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
+
+        filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 65]
+
+        logger.info(f"Found {len(filtered_movies)} fuzzy matches")
 
         cur.close()
         close_db_connection(conn)
-        return filtered_movies
+        return filtered_movies[:limit]
 
     except Exception as e:
         logger.error(f"Database query error: {e}")
@@ -2746,44 +2690,55 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             pass
 
 # ==================== CLEAN LOADING FUNCTION (FIXED) ====================
-async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, requested_quality: str = None):
+async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
+    """
+    Fetches and sends a movie with a clean 'Loading' animation.
+    No technical details shown to the user.
+    """
     chat_id = update.effective_chat.id
     
-    # ... loading message wala code same rahega ...
-    
+    # 1. Loading Effect
+    status_msg = None
+    try:
+        status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
+        
+        # Backup Auto-delete
+        track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
+    except:
+        pass
+
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
+            # User ko technical error mat dikhao, bas chupchap delete kar do
+            if status_msg: 
+                try: 
+                    await status_msg.delete() 
+                except: 
+                    pass
             return
 
         cur = conn.cursor()
         cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
         movie_data = cur.fetchone()
-        
-        # 🚀 NAYA: Agar specific quality mangi hai toh database se wo exact file nikal lo
-        specific_file = None
-        if requested_quality:
-            cur.execute("SELECT url, file_id FROM movie_files WHERE movie_id = %s AND quality = %s LIMIT 1", (movie_id, requested_quality))
-            specific_file = cur.fetchone()
-
         cur.close()
         close_db_connection(conn)
 
-        # ... loading msg delete wala code same rahega ...
+        # 2. Movie milne ke baad turant Loading Msg delete karo
+        if status_msg:
+            try: 
+                await status_msg.delete()
+            except: 
+                pass
 
         if movie_data:
-            title, base_url, base_file_id = movie_data
-            
-            # 🚀 NAYA: Agar quality file mili, toh seedha uski url/id bhejo
-            if specific_file:
-                file_url, file_id = specific_file
-                await send_movie_to_user(update, context, movie_id, title, file_url, file_id)
-            else:
-                # Agar kuch gadbad hui (quality na ho), toh default behavior
-                await send_movie_to_user(update, context, movie_id, title, base_url, base_file_id)
+            title, url, file_id = movie_data
+            # Movie bhejo
+            await send_movie_to_user(update, context, movie_id, title, url, file_id)
         else:
-            await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
+            # Agar movie nahi mili
+            fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
             track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
 
     except Exception as e:
@@ -2884,8 +2839,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 try:
                     cur = conn.cursor()
-                    # ✅ FIX 1: Sirf ek hi baar query karenge aur quality bhi nikal lenge
-                    cur.execute("SELECT movie_id, created_at, quality FROM temp_links WHERE token = %s", (payload,))
+                    cur.execute("SELECT movie_id, created_at FROM temp_links WHERE token = %s", (payload,))
                     res = cur.fetchone()
                     
                     # Token TURANT delete kar do (Single Use)
@@ -2898,7 +2852,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         track_message_for_deletion(context, chat_id, msg.message_id, 15)
                         return
                     
-                    movie_id, created_at, quality = res
+                    movie_id, created_at = res
                     time_diff = (datetime.now() - created_at).total_seconds()
                     
                     if time_diff > 60:
@@ -2906,8 +2860,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         track_message_for_deletion(context, chat_id, msg.message_id, 15)
                         return
                     
-                    # ✅ FIX 2: Sab sahi hai, sirf ek hi baar call karenge quality ke sath
-                    await deliver_movie_on_start(update, context, movie_id, quality)
+                    # Sab sahi hai, movie bhej do!
+                    await deliver_movie_on_start(update, context, movie_id)
                     logger.info(f"✅ Secure token {payload} used successfully for movie {movie_id}")
                     return
 
@@ -2925,6 +2879,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     movie_id = int(payload.split('_')[1])
                     
+                    # ✅ FIX 3: send_message use karein
                     status_msg = await context.bot.send_message(
                         chat_id=chat_id,
                         text=f"🎬 Deep link detected!\nMovie ID: {movie_id}\nFetching... Please wait ⏳"
@@ -2949,6 +2904,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Invalid movie link: {e}")
                     await context.bot.send_message(chat_id=chat_id, text="❌ Invalid Link Format")
                     return
+
             # --- CASE 2: AUTO SEARCH (q_kalki) ---
             # ✅ RESTORED: Ye logic maine wapas add kar di hai
             elif payload.startswith("q_"):
@@ -3079,12 +3035,12 @@ Just use the buttons below to navigate!
 
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for movies in the database"""
-    # 👇 YAHAN TRY MISSING THA
     try:
         # Agar ye button click se aya hai (cancel/back)
         if update.callback_query:
             query = update.callback_query
             await query.answer()
+            # Yahan hum kuch return nahi kar rahe, bas message bhej rahe hain
             return
 
         # Agar message text nahi hai
@@ -3097,24 +3053,10 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
              return await main_menu_or_search(update, context)
 
-        # 🚀 STEP 1: FAST SQL SEARCH (Phonetic + Self-Learning) 
-        movies = await run_async(get_movies_fast_sql, query, limit=10)
+        # 1. Search DB
+        movies = await run_async(get_movies_from_db, query, limit=10)
         
-        # 🧠 STEP 2: GROQ AI NORMALIZATION (Agar DB mein kuch nahi mila)
-        if not movies:
-            status_msg = await update.message.reply_text("🤖 AI checking spelling... Please wait.")
-            
-            # Groq se sahi naam nikalo
-            smart_query = await normalize_query_with_groq(query)
-            
-            if smart_query.lower() != query.lower():
-                # Agar Groq ne spelling theek ki hai, toh naye naam se dubara SQL search karo
-                movies = await run_async(get_movies_fast_sql, smart_query, limit=10)
-                
-            try: await status_msg.delete() 
-            except: pass
-
-        # 🛑 STEP 3: NOT FOUND LOGIC
+        # 2. Not Found
         if not movies:
             if SEARCH_ERROR_GIFS:
                 try:
@@ -3129,9 +3071,17 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<b><a href='https://www.google.com/'>𝗚𝗼𝗼𝗴𝗹𝗲</a></b> ☜ सर्च करें..!!\n\n"
                 "मूवी की स्पेलिंग गूगल पर सर्च करके, कॉपी करे, उसके बाद यहां टाइप करें।✔️\n\n"
                 "बस मूवी का नाम + वर्ष:::: लिखें, उसके आगे पीछे कुछ भी ना लिखे..।♻️\n\n"
+                "✐ᝰ𝗘𝘅𝗮𝗺𝗽𝗹𝗲\n\n"
+                "सही है.!‼️    \n"
+                "─────────────────────\n"
+                "𝑲𝒈𝒇 𝟐✔️ | 𝑲𝒈𝒇 𝟐 𝑴𝒐𝒗𝒊𝒆 ❌\n"
+                "─────────────────────\n"
+                "𝑨𝒔𝒖𝒓 𝑺𝟎𝟏 𝑬𝟎𝟑✔️ | 𝑨𝒔𝒖𝒓 𝑺𝒆𝒂𝒔𝒐𝒏𝟑❌\n"
+                "─────────────────────\n\n"
                 "👇 <b>सही स्पेलिंग ढूँढने और Request करने के लिए नीचे क्लिक करें:</b>"
             )
 
+            # 🌐 NAYA JUGAD: Web App URL jisme user ki galat spelling (query) attach hogi
             safe_query = quote(query)
             web_app_url = f"https://flimfybox-bot-yht0.onrender.com/webapp?req={safe_query}"
 
@@ -3145,10 +3095,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
+            # Auto Delete Not Found Msg
             track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-            return 
+            return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
-        # ✅ STEP 4: FOUND LOGIC
+        # 3. Found
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
 
@@ -3162,11 +3113,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
-        return 
+        return # <--- YAHAN SE BHI MAIN_MENU HATA DIYA HAI
 
-    # 👇 YEH EXCEPT AB THEEK SE KAAM KAREGA
     except Exception as e:
         logger.error(f"Error in search_movies: {e}")
+        # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
         return
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7834,9 +7785,8 @@ def get_suggestions():
 # 🛡️ MIDDLEMAN REDIRECT PAGE (Anti-Bot)
 @flask_app.route('/watch/<int:movie_id>')
 def secure_watch(movie_id):
-    quality = request.args.get('q', '') # 👈 NAYA: URL se quality nikalna
-    
-    html = f"""
+    # Yeh HTML page user ko dikhega. Bots JS run nahi kar pate.
+    html = """
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -7844,9 +7794,9 @@ def secure_watch(movie_id):
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>FlimfyBox - Verifying Secure Connection...</title>
         <style>
-            body {{ background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }}
-            .loader {{ border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }}
-            @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+            body { background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+            .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         </style>
     </head>
     <body>
@@ -7855,35 +7805,38 @@ def secure_watch(movie_id):
         <p style="color: #a1a1aa; font-size: 13px;">Please wait 2 seconds. You will be redirected automatically.</p>
         
         <script>
-            setTimeout(() => {{
-                // 👇 NAYA: API ko Quality pass karna
-                fetch('/api/gen_link/{movie_id}?q=' + encodeURIComponent('{quality}'), {{ method: 'POST' }})
+            // Invisible JS Challenge
+            setTimeout(() => {
+                fetch('/api/gen_link/""" + str(movie_id) + """', { method: 'POST' })
                 .then(response => response.json())
-                .then(data => {{
-                    if(data.url) {{ window.location.href = data.url; }} 
-                    else {{ document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>"; }}
-                }}).catch(e => {{
+                .then(data => {
+                    if(data.url) {
+                        window.location.href = data.url; 
+                    } else {
+                        document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>";
+                    }
+                }).catch(e => {
                     document.body.innerHTML = "<h3>❌ Connection failed.</h3>";
-                }});
-            }}, 1500); 
+                });
+            }, 1500); 
         </script>
     </body>
     </html>
     """
     return html
 
-# 🔐 SECRET LINK GENERATOR API
+# 🔐 SECRET LINK GENERATOR API (Auto Delete Logic)
 @flask_app.route('/api/gen_link/<int:movie_id>', methods=['POST'])
 def gen_secure_link(movie_id):
-    quality = request.args.get('q', '') # 👈 NAYA
     token = "tmp_" + secrets.token_hex(6)
     conn = get_db_connection()
     if conn:
         try:
             cur = conn.cursor()
+            # Delete old tokens (1 minute se purane)
             cur.execute("DELETE FROM temp_links WHERE created_at < NOW() - INTERVAL '1 minute'")
-            # 👇 NAYA: Database mein token ke sath Quality bhi save kar di
-            cur.execute("INSERT INTO temp_links (token, movie_id, quality) VALUES (%s, %s, %s)", (token, movie_id, quality))
+            # Save new token
+            cur.execute("INSERT INTO temp_links (token, movie_id) VALUES (%s, %s)", (token, movie_id))
             conn.commit()
             cur.close()
         except Exception as e:
@@ -8560,17 +8513,15 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                         if (m.files && m.files.length) {
                             let links = '<div class="dl-heading">AVAILABLE QUALITIES</div>';
                             m.files.forEach(f => {
-                                // Safe quality taaki single quotes se code break na ho
-                                let safeQuality = f.quality ? f.quality.replace(/'/g, "") : "Unknown";
                                 links += `
-                                    <button class="dl-btn" onclick="downloadMovie(${m.id}, '${safeQuality}')">
+                                    <button class="dl-btn" onclick="downloadMovie(${m.id})">
                                         <span class="quality-text">📁 ${f.quality} <span class="file-size">[${f.size || 'N/A'}]</span></span>
                                         <span class="action">Get</span>
                                     </button>
                                 `;
                             });
                             document.getElementById('dpLinks').innerHTML = links;
-                        }
+                        } else {
                             document.getElementById('dpLinks').innerHTML = `
                                 <div class="dl-heading">DOWNLOAD</div>
                                 <button class="dl-btn" onclick="downloadMovie(${m.id})">
@@ -8646,14 +8597,9 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
             tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
         };
 
-        window.downloadMovie = function(id, quality) {
+        window.downloadMovie = function(id) {
             tg.HapticFeedback.impactOccurred('heavy');
-            let link = `https://flimfybox-bot-yht0.onrender.com/watch/${id}`;
-            // 👇 Agar quality hai, toh link mein add kardo
-            if (quality && quality !== 'undefined') {
-                link += `?q=${encodeURIComponent(quality)}`;
-            }
-            tg.openLink(link);
+            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/${id}`);
         };
 
         // Start
