@@ -1547,7 +1547,7 @@ def update_movies_in_db():
 
 
 def get_movies_from_db(user_query, limit=10):
-    """Search for MULTIPLE movies in database with fuzzy matching"""
+    """Search for MULTIPLE movies in database with Fast SQL Word-Similarity"""
     conn = None
     try:
         conn = get_db_connection()
@@ -1555,14 +1555,14 @@ def get_movies_from_db(user_query, limit=10):
             return []
 
         cur = conn.cursor()
+        clean_query = user_query.strip()
+        logger.info(f"Searching for: '{clean_query}'")
 
-        logger.info(f"Searching for: '{user_query}'")
-
-        # ✅ Updated to include new columns
+        # 1. Exact Match Check (Super Fast)
         cur.execute(
             """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
-               FROM movies WHERE LOWER(title) LIKE LOWER(%s) ORDER BY title LIMIT %s""",
-            (f'%{user_query}%', limit)
+               FROM movies WHERE title ILIKE %s ORDER BY title LIMIT %s""",
+            (f'%{clean_query}%', limit)
         )
         exact_matches = cur.fetchall()
 
@@ -1572,14 +1572,15 @@ def get_movies_from_db(user_query, limit=10):
             close_db_connection(conn)
             return exact_matches
 
+        # 2. Alias Match Check
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
-            WHERE LOWER(ma.alias) LIKE LOWER(%s)
+            WHERE ma.alias ILIKE %s
             ORDER BY m.title
             LIMIT %s
-        """, (f'%{user_query}%', limit))
+        """, (f'%{clean_query}%', limit))
         alias_matches = cur.fetchall()
 
         if alias_matches:
@@ -1588,26 +1589,31 @@ def get_movies_from_db(user_query, limit=10):
             close_db_connection(conn)
             return alias_matches
 
-        cur.execute("SELECT id, title, url, file_id, imdb_id, poster_url, year, genre FROM movies")
-        all_movies = cur.fetchall()
+        # 🚀 3. THE ULTIMATE FIX: PostgreSQL Word Similarity
+        # Yeh extension humne pehle hi setup mein add ki thi
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
 
-        if not all_movies:
-            cur.close()
-            close_db_connection(conn)
-            return []
+        # Yeh 'calki' ko 'Kalki 2898 AD' ke sirf 'Kalki' wale hisse se match karega!
+        sql = """
+            SELECT id, title, url, file_id, imdb_id, poster_url, year, genre,
+                   word_similarity(%s, title) as sim_score
+            FROM movies
+            WHERE word_similarity(%s, title) > 0.35
+            ORDER BY sim_score DESC
+            LIMIT %s
+        """
+        cur.execute(sql, (clean_query, clean_query, limit))
+        smart_matches = cur.fetchall()
 
-        movie_titles = [movie[1] for movie in all_movies]
-        movie_dict = {movie[1]: movie for movie in all_movies}
+        if smart_matches:
+            logger.info(f"Found {len(smart_matches)} Smart SQL matches")
 
-        matches = process.extract(user_query, movie_titles, scorer=fuzz.token_sort_ratio, limit=limit)
-
-        filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 65]
-
-        logger.info(f"Found {len(filtered_movies)} fuzzy matches")
+        # Format results (sim_score ko list se hata do taaki purane format se match ho)
+        filtered_movies = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in smart_matches]
 
         cur.close()
         close_db_connection(conn)
-        return filtered_movies[:limit]
+        return filtered_movies
 
     except Exception as e:
         logger.error(f"Database query error: {e}")
