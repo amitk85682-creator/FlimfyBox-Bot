@@ -457,6 +457,27 @@ async def check_rate_limit(user_id):
     user_last_request[user_id] = now
     return True
 
+async def upload_image_to_telegraph(bot, file_id):
+    """Downloads photo from Telegram and uploads to Telegra.ph"""
+    try:
+        # File download karo
+        file = await bot.get_file(file_id)
+        byte_array = await file.download_as_bytearray()
+        
+        # Telegraph par upload karo
+        async with aiohttp.ClientSession() as session:
+            data = aiohttp.FormData()
+            data.add_field('file', byte_array, filename='poster.jpg', content_type='image/jpeg')
+            
+            async with session.post('https://telegra.ph/upload', data=data) as resp:
+                res = await resp.json()
+                if isinstance(res, list) and 'src' in res[0]:
+                    return f"https://telegra.ph{res[0]['src']}"
+        return None
+    except Exception as e:
+        logger.error(f"❌ Telegraph upload failed: {e}")
+        return None
+
 # 👇 NAYA HELPER FUNCTION: Yeh aapki saari keys .env se nikal lega
 def get_gemini_keys():
     keys = []
@@ -2414,12 +2435,12 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     for quality, url, file_id, file_size in current_qualities:
         callback_data = f"quality_{movie_id}_{quality}"
         
-        # Button Text Formatting (Compact)
-        # Example: "📁 720p [1.2GB]"
-        size_str = f"[{file_size}]" if file_size else ""
+        # Icon set karna hai file ya link ke basis par
         icon = "📁" if file_id else "🔗"
         
-        button_text = f"{icon} {quality} {size_str}"
+        # 'quality' ke andar pehle se hi file size juda hua hai (e.g., "720p [3.50 GB]")
+        # Toh bas icon aur quality ko jod do, extra size_str ki zaroorat hi nahi hai.
+        button_text = f"{icon} {quality}"
         
         row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
 
@@ -4146,100 +4167,6 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================================
 # ✍️ BATCH MANUAL COMMAND (For Custom Names & Details)
 # ============================================================================
-async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual batch command via comma separated arguments"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_USER_ID: return
-
-    if not context.args: 
-        await update.message.reply_text(
-            "❌ **Galat Format!** Aise use karein:\n\n"
-            "`/batch Movie Name, Year, Language, Genre, Category`\n\n"
-            "**Example:**\n"
-            "`/batch Pink Bra, 2023, Hindi, Adult, Web Series`", 
-            parse_mode='Markdown'
-        )
-        return
-
-    # 1. Parsing Custom Format
-    raw_text = " ".join(context.args)
-    parts = [p.strip() for p in raw_text.split(',')]
-    
-    title = parts[0] if len(parts) > 0 else "Unknown Title"
-    year = parts[1] if len(parts) > 1 else ""
-    language = parts[2] if len(parts) > 2 else "Hindi"
-    genre = parts[3] if len(parts) > 3 else "Adult, Drama"
-    category = parts[4] if len(parts) > 4 else "Web Series"
-    
-    rating = "N/A"
-    plot = "Watch exclusive content on FlimfyBox Premium."
-    poster_url = None
-    imdb_id = None
-    cast_str = None
-
-    status_msg = await update.message.reply_text(f"⏳ Saving '{title}' to Database...", parse_mode='Markdown')
-
-    conn = get_db_connection()
-    if not conn: return
-    
-    try:
-        cur = conn.cursor()
-        
-        # 🛑 CRITICAL FIX: "cast" is safely quoted here as well
-        cur.execute(
-            """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-            ON CONFLICT (title) DO UPDATE 
-            SET year = EXCLUDED.year, 
-                genre = EXCLUDED.genre, 
-                category = EXCLUDED.category, 
-                language = EXCLUDED.language
-            RETURNING id
-            """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str)
-        )
-        movie_id = cur.fetchone()[0]
-        conn.commit()
-
-        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-        file_count = cur.fetchone()[0]
-        cur.close()
-
-        BATCH_SESSION.update({
-            'active': True,
-            'movie_id': movie_id,
-            'movie_title': title,
-            'file_count': file_count,
-            'admin_id': user_id,
-            'language': language,
-            'category': category
-        })
-
-        msg_text = (
-            f"✅ **Batch Custom Mode Started!**\n\n"
-            f"🎬 **Title:** {title}\n"
-            f"📅 **Year:** {year}\n"
-            f"🎭 **Genre:** {genre}\n"
-            f"🗣️ **Language:** {language}\n"
-            f"🏷️ **Category:** {category}\n"
-            f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
-            f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
-            f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
-        )
-
-        keyboard = []
-        if file_count > 0:
-            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
-        keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
-        
-        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-    except Exception as e:
-        logger.error(f"Batch Error: {e}")
-        await status_msg.edit_text(f"❌ DB Error: {e}")
-    finally:
-        if conn: close_db_connection(conn)
 
 async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -7436,7 +7363,7 @@ flask_app = Flask(__name__)
 CORS(flask_app, resources={r"/*": {"origins": "*"}})
 
 # --- TMDB API Key (for fetching trailers & cast) ---
-TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
+api_key = os.environ.get("TMDB_API_KEY")
 
 # ==================== DATABASE HELPERS (use existing functions) ====================
 # Make sure these functions are already defined in your main code:
