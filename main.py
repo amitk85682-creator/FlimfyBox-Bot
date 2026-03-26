@@ -7896,6 +7896,14 @@ def serve_mini_app():
             overflow: hidden; text-overflow: ellipsis; padding: 0 4px;
         }
         .card-meta { font-size: 12px; color: var(--text-muted); padding: 0 4px; }
+        /* Movie Grid Container */
+        .movie-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr); /* Ek row mein 2 movies */
+            gap: 16px; /* Cards ke beech ka gap */
+            padding: 0 24px 20px 24px; /* Side margins ko theek rakhne ke liye */
+        }
+        
         /* Grid card (for search results / genre view) */
         .grid-card {
             position: relative; cursor: pointer; transition: transform 0.15s;
