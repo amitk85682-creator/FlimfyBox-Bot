@@ -7375,8 +7375,13 @@ api_key = os.environ.get("TMDB_API_KEY")
 @flask_app.route('/api/movies', methods=['GET'])
 def get_movies():
     """
-    Return list of movies with basic info (for homepage).
+    Return list of movies with pagination (Infinite Scroll).
     """
+    # Pagination Logic
+    page = int(request.args.get('page', 1))
+    limit = int(request.args.get('limit', 40)) # Ek baar mein 40 movies bhejo
+    offset = (page - 1) * limit
+
     conn = get_db_connection()
     if not conn:
         return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
@@ -7388,8 +7393,9 @@ def get_movies():
             FROM movies
             WHERE poster_url IS NOT NULL AND poster_url != ''
             ORDER BY id DESC
-            LIMIT 200
-        """)
+            LIMIT %s OFFSET %s
+        """, (limit, offset))
+        
         rows = cur.fetchall()
         movies = []
         for r in rows:
@@ -7405,7 +7411,11 @@ def get_movies():
             })
         cur.close()
         close_db_connection(conn)
-        return jsonify({'status': 'success', 'movies': movies})
+        
+        # Check if more movies exist
+        has_more = len(movies) == limit 
+        
+        return jsonify({'status': 'success', 'movies': movies, 'has_more': has_more})
     except Exception as e:
         logger.error(f"Error in /api/movies: {e}")
         close_db_connection(conn)
@@ -8211,23 +8221,67 @@ def serve_mini_app():
             if (el) el.scrollBy({ left: amount, behavior: 'smooth' });
         }
 
-        // Load movies from API
-        async function loadMovies() {
+        // Pagination State
+        let currentPage = 1;
+        let isFetching = false;
+        let hasMoreMovies = true;
+
+        // Load movies from API with Infinite Scroll support
+        async function loadMovies(page = 1) {
+            if (isFetching || !hasMoreMovies) return;
+            isFetching = true;
+
             try {
-                const res = await fetch('/api/movies');
+                // Agar page 1 se zyada hai, toh neeche ek loading spinner dikhao
+                if (page > 1) {
+                    document.getElementById('moreGrid').insertAdjacentHTML('beforeend', '<div id="scrollLoader" style="grid-column: 1 / -1; text-align: center; padding: 20px;"><div class="loader" style="width:30px;height:30px;border-width:3px;margin:0 auto;"></div></div>');
+                }
+
+                const res = await fetch(`/api/movies?page=${page}&limit=40`);
                 const data = await res.json();
+                
+                // Naya data aate hi loader hata do
+                if (page > 1) {
+                    const loader = document.getElementById('scrollLoader');
+                    if (loader) loader.remove();
+                }
+
                 if (data.status === 'success') {
-                    allMovies = data.movies.filter(m => m.image);
-                    renderHome(allMovies);
-                    renderGenrePills(allMovies);
+                    const newMovies = data.movies.filter(m => m.image);
+                    hasMoreMovies = data.has_more; 
+                    
+                    if (page === 1) {
+                        // Pehli baar: Pura UI setup karo
+                        allMovies = newMovies;
+                        renderHome(allMovies); 
+                        renderGenrePills(allMovies);
+                    } else {
+                        // Scrolling par: Purani movies mein nayi jod do
+                        allMovies = [...allMovies, ...newMovies]; 
+                        const newCardsHTML = renderCards(newMovies, 'grid-card', false);
+                        document.getElementById('moreGrid').insertAdjacentHTML('beforeend', newCardsHTML);
+                    }
+                    currentPage++; // Agli baar ke liye page badha do
                 } else {
                     console.error('API error:', data.message);
                 }
             } catch (e) {
                 console.error('Fetch failed', e);
-                document.getElementById('trendingScroll').innerHTML = '<div class="loader">⚠️ Server error</div>';
+            } finally {
+                isFetching = false;
             }
         }
+
+        // 🔥 NAYA: Infinite Scroll Listener
+        window.addEventListener('scroll', () => {
+            // Agar user page ke bottom se 600px upar hai, toh advance mein next page load kar lo
+            if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 600) {
+                // Check karo ki normal page open hai (Search result open na ho)
+                if (document.getElementById('searchResultsContent').style.display === 'none') {
+                    loadMovies(currentPage);
+                }
+            }
+        });
 
         function renderGenrePills(movies) {
             const genreSet = new Set();
@@ -8278,8 +8332,8 @@ def serve_mini_app():
             // Hollywood
             const holy = movies.filter(m => m.category?.toLowerCase().includes('hollywood')).slice(0, 15);
             document.getElementById('hollywoodScroll').innerHTML = renderCards(holy, 'card', false);
-            // More grid
-            document.getElementById('moreGrid').innerHTML = renderCards(movies.slice(15, 80), 'grid-card', false);
+            // Show remaining movies from the first batch
+            document.getElementById('moreGrid').innerHTML = renderCards(movies.slice(15), 'grid-card', false);
         }
 
         function renderCards(movies, cardClass = 'card', forceTMDB = false) {
