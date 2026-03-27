@@ -2893,45 +2893,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 finally:
                     close_db_connection(conn)
 
-
-            # 🔐 NAYA: CHANNEL DEEP LINKING (DM MEIN WEBAPP + 60s AUTO DELETE)
-            if payload.startswith("dl_"):
-                try:
-                    movie_id = int(payload.split("_")[1])
-                    
-                    # Original WebApp URL yahan generate hoga DM ke andar
-                    webapp_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
-                    
-                    keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📥 Open Download App", web_app=WebAppInfo(url=webapp_url))]
-                    ])
-                    
-                    # DM mein message bhejo
-                    sent_msg = await context.bot.send_message(
-                        chat_id=chat_id,
-                        text="🎬 **Movie Found!**\n\nNeeche button par click karke movie download karein.\n\n⏳ *Ye message security reasons ke liye 60 seconds mein delete ho jayega!*",
-                        reply_markup=keyboard,
-                        parse_mode='Markdown'
-                    )
-                    
-                    # 60 Second Auto-Delete Logic
-                    async def delete_msg_later(message, delay):
-                        await asyncio.sleep(delay)
-                        try:
-                            await message.delete()
-                        except Exception as e:
-                            pass # Agar chat pehle hi delete ho gayi toh ignore karo
-                            
-                    # Timer chalu karo
-                    asyncio.create_task(delete_msg_later(sent_msg, 60))
-                    
-                    logger.info(f"✅ Safe WebApp delivered to {user_id} for movie {movie_id}")
-                    return # Yahan se wapas jao taaki normal start msg na aaye
-                    
-                except Exception as e:
-                    logger.error(f"❌ dl_ routing failed: {e}")
-                    await context.bot.send_message(chat_id=chat_id, text="❌ Invalid movie link.")
-                    return
                     
             # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
             
@@ -5182,7 +5143,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 6. Build Keyboard
         if movie_id:
-            # 🔐 Ab channel mein WebApp nahi jayega, normal bot link jayega (Error fixed!)
+            # ✅ Yahan se web_app= hata diya hai, ab direct tumhara /watch/ wala link khulega
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("Download Now", url=link1),
