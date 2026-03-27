@@ -4905,8 +4905,8 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)), InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))],
-            [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
+            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
             [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
         
@@ -5015,10 +5015,10 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url)),
-            InlineKeyboardButton("Download Now", web_app=WebAppInfo(url=secure_url))
+            InlineKeyboardButton("Download Now", url=secure_url),
+            InlineKeyboardButton("Download Now", url=secure_url)
         ],
-        [InlineKeyboardButton("⚡ Download Now", web_app=WebAppInfo(url=secure_url))],
+        [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
         [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
     ])
 
