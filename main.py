@@ -7904,13 +7904,33 @@ def serve_mini_app():
             padding: 0 24px 20px 24px; /* Side margins ko theek rakhne ke liye */
         }
         
+        /* Movie Grid Container - Fixed for 2 Columns */
+        .movie-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr; /* Exactly 2 columns */
+            gap: 16px;
+            padding: 0 24px 24px 24px;
+            width: 100%;
+        }
+        
         /* Grid card (for search results / genre view) */
         .grid-card {
-            position: relative; cursor: pointer; transition: transform 0.15s;
-            border-radius: 16px; overflow: hidden;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            position: relative; 
+            cursor: pointer; 
+            transition: transform 0.15s;
+            border-radius: 16px; 
+            overflow: hidden;
         }
         .grid-card:active { transform: scale(0.96); }
-        .grid-card .card-img { aspect-ratio: 2/3; border-radius: 16px; }
+        .grid-card .card-img { 
+            width: 100%; 
+            aspect-ratio: 2/3; 
+            object-fit: cover; 
+            border-radius: 16px; 
+        }
         /* Skeleton loader */
         .skeleton {
             background: linear-gradient(90deg, var(--surface) 25%, var(--surface-light) 50%, var(--surface) 75%);
