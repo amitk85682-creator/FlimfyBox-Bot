@@ -3355,7 +3355,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             user = update.effective_user
             amount = 50  # Tumhara VIP amount
-            upi_id = "your_upi_id@upi"  # YAHAN APNI UPI ID DALO
+            upi_id = os.environ.get("UPI_ID", "default_id@ybl")
             
             try:
                 import qrcode
