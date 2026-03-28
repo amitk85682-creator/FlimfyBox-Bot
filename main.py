@@ -460,6 +460,62 @@ def preprocess_query(query):
     query = re.sub(r'[^\w\s-]', '', query)
     return query  # 👈 YE RETURN MISSING THA
 
+async def make_landscape_poster(url_or_bytes):
+    """
+    Portrait poster ko leta hai aur 16:9 landscape me convert karta hai
+    Background me same image ka heavily blurred version laga deta hai.
+    """
+    try:
+        image_data = None
+        if isinstance(url_or_bytes, str) and url_or_bytes.startswith('http'):
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url_or_bytes) as resp:
+                    if resp.status == 200:
+                        image_data = await resp.read()
+        elif isinstance(url_or_bytes, bytes):
+            image_data = url_or_bytes
+        elif hasattr(url_or_bytes, 'getvalue'): # 👈 YE NAYA ADD KIYA: Agar pehle se BytesIO hai
+            image_data = url_or_bytes.getvalue()
+        
+        if not image_data:
+            return None
+
+        # Image open karo
+        img = Image.open(BytesIO(image_data)).convert("RGB")
+        
+        # Target landscape size (1280x720) - 16:9 Ratio
+        target_w, target_h = 1280, 720
+        
+        # 1. Background prepare karo (Blurred)
+        bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
+        if bg_img.height > target_h:
+            top = (bg_img.height - target_h) // 2
+            bg_img = bg_img.crop((0, top, target_w, top + target_h))
+        else:
+            bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            
+        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=25)) # Strong Blur
+        
+        # 2. Foreground prepare karo (Sharp Original in center)
+        fg_h = target_h
+        fg_w = int(img.width * (target_h / img.height))
+        fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
+        
+        # Paste foreground on blurred background
+        paste_x = (target_w - fg_w) // 2
+        bg_img.paste(fg_img, (paste_x, 0))
+        
+        # Bytes me convert karke wapas bhejo
+        output = BytesIO()
+        output.name = "landscape_poster.jpg"
+        bg_img.save(output, format='JPEG', quality=90)
+        output.seek(0)
+        return output
+        
+    except Exception as e:
+        logger.error(f"Poster Processing Error: {e}")
+        return url_or_bytes # Error aaye toh original hi bhej do
+
 async def check_rate_limit(user_id):
     """Check if user is rate limited"""
     now = datetime.now()
@@ -4725,21 +4781,21 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 if conn: close_db_connection(conn)
             
-            # --- POSTER & POSTING LOGIC ---
-            photo_to_send = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
-            
-            # 👇 FIX: Telegram API video/document ke 'thumb_id' ko as a Photo bhejna reject kar deti hai.
-            # Isliye hum wahi 'image_bytes' use karenge jo bot ne Gemini ke liye download ki thi.
-            if not photo_to_send and image_bytes: 
-                photo_to_send = image_bytes
-            elif not photo_to_send: 
+            # --- POSTER PROCESSING (Landscape Blur Effect) ---
+            raw_photo = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
+            if not raw_photo and image_bytes: 
+                raw_photo = image_bytes
+                
+            if raw_photo:
+                # Yahan hamara naya function call hoga
+                photo_to_send = await make_landscape_poster(raw_photo)
+            else: 
                 photo_to_send = DEFAULT_POSTER
 
-            # 🛑 100% SAFE HTML BOLD CAPTION
+            # 🛑 100% SAFE HTML CAPTION + RANDOM STYLES
             safe_rating = rating if rating else "N/A"
             safe_genre = genre if genre else "Unknown"
 
-            # 👇 FIX 1: Resolution automatically nikalne ka logic
             res_set = set()
             for f in movie_files:
                 match = re.search(r'(\d{3,4}p)', str(f.get('file_name', '')).lower())
@@ -4747,20 +4803,50 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     res_set.add(match.group(1))
             res_list = sorted(list(res_set), key=lambda x: int(x.replace('p','')), reverse=True)
             dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+            
+            safe_title = title.replace('<', '').replace('>', '')
+            unicode_title = get_safe_font(safe_title)
 
-            # 👇 FIX 2: Sahi variables ka use kiya (title, safe_genre, movie_lang)
-            caption = (
-                f"🎬 <b>{title}</b>\n"
-                f"✨ Genre: {safe_genre}\n"
-                f"Language: {movie_lang if movie_lang else 'Hindi'}\n"
-                f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"👇 <b>Download Below</b> 👇"
-            )
+            # 🎲 3 RANDOM STYLES 🎲
+            style_choice = random.choice([1, 2, 3])
 
-            # --- SECURE LINK FOR SUPERBATCH POST ---
+            if style_choice == 1:
+                # Style 1: Blockquotes
+                caption = (
+                    f"<blockquote>"
+                    f"🎬 <b>{safe_title}</b>\n"
+                    f"✨ Genre: {safe_genre}\n"
+                    f"🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
+                    f"💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+                    f"</blockquote>\n"
+                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                    f"👇 <b>Download Below</b> 👇"
+                )
+            elif style_choice == 2:
+                # Style 2: ASCII Box
+                caption = (
+                    f"╭━━━━━━━━━━━━━━━━━━━━━━━╮\n"
+                    f"  🎬 <b>{safe_title}</b>\n"
+                    f"  ✨ Genre: {safe_genre}\n"
+                    f"  🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
+                    f"  💿 Quality: {dynamic_res}\n"
+                    f"╰━━━━━━━━━━━━━━━━━━━━━━━╯\n"
+                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                    f"👇 <b>Download Below</b> 👇"
+                )
+            else:
+                # Style 3: Tree Line + Premium Font
+                caption = (
+                    f"🔥 <b>{unicode_title}</b>\n"
+                    f" ├ ✨ Genre: {safe_genre}\n"
+                    f" ├ 🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
+                    f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                    f"👇 <b>Download Below</b> 👇"
+                )
+
+            # --- SECURE LINK & BUTTONS (As it was) ---
             secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
             post_keyboard = InlineKeyboardMarkup([
