@@ -3519,7 +3519,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return True # Matlab photo handle ho gayi
     return False
 
-async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Agar user UTR stage par hai
     if context.user_data.get('payment_step') == 'utr':
         utr_number = update.message.text.strip()
