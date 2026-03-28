@@ -75,41 +75,35 @@ try:
 except Exception:
     FIXED_DATABASE_URL = None
 
-def get_safe_font(text):
+def get_safe_font(text, style=None):
     """
-    Normal text ko Anti-Ban Fonts (Squared Style) mein convert karta hai.
+    Normal text ko Premium Fonts mein convert karta hai.
     """
     if not text:
         return ""
+    
+    # 1. Bold Italic (𝑲𝒂𝒍𝒌𝒊 𝟐𝟖𝟗𝟖 𝑨𝑫)
+    def to_bold_italic(s):
+        result = ""
+        for char in s:
+            if 'a' <= char <= 'z': result += chr(0x1D482 + ord(char) - ord('a'))
+            elif 'A' <= char <= 'Z': result += chr(0x1D468 + ord(char) - ord('A'))
+            elif '0' <= char <= '9': result += chr(0x1D7CE + ord(char) - ord('0'))
+            else: result += char
+        return result
 
-    result = ""
-    for char in text:
-        if 'a' <= char <= 'z':
-            result += chr(0x1F130 + ord(char) - ord('a'))
-        elif 'A' <= char <= 'Z':
-            result += chr(0x1F130 + ord(char) - ord('A'))
-        else:
-            result += char
-            
-    return result
-
-    # 2. Double Struck (ℙ𝕒𝕟𝕔𝕙𝕓𝕒𝕝𝕚)
+    # 2. Double Struck (𝕂𝕒𝕝𝕜𝕚 𝟚𝟠𝟡𝟠 𝔸𝔻)
     def to_double_struck(s):
         result = ""
         for char in s:
-            if 'a' <= char <= 'z':
-                result += chr(0x1D552 + ord(char) - ord('a'))
-            elif 'A' <= char <= 'Z':
-                result += chr(0x1D538 + ord(char) - ord('A'))
-            elif '0' <= char <= '9':
-                result += char
-            else:
-                result += char
+            if 'a' <= char <= 'z': result += chr(0x1D552 + ord(char) - ord('a'))
+            elif 'A' <= char <= 'Z': result += chr(0x1D538 + ord(char) - ord('A'))
+            elif '0' <= char <= '9': result += chr(0x1D7D8 + ord(char) - ord('0'))
+            else: result += char
         return result
 
-    # Aap yahan choose kar sakte hain konsa style chahiye
-    # Main abhi 'Squared' return kar raha hoon (Jo aapne pehla example diya)
-    return to_squared(text)
+    # Randomly inme se ek uthayega taaki wo chutiya squared font na aaye
+    return random.choice([to_bold_italic, to_double_struck])(text)
 
 # ==================== GLOBAL VARIABLES ====================
 BATCH_18_SESSION = {'active': False, 'admin_id': None, 'posts': []}
