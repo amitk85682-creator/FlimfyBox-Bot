@@ -356,10 +356,13 @@ ACTIVE_FSUB = {
     'url': 'https://t.me/MovieHdmoviehub' 
 }
 BACKUP_FSUB_LIST = [
-    {'id': '-1003586110697', 'url': 'https://t.me/FlimfyBoxmovies'}, # Backup 1 ID aur Link
-    {'id': '-1002222222222', 'url': 'https://t.me/BackupChannel2'}  # Backup 2 ID aur Link
+    {'id': '-1003586110697', 'url': 'https://t.me/FlimfyBoxmovies'}, 
+    {'id': '-1002222222222', 'url': 'https://t.me/BackupChannel2'}  
 ]
 # =============================================================
+
+# 👇👇 YAHAN YE EK LINE PASTE KAR DO 👇👇
+FILMFYBOX_CHANNEL_URL = ACTIVE_FSUB['url']
 
 REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003460387180')
 FILMFYBOX_GROUP_URL = 'https://t.me/FlimfyBox'
