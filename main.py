@@ -349,10 +349,20 @@ _admin_id = os.environ.get('ADMIN_USER_ID', '0')
 ADMIN_USER_ID = int(_admin_id) if _admin_id.isdigit() else 0
 GROUP_CHAT_ID = os.environ.get('GROUP_CHAT_ID')
 ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
-REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID', '-1002555232489')
+
+# ==================== DYNAMIC FSUB SYSTEM ====================
+ACTIVE_FSUB = {
+    'id': os.environ.get('REQUIRED_CHANNEL_ID', '-1002555232489'),
+    'url': 'https://t.me/MovieHdmoviehub' 
+}
+BACKUP_FSUB_LIST = [
+    {'id': '-1003586110697', 'url': 'https://t.me/FlimfyBoxmovies'}, # Backup 1 ID aur Link
+    {'id': '-1002222222222', 'url': 'https://t.me/BackupChannel2'}  # Backup 2 ID aur Link
+]
+# =============================================================
+
 REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003460387180')
 FILMFYBOX_GROUP_URL = 'https://t.me/FlimfyBox'
-FILMFYBOX_CHANNEL_URL = 'https://t.me/MovieHdmoviehub'  # Yahan apna Channel Link dalein
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
 FORCE_JOIN_ENABLED = True
@@ -870,43 +880,79 @@ async def _extract_web_series(text, original):
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
 # ==================== MEMBERSHIP CHECK LOGIC ====================
 async def is_user_member(context, user_id: int, force_fresh: bool = False):
-    """Check if user is member of channel and group (Matching Reference Code)"""
+    """Check if user is member of channel and group (Smart Auto-Switch Logic)"""
+    global ACTIVE_FSUB, BACKUP_FSUB_LIST
     
-    # Agar FSub disabled hai to turant pass kar do
     if not FORCE_JOIN_ENABLED:
         return {'is_member': True, 'channel': True, 'group': True, 'error': None}
     
     current_time = datetime.now()
-    
-    # 1. Cache Check
-    # Agar force_fresh FALSE hai, tabhi cache check karo
     if not force_fresh and user_id in verified_users:
         last_checked, cached = verified_users[user_id]
-        # Agar 1 ghante (3600s) se kam hua hai to cache use karo
         if (current_time - last_checked).total_seconds() < VERIFICATION_CACHE_TIME:
             return cached
     
-    result = {
-        'is_member': False,
-        'channel': False,
-        'group': False,
-        'error': None
-    }
-    
-    # Valid statuses jo member maane jayenge
+    result = {'is_member': False, 'channel': False, 'group': False, 'error': None}
     VALID_STATUSES = ['member', 'administrator', 'creator']
     
-    # 2. Check Channel
+    # --- 1. SMART CHANNEL CHECK (WITH AUTO-SWITCH) ---
     try:
-        channel_member = await context.bot.get_chat_member(chat_id=REQUIRED_CHANNEL_ID, user_id=user_id)
+        channel_member = await context.bot.get_chat_member(chat_id=ACTIVE_FSUB['id'], user_id=user_id)
         if channel_member.status in VALID_STATUSES:
             result['channel'] = True
+            
+    except telegram.error.Forbidden as e:
+        # 🚨 ERROR 1: Bot ko channel se nikal diya gaya hai!
+        logger.error(f"🚨 Bot banned from channel! Switching FSub...")
+        if BACKUP_FSUB_LIST:
+            next_backup = BACKUP_FSUB_LIST.pop(0)
+            ACTIVE_FSUB['id'] = next_backup['id']
+            ACTIVE_FSUB['url'] = next_backup['url']
+            
+            # Admin ko SOS Alert bhejo!
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_USER_ID, 
+                    text=f"🚨 **URGENT ALARM!** 🚨\n\nTumhara Main Channel ban ho gaya hai ya bot ko admin se hata diya gaya hai!\n\n✅ Maine automatically FSub ko naye channel par shift kar diya hai: {ACTIVE_FSUB['url']}", 
+                    parse_mode='Markdown'
+                )
+            except: pass
+            
+            # Naye channel ke sath wapas check karo
+            return await is_user_member(context, user_id, force_fresh)
+        else:
+            result['channel'] = True # Agar saare backup khatam, toh FSub bypass kar do taaki bot chalta rahe
+            
+    except telegram.error.BadRequest as e:
+        if "chat not found" in str(e).lower():
+            # 🚨 ERROR 2: Channel Telegram ne uda diya (Delete ho gaya)
+            logger.error(f"🚨 Channel Deleted! Switching FSub...")
+            if BACKUP_FSUB_LIST:
+                next_backup = BACKUP_FSUB_LIST.pop(0)
+                ACTIVE_FSUB['id'] = next_backup['id']
+                ACTIVE_FSUB['url'] = next_backup['url']
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_USER_ID, 
+                        text=f"🚨 **URGENT ALARM!** 🚨\n\nMain Channel Telegram dwara Delete/Ban kar diya gaya hai!\n\n✅ Maine traffic backup par shift kar diya hai: {ACTIVE_FSUB['url']}", 
+                        parse_mode='Markdown'
+                    )
+                except: pass
+                
+                return await is_user_member(context, user_id, force_fresh)
+            else:
+                result['channel'] = True
+        else:
+            # Koi chhota mota network error, channel active hai
+            result['channel'] = False 
+            
     except Exception as e:
-        logger.error(f"Channel Check Error: {e}")
-        # Agar bot admin nahi hai ya error hai, to assume karo join hai (Safe Fallback)
+        # Temporary glitch (ignore and allow/deny gracefully without switching)
+        logger.error(f"Temporary Channel Check Error: {e}")
         result['channel'] = False 
 
-    # 3. Check Group
+    # --- 2. GROUP CHECK ---
     try:
         group_member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
         if group_member.status in VALID_STATUSES:
@@ -915,19 +961,17 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
         logger.error(f"Group Check Error: {e}")
         result['group'] = False
 
-    # 4. Final Result
     result['is_member'] = result['channel'] and result['group']
-    
-    # 5. Update Cache (Cache me naya status save karo)
     verified_users[user_id] = (current_time, result)
     
     return result
 
 def get_join_keyboard():
     """Join buttons keyboard"""
+    global ACTIVE_FSUB
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL),
+            InlineKeyboardButton("📢 Join Channel", url=ACTIVE_FSUB['url']),
             InlineKeyboardButton("💬 Join Group", url=FILMFYBOX_GROUP_URL)
         ],
         [InlineKeyboardButton("✅ Joined Both - Verify", callback_data="verify")]
