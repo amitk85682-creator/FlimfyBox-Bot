@@ -3052,7 +3052,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Bottom Keyboard ('Search', 'Request') lane ke liye ek chhota silent message
-        await context.bot.send_message(chat_id=chat_id, text="🔄 Main Menu Activated", reply_markup=get_main_keyboard())
+        # Bottom keyboard bhej kar turant delete kar do (chat clean rahegi)
+        menu_msg = await context.bot.send_message(chat_id=chat_id, text="🔄 Loading Menu...", reply_markup=get_main_keyboard())
+        try:
+            await menu_msg.delete()
+        except: 
+            pass
 
         # GIF from Dump Channel + Naya Caption & Buttons
         msg = await context.bot.copy_message(
