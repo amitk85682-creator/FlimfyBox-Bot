@@ -9269,9 +9269,10 @@ def register_handlers(application: Application):
     # 2. GLOBAL HANDLERS
     # -----------------------------------------------------------
 
-    app.add_handler(MessageHandler(filters.PHOTO, payment_photo_handler))
-    # UTR handler (Normal text messages ke liye)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, payment_utr_handler))
+    # 👇 YAHAN PAR 'application' LIKHNA HAI 'app' KI JAGAH 👇
+    application.add_handler(MessageHandler(filters.PHOTO, payment_photo_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, payment_utr_handler))
+    
     
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
