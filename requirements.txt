@@ -26,4 +26,4 @@ cinemagoer
 Pillow
 Flask-Cors
 groq
-qrcode pillow
+qrcode
