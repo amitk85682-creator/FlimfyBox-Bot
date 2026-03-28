@@ -9268,6 +9268,11 @@ def register_handlers(application: Application):
     # -----------------------------------------------------------
     # 2. GLOBAL HANDLERS
     # -----------------------------------------------------------
+
+    app.add_handler(MessageHandler(filters.PHOTO, payment_photo_handler))
+    # UTR handler (Normal text messages ke liye)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, payment_utr_handler))
+    
     application.add_handler(CommandHandler('start', start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
     
@@ -9324,10 +9329,6 @@ def register_handlers(application: Application):
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
 
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
-
-    app.add_handler(MessageHandler(filters.PHOTO, payment_photo_handler))
-    # UTR handler (Normal text messages ke liye)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, payment_utr_handler))
       
     # -----------------------------------------------------------
     # 5. NOTIFICATION & STATS
