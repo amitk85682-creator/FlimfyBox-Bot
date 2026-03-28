@@ -12,6 +12,7 @@ import random
 import requests
 import signal
 import sys
+from PIL import Image, ImageFilter
 from telegram import KeyboardButton, WebAppInfo
 from telegram import MenuButtonWebApp, WebAppInfo
 import aiohttp
@@ -456,59 +457,79 @@ def preprocess_query(query):
 
 async def make_landscape_poster(url_or_bytes):
     """
-    Portrait poster ko leta hai aur 16:9 landscape me convert karta hai
-    Background me same image ka heavily blurred version laga deta hai.
+    Convert a portrait poster to 16:9 landscape with blurred background.
+    Accepts: URL string, bytes, or BytesIO object.
+    Returns: BytesIO (JPEG) on success, otherwise the original input.
     """
     try:
+        if not url_or_bytes:
+            logger.warning("make_landscape_poster called with empty input")
+            return None
+
+        # Step 1: Obtain image data as bytes
         image_data = None
         if isinstance(url_or_bytes, str) and url_or_bytes.startswith('http'):
             async with aiohttp.ClientSession() as session:
                 async with session.get(url_or_bytes) as resp:
                     if resp.status == 200:
                         image_data = await resp.read()
+                    else:
+                        logger.warning(f"Failed to fetch poster: HTTP {resp.status}")
         elif isinstance(url_or_bytes, bytes):
             image_data = url_or_bytes
-        elif hasattr(url_or_bytes, 'getvalue'): # 👈 YE NAYA ADD KIYA: Agar pehle se BytesIO hai
+        elif hasattr(url_or_bytes, 'getvalue'):  # BytesIO
             image_data = url_or_bytes.getvalue()
-        
-        if not image_data:
-            return None
+        else:
+            logger.warning(f"Unsupported input type: {type(url_or_bytes)}")
+            return url_or_bytes  # return as is
 
-        # Image open karo
+        if not image_data:
+            logger.warning("No image data obtained")
+            return url_or_bytes
+
+        # Step 2: Open and convert to RGB
         img = Image.open(BytesIO(image_data)).convert("RGB")
-        
-        # Target landscape size (1280x720) - 16:9 Ratio
+
+        # Step 3: Target landscape size (16:9)
         target_w, target_h = 1280, 720
-        
-        # 1. Background prepare karo (Blurred)
+
+        # Step 4: Create blurred background
+        # Scale the image to fill the width, then crop/scale to match target height
         bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
         if bg_img.height > target_h:
+            # Crop vertically to center
             top = (bg_img.height - target_h) // 2
             bg_img = bg_img.crop((0, top, target_w, top + target_h))
         else:
+            # Scale up to fill height
             bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            
-        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=25)) # Strong Blur
-        
-        # 2. Foreground prepare karo (Sharp Original in center)
+
+        # Apply strong blur
+        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=25))
+
+        # Step 5: Prepare sharp foreground (preserve original aspect ratio, fit to height)
         fg_h = target_h
         fg_w = int(img.width * (target_h / img.height))
         fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
-        
-        # Paste foreground on blurred background
+
+        # Step 6: Paste foreground centered on background
         paste_x = (target_w - fg_w) // 2
         bg_img.paste(fg_img, (paste_x, 0))
-        
-        # Bytes me convert karke wapas bhejo
+
+        # Step 7: Save to BytesIO
         output = BytesIO()
         output.name = "landscape_poster.jpg"
         bg_img.save(output, format='JPEG', quality=90)
         output.seek(0)
+
+        logger.info("Successfully created landscape poster")
         return output
-        
+
     except Exception as e:
-        logger.error(f"Poster Processing Error: {e}")
-        return url_or_bytes # Error aaye toh original hi bhej do
+        logger.error(f"Error in make_landscape_poster: {e}", exc_info=True)
+        # Return original input so the process can continue with a fallback
+        return url_or_bytes
+
 
 async def check_rate_limit(user_id):
     """Check if user is rate limited"""
