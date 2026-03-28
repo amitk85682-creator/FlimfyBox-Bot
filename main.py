@@ -2,6 +2,7 @@
 import traceback
 import os
 import secrets
+import pytz
 import re
 import json
 import threading
@@ -3003,38 +3004,73 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=chat_id, text="❌ Error processing search link.")
                     return
 
-    # --- NORMAL WELCOME MESSAGE ---
-    welcome_text = """
-📨 Send Movie Or Series Name And Year As Per Google Spelling..!! 👍
-
-🎬 <b>FlimfyBox Bot</b> is ready to serve you!
-
-👇 Use the buttons below to get started:
-"""
-
-    # 🌐 Web App Menu Button (Side wala button yahan set ho raha hai)
-    web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
+    # --- NORMAL WELCOME MESSAGE (WITH GIF & DYNAMIC GREETING) ---
+    user_name = update.effective_user.first_name
     
+    # 🌟 NAYA: Bot ka actual naam aur username nikalo
+    bot_info = await context.bot.get_me()
+    bot_name = bot_info.first_name  # Ye har bot ka apna alag naam uthayega!
+    
+    # 1. Dynamic Greeting Logic
     try:
+        import pytz
+        tz = pytz.timezone('Asia/Kolkata')
+        hour = datetime.now(tz).hour
+    except ImportError:
+        hour = datetime.now().hour # Fallback agar pytz na ho
+        
+    if 5 <= hour < 12: greeting = "Good Morning ☀️"
+    elif 12 <= hour < 17: greeting = "Good Afternoon 🌤️"
+    elif 17 <= hour < 21: greeting = "Good Evening 🌆"
+    else: greeting = "Good Night 🌙"
+
+    # 2. Premium Caption (Dynamic Bot Name ke sath)
+    caption_text = (
+        f"<b>🚩 JAI SHRI RAM 🚩</b>\n\n"
+        f"Hey <b>{user_name}</b>, {greeting}\n\n"
+        f"🤖 Main hoon <b>{bot_name}</b>, the most powerful Auto Filter Bot with premium features.\n\n"
+        f"<b>⚡️ My Capabilities:</b>\n"
+        f"• Fastest auto-filtering\n"
+        f"• 24/7 uptime\n"
+        f"• Premium file processing\n\n"
+        f"Tap the buttons below to know more! 👇"
+    )
+
+    # 3. Inline Buttons
+    inline_buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_info.username}?startgroup=true")],
+        [InlineKeyboardButton("HELP 📢", callback_data="start_help"), InlineKeyboardButton("ABOUT 📖", callback_data="start_about")],
+        [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
+    ])
+
+    try:
+        # Web App button set karna
+        web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
         await context.bot.set_chat_menu_button(
             chat_id=chat_id,
-            menu_button=MenuButtonWebApp(
-                text="🎬 Web Version", 
-                web_app=WebAppInfo(url=web_app_url)
-            )
+            menu_button=MenuButtonWebApp(text="🎬 Web Version", web_app=WebAppInfo(url=web_app_url))
         )
-    except Exception as e:
-        logger.error(f"Menu Button Error: {e}")
+        
+        # Bottom Keyboard ('Search', 'Request') lane ke liye ek chhota silent message
+        await context.bot.send_message(chat_id=chat_id, text="🔄 Main Menu Activated", reply_markup=get_main_keyboard())
 
-    # Bas sidha message aur get_main_keyboard() bhej do
-    msg = await context.bot.send_message(
-        chat_id=chat_id, 
-        text=welcome_text, 
-        reply_markup=get_main_keyboard(), 
-        parse_mode='HTML'
-    )
-    track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
-    
+        # GIF from Dump Channel + Naya Caption & Buttons
+        msg = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=int(DUMP_CHANNEL_ID),
+            message_id=6057, # Tumhari GIF ki Message ID
+            caption=caption_text,
+            parse_mode='HTML',
+            reply_markup=inline_buttons
+        )
+        track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
+        
+    except Exception as e:
+        logger.error(f"Start Menu Error: {e}")
+        # Agar copy_message fail ho (bot dump channel me admin na ho)
+        msg = await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='HTML', reply_markup=inline_buttons)
+        track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
+        
     return
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
@@ -3307,6 +3343,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # === START MENU BUTTONS LOGIC ===
+    if data.startswith("start_"):
+        await query.answer()
+        
+        if data == "start_help":
+            text = "<b>🛠 HELP MENU</b>\n\nMujhe apne group me add karke Admin bana do. Main automatically files filter karna shuru kar dunga!"
+        elif data == "start_about":
+            text = "<b>📖 ABOUT ME</b>\n\n• <b>Developer:</b> @ownermahi\n• <b>Language:</b> Python 3\n• <b>Library:</b> python-telegram-bot"
+        elif data == "start_donate":
+            text = "<b>💰 DONATION</b>\n\nAgar aapko mera kaam pasand aaya, toh aap UPI pe support kar sakte hain: `your_upi_id@upi`"
+            
+        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
+        
+        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=back_btn)
+        return
+
+    if data == "start_back":
+        await query.answer()
+        # Wapas aane pe original message laane ke liye bas start command call kar do
+        update.message = query.message
+        await start(update, context)
+        try:
+            await query.message.delete()
+        except: pass
+        return
+        
     # === ADMIN REQUEST BUTTONS (Add/Not Found) ===
     if data.startswith("reqA_") or data.startswith("reqN_"):
         await query.answer("🔄 Sending message to user...", show_alert=False)
