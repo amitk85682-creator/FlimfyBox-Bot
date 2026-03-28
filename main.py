@@ -3352,21 +3352,109 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif data == "start_about":
             text = "<b>📖 ABOUT ME</b>\n\n• <b>Developer:</b> @ownermahi\n• <b>Language:</b> Python 3\n• <b>Library:</b> python-telegram-bot"
         elif data == "start_donate":
-            text = "<b>💰 DONATION</b>\n\nAgar aapko mera kaam pasand aaya, toh aap UPI pe support kar sakte hain: `your_upi_id@upi`"
+            await query.answer()
+            user = update.effective_user
+            amount = 50  # Tumhara VIP amount
+            upi_id = "your_upi_id@upi"  # YAHAN APNI UPI ID DALO
             
-        back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
-        
-        await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=back_btn)
-        return
+            try:
+                import qrcode
+                from io import BytesIO
+                from urllib.parse import quote
+                
+                # QR Code Generate karna
+                note = f"TG-{user.id}"
+                upi_url = f"upi://pay?pa={upi_id}&pn=VIP+Subscription&am={amount}&tn={note}&cu=INR"
+                
+                qr = qrcode.QRCode(version=1, box_size=10, border=4)
+                qr.add_data(upi_url)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                bio = BytesIO()
+                img.save(bio, format='PNG')
+                bio.seek(0)
+                
+                text = (
+                    f"💎 <b>VIP DONATION - ₹{amount}</b>\n\n"
+                    f"📱 <b>Scan QR Code</b> from any UPI app (GPay/PhonePe/Paytm)\n"
+                    f"💳 <b>UPI ID:</b> <code>{upi_id}</code>\n\n"
+                    f"✅ Payment ke baad:\n"
+                    f"1️⃣ <b>Screenshot</b> bhejo yahan\n"
+                    f"2️⃣ Phir <b>UTR Number</b> type karke bhejo\n\n"
+                    f"📸 <i>Intezaar hai aapke screenshot ka...</i>"
+                )
+                
+                # Bot ko batana ki user ab screenshot bhejega
+                context.user_data['payment_step'] = 'screenshot'
+                
+                # Purana menu delete karke QR bhejna
+                await query.message.delete()
+                await context.bot.send_photo(
+                    chat_id=query.message.chat_id,
+                    photo=bio,
+                    caption=text,
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="start_back")]])
+                )
+            except Exception as e:
+                # Agar qrcode install nahi hai toh normal text bhejega
+                text = f"<b>💰 DONATION</b>\n\nAgar aapko mera kaam pasand aaya, toh aap UPI pe support kar sakte hain: <code>{upi_id}</code>"
+                back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
+                await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=back_btn)
+            return
 
     if data == "start_back":
         await query.answer()
-        # Wapas aane pe original message laane ke liye bas start command call kar do
-        update.message = query.message
-        await start(update, context)
+        chat_id = query.message.chat_id
+        
+        # Pehle wala message delete karo (chahe wo Help ho, About ho ya QR code ho)
         try:
             await query.message.delete()
         except: pass
+
+        # Wapas Start Menu Banane ka logic
+        user_name = update.effective_user.first_name
+        bot_info = await context.bot.get_me()
+        bot_name = bot_info.first_name
+        
+        try:
+            import pytz
+            tz = pytz.timezone('Asia/Kolkata')
+            hour = datetime.now(tz).hour
+        except ImportError:
+            hour = datetime.now().hour
+            
+        if 5 <= hour < 12: greeting = "Good Morning ☀️"
+        elif 12 <= hour < 17: greeting = "Good Afternoon 🌤️"
+        elif 17 <= hour < 21: greeting = "Good Evening 🌆"
+        else: greeting = "Good Night 🌙"
+
+        caption_text = (
+            f"<b>🚩 JAI SHRI RAM 🚩</b>\n\n"
+            f"Hey <b>{user_name}</b>, {greeting}\n\n"
+            f"🤖 Main hoon <b>{bot_name}</b>, the most powerful Auto Filter Bot with premium features.\n\n"
+            f"<b>⚡️ My Capabilities:</b>\n"
+            f"• Fastest auto-filtering\n"
+            f"• 24/7 uptime\n"
+            f"• Premium file processing\n\n"
+            f"Tap the buttons below to know more! 👇"
+        )
+
+        inline_buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_info.username}?startgroup=true")],
+            [InlineKeyboardButton("HELP 📢", callback_data="start_help"), InlineKeyboardButton("ABOUT 📖", callback_data="start_about")],
+            [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
+        ])
+
+        # Original GIF wapas send karo
+        await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=int(os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')),
+            message_id=6057, 
+            caption=caption_text,
+            parse_mode='HTML',
+            reply_markup=inline_buttons
+        )
         return
         
     # === ADMIN REQUEST BUTTONS (Add/Not Found) ===
@@ -3419,6 +3507,47 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         return # Yahan is block ka kaam khatam!
 
+    async def payment_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Agar user screenshot stage par hai
+    if context.user_data.get('payment_step') == 'screenshot':
+        context.user_data['screenshot_id'] = update.message.photo[-1].file_id
+        context.user_data['payment_step'] = 'utr'
+        await update.message.reply_text(
+            "✅ <b>Screenshot Received!</b>\n\n🔢 Ab <b>UTR ya Reference Number</b> type karke bhejein.", 
+            parse_mode='HTML'
+        )
+        return True # Matlab photo handle ho gayi
+    return False
+
+async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Agar user UTR stage par hai
+    if context.user_data.get('payment_step') == 'utr':
+        utr_number = update.message.text.strip()
+        user = update.effective_user
+        screenshot_id = context.user_data.get('screenshot_id')
+        
+        # Admin ko alert bhejna
+        admin_id = 123456789 # ⚠️ YAHAN APNA ASLI TELEGRAM ADMIN ID DALO
+        admin_text = (
+            f"🔔 <b>NEW PAYMENT PENDING</b>\n\n"
+            f"👤 Name: {user.first_name}\n"
+            f"🆔 ID: <code>{user.id}</code>\n"
+            f"🔢 UTR: <code>{utr_number}</code>"
+        )
+        try:
+            await context.bot.send_photo(chat_id=admin_id, photo=screenshot_id, caption=admin_text, parse_mode='HTML')
+        except Exception as e:
+            pass
+            
+        await update.message.reply_text(
+            "⏳ <b>Verification Pending!</b>\n\n✅ Payment details admin ko bhej di gayi hai. Thodi der me VIP access mil jayega.", 
+            parse_mode='HTML'
+        )
+        # Process complete, ab reset kar do
+        context.user_data.pop('payment_step', None)
+        context.user_data.pop('screenshot_id', None)
+        return True
+    return False
     # =======================================================
     # 🖼️ NEW: ASK POSTER LOGIC (Semi-Auto Post)
     # =======================================================
@@ -9195,6 +9324,10 @@ def register_handlers(application: Application):
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
 
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
+
+    app.add_handler(MessageHandler(filters.PHOTO, payment_photo_handler))
+    # UTR handler (Normal text messages ke liye)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, payment_utr_handler))
       
     # -----------------------------------------------------------
     # 5. NOTIFICATION & STATS
