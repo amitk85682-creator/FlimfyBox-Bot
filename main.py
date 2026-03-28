@@ -3508,46 +3508,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return # Yahan is block ka kaam khatam!
 
     async def payment_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Agar user screenshot stage par hai
-    if context.user_data.get('payment_step') == 'screenshot':
-        context.user_data['screenshot_id'] = update.message.photo[-1].file_id
-        context.user_data['payment_step'] = 'utr'
-        await update.message.reply_text(
-            "✅ <b>Screenshot Received!</b>\n\n🔢 Ab <b>UTR ya Reference Number</b> type karke bhejein.", 
-            parse_mode='HTML'
-        )
-        return True # Matlab photo handle ho gayi
-    return False
+        # Agar user screenshot stage par hai
+        if context.user_data.get('payment_step') == 'screenshot':
+            context.user_data['screenshot_id'] = update.message.photo[-1].file_id
+            context.user_data['payment_step'] = 'utr'
+            await update.message.reply_text(
+                "✅ <b>Screenshot Received!</b>\n\n🔢 Ab <b>UTR ya Reference Number</b> type karke bhejein.", 
+                parse_mode='HTML'
+            )
+            return True # Matlab photo handle ho gayi
+        return False
 
     async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Agar user UTR stage par hai
-    if context.user_data.get('payment_step') == 'utr':
-        utr_number = update.message.text.strip()
-        user = update.effective_user
-        screenshot_id = context.user_data.get('screenshot_id')
-        
-        # Admin ko alert bhejna
-        admin_id = 123456789 # ⚠️ YAHAN APNA ASLI TELEGRAM ADMIN ID DALO
-        admin_text = (
-            f"🔔 <b>NEW PAYMENT PENDING</b>\n\n"
-            f"👤 Name: {user.first_name}\n"
-            f"🆔 ID: <code>{user.id}</code>\n"
-            f"🔢 UTR: <code>{utr_number}</code>"
-        )
-        try:
-            await context.bot.send_photo(chat_id=admin_id, photo=screenshot_id, caption=admin_text, parse_mode='HTML')
-        except Exception as e:
-            pass
+        # Agar user UTR stage par hai
+        if context.user_data.get('payment_step') == 'utr':
+            utr_number = update.message.text.strip()
+            user = update.effective_user
+            screenshot_id = context.user_data.get('screenshot_id')
             
-        await update.message.reply_text(
-            "⏳ <b>Verification Pending!</b>\n\n✅ Payment details admin ko bhej di gayi hai. Thodi der me VIP access mil jayega.", 
-            parse_mode='HTML'
-        )
-        # Process complete, ab reset kar do
-        context.user_data.pop('payment_step', None)
-        context.user_data.pop('screenshot_id', None)
-        return True
-    return False
+            # Admin ko alert bhejna
+            admin_id = 123456789 # ⚠️ YAHAN APNA ASLI TELEGRAM ADMIN ID DALO
+            admin_text = (
+                f"🔔 <b>NEW PAYMENT PENDING</b>\n\n"
+                f"👤 Name: {user.first_name}\n"
+                f"🆔 ID: <code>{user.id}</code>\n"
+                f"🔢 UTR: <code>{utr_number}</code>"
+            )
+            try:
+                await context.bot.send_photo(chat_id=admin_id, photo=screenshot_id, caption=admin_text, parse_mode='HTML')
+            except Exception as e:
+                pass
+                
+            await update.message.reply_text(
+                "⏳ <b>Verification Pending!</b>\n\n✅ Payment details admin ko bhej di gayi hai. Thodi der me VIP access mil jayega.", 
+                parse_mode='HTML'
+            )
+            # Process complete, ab reset kar do
+            context.user_data.pop('payment_step', None)
+            context.user_data.pop('screenshot_id', None)
+            return True
+        return False
     # =======================================================
     # 🖼️ NEW: ASK POSTER LOGIC (Semi-Auto Post)
     # =======================================================
