@@ -3654,44 +3654,34 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Iske niche aapke baki ke callback conditions waise hi rahenge (autopost_, cancel_genre aadi...)
     
     # =======================================================
-    # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Crash Proof)
+    # 🤖 NEW: AUTO POST LOGIC (Premium Cinematic & Random Styles)
     # =======================================================
     if query.data.startswith("autopost_"):
-        await query.answer() # Button loading animation band karne ke liye
+        await query.answer("⏳ Premium Post Generate ho rahi hai...")
         movie_id = int(query.data.split("_")[1])
         
-        # 1. SAFELY FETCH DATA FROM DB (Try-Except lagana zaroori hai)
-        conn = None
-        rows = []
-        m_data = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            # क्वालिटी निकालें
-            cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-            rows = cur.fetchall()
-            
-            # मूवी की डिटेल्स निकालें (Saath me poster_url bhi nikal lo fallback ke liye)
-            cur.execute("SELECT title, genre, language, poster_url FROM movies WHERE id = %s", (movie_id,))
-            m_data = cur.fetchone()
-            
-            cur.close()
-        except Exception as e:
-            logger.error(f"DB Error in autopost: {e}")
-            await query.edit_message_text("❌ Database Error. Please try again later.")
+        # --- 1. DATABASE SE DATA NIKALNA ---
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # क्वालिटी निकालें
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        rows = cur.fetchall()
+        
+        # मूवी की डिटेल्स निकालें
+        cur.execute("SELECT title, genre, language FROM movies WHERE id = %s", (movie_id,))
+        m_data = cur.fetchone()
+        cur.close()
+        
+        # Connection close (Tera custom function)
+        try: close_db_connection(conn) 
+        except: db_pool.putconn(conn) # Fallback if function name is different
+
+        if not m_data:
+            await query.edit_message_text("❌ Error: Movie DB mein nahi mili!")
             return
-        finally:
-            if conn:
-                try: close_db_connection(conn)
-                except: pass # Safe DB Close
 
-        # 2. DATA FORMATTING
-        m_title = m_data[0] if (m_data and m_data[0]) else "Unknown Movie"
-        m_genre = m_data[1] if (m_data and m_data[1]) else "Action / Drama"
-        m_lang = m_data[2] if (m_data and m_data[2]) else "Hindi (LiNE) + HC-ESubs"
-        db_poster_url = m_data[3] if (m_data and len(m_data) > 3) else None
-
+        # क्वालिटी फॉर्मेटिंग
         res_list = []
         for r in rows:
             if r and r[0]:
@@ -3700,55 +3690,87 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         res_list = sorted(list(set(res_list)), key=lambda x: int(x.replace('p','')), reverse=True)
         dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
 
+        m_title = m_data[0] if m_data[0] else "Unknown Movie"
+        m_genre = m_data[1] if m_data[1] else "Action, Drama"
+        m_lang = m_data[2] if m_data[2] else "Hindi + English"
+
+        # --- 2. POSTER PROCESSING (Cinematic Square Effect) ---
+        # Pehle dekhenge kya context.bot_data mein pehle se photo hai
+        raw_photo = context.bot_data.get(f"auto_thumb_{movie_id}")
+        
+        # Yahan hum naya blurred poster banayenge
+        if raw_photo:
+            photo_to_send = await make_landscape_poster(raw_photo)
+        else:
+            # Default poster agar kuch na mile
+            photo_to_send = "https://i.ibb.co/default_poster.jpg" # Isko apne kisi default image link se replace kar dena agar zarurat ho
+
+        # --- 3. 🎲 RANDOM PREMIUM STYLES 🎲 ---
         safe_title = m_title.replace('<', '').replace('>', '')
+        unicode_title = get_safe_font(safe_title)
+        
+        style_choice = random.choice([1, 2, 3])
 
-        # 3. PREMIUM MOBILE-FRIENDLY CAPTION
-        channel_caption = (
-            f"🎬 <b>{safe_title}</b>\n"
-            f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"✨ <b>Genre:</b> {m_genre}\n"
-            f"🔊 <b>Language:</b> {m_lang}\n"
-            f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
-            f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-            f"👇 <b>Download Below</b> 👇"
-        )
+        if style_choice == 1:
+            channel_caption = (
+                f"🎬 <b>{safe_title}</b>\n"
+                f"➖➖➖➖➖➖➖➖➖➖\n"
+                f"✨ <b>Genre:</b> {m_genre}\n"
+                f"🔊 <b>Language:</b> {m_lang}\n"
+                f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+                f"➖➖➖➖➖➖➖➖➖➖\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                f"👇 <b>Download Below</b> 👇"
+            )
+        elif style_choice == 2:
+            channel_caption = (
+                f"╭━━━━━━━━━━━━━━━━━━━━━━━╮\n"
+                f"  🎬 <b>{safe_title}</b>\n"
+                f"  ✨ Genre: {m_genre}\n"
+                f"  🔊 Language: {m_lang}\n"
+                f"  💿 Quality: {dynamic_res}\n"
+                f"╰━━━━━━━━━━━━━━━━━━━━━━━╯\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                f"👇 <b>Download Below</b> 👇"
+            )
+        else:
+            channel_caption = (
+                f"🔥 <b>{unicode_title}</b>\n"
+                f" ├ ✨ Genre: {m_genre}\n"
+                f" ├ 🔊 Language: {m_lang}\n"
+                f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+                f"👇 <b>Download Below</b> 👇"
+            )
 
-        # 4. KEYBOARD & URLS FIX
+        # --- 4. SECURE LINK & BUTTONS ---
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
-        channel_url = os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/your_channel')
+        channel_link = os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/your_channel')
 
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
             [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-            [InlineKeyboardButton("📢 Join Channel", url=channel_url)]
+            [InlineKeyboardButton("📢 Join Channel", url=channel_link)]
         ])
 
+        # --- 5. BROADCASTING TO CHANNELS ---
         channels_str = os.environ.get('BROADCAST_CHANNELS', '')
         target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
 
         if not target_channels:
-            await query.edit_message_text("❌ Error: No BROADCAST_CHANNELS found in environment settings.")
+            await query.edit_message_text(f"{query.message.text}\n\n❌ Error: No BROADCAST_CHANNELS found in env.")
             return
-
-        # 5. PHOTO FETCH LOGIC (Ye missing tha pehle)
-        photo_to_send = context.bot_data.get(f"auto_thumb_{movie_id}")
-        if not photo_to_send:
-            # Agar bot_data me photo nahi hai, toh DB wala URL lo, ya fir default poster bhej do
-            photo_to_send = db_poster_url if db_poster_url else "https://telegra.ph/file/default_poster.jpg"
-
-        await query.edit_message_text("⏳ Auto-posting in progress, please wait...")
 
         sent_count = 0
         last_error = ""
         telegram_photo_id = None 
 
-        # 6. POSTING LOOP (With Telegram Fast Cache ID)
         for chat_id_str in target_channels:
             try:
                 chat_id = int(chat_id_str)
                 
-                # Agar ek channel me upload ho chuki hai toh usi ki cache ID use karo (10x Faster)
+                # Fast posting ke liye Telegram File ID use karo
                 if telegram_photo_id:
                     sent_msg = await context.bot.send_photo(
                         chat_id=chat_id,
@@ -3758,7 +3780,7 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                         reply_markup=post_keyboard
                     )
                 else:
-                    # Pehli baar bhejna hai toh Memory (BytesIO) pointer check karo
+                    # BytesIO pointer ko start par reset karna zaroori hai
                     if hasattr(photo_to_send, 'seek'):
                         photo_to_send.seek(0)
                         
@@ -3769,29 +3791,33 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                         parse_mode='HTML',
                         reply_markup=post_keyboard
                     )
+                    # Agle channel ke liye File ID save kar lo
                     if sent_msg and sent_msg.photo:
                         telegram_photo_id = sent_msg.photo[-1].file_id
 
-                # Save to database (bot3 ki jagah hardcoded naam dala hai taaki crash na ho)
-                try:
-                    save_post_to_db(movie_id, chat_id, sent_msg.message_id, "FlimfyBox", channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
-                except Exception as db_err:
-                    logger.error(f"Save to DB failed: {db_err}")
-
+                # DB mein save karne wala tera purana logic
+                if sent_msg:
+                    try:
+                        save_post_to_db(movie_id, chat_id, sent_msg.message_id, "bot3", channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
+                    except Exception as db_err:
+                        logger.error(f"Save to DB Error: {db_err}")
+                        
                 sent_count += 1
-                await asyncio.sleep(1.5) # Telegram API flood error se bachne ke liye thoda delay
+                await asyncio.sleep(1) # Flood se bachne ke liye chhota delay
                 
             except Exception as e:
                 logger.error(f"Auto-post failed for {chat_id_str}: {e}")
                 last_error = str(e)
 
-        # 7. FINAL SUCCESS MESSAGE
-        result_msg = f"✅ <b>Auto-Posted (100% Original HD) to {sent_count} channels!</b>"
+        # --- 6. SUCCESS MESSAGE ---
+        result_msg = f"✅ <b>Auto-Posted (VIP Square Poster) to {sent_count} channels!</b>"
         if sent_count == 0 and last_error: 
             result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
 
         await query.edit_message_text(result_msg, parse_mode='HTML')
-        context.bot_data.pop(f"auto_thumb_{movie_id}", None) # Cleanup Memory
+        
+        # Memory saaf karo
+        context.bot_data.pop(f"auto_thumb_{movie_id}", None)
         return
     
     # === NEW: GENRE CALLBACK HANDLER ===
