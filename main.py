@@ -3709,7 +3709,8 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         safe_title = m_title.replace('<', '').replace('>', '')
         unicode_title = get_safe_font(safe_title)
         
-        style_choice = random.choice([1, 2, 3])
+        # 👈 Ab sirf 2 styles bache hain (Box wala hata diya)
+        style_choice = random.choice([1, 2])
 
         if style_choice == 1:
             channel_caption = (
@@ -3719,17 +3720,6 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"🔊 <b>Language:</b> {m_lang}\n"
                 f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
                 f"➖➖➖➖➖➖➖➖➖➖\n"
-                f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                f"👇 <b>Download Below</b> 👇"
-            )
-        elif style_choice == 2:
-            channel_caption = (
-                f"╭━━━━━━━━━━━━━━━━━━━━━━━╮\n"
-                f"  🎬 <b>{safe_title}</b>\n"
-                f"  ✨ Genre: {m_genre}\n"
-                f"  🔊 Language: {m_lang}\n"
-                f"  💿 Quality: {dynamic_res}\n"
-                f"╰━━━━━━━━━━━━━━━━━━━━━━━╯\n"
                 f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
                 f"👇 <b>Download Below</b> 👇"
             )
@@ -4898,8 +4888,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_title = title.replace('<', '').replace('>', '')
             unicode_title = get_safe_font(safe_title)
 
-            # 🎲 3 RANDOM STYLES 🎲
-            style_choice = random.choice([1, 2, 3])
+            # 🎲 2 RANDOM STYLES 🎲 (Box wala hat gaya)
+            style_choice = random.choice([1, 2])
 
             if style_choice == 1:
                 # 🌟 Style 1: Clean Minimalist Divider (Mobile & PC Friendly)
@@ -4913,20 +4903,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
                     f"👇 <b>Download Below</b> 👇"
                 )
-            elif style_choice == 2:
-                # Style 2: ASCII Box
-                caption = (
-                    f"╭━━━━━━━━━━━━━━━━━━━━━━━╮\n"
-                    f"  🎬 <b>{safe_title}</b>\n"
-                    f"  ✨ Genre: {safe_genre}\n"
-                    f"  🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
-                    f"  💿 Quality: {dynamic_res}\n"
-                    f"╰━━━━━━━━━━━━━━━━━━━━━━━╯\n"
-                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                    f"👇 <b>Download Below</b> 👇"
-                )
             else:
-                # Style 3: Tree Line + Premium Font
+                # Style 2: Tree Line + Premium Font (Pehle ye Style 3 tha)
                 caption = (
                     f"🔥 <b>{unicode_title}</b>\n"
                     f" ├ ✨ Genre: {safe_genre}\n"
@@ -4968,26 +4946,56 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"SuperBatch Forum Post Error: {e}")
 
-            telegram_photo_id = None
+            # 👇 YAHAN SE MAIN CHANNEL PAR BHEJNE KA ASLI LOGIC SHURU HOTA HAI 👇
+            
+            # --- THE "NINJA FIX" --- 
+            # Pehle decide karte hain ki photo kya bhejna hai
+            is_bytes = hasattr(photo_to_send, 'read')
+            current_media = photo_to_send
+            
+            uploaded_file_id = None # Isme Telegram ki File ID store hogi
+            
             if target_channels:
-                for chat_id_str in target_channels:
+                for chat_id_str in target_channels: 
                     try:
-                        current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
+                        chat_id = int(chat_id_str)
+                        sent_msg = None
                         
-                        sent_msg = await context.bot.send_photo(
-                            chat_id=int(chat_id_str), photo=current_photo,
-                            caption=caption, parse_mode='HTML', reply_markup=post_keyboard
-                        )
-                        if not telegram_photo_id and sent_msg.photo:
-                            telegram_photo_id = sent_msg.photo[-1].file_id
-                        
-                        save_post_to_db(movie_id, int(chat_id_str), sent_msg.message_id, bot3, caption, telegram_photo_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
-                        await asyncio.sleep(1.5)
+                        # Agar humare pass pehle se ID hai, toh file upload nahi karni
+                        if uploaded_file_id:
+                            sent_msg = await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=uploaded_file_id, # 👈 Direct ID
+                                caption=caption,
+                                parse_mode='HTML',
+                                reply_markup=post_keyboard
+                            )
+                        else:
+                            # Pehli baar upload karna hai (Bytes se)
+                            if is_bytes:
+                                current_media.seek(0) # File pointer ko shuru me laao
+                                
+                            sent_msg = await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=current_media, # 👈 Actual bytes
+                                caption=caption,
+                                parse_mode='HTML',
+                                reply_markup=post_keyboard
+                            )
+                            # Ek baar upload hone ke baad, Telegram se permanent File ID save karlo
+                            if sent_msg and sent_msg.photo:
+                                uploaded_file_id = sent_msg.photo[-1].file_id 
+                                
+                        # ✅ DB me save karna zaroori hai taaki baad me /restore kaam kare
+                        if sent_msg:
+                            save_post_to_db(movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot", caption, uploaded_file_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
+                            await asyncio.sleep(1.5)
+                            
                     except Exception as e:
-                        logger.error(f"SuperBatch Main Channel Post Error: {e}")
+                        logger.error(f"❌ Failed to post in channel {chat_id_str}: {e}")
 
             success_movies += 1
-            await asyncio.sleep(2)
+            await asyncio.sleep(2) # Flood limit se bachne ke liye delay
 
         except Exception as e:
             logger.error(f"SuperBatch Movie Error: {e}")
