@@ -457,77 +457,63 @@ def preprocess_query(query):
 
 async def make_landscape_poster(url_or_bytes):
     """
-    Convert a portrait poster to 16:9 landscape with blurred background.
-    Accepts: URL string, bytes, or BytesIO object.
-    Returns: BytesIO (JPEG) on success, otherwise the original input.
+    Portrait poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
+    Heavily Blurred background aur Center me Sharp image.
     """
     try:
-        if not url_or_bytes:
-            logger.warning("make_landscape_poster called with empty input")
-            return None
-
-        # Step 1: Obtain image data as bytes
+        from PIL import Image, ImageFilter 
+        
         image_data = None
         if isinstance(url_or_bytes, str) and url_or_bytes.startswith('http'):
             async with aiohttp.ClientSession() as session:
-                async with session.get(url_or_bytes) as resp:
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                async with session.get(url_or_bytes, headers=headers) as resp:
                     if resp.status == 200:
                         image_data = await resp.read()
-                    else:
-                        logger.warning(f"Failed to fetch poster: HTTP {resp.status}")
         elif isinstance(url_or_bytes, bytes):
             image_data = url_or_bytes
-        elif hasattr(url_or_bytes, 'getvalue'):  # BytesIO
+        elif hasattr(url_or_bytes, 'getvalue'): 
             image_data = url_or_bytes.getvalue()
-        else:
-            logger.warning(f"Unsupported input type: {type(url_or_bytes)}")
-            return url_or_bytes  # return as is
-
+            
         if not image_data:
-            logger.warning("No image data obtained")
             return url_or_bytes
 
-        # Step 2: Open and convert to RGB
+        # ---------------- IMAGE MAGIC (MOBILE FRIENDLY) ----------------
         img = Image.open(BytesIO(image_data)).convert("RGB")
-
-        # Step 3: Target landscape size (16:9)
-        target_w, target_h = 1280, 720
-
-        # Step 4: Create blurred background
-        # Scale the image to fill the width, then crop/scale to match target height
+        
+        # TARGET SIZE: Square format (Phone aur Desktop dono pe best lagta hai)
+        # 800x800 resolution rakhte hain.
+        target_w, target_h = 800, 800
+        
+        # 1. Background Blur (Zoomed in and heavily blurred)
         bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
         if bg_img.height > target_h:
-            # Crop vertically to center
             top = (bg_img.height - target_h) // 2
             bg_img = bg_img.crop((0, top, target_w, top + target_h))
         else:
-            # Scale up to fill height
             bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
-        # Apply strong blur
-        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=25))
-
-        # Step 5: Prepare sharp foreground (preserve original aspect ratio, fit to height)
-        fg_h = target_h
-        fg_w = int(img.width * (target_h / img.height))
+            
+        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=40)) # Extra strong blur background ke liye
+        
+        # 2. Foreground Paste (Portrait poster ko centre me chhota karke lagana)
+        # Foreground height ko thoda chota karenge (like 90% of target) taaki breathing room mile
+        fg_h = int(target_h * 0.95)
+        fg_w = int(img.width * (fg_h / img.height))
         fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
-
-        # Step 6: Paste foreground centered on background
+        
         paste_x = (target_w - fg_w) // 2
-        bg_img.paste(fg_img, (paste_x, 0))
-
-        # Step 7: Save to BytesIO
+        paste_y = (target_h - fg_h) // 2
+        bg_img.paste(fg_img, (paste_x, paste_y))
+        
+        # 3. Output as Bytes
         output = BytesIO()
-        output.name = "landscape_poster.jpg"
-        bg_img.save(output, format='JPEG', quality=90)
+        output.name = "cinematic_poster.jpg"
+        bg_img.save(output, format='JPEG', quality=95) 
         output.seek(0)
-
-        logger.info("Successfully created landscape poster")
         return output
-
+        
     except Exception as e:
-        logger.error(f"Error in make_landscape_poster: {e}", exc_info=True)
-        # Return original input so the process can continue with a fallback
+        logger.error(f"❌ Cinematic Conversion Error: {e}")
         return url_or_bytes
 
 
@@ -3422,15 +3408,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === START MENU BUTTONS LOGIC ===
     if data.startswith("start_"):
         await query.answer()
-        
+
         if data == "start_help":
             text = "<b>🛠 HELP MENU</b>\n\nMujhe apne group me add karke Admin bana do. Main automatically files filter karna shuru kar dunga!"
+            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
+            # Purani GIF delete karke naya message bhejenge (sabse safe tareeka)
+            try: await query.message.delete()
+            except: pass
+            msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
+            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            return
+
         elif data == "start_about":
-            text = "<b>📖 ABOUT ME</b>\n\n• <b>Developer:</b> @ownermahi\n• <b>Language:</b> Python 3\n• <b>Library:</b> python-telegram-bot"
+            text = f"<b>📖 ABOUT ME</b>\n\n• <b>Developer:</b> @{ADMIN_USERNAME}\n• <b>Language:</b> Python 3\n• <b>Library:</b> python-telegram-bot"
+            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
+            try: await query.message.delete()
+            except: pass
+            msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
+            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            return
+            
         elif data == "start_donate":
+            # Yahan se tumhara purana start_donate wala code shuru hoga...
             await query.answer()
             user = update.effective_user
-            amount = 50  # Tumhara VIP amount
+            amount = 10  # Tumhara VIP amount
             upi_id = os.environ.get("UPI_ID", "default_id@ybl")
             
             try:
@@ -3652,96 +3654,144 @@ async def payment_utr_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Iske niche aapke baki ke callback conditions waise hi rahenge (autopost_, cancel_genre aadi...)
     
     # =======================================================
-    # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Smart HD Poster)
+    # 🤖 NEW: AUTO POST LOGIC (Zero Effort - Crash Proof)
     # =======================================================
     if query.data.startswith("autopost_"):
+        await query.answer() # Button loading animation band karne ke liye
         movie_id = int(query.data.split("_")[1])
         
-        # --- 👇 यहाँ पेस्ट करें 👇 ---
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # क्वालिटी निकालें
-        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-        rows = cur.fetchall()
-        # मूवी की भाषा भी निकालें
-        cur.execute("SELECT title, genre, language FROM movies WHERE id = %s", (movie_id,))
-        m_data = cur.fetchone()
-        cur.close()
-        close_db_connection(conn)
+        # 1. SAFELY FETCH DATA FROM DB (Try-Except lagana zaroori hai)
+        conn = None
+        rows = []
+        m_data = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # क्वालिटी निकालें
+            cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+            rows = cur.fetchall()
+            
+            # मूवी की डिटेल्स निकालें (Saath me poster_url bhi nikal lo fallback ke liye)
+            cur.execute("SELECT title, genre, language, poster_url FROM movies WHERE id = %s", (movie_id,))
+            m_data = cur.fetchone()
+            
+            cur.close()
+        except Exception as e:
+            logger.error(f"DB Error in autopost: {e}")
+            await query.edit_message_text("❌ Database Error. Please try again later.")
+            return
+        finally:
+            if conn:
+                try: close_db_connection(conn)
+                except: pass # Safe DB Close
 
-        # क्वालिटी फॉर्मेटिंग
+        # 2. DATA FORMATTING
+        m_title = m_data[0] if (m_data and m_data[0]) else "Unknown Movie"
+        m_genre = m_data[1] if (m_data and m_data[1]) else "Action / Drama"
+        m_lang = m_data[2] if (m_data and m_data[2]) else "Hindi (LiNE) + HC-ESubs"
+        db_poster_url = m_data[3] if (m_data and len(m_data) > 3) else None
+
         res_list = []
         for r in rows:
-            match = re.search(r'(\d{3,4}p)', r[0])
-            if match: res_list.append(match.group(1))
+            if r and r[0]:
+                match = re.search(r'(\d{3,4}p)', str(r[0]))
+                if match: res_list.append(match.group(1))
         res_list = sorted(list(set(res_list)), key=lambda x: int(x.replace('p','')), reverse=True)
         dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
 
-        # डेटा सेट करें
-        m_title = m_data[0] if m_data else "Movie"
-        m_genre = m_data[1] if m_data else "Action"
-        m_lang = m_data[2] if m_data and m_data[2] else "Hindi (LiNE) + HC-ESubs"
-        # --- 👆 यहाँ तक 👆 ---
+        safe_title = m_title.replace('<', '').replace('>', '')
 
+        # 3. PREMIUM MOBILE-FRIENDLY CAPTION
         channel_caption = (
-            f"🎬 <b>{m_title}</b>\n"
-            f"✨ Genre: {m_genre}\n"
-            f"Language: {m_lang}\n"
-            f"Quality: V2 HQ-HDTC {dynamic_res}\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+            f"🎬 <b>{safe_title}</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"✨ <b>Genre:</b> {m_genre}\n"
+            f"🔊 <b>Language:</b> {m_lang}\n"
+            f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
             f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
             f"👇 <b>Download Below</b> 👇"
         )
-        # ... (आगे का send_photo वाला कोड)
 
-        # --- SECURE LINK FOR BATCH POST ---
+        # 4. KEYBOARD & URLS FIX
         secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+        channel_url = os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/your_channel')
 
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
             [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-            [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            [InlineKeyboardButton("📢 Join Channel", url=channel_url)]
         ])
 
         channels_str = os.environ.get('BROADCAST_CHANNELS', '')
         target_channels = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
 
         if not target_channels:
-            await query.edit_message_text(f"{query.message.text}\n\n❌ Error: No BROADCAST_CHANNELS found.")
+            await query.edit_message_text("❌ Error: No BROADCAST_CHANNELS found in environment settings.")
             return
+
+        # 5. PHOTO FETCH LOGIC (Ye missing tha pehle)
+        photo_to_send = context.bot_data.get(f"auto_thumb_{movie_id}")
+        if not photo_to_send:
+            # Agar bot_data me photo nahi hai, toh DB wala URL lo, ya fir default poster bhej do
+            photo_to_send = db_poster_url if db_poster_url else "https://telegra.ph/file/default_poster.jpg"
+
+        await query.edit_message_text("⏳ Auto-posting in progress, please wait...")
 
         sent_count = 0
         last_error = ""
         telegram_photo_id = None 
 
+        # 6. POSTING LOOP (With Telegram Fast Cache ID)
         for chat_id_str in target_channels:
             try:
                 chat_id = int(chat_id_str)
-                current_photo = telegram_photo_id if telegram_photo_id else photo_to_send
-
-                # 🛑 HTML PARSE MODE
-                sent_msg = await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=current_photo,
-                    caption=channel_caption,
-                    parse_mode='HTML',
-                    reply_markup=post_keyboard
-                )
                 
-                if sent_msg:
-                    if not telegram_photo_id and sent_msg.photo: telegram_photo_id = sent_msg.photo[-1].file_id
-                    save_post_to_db(movie_id, chat_id, sent_msg.message_id, bot3, channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
-                    sent_count += 1
+                # Agar ek channel me upload ho chuki hai toh usi ki cache ID use karo (10x Faster)
+                if telegram_photo_id:
+                    sent_msg = await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=telegram_photo_id,
+                        caption=channel_caption,
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
+                else:
+                    # Pehli baar bhejna hai toh Memory (BytesIO) pointer check karo
+                    if hasattr(photo_to_send, 'seek'):
+                        photo_to_send.seek(0)
+                        
+                    sent_msg = await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo_to_send,
+                        caption=channel_caption,
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
+                    if sent_msg and sent_msg.photo:
+                        telegram_photo_id = sent_msg.photo[-1].file_id
+
+                # Save to database (bot3 ki jagah hardcoded naam dala hai taaki crash na ho)
+                try:
+                    save_post_to_db(movie_id, chat_id, sent_msg.message_id, "FlimfyBox", channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
+                except Exception as db_err:
+                    logger.error(f"Save to DB failed: {db_err}")
+
+                sent_count += 1
+                await asyncio.sleep(1.5) # Telegram API flood error se bachne ke liye thoda delay
+                
             except Exception as e:
                 logger.error(f"Auto-post failed for {chat_id_str}: {e}")
                 last_error = str(e)
 
-        result_msg = f"{query.message.text}\n\n✅ <b>Auto-Posted (100% Original HD) to {sent_count} channels!</b>"
-        if sent_count == 0 and last_error: result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
+        # 7. FINAL SUCCESS MESSAGE
+        result_msg = f"✅ <b>Auto-Posted (100% Original HD) to {sent_count} channels!</b>"
+        if sent_count == 0 and last_error: 
+            result_msg += f"\n❌ <b>Failed Reason:</b> <code>{last_error}</code>"
 
         await query.edit_message_text(result_msg, parse_mode='HTML')
-        context.bot_data.pop(f"auto_thumb_{movie_id}", None)
+        context.bot_data.pop(f"auto_thumb_{movie_id}", None) # Cleanup Memory
         return
     
     # === NEW: GENRE CALLBACK HANDLER ===
@@ -4826,14 +4876,14 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             style_choice = random.choice([1, 2, 3])
 
             if style_choice == 1:
-                # Style 1: Blockquotes
+                # 🌟 Style 1: Clean Minimalist Divider (Mobile & PC Friendly)
                 caption = (
-                    f"<blockquote>"
                     f"🎬 <b>{safe_title}</b>\n"
-                    f"✨ Genre: {safe_genre}\n"
-                    f"🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
-                    f"💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
-                    f"</blockquote>\n"
+                    f"➖➖➖➖➖➖➖➖➖➖\n"
+                    f"✨ <b>Genre:</b> {safe_genre}\n"
+                    f"🔊 <b>Language:</b> {movie_lang if movie_lang else 'Hindi'}\n"
+                    f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+                    f"➖➖➖➖➖➖➖➖➖➖\n"
                     f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
                     f"👇 <b>Download Below</b> 👇"
                 )
