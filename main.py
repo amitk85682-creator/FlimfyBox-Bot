@@ -9534,7 +9534,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("post", post_to_topic_command))
     
     # ✅ FIX: group=2 जोड़ा गया ताकि नॉर्मल बैच अपना काम कर सके
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO | filters.PHOTO), pm_file_listener), group=2)
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND)), pm_file_listener), group=2)
 
     # -----------------------------------------------------------
     # 4. GENRE & GROUP HANDLERS
