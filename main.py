@@ -3625,14 +3625,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
         rows = cur.fetchall()
         
-        # मूवी की डिटेल्स निकालें
-        cur.execute("SELECT title, genre, language FROM movies WHERE id = %s", (movie_id,))
+        # मूवी की डिटेल्स निकालें (🚀 NAYA: Ab poster_url bhi nikalega)
+        cur.execute("SELECT title, genre, language, poster_url FROM movies WHERE id = %s", (movie_id,))
         m_data = cur.fetchone()
         cur.close()
         
         # Connection close (Tera custom function)
         try: close_db_connection(conn) 
-        except: db_pool.putconn(conn) # Fallback if function name is different
+        except: db_pool.putconn(conn) 
 
         if not m_data:
             await query.edit_message_text("❌ Error: Movie DB mein nahi mili!")
@@ -3650,17 +3650,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m_title = m_data[0] if m_data[0] else "Unknown Movie"
         m_genre = m_data[1] if m_data[1] else "Action, Drama"
         m_lang = m_data[2] if m_data[2] else "Hindi + English"
+        m_poster = m_data[3] if len(m_data) > 3 and m_data[3] else None
 
         # --- 2. POSTER PROCESSING (Cinematic Square Effect) ---
-        # Pehle dekhenge kya context.bot_data mein pehle se photo hai
-        raw_photo = context.bot_data.get(f"auto_thumb_{movie_id}")
+        # 🚀 NAYA FIX: Pehle TMDB ka link uthao. Agar TMDB poster nahi hai, tabhi Thumbnail use karo.
+        raw_photo = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
+        
+        if not raw_photo:
+            thumb_id = context.bot_data.get(f"auto_thumb_{movie_id}")
+            if isinstance(thumb_id, str) and not thumb_id.startswith("http"):
+                try:
+                    tg_file = await context.bot.get_file(thumb_id)
+                    raw_photo = bytes(await tg_file.download_as_bytearray())
+                except Exception as e:
+                    logger.error(f"Autopost thumb download error: {e}")
+                    raw_photo = None
         
         # Yahan hum naya blurred poster banayenge
         if raw_photo:
             photo_to_send = await make_landscape_poster(raw_photo)
         else:
             # Default poster agar kuch na mile
-            photo_to_send = "https://i.ibb.co/default_poster.jpg" # Isko apne kisi default image link se replace kar dena agar zarurat ho
+            photo_to_send = "https://i.imgur.com/6XK4F6K.png"
 
         # --- 3. 🎲 RANDOM PREMIUM STYLES 🎲 ---
         safe_title = m_title.replace('<', '').replace('>', '')
@@ -4763,15 +4774,20 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for f in movie_files:
                     backup_map = {}
                     main_url = ""
-                    # ... [Aapka purana channel forward wala code yahan continue hoga] ...
+                    
                     if channels:
-                        try:
-                            sent = await f['message_obj'].copy(chat_id=channels[0])
-                            backup_map[str(channels[0])] = sent.message_id
-                            main_url = f"https://t.me/c/{str(channels[0]).replace('-100', '')}/{sent.message_id}"
-                            await asyncio.sleep(0.5) 
-                        except Exception as e:
-                            logger.error(f"Backup failed: {e}")
+                        for chat_id in channels:
+                            try:
+                                sent = await f['message_obj'].copy(chat_id=chat_id)
+                                backup_map[str(chat_id)] = sent.message_id
+                                
+                                # Main URL hamesha pehle (Main Dump) channel ka banega
+                                if chat_id == channels[0]:
+                                    main_url = f"https://t.me/c/{str(chat_id).replace('-100', '')}/{sent.message_id}"
+                                    
+                                await asyncio.sleep(0.5) # Telegram flood se bachne ke liye
+                            except Exception as e:
+                                logger.error(f"Backup failed for channel {chat_id}: {e}")
 
                     file_size_str = get_readable_file_size(f['file_size'])
                     label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
