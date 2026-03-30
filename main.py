@@ -5019,29 +5019,44 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
 
     # ==========================================
-    # 🖼️ CUSTOM POSTER UPLOAD LOGIC
+    # 🖼️ CUSTOM POSTER UPLOAD LOGIC (Photo & URL Both Supported)
     # ==========================================
-    if BATCH_SESSION.get('active') and message.photo:
-        status_msg = await message.reply_text("🖼️ Image received! Uploading poster to cloud...")
-        photo_file_id = message.photo[-1].file_id
+    if BATCH_SESSION.get('active'):
+        is_poster_update = False
+        public_url = None
         
-        # Telegraph par upload karke public URL lo
-        public_url = await upload_image_to_telegraph(context.bot, photo_file_id)
-        
-        if public_url:
-            movie_id = BATCH_SESSION['movie_id']
-            conn = get_db_connection()
-            if conn:
-                cur = conn.cursor()
-                cur.execute("UPDATE movies SET poster_url = %s WHERE id = %s", (public_url, movie_id))
-                conn.commit()
-                cur.close()
-                close_db_connection(conn)
+        # 1. Agar Admin ne Photo bheji hai
+        if message.photo:
+            is_poster_update = True
+            status_msg = await message.reply_text("🖼️ Image received! Uploading poster to cloud...")
+            photo_file_id = message.photo[-1].file_id
+            # Telegraph par upload karke public URL lo
+            public_url = await upload_image_to_telegraph(context.bot, photo_file_id)
             
-            await status_msg.edit_text("✅ **Poster Successfully Updated!**\nAb aap files bhej sakte hain ya `/done` kar sakte hain.", parse_mode='Markdown')
-        else:
-            await status_msg.edit_text("❌ Poster upload fail ho gaya. Kripya image dobara bhejein.")
-        return # Yahan ruk jao taaki image ko file ki tarah save na kare
+        # 2. Agar Admin ne direct Image URL bheja hai (http/https se shuru hone wala)
+        elif message.text and message.text.strip().startswith("http"):
+            is_poster_update = True
+            status_msg = await message.reply_text("🔗 Image URL received! Linking poster directly...")
+            public_url = message.text.strip()
+
+        # Agar dono mein se koi bhi step trigger hua hai
+        if is_poster_update:
+            if public_url:
+                movie_id = BATCH_SESSION['movie_id']
+                conn = get_db_connection()
+                if conn:
+                    cur = conn.cursor()
+                    cur.execute("UPDATE movies SET poster_url = %s WHERE id = %s", (public_url, movie_id))
+                    conn.commit()
+                    cur.close()
+                    close_db_connection(conn)
+
+                await status_msg.edit_text("✅ **Poster Successfully Updated!**\nAb aap files bhej sakte hain ya `/done` kar sakte hain.", parse_mode='Markdown')
+            else:
+                await status_msg.edit_text("❌ Poster upload fail ho gaya. Kripya image ya image ki direct URL dobara bhejein.")
+            
+            # Yahan ruk jao taaki image/url aage file ki tarah save na ho
+            return
         
     # --- ISKE NEECHE TUMHARA PURANA PHASE 2 WALA CODE AAYEGA JO FILES SAVE KARTA HAI ---
     if not (message.document or message.video): return
