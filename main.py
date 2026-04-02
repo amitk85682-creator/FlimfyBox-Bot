@@ -1995,17 +1995,36 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             else: category = "Bollywood"
         else: category = "Hollywood"
 
-        # --- STEP 3: TMDb से HD Poster लाना (Sirf LAMBA Wala) ---
+        # --- STEP 3: TMDb से HD Poster लाना (100% Exact Match) ---
         poster_url = resp.get('Poster') # Default OMDb
-        tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
-        t_resp = requests.get(tmdb_search, timeout=10).json()
-        if t_resp.get('results'):
-            res = t_resp['results'][0]
+
+        if imdb_id and imdb_id != 'N/A':
+            # 🎯 JUGAD: Agar IMDb ID hai, toh TMDB ko seedha ID do, naam nahi! Isse galti ka chance 0% ho jayega.
+            tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
+            t_resp = requests.get(tmdb_find, timeout=10).json()
             
-            # 👇 FIX: Pehle yahan 'backdrop_path' (landscape) utha raha tha. Ab strictly 'poster_path' (Lamba) lega.
-            path = res.get('poster_path')
-            if path:
-                poster_url = f"https://image.tmdb.org/t/p/original{path}"
+            # Movie ya TV dono me se poster nikal lo
+            results = t_resp.get('movie_results', []) + t_resp.get('tv_results', [])
+            if results:
+                path = results[0].get('poster_path')
+                if path:
+                    poster_url = f"https://image.tmdb.org/t/p/original{path}"
+        else:
+            # 🛡️ FALLBACK: Agar IMDb ID nahi hai, toh Name aur Year dono mila kar check karo
+            tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
+            t_resp = requests.get(tmdb_search, timeout=10).json()
+            if t_resp.get('results'):
+                for item in t_resp['results']:
+                    item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
+                    # Saal (Year) match karne ki koshish karo
+                    if str(year) == item_year and item.get('poster_path'):
+                        poster_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
+                        break
+                else:
+                    # Saal match na ho toh jo pehla lamba poster mile utha lo
+                    path = t_resp['results'][0].get('poster_path')
+                    if path:
+                        poster_url = f"https://image.tmdb.org/t/p/original{path}"
 
         return title, year, poster_url, genre, imdb_id, rating, plot, category
 
