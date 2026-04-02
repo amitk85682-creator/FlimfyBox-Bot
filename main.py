@@ -2576,7 +2576,7 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
 
 # ==================== HELPER FUNCTION ====================
 # 👇 Parameter me 'pre_fetched_meta=None' add kiya hai
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None):
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, file_quality: str = None):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
@@ -2597,6 +2597,16 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
         if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
         if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
+
+        # ---------------------------------------------------
+    # Upar ka DB / pre_fetched_meta block same rahega...
+    
+    # 👇 NAYA FIX: Agar specific file ka season/quality pass hua hai, to usko hi dikhao (Duplicate series info hata do)
+    if file_quality:
+        extra_display = f"📌 <b>File:</b> {file_quality}\n"
+        
+    # =========================================================
+    # 🔥 WARNING FILE LOGIC
     
     # Agar data nahi diya gaya (Single file download), tabhi DB open karo
     else:
@@ -3823,7 +3833,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
                     send_warning=False,
-                    pre_fetched_meta=pre_fetched_meta  # 👈 Yahan data pass kar diya!
+                    pre_fetched_meta=pre_fetched_meta,
+                    file_quality=quality  # 👈 BASS YE NAYI LINE ADD KARNI HAI
                 )
                 
                 # DB query ka overhead khatam ho gaya, isliye thoda fast (1.2s) kar sakte hain
@@ -4143,7 +4154,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ==================== QUALITY SELECTION ====================
         elif query.data.startswith("quality_"):
-            parts = query.data.split('_')
+            parts = query.data.split('_', 2) # 👈 FIX 1: Yahan '2' lagana zaroori hai
             movie_id = int(parts[1])
             selected_quality = parts[2]
 
@@ -4161,7 +4172,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_file = None
             
             # --- FIX IS BELOW THIS LINE ---
-            # We added 'file_size' to the unpacking because the DB function returns 4 values now
             for quality, url, file_id, file_size in movie_data['qualities']:
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
@@ -4181,7 +4191,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_id,
                 title,
                 chosen_file['url'],
-                chosen_file['file_id']
+                chosen_file['file_id'],
+                file_quality=selected_quality # 👈 FIX 2: BASS YE NAYI LINE ADD KARNI HAI YAHAN
             )
 
             if 'selected_movie_data' in context.user_data:
