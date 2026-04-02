@@ -1327,9 +1327,6 @@ def setup_database():
                 UNIQUE(movie_id, quality)
             )
         """)
-        # Ye lines add kar do taaki bina table delete kiye naye columns add ho jayein
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS languages TEXT;")
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS extra_info TEXT;")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sync_info (
@@ -2497,12 +2494,11 @@ def get_all_movie_qualities(movie_id):
         cur = conn.cursor()
         # Update: Added file_size to the SELECT statement
         cur.execute("""
-            SELECT quality, url, file_id, file_size, languages, extra_info
+            SELECT quality, url, file_id, file_size
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
             ORDER BY CASE quality
                 WHEN '4K' THEN 1
-                ...
                 WHEN 'HD Quality' THEN 2
                 WHEN 'Standart Quality'  THEN 3
                 WHEN 'Low Quality'  THEN 4
@@ -2579,7 +2575,8 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, specific_lang: str = None, specific_extra: str = None):
+# 👇 Parameter me 'pre_fetched_meta=None' add kiya hai
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
@@ -2587,45 +2584,41 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     genre = ""
     year = ""
     lang_display = ""
-    extra_display = "" 
+    extra_display = "" # 👈 NAYA: Info (COMBiNED/Ep) dikhane ke liye
     
     # ✅ OPTIMIZATION: Agar data pehle se diya gaya hai, to DB connect mat karo
     if pre_fetched_meta:
         db_genre = pre_fetched_meta.get('genre')
         db_year = pre_fetched_meta.get('year')
         db_lang = pre_fetched_meta.get('language')
-        db_extra = pre_fetched_meta.get('extra_info')
+        db_extra = pre_fetched_meta.get('extra_info') # 👈 Fetch Extra info
         
         if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
         if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
         if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
-        if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n"
+        if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
     
+    # Agar data nahi diya gaya (Single file download), tabhi DB open karo
     else:
-        # Agar data nahi diya gaya (Single file download), tabhi DB open karo
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
+                # 👇 UPDATE: SQL query mein 'extra_info' add kiya
                 cur.execute("SELECT genre, year, language, extra_info FROM movies WHERE id = %s", (movie_id,))
-                row = cur.fetchone()
-                if row:
-                    if row[0] and row[0] != 'Unknown': genre = f"🎭 <b>Genre:</b> {row[0]}\n"
-                    if row[1] and row[1] > 0: year = f"📅 <b>Year:</b> {row[1]}\n"
-                    if row[2] and row[2].strip(): lang_display = f"🔊 <b>Language:</b> {row[2]}\n"
-                    if row[3] and row[3].strip(): extra_display = f"📌 <b>Info:</b> {row[3]}\n"
+                result = cur.fetchone()
+                if result:
+                    db_genre, db_year, db_lang, db_extra = result # 👈 4 values unpack hongi
+                    if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
+                    if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
+                    if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+                    if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
+                cur.close()
             except Exception as e:
-                logger.error(f"Error fetching movie meta: {e}")
+                logger.error(f"Error fetching movie info: {e}")
             finally:
                 close_db_connection(conn)
-
-    # 🔥 YAHAN LAGEGA TUMHARA CODE! 
-    # (Ye DB/Pre-fetch hone ke baad chalega aur generic data ko file ke real data se replace kar dega)
-    if specific_lang and specific_lang.strip(): 
-        lang_display = f"🔊 <b>Language:</b> {specific_lang}\n"
-    if specific_extra and specific_extra.strip(): 
-        extra_display = f"📌 <b>Info:</b> {specific_extra}\n"
-
+    # ---------------------------------------------------
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
@@ -3823,17 +3816,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"🚀 Sending {len(qualities)} files...")
         status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files...**", parse_mode='Markdown')
         
-# 1. LOOP: FILES BHEJO (Bina DB query ke)
+        # 1. LOOP: FILES BHEJO (Bina DB query ke)
         count = 0
-        # 👇 Unpack 6 values (Dhyan rahe 'for' loop ka 'f' line ki shuruat se sahi gap par ho)
-        for quality, url, file_id, file_size, languages, extra_info in qualities:
+        for quality, url, file_id, file_size in qualities:
             try:
                 await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
                     send_warning=False,
-                    pre_fetched_meta=pre_fetched_meta,
-                    specific_lang=languages,
-                    specific_extra=extra_info
+                    pre_fetched_meta=pre_fetched_meta  # 👈 Yahan data pass kar diya!
                 )
                 
                 # DB query ka overhead khatam ho gaya, isliye thoda fast (1.2s) kar sakte hain
@@ -4170,10 +4160,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             chosen_file = None
             
-            # 👇 Unpack 6 values
-            for quality, url, file_id, file_size, languages, extra_info in movie_data['qualities']:
+            # --- FIX IS BELOW THIS LINE ---
+            # We added 'file_size' to the unpacking because the DB function returns 4 values now
+            for quality, url, file_id, file_size in movie_data['qualities']:
                 if quality == selected_quality:
-                    chosen_file = {'url': url, 'file_id': file_id, 'languages': languages, 'extra_info': extra_info}
+                    chosen_file = {'url': url, 'file_id': file_id}
                     break
             # -----------------------------
 
@@ -4185,8 +4176,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
 
             await send_movie_to_user(
-                update, context, movie_id, title, chosen_file['url'], chosen_file['file_id'],
-                specific_lang=chosen_file['languages'], specific_extra=chosen_file['extra_info']
+                update,
+                context,
+                movie_id,
+                title,
+                chosen_file['url'],
+                chosen_file['file_id']
             )
 
             if 'selected_movie_data' in context.user_data:
@@ -4989,6 +4984,11 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 👇 NAYA CODE: VIP Payment Screenshot Check 👇
+    if context.user_data.get('payment_step') == 'screenshot' and update.message.photo:
+        await payment_photo_handler(update, context)
+        return
+
     user_id = update.effective_user.id
     if user_id != ADMIN_USER_ID: return
     if SUPER_BATCH_SESSION.get('active'): return
@@ -5221,25 +5221,18 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_channel_id = channels[0]
         main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
 
-        # 🔥 NAYA: Har file ka apna Episode/Language extract karo!
-        file_info = await fallback_extraction(file_name)
-        file_extra = file_info.get("extra_info", "")
-        file_lang = file_info.get("language", "")
-
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                # 👇 Yahan insert me 'languages' aur 'extra_info' add kiya
                 cur.execute(
                     """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
+                    VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
-                    languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
+                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
                     """,
-                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), file_lang, file_extra)
+                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
                 )
                 conn.commit()
                 cur.close()
@@ -9222,6 +9215,11 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 👇 VIP Payment UTR Check 👇
+    if context.user_data.get('payment_step') == 'utr':
+        await payment_utr_handler(update, context)
+        return
+
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     
@@ -9229,7 +9227,6 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_chat.type == "private":
         check = await is_user_member(context, user_id)
         if not check['is_member']:
-            # ✅ NEW: User ne jo search kiya (e.g. "Kalki"), use SAVE kar lo
             if update.message and update.message.text:
                 context.user_data['pending_search_query'] = update.message.text.strip()
 
@@ -9248,14 +9245,11 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     query_text = update.message.text.strip()
     
     # === 2. Menu Button Logic ===
-    
-    # Handle 'Search Movies' button (Guidance)
     if query_text == '🔍 Search Movies':
         msg = await update.message.reply_text("Great! Just type the name of the movie you want to search for.")
         track_message_for_deletion(context, chat_id, msg.message_id, 60)
         return
 
-    # Handle 'Request Movie' button (Guidance)
     elif query_text == '🙋 Request Movie':
         web_app_url = "https://flimfybox-bot-yht0.onrender.com/webapp"
         keyboard = InlineKeyboardMarkup([
@@ -9268,9 +9262,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         track_message_for_deletion(context, chat_id, msg.message_id, 60)
         return
-    # ============================================
 
-    # Handle 'My Stats' button
     elif query_text == '📊 My Stats':
         conn = get_db_connection()
         if conn:
@@ -9282,9 +9274,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ful = cur.fetchone()[0]
                 
                 stats_msg = await update.message.reply_text(
-                    f"📊 **Your Stats**\n\n"
-                    f"📝 Total Requests: {req}\n"
-                    f"✅ Fulfilled: {ful}",
+                    f"📊 **Your Stats**\n\n📝 Total Requests: {req}\n✅ Fulfilled: {ful}",
                     parse_mode='Markdown'
                 )
                 track_message_for_deletion(context, chat_id, stats_msg.message_id, 120)
@@ -9294,7 +9284,6 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 close_db_connection(conn)
         return
 
-    # Handle 'Help' button
     elif query_text == '❓ Help':
         help_text = (
             "🤖 **How to use:**\n\n"
@@ -9511,8 +9500,7 @@ def register_handlers(application: Application):
     # -----------------------------------------------------------
 
     # 👇 YAHAN PAR 'application' LIKHNA HAI 'app' KI JAGAH 👇
-    application.add_handler(MessageHandler(filters.PHOTO, payment_photo_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, payment_utr_handler))
+    
     
     
     application.add_handler(CommandHandler('start', start))
