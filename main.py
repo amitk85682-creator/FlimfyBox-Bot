@@ -3823,26 +3823,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"🚀 Sending {len(qualities)} files...")
         status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files...**", parse_mode='Markdown')
         
-        # 1. LOOP: FILES BHEJO (Bina DB query ke)
+# 1. LOOP: FILES BHEJO (Bina DB query ke)
         count = 0
-        # 👇 Unpack 6 values
-            for quality, url, file_id, file_size, languages, extra_info in movie_data['qualities']:
-                if quality == selected_quality:
-                    chosen_file = {'url': url, 'file_id': file_id, 'languages': languages, 'extra_info': extra_info}
-                    break
-            # -----------------------------
-
-            if not chosen_file:
-                await query.edit_message_text("❌ Error fetching the file for that quality.")
-                return
-
-            title = movie_data['title']
-            await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
-
-            await send_movie_to_user(
-                update, context, movie_id, title, chosen_file['url'], chosen_file['file_id'],
-                specific_lang=chosen_file['languages'], specific_extra=chosen_file['extra_info']
-            )
+        # 👇 Unpack 6 values (Dhyan rahe 'for' loop ka 'f' line ki shuruat se sahi gap par ho)
+        for quality, url, file_id, file_size, languages, extra_info in qualities:
+            try:
+                await send_movie_to_user(
+                    update, context, movie_id, title, url, file_id, 
+                    send_warning=False,
+                    pre_fetched_meta=pre_fetched_meta,
+                    specific_lang=languages,
+                    specific_extra=extra_info
+                )
                 
                 # DB query ka overhead khatam ho gaya, isliye thoda fast (1.2s) kar sakte hain
                 await asyncio.sleep(1.2) 
@@ -4178,11 +4170,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             chosen_file = None
             
-            # --- FIX IS BELOW THIS LINE ---
-            # We added 'file_size' to the unpacking because the DB function returns 4 values now
-            for quality, url, file_id, file_size in movie_data['qualities']:
+            # 👇 Unpack 6 values
+            for quality, url, file_id, file_size, languages, extra_info in movie_data['qualities']:
                 if quality == selected_quality:
-                    chosen_file = {'url': url, 'file_id': file_id}
+                    chosen_file = {'url': url, 'file_id': file_id, 'languages': languages, 'extra_info': extra_info}
                     break
             # -----------------------------
 
@@ -4194,12 +4185,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
 
             await send_movie_to_user(
-                update,
-                context,
-                movie_id,
-                title,
-                chosen_file['url'],
-                chosen_file['file_id']
+                update, context, movie_id, title, chosen_file['url'], chosen_file['file_id'],
+                specific_lang=chosen_file['languages'], specific_extra=chosen_file['extra_info']
             )
 
             if 'selected_movie_data' in context.user_data:
