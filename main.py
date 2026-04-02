@@ -4714,7 +4714,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
             gemini_category = ai_data.get("category", "Movies")
-            movie_extra = ai_data.get("extra_info", "") # Naya: Extra Info
+            movie_extra = "" # Naya: Extra Info
 
             # 🎯 2. TMDB & IMDB METADATA
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
@@ -5089,7 +5089,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "")
-            movie_extra = ai_data.get("extra_info", "")
+            movie_extra = ""
             gemini_category = ai_data.get("category", "")
             
             if movie_name == "UNKNOWN" or len(movie_name) < 2:
