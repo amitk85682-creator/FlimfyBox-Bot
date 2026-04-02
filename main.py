@@ -1971,6 +1971,9 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}&plot=full"
         else:
             url = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}&plot=full"
+            # 👇 NAYA FIX: OMDb ko Year (Saal) bhi batana zaroori hai, warna wo galat movie dega!
+            if search_year and str(search_year).strip().isdigit():
+                url += f"&y={str(search_year).strip()}"
 
         resp = requests.get(url, timeout=10).json()
         if resp.get("Response") != "True":
