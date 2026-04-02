@@ -2518,7 +2518,6 @@ def get_all_movie_qualities(movie_id):
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
-    """Create inline keyboard with quality selection."""
     limit = 6 
     start_idx = page * limit
     end_idx = start_idx + limit
@@ -2529,8 +2528,14 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     keyboard.append([InlineKeyboardButton("🚀 SEND ALL FILES", callback_data=f"sendall_{movie_id}")])
 
     row = []
-    # NAYA CODE: Yahan 6 values unpack hongi
-    for quality, url, file_id, file_size, languages, extra_info in current_qualities:
+    # 👇 NAYA BULLETPROOF CODE 👇
+    for file_data in current_qualities:
+        quality = file_data[0]
+        file_id = file_data[2]
+        
+        # Agar 6th position par extra_info hai, toh use nikal lo, warna khali chod do
+        extra_info = file_data[5] if len(file_data) > 5 else ""
+        
         callback_data = f"quality_{movie_id}_{quality}"
         icon = "📁" if file_id else "🔗"
         
@@ -2553,9 +2558,6 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     
     if end_idx < len(qualities):
         nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"qualpage_{movie_id}_{page+1}"))
-
-    if nav_buttons:
-        keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
     return InlineKeyboardMarkup(keyboard)
@@ -3769,7 +3771,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # === SEND ALL FILES LOGIC (HIGHLY OPTIMIZED) ===
-    # === SEND ALL FILES LOGIC (HIGHLY OPTIMIZED) ===
     if query.data.startswith("sendall_"):
         movie_id = int(query.data.split("_")[1])
         chat_id = update.effective_chat.id
@@ -3777,8 +3778,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ✅ FAST FETCH: Ek hi bar mein sab nikal lo
         conn = get_db_connection()
         cur = conn.cursor()
-        # 👇 UPDATE: Yahan bhi 'extra_info' add kiya
-        # 👇 UPDATE: Yahan se extra_info hata diya gaya
         cur.execute("SELECT title, genre, year, language FROM movies WHERE id = %s", (movie_id,))
         res = cur.fetchone()
         cur.close()
@@ -3791,8 +3790,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = "Movie"
             pre_fetched_meta = {}
 
-        # ... iske niche ka code (qualities nikalna aur loop chalana) same rahega ...
-
         qualities = get_all_movie_qualities(movie_id)
         if not qualities:
             await query.answer("❌ No files found!", show_alert=True)
@@ -3801,17 +3798,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"🚀 Sending {len(qualities)} files...")
         status_msg = await query.message.reply_text(f"🚀 **Sending {len(qualities)} files...**", parse_mode='Markdown')
         
-        # 1. LOOP: FILES BHEJO (Bina DB query ke)
+        # 1. LOOP: FILES BHEJO
         count = 0
-        for quality, url, file_id, file_size, languages, extra_info in qualities:
+        # 👇 NAYA BULLETPROOF CODE 👇
+        for file_data in qualities:
+            url = file_data[1]
+            file_id = file_data[2]
+            
             try:
                 await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
                     send_warning=False,
-                    pre_fetched_meta=pre_fetched_meta  # 👈 Yahan data pass kar diya!
+                    pre_fetched_meta=pre_fetched_meta
                 )
-                
-                # DB query ka overhead khatam ho gaya, isliye thoda fast (1.2s) kar sakte hain
                 await asyncio.sleep(1.2) 
                 count += 1
             except Exception as e:
@@ -4127,6 +4126,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Database error during deletion.")
 
         # ==================== QUALITY SELECTION ====================
+        # ==================== QUALITY SELECTION ====================
         elif query.data.startswith("quality_"):
             parts = query.data.split('_')
             movie_id = int(parts[1])
@@ -4136,7 +4136,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not movie_data or movie_data.get('id') != movie_id:
                 qualities = get_all_movie_qualities(movie_id)
-                # Note: qualities now contains (quality, url, file_id, file_size)
                 movie_data = {'id': movie_id, 'title': 'Movie', 'qualities': qualities}
 
             if not movie_data or 'qualities' not in movie_data:
@@ -4145,14 +4144,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             chosen_file = None
             
-            # --- FIX IS BELOW THIS LINE ---
-            # We added 'file_size', 'languages', 'extra_info' to the unpacking
-            for quality, url, file_id, file_size, languages, extra_info in movie_data['qualities']:
+            # 👇 NAYA BULLETPROOF CODE 👇
+            for file_data in movie_data['qualities']:
+                quality = file_data[0]
+                url = file_data[1]
+                file_id = file_data[2]
+                
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
                     break
-            # -----------------------------
-            # -----------------------------
 
             if not chosen_file:
                 await query.edit_message_text("❌ Error fetching the file for that quality.")
@@ -4444,13 +4444,19 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         
         # 🛑 "cast" quoted and year is integer
+        # 🎯 NAYA LOGIC: Title ki jagah IMDb ID par conflict check karega
         cur.execute("""
             INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
             VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-            ON CONFLICT (title) DO UPDATE SET 
-            imdb_id = EXCLUDED.imdb_id, poster_url = EXCLUDED.poster_url, year = EXCLUDED.year,
-            genre = EXCLUDED.genre, rating = EXCLUDED.rating, description = EXCLUDED.description, 
-            category = EXCLUDED.category, "cast" = EXCLUDED."cast"
+            ON CONFLICT (imdb_id) DO UPDATE SET 
+            title = EXCLUDED.title,
+            poster_url = EXCLUDED.poster_url, 
+            year = EXCLUDED.year,
+            genre = EXCLUDED.genre, 
+            rating = EXCLUDED.rating, 
+            description = EXCLUDED.description, 
+            category = EXCLUDED.category, 
+            "cast" = EXCLUDED."cast"
             RETURNING id
         """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str))
         
