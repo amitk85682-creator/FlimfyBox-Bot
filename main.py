@@ -2492,9 +2492,9 @@ def get_all_movie_qualities(movie_id):
 
     try:
         cur = conn.cursor()
-        # Update: Added file_size to the SELECT statement
+        # NAYI QUERY: languages aur extra_info add kiya hai
         cur.execute("""
-            SELECT quality, url, file_id, file_size
+            SELECT quality, url, file_id, file_size, languages, extra_info
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
             ORDER BY CASE quality
@@ -2518,47 +2518,35 @@ def get_all_movie_qualities(movie_id):
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
-    """
-    Create inline keyboard with quality selection.
-    Features: 
-    1. Grid Layout (2 buttons per row)
-    2. 'Send All' button at top
-    3. Pagination
-    """
-    limit = 6 # Grid view ke liye limit badha di (even number best hai)
+    """Create inline keyboard with quality selection."""
+    limit = 6 
     start_idx = page * limit
     end_idx = start_idx + limit
     
     current_qualities = qualities[start_idx:end_idx]
     keyboard = []
 
-    # --- 1. SEND ALL BUTTON (Top) ---
     keyboard.append([InlineKeyboardButton("🚀 SEND ALL FILES", callback_data=f"sendall_{movie_id}")])
 
-    # --- 2. GRID LAYOUT (2 Buttons per Row) ---
     row = []
-    for quality, url, file_id, file_size in current_qualities:
+    # NAYA CODE: Yahan 6 values unpack hongi
+    for quality, url, file_id, file_size, languages, extra_info in current_qualities:
         callback_data = f"quality_{movie_id}_{quality}"
-        
-        # Icon set karna hai file ya link ke basis par
         icon = "📁" if file_id else "🔗"
         
-        # 'quality' ke andar pehle se hi file size juda hua hai (e.g., "720p [3.50 GB]")
-        # Toh bas icon aur quality ko jod do, extra size_str ki zaroorat hi nahi hai.
-        button_text = f"{icon} {quality}"
+        # Episode/Season info agar hai toh button me dikhega
+        ep_tag = f"[{extra_info}] " if extra_info else ""
+        button_text = f"{icon} {ep_tag}{quality}"
         
         row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
 
-        # Agar row mein 2 button ho gaye, to keyboard mein daal do
         if len(row) == 2:
             keyboard.append(row)
             row = []
 
-    # Agar koi akela button bacha hai (odd number), to use bhi add karo
     if row:
         keyboard.append(row)
 
-    # --- 3. PAGINATION BUTTONS ---
     nav_buttons = []
     if page > 0:
         nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=f"qualpage_{movie_id}_{page-1}"))
@@ -2569,9 +2557,7 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     if nav_buttons:
         keyboard.append(nav_buttons)
 
-    # Cancel Button
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
-
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
@@ -4161,11 +4147,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_file = None
             
             # --- FIX IS BELOW THIS LINE ---
-            # We added 'file_size' to the unpacking because the DB function returns 4 values now
-            for quality, url, file_id, file_size in movie_data['qualities']:
+            # We added 'file_size', 'languages', 'extra_info' to the unpacking
+            for quality, url, file_id, file_size, languages, extra_info in movie_data['qualities']:
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
                     break
+            # -----------------------------
             # -----------------------------
 
             if not chosen_file:
@@ -5221,18 +5208,24 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_channel_id = channels[0]
         main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
 
+        # 👇 NAYA CODE: File Name se Episode nikalna 👇
+        ai_data = await fallback_extraction(file_name)
+        f_lang = ai_data.get('language', '')
+        f_extra = ai_data.get('extra_info', '')
+
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
                 cur.execute(
                     """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
+                    languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
                     """,
-                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
                 )
                 conn.commit()
                 cur.close()
