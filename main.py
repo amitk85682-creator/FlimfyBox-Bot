@@ -3804,7 +3804,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 1. LOOP: FILES BHEJO (Bina DB query ke)
         count = 0
-        for quality, url, file_id, file_size in qualities:
+        for quality, url, file_id, file_size, languages, extra_info in qualities:
             try:
                 await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
@@ -4779,14 +4779,20 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_size_str = get_readable_file_size(f['file_size'])
                     label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
 
+                    # 👇 NAYA CODE: File name se Episode/Lang nikalna
+                    f_ai_data = await fallback_extraction(f['file_name'])
+                    f_lang = f_ai_data.get('language', '')
+                    f_extra = f_ai_data.get('extra_info', '')
+
                     cur.execute(
                         """
-                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                        url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                        url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
+                        languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
                         """,
-                        (movie_id, label, file_size_str, main_url, json.dumps(backup_map))
+                        (movie_id, label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
                     )
                 
                 # 🛑 CRITICAL FIX 1: Pehle Movie aur Files ko save karlo taaki Aliases ke error se ye delete na ho!
