@@ -4776,10 +4776,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 logger.error(f"Backup failed for channel {chat_id}: {e}")
 
                     file_size_str = get_readable_file_size(f['file_size'])
-                    label = generate_quality_label(f['file_name'], file_size_str, movie_lang)
+                    
+                    # 👇 NAYA FIX: Yahan bhi Caption use karenge 👇
+                    text_for_detection = f['caption'] if f['caption'] else f['file_name']
+                    label = generate_quality_label(text_for_detection, file_size_str, movie_lang)
 
-                    # 👇 NAYA CODE: File name se Episode/Lang nikalna
-                    f_ai_data = await fallback_extraction(f['file_name'])
+                    f_ai_data = await fallback_extraction(text_for_detection)
                     f_lang = f_ai_data.get('language', '')
                     f_extra = f_ai_data.get('extra_info', '')
 
@@ -5208,13 +5210,17 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         file_size_str = get_readable_file_size(file_size)
         current_lang = BATCH_SESSION.get('language', '')
-        label = generate_quality_label(file_name, file_size_str, current_lang)
+        
+        # 👇 NAYA FIX: Telegram file name cut kar deta hai, isliye Caption check karenge 👇
+        text_for_detection = message.caption if message.caption else file_name
+        
+        label = generate_quality_label(text_for_detection, file_size_str, current_lang)
         
         main_channel_id = channels[0]
         main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
 
-        # 👇 NAYA CODE: File Name se Episode nikalna 👇
-        ai_data = await fallback_extraction(file_name)
+        # Yahan bhi kate hue naam ki jagah text_for_detection denge
+        ai_data = await fallback_extraction(text_for_detection)
         f_lang = ai_data.get('language', '')
         f_extra = ai_data.get('extra_info', '')
 
