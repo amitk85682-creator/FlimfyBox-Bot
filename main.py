@@ -2561,50 +2561,64 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-# 👇 Parameter me 'pre_fetched_meta=None' add kiya hai
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
-    # --- 1. Fetch movie details (Genre, Year, Language, Extra Info) ---
+    # --- 1. Fetch movie details (Genre, Year, Language) ---
     genre = ""
     year = ""
     lang_display = ""
-    extra_display = "" # 👈 NAYA: Info (COMBiNED/Ep) dikhane ke liye
-    
+    extra_display = "" # NAYA: Info (Ep) dikhane ke liye
+
     # ✅ OPTIMIZATION: Agar data pehle se diya gaya hai, to DB connect mat karo
     if pre_fetched_meta:
         db_genre = pre_fetched_meta.get('genre')
         db_year = pre_fetched_meta.get('year')
         db_lang = pre_fetched_meta.get('language')
-        db_extra = pre_fetched_meta.get('extra_info') # 👈 Fetch Extra info
         
         if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
         if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
         if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
-        if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
     
-    # Agar data nahi diya gaya (Single file download), tabhi DB open karo
+    # Agar data nahi diya gaya, tabhi DB open karo
     else:
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                # 👇 UPDATE: SQL query mein 'extra_info' add kiya
-                cur.execute("SELECT genre, year, language, extra_info FROM movies WHERE id = %s", (movie_id,))
+                cur.execute("SELECT genre, year, language FROM movies WHERE id = %s", (movie_id,))
                 result = cur.fetchone()
                 if result:
-                    db_genre, db_year, db_lang, db_extra = result # 👈 4 values unpack hongi
+                    db_genre, db_year, db_lang = result
                     if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
                     if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
                     if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
-                    if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
                 cur.close()
             except Exception as e:
                 logger.error(f"Error fetching movie info: {e}")
             finally:
                 close_db_connection(conn)
-    # ---------------------------------------------------
+
+    # 👇 NAYA CODE: Yahan hum us ek specific file ka episode 'movie_files' table se nikalenge! 👇
+    if url or file_id:
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                if file_id:
+                    cur.execute("SELECT extra_info FROM movie_files WHERE file_id = %s LIMIT 1", (file_id,))
+                else:
+                    cur.execute("SELECT extra_info FROM movie_files WHERE url = %s LIMIT 1", (url,))
+                res = cur.fetchone()
+                if res and res[0] and res[0].strip():
+                    extra_display = f"📌 <b>Episode:</b> {res[0]}\n"
+                cur.close()
+            except Exception:
+                pass
+            finally:
+                close_db_connection(conn)
+    # 👆 ---------------------------------------------------- 👆
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
@@ -2620,17 +2634,13 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             return
 
     try:
-        # =========================================================
-        # 🔥 WARNING FILE LOGIC
-        # =========================================================
         warning_msg = None
         if send_warning:
             try:
-                # Sirf File Copy Karega (Text Message Nahi)
                 warning_msg = await context.bot.copy_message(
                     chat_id=chat_id,
-                    from_chat_id=-1002683355160,  # Channel ID
-                    message_id=1773              # File Message ID
+                    from_chat_id=-1002683355160,
+                    message_id=1773
                 )
             except Exception as e:
                 logger.error(f"Warning file send failed: {e}")
@@ -2638,7 +2648,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # --- CAPTION UPDATE WITH EXTRA INFO ---
         caption_text = (
             f"🎬 <b>{title}</b>\n"
-            f"{extra_display}"   # 👈 Yahan print hoga apka COMBiNED / Ep Info
+            f"{extra_display}"
             f"{year}"        
             f"{genre}"       
             f"{lang_display}"  
@@ -2646,13 +2656,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
             f"🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
         )
-        # ---------------------------------------------------
         
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
-        # ==================================================================
-        # 🚀 PRIORITY 1: TRY COPYING FROM CHANNEL LINK
-        # ==================================================================
         sent_msg = None
         if url and ("t.me/c/" in url or "t.me/" in url) and "http" in url:
             try:
@@ -2676,9 +2682,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception as e:
                 logger.error(f"Copy link failed: {e}")
 
-        # ==================================================================
-        # ⚠️ PRIORITY 2: TRY SENDING BY FILE ID (Fallback)
-        # ==================================================================
         if not sent_msg and file_id:
             clean_file_id = str(file_id).strip()
             try:
@@ -2701,9 +2704,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 except Exception as e:
                     logger.error(f"Send Document failed: {e}")
 
-        # ==================================================================
-        # 🌐 PRIORITY 3: EXTERNAL LINK
-        # ==================================================================
         if not sent_msg and url and "http" in url and "t.me" not in url:
              sent_msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -2712,7 +2712,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 reply_markup=join_keyboard
             )
 
-        # Final Cleanup (Auto Delete Logic)
         messages_to_delete = []
         if sent_msg:
             messages_to_delete.append(sent_msg.message_id)
@@ -3779,15 +3778,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_db_connection()
         cur = conn.cursor()
         # 👇 UPDATE: Yahan bhi 'extra_info' add kiya
-        cur.execute("SELECT title, genre, year, language, extra_info FROM movies WHERE id = %s", (movie_id,))
+        # 👇 UPDATE: Yahan se extra_info hata diya gaya
+        cur.execute("SELECT title, genre, year, language FROM movies WHERE id = %s", (movie_id,))
         res = cur.fetchone()
         cur.close()
         close_db_connection(conn)
 
         if res:
-            # 👇 UPDATE: Unpack 5 values
-            title, db_genre, db_year, db_lang, db_extra = res
-            pre_fetched_meta = {'genre': db_genre, 'year': db_year, 'language': db_lang, 'extra_info': db_extra}
+            title, db_genre, db_year, db_lang = res
+            pre_fetched_meta = {'genre': db_genre, 'year': db_year, 'language': db_lang}
         else:
             title = "Movie"
             pre_fetched_meta = {}
