@@ -458,7 +458,6 @@ def preprocess_query(query):
 def clean_telegram_text(text):
     """Removes emojis and converts fancy fonts to normal text"""
     if not text: return ""
-    # 1. Fancy Fonts to Normal
     fancy = {'ᴀ':'a','ʙ':'b','ᴄ':'c','ᴅ':'d','ᴇ':'e','ғ':'f','ɢ':'g','ʜ':'h','ɪ':'i','ᴊ':'j','ᴋ':'k','ʟ':'l','ᴍ':'m','ɴ':'n','ᴏ':'o','ᴘ':'p','ǫ':'q','ʀ':'r','s':'s','ᴛ':'t','ᴜ':'u','ᴠ':'v','ᴡ':'w','x':'x','ʏ':'y','ᴢ':'z'}
     for k, v in fancy.items(): 
         text = text.replace(k, v)
@@ -466,15 +465,13 @@ def clean_telegram_text(text):
     import unicodedata
     text = unicodedata.normalize('NFKC', text)
     
-    # 2. Remove Emojis but keep Hindi/English words & basic punctuation
+    # 👇 NAYA: Yahan '@' aur ':' add kar diya gaya hai taaki channel mentions na katen
     import re
-    text = re.sub(r'[^\w\s\.\-\'\[\]\(\)]', ' ', text)
+    text = re.sub(r'[^\w\s\.\-\'\[\]\(\)@:]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     
-    # 3. Remove starting dashes or dots
     text = re.sub(r'^[\.\-\s]+', '', text)
     return text
-
 async def make_landscape_poster(url_or_bytes):
     """
     Portrait poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
@@ -741,11 +738,13 @@ async def fallback_extraction(caption_text):
         text = clean_telegram_text(caption_text.strip())
         original = text
 
-        # 1. Remove obvious group prefixes from the beginning
-        text = re.sub(r'^\{@[^}]+\}\s*', '', text)          # {@Royal_Backup2}
-        text = re.sub(r'^@\w+\s+', '', text)                # @MRKUPDATES4U6
-        text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group]
-
+        # 1. Remove obvious group prefixes and promotional words
+        text = re.sub(r'(?i)^(join\s+)?@\w+\s*', '', text)  # JOIN @channel ko udayega
+        text = re.sub(r'(?i)^join\s+', '', text)            # Sirf JOIN likha ho toh udayega
+        text = re.sub(r'^\{[^}]+\}\s*', '', text)           # {@Royal_Backup2} ko udayega
+        text = re.sub(r'^@\w+\s+', '', text)                # @MRKUPDATES4U6 ko udayega
+        text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
+        
         # 2. Detect if it's a web series (contains season/episode indicators)
         season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,2}|\[E\d{1,2}-\d{1,2}\])\b', re.IGNORECASE)
         season_match = season_pattern.search(text)
