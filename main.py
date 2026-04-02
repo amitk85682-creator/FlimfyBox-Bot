@@ -1327,6 +1327,9 @@ def setup_database():
                 UNIQUE(movie_id, quality)
             )
         """)
+        # Ye lines add kar do taaki bina table delete kiye naye columns add ho jayein
+        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS languages TEXT;")
+        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS extra_info TEXT;")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sync_info (
@@ -2494,11 +2497,12 @@ def get_all_movie_qualities(movie_id):
         cur = conn.cursor()
         # Update: Added file_size to the SELECT statement
         cur.execute("""
-            SELECT quality, url, file_id, file_size
+            SELECT quality, url, file_id, file_size, languages, extra_info
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
             ORDER BY CASE quality
                 WHEN '4K' THEN 1
+                ...
                 WHEN 'HD Quality' THEN 2
                 WHEN 'Standart Quality'  THEN 3
                 WHEN 'Low Quality'  THEN 4
@@ -2575,8 +2579,7 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
-# 👇 Parameter me 'pre_fetched_meta=None' add kiya hai
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, file_quality: str = None):
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, specific_lang: str = None, specific_extra: str = None):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
@@ -2584,51 +2587,45 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     genre = ""
     year = ""
     lang_display = ""
-    extra_display = "" # 👈 NAYA: Info (COMBiNED/Ep) dikhane ke liye
+    extra_display = "" 
     
     # ✅ OPTIMIZATION: Agar data pehle se diya gaya hai, to DB connect mat karo
     if pre_fetched_meta:
         db_genre = pre_fetched_meta.get('genre')
         db_year = pre_fetched_meta.get('year')
         db_lang = pre_fetched_meta.get('language')
-        db_extra = pre_fetched_meta.get('extra_info') # 👈 Fetch Extra info
+        db_extra = pre_fetched_meta.get('extra_info')
         
         if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
         if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
         if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
-        if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
-
-        # ---------------------------------------------------
-    # Upar ka DB / pre_fetched_meta block same rahega...
+        if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n"
     
-    # 👇 NAYA FIX: Agar specific file ka season/quality pass hua hai, to usko hi dikhao (Duplicate series info hata do)
-    if file_quality:
-        extra_display = f"📌 <b>File:</b> {file_quality}\n"
-        
-    # =========================================================
-    # 🔥 WARNING FILE LOGIC
-    
-    # Agar data nahi diya gaya (Single file download), tabhi DB open karo
     else:
+        # Agar data nahi diya gaya (Single file download), tabhi DB open karo
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                # 👇 UPDATE: SQL query mein 'extra_info' add kiya
                 cur.execute("SELECT genre, year, language, extra_info FROM movies WHERE id = %s", (movie_id,))
-                result = cur.fetchone()
-                if result:
-                    db_genre, db_year, db_lang, db_extra = result # 👈 4 values unpack hongi
-                    if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
-                    if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
-                    if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
-                    if db_extra and db_extra.strip(): extra_display = f"📌 <b>Info:</b> {db_extra}\n" # 👈 Format Extra info
-                cur.close()
+                row = cur.fetchone()
+                if row:
+                    if row[0] and row[0] != 'Unknown': genre = f"🎭 <b>Genre:</b> {row[0]}\n"
+                    if row[1] and row[1] > 0: year = f"📅 <b>Year:</b> {row[1]}\n"
+                    if row[2] and row[2].strip(): lang_display = f"🔊 <b>Language:</b> {row[2]}\n"
+                    if row[3] and row[3].strip(): extra_display = f"📌 <b>Info:</b> {row[3]}\n"
             except Exception as e:
-                logger.error(f"Error fetching movie info: {e}")
+                logger.error(f"Error fetching movie meta: {e}")
             finally:
                 close_db_connection(conn)
-    # ---------------------------------------------------
+
+    # 🔥 YAHAN LAGEGA TUMHARA CODE! 
+    # (Ye DB/Pre-fetch hone ke baad chalega aur generic data ko file ke real data se replace kar dega)
+    if specific_lang and specific_lang.strip(): 
+        lang_display = f"🔊 <b>Language:</b> {specific_lang}\n"
+    if specific_extra and specific_extra.strip(): 
+        extra_display = f"📌 <b>Info:</b> {specific_extra}\n"
+
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
@@ -3828,14 +3825,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 1. LOOP: FILES BHEJO (Bina DB query ke)
         count = 0
-        for quality, url, file_id, file_size in qualities:
-            try:
-                await send_movie_to_user(
-                    update, context, movie_id, title, url, file_id, 
-                    send_warning=False,
-                    pre_fetched_meta=pre_fetched_meta,
-                    file_quality=quality  # 👈 BASS YE NAYI LINE ADD KARNI HAI
-                )
+        # 👇 Unpack 6 values
+            for quality, url, file_id, file_size, languages, extra_info in movie_data['qualities']:
+                if quality == selected_quality:
+                    chosen_file = {'url': url, 'file_id': file_id, 'languages': languages, 'extra_info': extra_info}
+                    break
+            # -----------------------------
+
+            if not chosen_file:
+                await query.edit_message_text("❌ Error fetching the file for that quality.")
+                return
+
+            title = movie_data['title']
+            await query.edit_message_text(f"Sending **{title}**...", parse_mode='Markdown')
+
+            await send_movie_to_user(
+                update, context, movie_id, title, chosen_file['url'], chosen_file['file_id'],
+                specific_lang=chosen_file['languages'], specific_extra=chosen_file['extra_info']
+            )
                 
                 # DB query ka overhead khatam ho gaya, isliye thoda fast (1.2s) kar sakte hain
                 await asyncio.sleep(1.2) 
@@ -4154,7 +4161,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ==================== QUALITY SELECTION ====================
         elif query.data.startswith("quality_"):
-            parts = query.data.split('_', 2) # 👈 FIX 1: Yahan '2' lagana zaroori hai
+            parts = query.data.split('_')
             movie_id = int(parts[1])
             selected_quality = parts[2]
 
@@ -4172,6 +4179,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_file = None
             
             # --- FIX IS BELOW THIS LINE ---
+            # We added 'file_size' to the unpacking because the DB function returns 4 values now
             for quality, url, file_id, file_size in movie_data['qualities']:
                 if quality == selected_quality:
                     chosen_file = {'url': url, 'file_id': file_id}
@@ -4191,8 +4199,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_id,
                 title,
                 chosen_file['url'],
-                chosen_file['file_id'],
-                file_quality=selected_quality # 👈 FIX 2: BASS YE NAYI LINE ADD KARNI HAI YAHAN
+                chosen_file['file_id']
             )
 
             if 'selected_movie_data' in context.user_data:
@@ -5227,18 +5234,25 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_channel_id = channels[0]
         main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
 
+        # 🔥 NAYA: Har file ka apna Episode/Language extract karo!
+        file_info = await fallback_extraction(file_name)
+        file_extra = file_info.get("extra_info", "")
+        file_lang = file_info.get("language", "")
+
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
+                # 👇 Yahan insert me 'languages' aur 'extra_info' add kiya
                 cur.execute(
                     """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map) 
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL
+                    url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
+                    languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
                     """,
-                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map))
+                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), file_lang, file_extra)
                 )
                 conn.commit()
                 cur.close()
