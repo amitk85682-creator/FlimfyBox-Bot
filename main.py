@@ -453,7 +453,27 @@ async def get_poster_bytes(url):
 def preprocess_query(query):
     """Clean and normalize user query"""
     query = re.sub(r'[^\w\s-]', '', query)
-    return query  # 👈 YE RETURN MISSING THA
+    return query
+
+def clean_telegram_text(text):
+    """Removes emojis and converts fancy fonts to normal text"""
+    if not text: return ""
+    # 1. Fancy Fonts to Normal
+    fancy = {'ᴀ':'a','ʙ':'b','ᴄ':'c','ᴅ':'d','ᴇ':'e','ғ':'f','ɢ':'g','ʜ':'h','ɪ':'i','ᴊ':'j','ᴋ':'k','ʟ':'l','ᴍ':'m','ɴ':'n','ᴏ':'o','ᴘ':'p','ǫ':'q','ʀ':'r','s':'s','ᴛ':'t','ᴜ':'u','ᴠ':'v','ᴡ':'w','x':'x','ʏ':'y','ᴢ':'z'}
+    for k, v in fancy.items(): 
+        text = text.replace(k, v)
+    
+    import unicodedata
+    text = unicodedata.normalize('NFKC', text)
+    
+    # 2. Remove Emojis but keep Hindi/English words & basic punctuation
+    import re
+    text = re.sub(r'[^\w\s\.\-\'\[\]\(\)]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    # 3. Remove starting dashes or dots
+    text = re.sub(r'^[\.\-\s]+', '', text)
+    return text
 
 async def make_landscape_poster(url_or_bytes):
     """
@@ -572,7 +592,7 @@ async def get_movie_name_from_caption(caption_text, image_bytes=None):
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
     
-    first_line = caption_text.split('\n')[0].strip()
+    first_line = clean_telegram_text(caption_text.split('\n')[0].strip())
     logger.info(f"📝 Processing caption: {first_line[:100]}...")
 
     gemini_keys = get_gemini_keys()
@@ -718,7 +738,7 @@ async def fallback_extraction(caption_text):
     SMART FALLBACK: Improved regex-based extraction for both movies and web series.
     """
     try:
-        text = caption_text.strip()
+        text = clean_telegram_text(caption_text.strip())
         original = text
 
         # 1. Remove obvious group prefixes from the beginning
