@@ -1976,8 +1976,47 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 url += f"&y={str(search_year).strip()}"
 
         resp = requests.get(url, timeout=10).json()
+        
+        # 👇 NAYA FIX: Agar OMDb movie dhoondhne me fail ho jaye, toh TMDB se saara data nikalenge 👇
         if resp.get("Response") != "True":
-            return None
+            tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}"
+            t_resp = requests.get(tmdb_search, timeout=10).json()
+            
+            if not t_resp.get('results'):
+                return None  # Agar TMDB bhi fail ho jaye tabhi aage badhega
+                
+            # TMDB me saal (year) match karne ki koshish
+            best_match = t_resp['results'][0]
+            if search_year and str(search_year).strip().isdigit():
+                for item in t_resp['results']:
+                    item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
+                    if str(search_year).strip() == item_year:
+                        best_match = item
+                        break
+            
+            # TMDB se data extract karna
+            title = best_match.get('title') or best_match.get('name') or search_query
+            year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
+            year = int(year_str) if year_str.isdigit() else 0
+            plot = best_match.get('overview', 'No story available.')
+            rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
+            category = "Movies" if best_match.get('media_type') == 'movie' else "Web Series"
+            genre = "Action, Drama" # TMDB genres numbers me hote hain, isliye default
+            
+            path = best_match.get('poster_path')
+            poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
+            
+            # TMDB se IMDb ID nikalna (Taaki DB crash na ho)
+            tmdb_id = best_match.get('id')
+            media_type = best_match.get('media_type', 'movie')
+            imdb_id = None
+            try:
+                ext_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
+                imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
+            except: pass
+            
+            return title, year, poster_url, genre, imdb_id, rating, plot, category
+        # 👆 -------------------------------------------------------------------------------- 👆
 
         title = resp.get('Title')
         year = int(resp.get('Year', '0').split('–')[0]) if resp.get('Year') else 0
