@@ -9738,6 +9738,8 @@ async def main():
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
             asyncio.create_task(auto_delete_worker(app))
+            # 👇 BAS YE EK LINE ADD KARNI HAI 👇
+            asyncio.create_task(trending_worker_loop(app, ADMIN_USER_ID))
 
             apps.append(app)
 
