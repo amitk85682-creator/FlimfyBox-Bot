@@ -3286,8 +3286,13 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
              return await main_menu_or_search(update, context)
 
-        # 1. Search DB
-        movies = await run_async(get_movies_from_db, query, limit=10)
+        # 👇 NAYA FIX: Search query se Season/Episode tags hata do taaki main show mil jaye 👇
+        import re
+        clean_query = re.sub(r'(?i)\b(s\d{1,2}|season\s*\d+|ep\s?\d+|e\d{1,2})\b.*', '', query).strip()
+        search_term = clean_query if (clean_query and len(clean_query) > 1) else query
+
+        # 1. Search DB (Ab bot 'The Great' dhoondhega, 'The Great S03' nahi)
+        movies = await run_async(get_movies_from_db, search_term, limit=10)
         
         # 2. Not Found
         if not movies:
@@ -4815,6 +4820,16 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
 
+            # 👇 NAYA JUGAD: Series ke Seasons ko Alag-Alag Movie banakar save karna 👇
+            if movie_extra:
+                s_match = re.search(r'(?i)\b(?:s|season\s*)(\d{1,2})\b', movie_extra)
+                if s_match:
+                    season_num = int(s_match.group(1))
+                    title = f"{title} Season {season_num}"
+                    if imdb_id:
+                        imdb_id = f"{imdb_id}_S{season_num:02d}"
+            # 👆 ------------------------------------------------------------------ 👆
+
             conn = get_db_connection()
             if not conn: continue
             
@@ -5202,6 +5217,16 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cast_str = ""
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+
+            # 👇 NAYA JUGAD: Series ke Seasons ko Alag-Alag Movie banakar save karna 👇
+            if movie_extra:
+                s_match = re.search(r'(?i)\b(?:s|season\s*)(\d{1,2})\b', movie_extra)
+                if s_match:
+                    season_num = int(s_match.group(1))
+                    title = f"{title} Season {season_num}"
+                    if imdb_id:
+                        imdb_id = f"{imdb_id}_S{season_num:02d}"
+            # 👆 ------------------------------------------------------------------ 👆
 
             # Database Insert...
             conn = get_db_connection()
