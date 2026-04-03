@@ -4820,16 +4820,6 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
 
-            # 👇 NAYA JUGAD: Series ke Seasons ko Alag-Alag Movie banakar save karna 👇
-            if movie_extra:
-                s_match = re.search(r'(?i)\b(?:s|season\s*)(\d{1,2})\b', movie_extra)
-                if s_match:
-                    season_num = int(s_match.group(1))
-                    title = f"{title} Season {season_num}"
-                    if imdb_id:
-                        imdb_id = f"{imdb_id}_S{season_num:02d}"
-            # 👆 ------------------------------------------------------------------ 👆
-
             conn = get_db_connection()
             if not conn: continue
             
@@ -5213,29 +5203,17 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 genre, rating, plot = "Unknown", "N/A", "Auto Added"
                 category = gemini_category if gemini_category else "Movies"
 
-           # 👇 NAYA CODE: IMDb ID milne par Cast (Stars) fetch karein
+            # 👇 NAYA CODE: IMDb ID milne par Cast (Stars) fetch karein
             cast_str = ""
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
-
-            # 👇 NAYA JUGAD: Series ke Seasons ko Alag-Alag Movie banakar save karna 👇
-            base_title = title  # Asli show ka naam save kar lo
-            base_imdb = imdb_id
-            
-            if movie_extra:
-                s_match = re.search(r'(?i)\b(?:s|season\s*)(\d{1,2})\b', movie_extra)
-                if s_match:
-                    season_num = int(s_match.group(1))
-                    title = f"{base_title} Season {season_num}"
-                    if imdb_id:
-                        imdb_id = f"{base_imdb}_S{season_num:02d}"
-            # 👆 ------------------------------------------------------------------ 👆
 
             # Database Insert...
             conn = get_db_connection()
             if conn:
                 try:
                     cur = conn.cursor()
+                    # 👇 UPDATE: "cast" column aur COALESCE logic add kiya gaya hai
                     cur.execute(
                         """
                         INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast") 
@@ -5265,9 +5243,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     BATCH_SESSION.update({
                         'active': True, 'movie_id': movie_id, 'movie_title': title, 
                         'file_count': file_count, 'admin_id': user_id,
-                        'year': str(year) if year else movie_year, 'category': category, 'language': movie_lang,
-                        'base_title': base_title,          # 👈 NAYA: Asli naam save kiya (The Great)
-                        'base_movie_id': movie_id          # 👈 NAYA: Data clone karne ke liye ID save ki
+                        'year': str(year) if year else movie_year, 'category': category, 'language': movie_lang
                     })
                     
                     keyboard = []
@@ -5343,48 +5319,6 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             try:
                 cur = conn.cursor()
-
-                # 👇 NAYA JUGAD: Har file ka apna Season check karo aur jarurat padne par nayi Entry banao 👇
-                current_movie_id = BATCH_SESSION['movie_id']
-                current_movie_title = BATCH_SESSION['movie_title']
-                
-                if f_extra and BATCH_SESSION.get('base_title'):
-                    s_match = re.search(r'(?i)\b(?:s|season\s*)(\d{1,2})\b', f_extra)
-                    if s_match:
-                        season_num = int(s_match.group(1))
-                        target_title = f"{BATCH_SESSION['base_title']} Season {season_num}"
-                        
-                        # Agar S02 ki file aayi hai, par batch S01 ka chal raha hai
-                        if target_title != current_movie_title:
-                            cur.execute("SELECT id FROM movies WHERE title = %s", (target_title,))
-                            row = cur.fetchone()
-                            
-                            if row:
-                                current_movie_id = row[0] # Pehle se bani hai toh uski ID le lo
-                            else:
-                                # Nayi season ki movie DB me Clone (copy) kar lo! (Same data, different season)
-                                cur.execute('SELECT url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast" FROM movies WHERE id = %s', (BATCH_SESSION['base_movie_id'],))
-                                base_data = cur.fetchone()
-                                if base_data:
-                                    b_url, b_imdb, b_poster, b_year, b_genre, b_rating, b_desc, b_cat, b_lang, b_cast = base_data
-                                    
-                                    # Naya IMDb ID banao (jaise tt123_S02)
-                                    new_imdb = None
-                                    if b_imdb:
-                                        base_imdb_clean = re.sub(r'_S\d+$', '', b_imdb)
-                                        new_imdb = f"{base_imdb_clean}_S{season_num:02d}"
-                                        
-                                    cur.execute('''
-                                        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
-                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                                        ON CONFLICT (title) DO UPDATE SET imdb_id=EXCLUDED.imdb_id 
-                                        RETURNING id
-                                    ''', (target_title, b_url, new_imdb, b_poster, b_year, b_genre, b_rating, b_desc, b_cat, b_lang, b_cast))
-                                    current_movie_id = cur.fetchone()[0]
-                                    conn.commit()
-                # 👆 ------------------------------------------------------------- 👆
-
-                # Ab file ko naye (ya purane) 'current_movie_id' ke andar daalo
                 cur.execute(
                     """
                     INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
@@ -5393,7 +5327,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
                     languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
                     """,
-                    (current_movie_id, label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
+                    (BATCH_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
                 )
                 conn.commit()
                 cur.close()
