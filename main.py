@@ -13,6 +13,7 @@ import requests
 import signal
 import sys
 from PIL import Image, ImageFilter
+from trending_manager import trending_worker_loop
 from telegram import KeyboardButton, WebAppInfo
 from telegram import MenuButtonWebApp, WebAppInfo
 import aiohttp
