@@ -425,6 +425,21 @@ async def run_async(func, *args, **kwargs):
 
 # ==================== UTILITY FUNCTIONS ====================
 
+def extract_season_name(extra_info):
+    """File ke extra_info se 'Season 1', 'Season 2' nikalta hai"""
+    if not extra_info: 
+        return "Extra Files"
+    
+    import re
+    # S01, S1, Season 1, etc. ko dhoondhne ka regex
+    match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', extra_info)
+    if match:
+        s = match.group().upper()
+        # Number nikal lo (e.g., '01' se '1')
+        num = re.search(r'\d+', s).group()
+        return f"Season {int(num)}"
+    return "Extra Files"
+
 async def get_poster_bytes(url):
     """
     Amazon/IMDb se fake browser (User-Agent) ban kar image download karta hai,
@@ -4088,7 +4103,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("SELECT id, title FROM movies WHERE id = %s", (movie_id,))
+            # 🚀 FIX: Yahan 'category' bhi nikal rahe hain taaki pata chale Web Series hai ya nahi
+            cur.execute("SELECT id, title, category FROM movies WHERE id = %s", (movie_id,))
             movie = cur.fetchone()
             cur.close()
             close_db_connection(conn)
@@ -4097,28 +4113,54 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Movie not found in database.")
                 return
 
-            movie_id, title = movie
+            movie_id, title, category = movie
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
-                await query.edit_message_text(f"✅ You selected: **{title}**\n\nSending movie.. .", parse_mode='Markdown')
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("SELECT url, file_id FROM movies WHERE id = %s", (movie_id,))
-                result = cur.fetchone()
-                url, file_id = result if result else (None, None)  # ✅ Added safety check
-                cur.close()
-                close_db_connection(conn)
-
-                await send_movie_to_user(update, context, movie_id, title, url, file_id)
+                await query.answer("❌ No files found!", show_alert=True)
                 return
 
+            # Data context mein save karo aage ke liye
             context.user_data['selected_movie_data'] = {
-                'id':  movie_id,
+                'id': movie_id,
                 'title': title,
-                'qualities':  qualities
+                'category': category,
+                'qualities': qualities
             }
 
+            # 🚀 NAYA LOGIC: Agar Web Series hai, toh pehle Seasons dikhao!
+            if category and "Series" in category:
+                seasons_set = set()
+                for file_data in qualities:
+                    extra_info = file_data[5] if len(file_data) > 5 else ""
+                    s_name = extract_season_name(extra_info)
+                    seasons_set.add(s_name)
+                
+                # Agar ek se zyada categories/seasons milein, toh Season Menu dikhao
+                if len(seasons_set) > 0:
+                    sorted_seasons = sorted(list(seasons_set))
+                    season_keyboard = []
+                    
+                    # 2 Buttons per row
+                    row = []
+                    for s_name in sorted_seasons:
+                        row.append(InlineKeyboardButton(f"📁 {s_name}", callback_data=f"showseason_{movie_id}_{s_name}"))
+                        if len(row) == 2:
+                            season_keyboard.append(row)
+                            row = []
+                    if row:
+                        season_keyboard.append(row)
+                        
+                    season_keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
+                    
+                    await query.edit_message_text(
+                        f"📺 **{title}**\n\n👇 **Select Season:**",
+                        reply_markup=InlineKeyboardMarkup(season_keyboard),
+                        parse_mode='Markdown'
+                    )
+                    return
+
+            # Agar normal Movie hai (ya Series ka season logic fail hua), toh direct qualities dikhao
             selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
             keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
 
@@ -4128,9 +4170,48 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
             
-            track_message_for_deletion(context, update. effective_chat. id, query.message.message_id, 60)
+            track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
 
 
+        # ==================== SEASON SELECTION (NEW) ====================
+        elif query.data.startswith("showseason_"):
+            parts = query.data.split('_', 2) # Format: showseason_123_Season 1
+            movie_id = int(parts[1])
+            selected_season = parts[2]
+            
+            movie_data = context.user_data.get('selected_movie_data')
+            if not movie_data or movie_data.get('id') != movie_id:
+                await query.edit_message_text("❌ Session expired. Please search again.")
+                return
+                
+            title = movie_data['title']
+            all_qualities = movie_data['qualities']
+            
+            # Sirf wahi files filter karo jo is selected season ki hain
+            filtered_qualities = []
+            for file_data in all_qualities:
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                if extract_season_name(extra_info) == selected_season:
+                    filtered_qualities.append(file_data)
+                    
+            if not filtered_qualities:
+                await query.answer("❌ No files found for this season!", show_alert=True)
+                return
+                
+            # Ab sirf is Season ki files list karo
+            selection_text = f"📺 **{title} - {selected_season}**\n\n⬇️ **Please choose the file:**"
+            
+            # Hum wahi purana keyboard function use kar rahe hain, bas list chhoti bhej rahe hain
+            keyboard = create_quality_selection_keyboard(movie_id, title, filtered_qualities)
+            
+            # Ek BACK button add kar dete hain taaki user wapas seasons list par ja sake
+            keyboard.inline_keyboard.insert(0, [InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"movie_{movie_id}")])
+            
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
         # ==================== ADMIN ACTIONS ====================
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
