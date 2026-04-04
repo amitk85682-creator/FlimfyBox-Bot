@@ -2616,7 +2616,7 @@ def get_all_movie_qualities(movie_id):
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
-def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
+def create_quality_selection_keyboard(movie_id, title, qualities, page=0, season=None):
     limit = 6 
     start_idx = page * limit
     end_idx = start_idx + limit
@@ -2632,13 +2632,11 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
         quality = file_data[0]
         file_id = file_data[2]
         
-        # Agar 6th position par extra_info hai, toh use nikal lo, warna khali chod do
         extra_info = file_data[5] if len(file_data) > 5 else ""
         
         callback_data = f"quality_{movie_id}_{quality}"
         icon = "📁" if file_id else "🔗"
         
-        # Episode/Season info agar hai toh button me dikhega
         ep_tag = f"[{extra_info}] " if extra_info else ""
         button_text = f"{icon} {ep_tag}{quality}"
         
@@ -2652,11 +2650,18 @@ def create_quality_selection_keyboard(movie_id, title, qualities, page=0):
         keyboard.append(row)
 
     nav_buttons = []
+    
+    # 👇 FIX: Ab hum 'season' ko bhi yaad rakhenge taaki Next/Back par bot reset na ho!
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=f"qualpage_{movie_id}_{page-1}"))
+        cb_data = f"qualpage_{movie_id}_{page-1}" + (f"_{season}" if season else "")
+        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=cb_data))
     
     if end_idx < len(qualities):
-        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"qualpage_{movie_id}_{page+1}"))
+        cb_data = f"qualpage_{movie_id}_{page+1}" + (f"_{season}" if season else "")
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=cb_data))
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
 
     keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
     return InlineKeyboardMarkup(keyboard)
@@ -4202,10 +4207,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selection_text = f"📺 **{title} - {selected_season}**\n\n⬇️ **Please choose the file:**"
             
             # Hum wahi purana keyboard function use kar rahe hain, bas list chhoti bhej rahe hain
-            keyboard = create_quality_selection_keyboard(movie_id, title, filtered_qualities)
+            keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=0, season=selected_season)
             
-            # Ek BACK button add kar dete hain taaki user wapas seasons list par ja sake
-            keyboard.inline_keyboard.insert(0, [InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"movie_{movie_id}")])
+            # ✅ FIX: InlineKeyboardMarkup ke andar list 'inline_keyboard' ek tuple ki tarah return hoti hai naye python-telegram-bot versions me.
+            # Isliye humein pehle usko list mein badalna padega, tab usme Naya button daalna hoga.
+            
+            keyboard_list = list(keyboard_markup.inline_keyboard)
+            keyboard_list.insert(0, [InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"movie_{movie_id}")])
+            
+            new_keyboard = InlineKeyboardMarkup(keyboard_list)
+            
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=new_keyboard,
+                parse_mode='Markdown'
+            )
+            return
             
             await query.edit_message_text(
                 selection_text,
@@ -4216,9 +4233,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
         elif query.data.startswith("qualpage_"):
-            parts = query.data.split('_')
+            # FIX: Split up to 3 times to get the season name safely
+            parts = query.data.split('_', 3)
             movie_id = int(parts[1])
             page = int(parts[2])
+            selected_season = parts[3] if len(parts) > 3 else None
 
             # Try fetching data from user_data first (Fast)
             movie_data = context.user_data.get('selected_movie_data')
@@ -4245,11 +4264,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title = movie_data['title']
                 qualities = movie_data['qualities']
 
-            # New Keyboard with updated page
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities, page=page)
+            # 👇 FIX: Agar Season select kiya tha, toh pehle wapas files filter karo page badalne se pehle
+            if selected_season:
+                filtered_qualities = []
+                for file_data in qualities:
+                    extra_info = file_data[5] if len(file_data) > 5 else ""
+                    if extract_season_name(extra_info) == selected_season:
+                        filtered_qualities.append(file_data)
+                
+                keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=page, season=selected_season)
+                
+                # Season wale Next/Back mein bhi Upar "Back to Seasons" daalna zaroori hai
+                keyboard_list = list(keyboard_markup.inline_keyboard)
+                keyboard_list.insert(0, [InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"movie_{movie_id}")])
+                keyboard = InlineKeyboardMarkup(keyboard_list)
+            else:
+                # Normal Movie Pagination
+                keyboard = create_quality_selection_keyboard(movie_id, title, qualities, page=page)
             
             # Sirf buttons update karein (Text same rahega)
             await query.edit_message_reply_markup(reply_markup=keyboard)
+            return
         
         elif query.data.startswith("admin_fulfill_"):
             parts = query.data.split('_', 3)
