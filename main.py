@@ -4914,8 +4914,10 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_bytes = None
             if first_file['thumb_id']:
                 try:
-                    tg_file = await context.bot.get_file(first_file['thumb_id'])
-                    image_bytes = bytes(await tg_file.download_as_bytearray())
+                    # tg_file = await context.bot.get_file(first_file['thumb_id'])
+                    # image_bytes = bytes(await tg_file.download_as_bytearray())
+                    # 🛑 TEMPORARY BYPASS: API bachane ke liye Gemini ko image nahi de rahe
+                    image_bytes = None
                 except Exception: pass
             
             # 🎯 1. SMART EXTRACTION (Gemini Vision)
@@ -5290,8 +5292,10 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     BATCH_SESSION['extracted_thumb'] = thumb_file_id
                     
                     # Download immediately for Gemini to "SEE"
-                    tg_file = await context.bot.get_file(thumb_file_id)
-                    image_bytes = bytes(await tg_file.download_as_bytearray())
+                    # tg_file = await context.bot.get_file(thumb_file_id)
+                    # image_bytes = bytes(await tg_file.download_as_bytearray())
+                    # 🛑 TEMPORARY BYPASS: API bachane ke liye Gemini ko image nahi de rahe
+                    image_bytes = None
             except Exception as e:
                 logger.error(f"Failed to extract thumbnail for Gemini: {e}")
 
