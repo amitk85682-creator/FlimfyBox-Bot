@@ -5651,9 +5651,8 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot3 = "FlimfyBox_Bot"
         
         if movie_id:
-            # ✅ Naya SECURE DEEP LINK (Channel ke liye 100% safe)
-            bot_username = context.bot.username
-            secure_link = f"https://t.me/{bot_username}?start=dl_{movie_id}"
+            # ✅ FIXED: Web App Secure Link (Exactly like /superdone)
+            secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
             link1 = secure_link
             link2 = secure_link
             link3 = secure_link
