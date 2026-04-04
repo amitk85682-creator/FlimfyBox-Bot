@@ -183,70 +183,117 @@ async def check_and_alert_trending(app, admin_id):
 
             if not title or not tmdb_id: continue
 
-            # 🛑 STEP 1: History Check
+            # ✅ STEP 1: History Check (PEHLE dekho ki pehle post kiya hai ya nahi)
             cur.execute("SELECT tmdb_id FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
             if cur.fetchone():
+                logger.info(f"⏭️ Already alerted: {title} (ID: {tmdb_id})")
                 skipped_already += 1
                 continue
 
-            # 🛑 STEP 2: PEHLE SAVE KARO! (Yahi tera spam block karega)
+            # ✅ STEP 2: 🚨 CRITICAL - PEHLE DATABASE MEIN SAVE KARO (BEFORE POSTING!)
             try:
                 cur.execute(
                     """INSERT INTO trending_history (tmdb_id, title, media_type, popularity, vote_average) 
-                       VALUES (%s, %s, %s, %s, %s) ON CONFLICT (tmdb_id) DO NOTHING""",
-                    (tmdb_id, title, media_type, float(item.get('popularity', 0)), float(item.get('vote_average', 0)))
+                       VALUES (%s, %s, %s, %s, %s) 
+                       ON CONFLICT (tmdb_id) DO NOTHING""",
+                    (tmdb_id, title, media_type, 
+                     float(item.get('popularity', 0)), 
+                     float(item.get('vote_average', 0)))
                 )
                 conn.commit()
+                logger.info(f"✅ Saved to history: {title} (ID: {tmdb_id})")
             except Exception as e:
-                logger.error(f"DB Insert Error: {e}")
+                logger.error(f"❌ DB Insert Failed for {title}: {e}")
                 conn.rollback()
+                continue  # ⚠️ Agar save nahi hua, post mat karo
 
-            # 🛑 STEP 3: Message Banao
+            # ✅ STEP 3: Message Prepare Karo
             extra = fetch_extra_details(tmdb_id, media_type)
             text, admin_buttons, image_url = build_premium_alert(item, extra) 
 
-            # 🛑 STEP 4: DB Check & Post
+            # ✅ STEP 4: Check if Movie in Database
             cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{title}%",))
             movie = cur.fetchone()
 
+            # ✅ STEP 5: Post Logic (AB post hoga, kyunki pehle save ho chuka)
             if movie:
-                # 🎬 DB MEIN HAI -> CHANNEL PE POST
-                skipped_in_db += 1
-                watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie[0]}"
-                channel_buttons = InlineKeyboardMarkup([[InlineKeyboardButton("📥 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗡𝗢𝗪", url=watch_link)]])
-                
+                # 🎬 Movie DB mein hai -> Channel pe post karo
                 try:
+                    watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie[0]}"
+                    channel_buttons = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📥 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗡𝗢𝗪", url=watch_link)]
+                    ])
+                    
                     if image_url:
-                        await app.bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode=ParseMode.MARKDOWN, reply_markup=channel_buttons)
+                        await app.bot.send_photo(
+                            chat_id=CHANNEL_ID, 
+                            photo=image_url, 
+                            caption=text, 
+                            parse_mode=ParseMode.MARKDOWN, 
+                            reply_markup=channel_buttons
+                        )
                     else:
-                        await app.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=channel_buttons)
+                        await app.bot.send_message(
+                            chat_id=CHANNEL_ID, 
+                            text=text, 
+                            parse_mode=ParseMode.MARKDOWN, 
+                            reply_markup=channel_buttons
+                        )
+                    
                     auto_posted += 1
+                    skipped_in_db += 1  # Fixed counter name
+                    logger.info(f"📤 Auto-posted to channel: {title}")
+                    
                 except Exception as e:
-                    logger.error(f"❌ Channel Post Error: {e}")
-                    # Bulletproof error message (No Markdown crash)
+                    logger.error(f"❌ Channel Post Failed for {title}: {e}")
                     try:
-                        await app.bot.send_message(chat_id=admin_id, text=f"⚠️ Auto-Post Failed!\n🎬 Movie: {title}\n❌ Error: {e}")
+                        await app.bot.send_message(
+                            chat_id=admin_id, 
+                            text=f"⚠️ Auto-Post Failed!\n\n🎬 **Movie:** {title}\n❌ **Error:** {str(e)[:100]}"
+                        )
                     except: pass
             
             else:
-                # 🚨 DB MEIN NAHI HAI -> ADMIN KO ALERT
+                # 🚨 Movie DB mein nahi -> Admin ko alert bhejo
                 try:
                     if image_url:
-                        await app.bot.send_photo(chat_id=admin_id, photo=image_url, caption=text, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_buttons)
+                        await app.bot.send_photo(
+                            chat_id=admin_id, 
+                            photo=image_url, 
+                            caption=text, 
+                            parse_mode=ParseMode.MARKDOWN, 
+                            reply_markup=admin_buttons
+                        )
                     else:
-                        await app.bot.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_buttons)
+                        await app.bot.send_message(
+                            chat_id=admin_id, 
+                            text=text, 
+                            parse_mode=ParseMode.MARKDOWN, 
+                            reply_markup=admin_buttons
+                        )
+                    
                     new_alerts += 1
+                    logger.info(f"🚨 Admin alert sent: {title}")
+                    
                 except Exception as e:
-                    logger.error(f"❌ Admin Alert Error: {e}")
+                    logger.error(f"❌ Admin Alert Failed for {title}: {e}")
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)  # Rate limiting
 
-        # 📊 SINGLE SUMMARY MESSAGE
+        # ✅ STEP 6: Summary Message
         summary = build_summary_message(new_alerts, total_checked, skipped_in_db, skipped_already)
         await app.bot.send_message(chat_id=admin_id, text=summary, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"❌ Trending Full Error: {e}")
+        logger.error(f"❌ Trending Worker Crashed: {e}")
+        try:
+            await app.bot.send_message(
+                chat_id=admin_id, 
+                text=f"⚠️ Trending System Error!\n\n```\n{str(e)[:200]}\n```",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except: pass
+    
     finally:
         if conn:
             try:
