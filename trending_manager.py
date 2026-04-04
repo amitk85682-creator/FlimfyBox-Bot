@@ -10,7 +10,14 @@ from telegram.constants import ParseMode
 
 logger = logging.getLogger(__name__)
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
-DATABASE_URL = os.environ.get('DATABASE_URL')
+# 👇 NAYA CODE DALO 👇
+try:
+    import db_utils
+    FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
+except ImportError:
+    FIXED_DATABASE_URL = None
+
+DATABASE_URL = FIXED_DATABASE_URL or os.environ.get('DATABASE_URL')
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1002555232489'))
 
 # 🆔 BOT UNIQUE ID (Environment variable se lo)
