@@ -588,11 +588,9 @@ async def upload_image_to_telegraph(bot, file_id):
 # 👇 NAYA HELPER FUNCTION: Yeh aapki saari keys .env se nikal lega
 def get_gemini_keys():
     keys = []
-    # Purani standard key check karein
     std_key = os.environ.get("GEMINI_API_KEY")
-    if std_key: keys.append(std_key)
-    
-    # Nayi numbered keys check karein (1 se 5 tak)
+    if std_key:
+        keys.append(std_key)
     for i in range(1, 6):
         k = os.environ.get(f"GEMINI_API_KEY_{i}")
         if k and k not in keys:
@@ -603,18 +601,18 @@ def get_gemini_keys():
 # 👇 UPDATED FUNCTION 1: Name Extraction (With Multi-Key Rotation)
 async def get_movie_name_from_caption(caption_text, image_bytes=None):
     """
-    🎯 FULLY AI-POWERED EXTRACTION (MULTIMODAL WITH AUTO-KEY ROTATION)
+    Extract movie/series info.
+    - If image_bytes provided: only Gemini (vision) is used.
+    - If text‑only: tries Gemini first, then falls back to GROQ.
     """
     if not caption_text or len(caption_text.strip()) < 2:
         return {"title": "UNKNOWN", "year": "", "language": "", "extra_info": "", "category": ""}
-    
+
     first_line = clean_telegram_text(caption_text.split('\n')[0].strip())
     logger.info(f"📝 Processing caption: {first_line[:100]}...")
 
     gemini_keys = get_gemini_keys()
-
-    if gemini_keys:
-        prompt = f"""Extract movie/series info from this filename. Return ONLY JSON.
+    prompt = f"""Extract movie/series info from this filename. Return ONLY JSON.
 Filename: "{first_line}"
 Rules:
 - title: Clean name without S01, E01, group names, quality, etc.
@@ -628,57 +626,68 @@ Input: "A Gatherer's Adventure In Isekai S01 [E01-12] COMBiNED 720p AMZN WEB-DL 
 Output: {{"title": "A Gatherer's Adventure In Isekai", "year": "", "language": "Multi Audio", "extra_info": "S01 E01-12 COMBINED", "category": "Web Series"}}
 JSON:"""
 
-        contents = [prompt]
-        if image_bytes:
-            contents.append({"mime_type": "image/jpeg", "data": image_bytes})
+    # ------------------- 1. TRY GEMINI (with or without image) -------------------
+    for key in gemini_keys:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            contents = [prompt]
+            if image_bytes:
+                contents.append({"mime_type": "image/jpeg", "data": image_bytes})
+            response = await run_async(model.generate_content, contents)
 
-        # 🚀 KEY ROTATION LOOP
-        for key in gemini_keys:
+            if response and response.text:
+                text = response.text.strip()
+                text = re.sub(r'```json|```', '', text)
+                json_match = re.search(r'\{.*\}', text, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group())
+                    if data.get("title") and len(data["title"]) > 2:
+                        logger.info(f"✅ Gemini success (key {key[:5]}...): {data['title']}")
+                        return data
+            break  # response received but invalid JSON → stop trying other keys
+        except Exception as e:
+            err = str(e).lower()
+            if "429" in err or "quota" in err or "exhausted" in err:
+                logger.warning(f"⚠️ Gemini key {key[:5]}... quota exhausted. Trying next key...")
+                continue
+            else:
+                logger.error(f"❌ Gemini error on key {key[:5]}...: {e}")
+                break
+
+    # ------------------- 2. FALLBACK TO GROQ (only if NO image and Gemini failed) -------------------
+    if not image_bytes:
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+        if groq_api_key:
             try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel('gemini-2.0-flash')
-                response = await run_async(model.generate_content, contents)
-                
-                if response and response.text:
-                    text = response.text.strip()
-                    text = re.sub(r'```json|```', '', text)
-                    json_match = re.search(r'\{.*\}', text, re.DOTALL)
-                    if json_match:
-                        data = json.loads(json_match.group())
-                        if data.get("title") and len(data["title"]) > 2:
-                            logger.info(f"✅ Gemini Success (Key used: {key[:5]}...): {data['title']}")
-                            return data
-                break # Agar response mila par JSON galat hai, toh aage wali key waste mat karo
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                # Agar Quota/Limit ka error aaya toh agli key try karo
-                if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-                    logger.warning(f"⚠️ Key {key[:5]}... limit reached. Shifting to next key...")
-                    continue
-                else:
-                    logger.error(f"❌ Gemini Error on key {key[:5]}...: {e}")
-                    break
+                from groq import Groq
+                client = Groq(api_key=groq_api_key)
+                chat_completion = await run_async(
+                    client.chat.completions.create,
+                    messages=[{"role": "user", "content": prompt}],
+                    model="llama-3.3-70b-versatile",   # fast & reliable
+                    temperature=0.2,
+                    response_format={"type": "json_object"}
+                )
+                response_text = chat_completion.choices[0].message.content
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group())
+                    if data.get("title") and len(data["title"]) > 2:
+                        logger.info(f"✅ GROQ fallback success: {data['title']}")
+                        return data
+            except Exception as groq_err:
+                logger.error(f"❌ GROQ fallback failed: {groq_err}")
 
-    # FALLBACK: Improved version
-    logger.info("⚠️ Keys exhausted or failed. Using fallback extraction...")
+    # ------------------- 3. FINAL FALLBACK (regex) -------------------
+    logger.info("⚠️ All AI methods exhausted. Using fallback extraction...")
     return await fallback_extraction(first_line)
-
 
 # 👇 UPDATED FUNCTION 2: Alias Generation (With Multi-Key Rotation)
 def generate_aliases_gemini(movie_title, year="", category=""):
-    """
-    🎯 AI se 50 search aliases generate karta hai (WITH AUTO-KEY ROTATION)
-    """
-    logger.info(f"🚀 Generating aliases for: '{movie_title}' ({year}) [{category}]")
-    
+    """Generate 50 search aliases using Gemini (with rotation) → fallback to GROQ"""
     if not movie_title or movie_title == "UNKNOWN":
         return []
-    
-    gemini_keys = get_gemini_keys()
-    if not gemini_keys:
-        logger.error("❌ No GEMINI_API_KEY found!")
-        return generate_basic_aliases(movie_title, year)
 
     prompt = f"""Generate 50 search aliases for the movie/show: "{movie_title}"
 Year: {year if year else "N/A"}
@@ -703,49 +712,67 @@ Example format: alias1, alias2, alias3, alias4"""
         genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
     }
 
-    # 🚀 KEY ROTATION LOOP
+    gemini_keys = get_gemini_keys()
+
+    # ---------- 1. TRY GEMINI ----------
     for key in gemini_keys:
         try:
             genai.configure(api_key=key)
             model = genai.GenerativeModel('gemini-2.0-flash')
             response = model.generate_content(prompt, safety_settings=safety_settings)
-            
+
             if not response or not response.parts:
-                logger.warning("Gemini response was empty or blocked. Trying basic.")
-                return generate_basic_aliases(movie_title, year)
-            
+                continue
+
             ai_text = response.text.strip()
-            aliases = []
-            
-            # 👇 FIX 1: Ab bot comma (,) aur New Line (\n) dono ko split kar lega
             raw_items = re.split(r',|\n', ai_text)
-            
+            aliases = []
             for item in raw_items:
                 alias = item.strip().lower()
-                # Numbers, bullets (*, -) sab hata dega
                 alias = re.sub(r'^[\d\.\-\*\)]+\s*', '', alias).strip('"\'').strip()
-                if alias and len(alias) >= 2 and len(alias) <= 100:
+                if alias and 2 <= len(alias) <= 100:
                     aliases.append(alias)
-            
             aliases = list(dict.fromkeys(aliases))[:50]
-            
-            # 👇 FIX 2: Agar AI ne ajeeb format diya aur 0 alias bache, toh Basic aliases (Fallback) use kar lo
-            if not aliases:
-                logger.warning("AI returned bad format. Using fallback aliases.")
-                return generate_basic_aliases(movie_title, year)
-                
-            logger.info(f"✅ Generated {len(aliases)} aliases (Key used: {key[:5]}...)")
-            return aliases
-
+            if aliases:
+                logger.info(f"✅ Gemini aliases ({key[:5]}...): {len(aliases)} generated")
+                return aliases
         except Exception as e:
-            error_msg = str(e).lower()
-            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-                logger.warning(f"⚠️ Key {key[:5]}... limit reached. Shifting to next key...")
+            err = str(e).lower()
+            if "429" in err or "quota" in err or "exhausted" in err:
+                logger.warning(f"⚠️ Gemini key {key[:5]}... quota exhausted. Trying next...")
                 continue
             else:
-                logger.warning(f"❌ Alias Gemini error on key {key[:5]}...: {e}")
+                logger.warning(f"❌ Gemini error on key {key[:5]}...: {e}")
                 break
 
+    # ---------- 2. FALLBACK TO GROQ ----------
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if groq_api_key:
+        try:
+            from groq import Groq
+            client = Groq(api_key=groq_api_key)
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+                temperature=0.2
+            )
+            response_text = chat_completion.choices[0].message.content
+            raw_items = re.split(r',|\n', response_text)
+            aliases = []
+            for item in raw_items:
+                alias = item.strip().lower()
+                alias = re.sub(r'^[\d\.\-\*\)]+\s*', '', alias).strip('"\'').strip()
+                if alias and 2 <= len(alias) <= 100:
+                    aliases.append(alias)
+            aliases = list(dict.fromkeys(aliases))[:50]
+            if aliases:
+                logger.info(f"✅ GROQ aliases fallback: {len(aliases)} generated")
+                return aliases
+        except Exception as groq_err:
+            logger.error(f"❌ GROQ alias generation failed: {groq_err}")
+
+    # ---------- 3. FINAL BASIC ALIASES ----------
+    logger.warning("⚠️ All AI alias methods failed. Using basic aliases.")
     return generate_basic_aliases(movie_title, year)
 
 
@@ -953,9 +980,9 @@ async def _extract_web_series(text, original):
         
         # Episode range regex (same as generate_quality_label)
         ep_pattern = re.compile(
-            r'(?i)(?:ep|e)?\s*(\d{1,2})\s*[-~]\s*(\d{1,2})|'          # EP 01~12, E01-12
-            r'(?i)(?:episodes?)\s+(\d{1,2})\s*[-~]\s*(\d{1,2})|'       # Episodes 01-12
-            r'(?i)s\d{1,2}e(\d{1,2})(?:-e?(\d{1,2}))?'                # S01E01-E12
+            r'(?i)(?:ep|e)?\s*(\d{1,2})\s*[-~]\s*(\d{1,2})|'
+            r'(?:episodes?)\s+(\d{1,2})\s*[-~]\s*(\d{1,2})|'
+            r's(\d{1,2})e(\d{1,2})(?:-e?(\d{1,2}))?'
         )
         ep_match = ep_pattern.search(text)
         
@@ -4541,94 +4568,6 @@ def get_readable_file_size(size_in_bytes):
     except Exception:
         return "Unknown"
     return "Unknown"
-
-def generate_aliases_gemini(movie_title, year="", category=""):
-    """
-    🎯 FIXED: AI se 50 search aliases generate karta hai
-    """
-    logger.info(f"🚀 Generating aliases for: '{movie_title}' ({year}) [{category}]")
-    
-    if not movie_title or movie_title == "UNKNOWN":
-        logger.warning("Empty movie title, skipping alias generation")
-        return []
-    
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("❌ GEMINI_API_KEY missing!")
-        return []
-
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        # 🎯 SIMPLER, MORE EFFECTIVE PROMPT
-        prompt = f"""Generate 50 search aliases for the movie/show: "{movie_title}"
-Year: {year if year else "N/A"}
-Category: {category if category else "N/A"}
-
-Include these types of variations:
-1. Common misspellings (typos people make)
-2. With and without year
-3. Hindi transliterations if applicable
-4. Short forms and abbreviations
-5. With "movie", "film", "download" keywords
-6. Without spaces, with hyphens
-7. Regional language spellings
-
-IMPORTANT: Return ONLY comma-separated aliases, nothing else.
-Example format: alias1, alias2, alias3, alias4
-
-Do not include numbering, bullets, or explanations. Just plain comma-separated text."""
-
-        # Safety settings to avoid blocks
-        safety_settings = {
-            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-        }
-
-        response = model.generate_content(prompt, safety_settings=safety_settings)
-        
-        # Check if response was blocked
-        if not response or not response.parts:
-            logger.warning("Gemini response was empty or blocked")
-            return generate_basic_aliases(movie_title, year)
-        
-        try:
-            ai_text = response.text.strip()
-        except ValueError as e:
-            logger.warning(f"Response blocked by safety: {e}")
-            return generate_basic_aliases(movie_title, year)
-        
-        if not ai_text:
-            logger.warning("Empty response from Gemini")
-            return generate_basic_aliases(movie_title, year)
-        
-        logger.info(f"Gemini Alias Response (first 200 chars): {ai_text[:200]}")
-        
-        # Parse aliases
-        aliases = []
-        for item in ai_text.split(','):
-            alias = item.strip().lower()
-            # Clean each alias
-            alias = re.sub(r'^\d+[\.\)]\s*', '', alias)  # Remove numbering
-            alias = alias.strip('"\'')  # Remove quotes
-            alias = alias.strip()
-            
-            if alias and len(alias) >= 2 and len(alias) <= 100:
-                aliases.append(alias)
-        
-        # Remove duplicates and limit to 50
-        aliases = list(dict.fromkeys(aliases))[:50]
-        
-        logger.info(f"✅ Generated {len(aliases)} aliases")
-        return aliases
-
-    except Exception as e:
-        logger.error(f"❌ Alias Generation Error: {e}")
-        return generate_basic_aliases(movie_title, year)
-
 
 def generate_basic_aliases(movie_title, year=""):
     """
