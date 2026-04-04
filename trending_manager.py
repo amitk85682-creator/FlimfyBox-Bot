@@ -12,7 +12,7 @@ TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 # Yahan apna main channel ID daal de jahan post karni hai (Ensure it's correct in .env)
-CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1001234567890'))
+CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1002555232489'))
 
 # ─────────────────────────────────────────────
 # 🎨 GENRE MAP — TMDB genre IDs to readable names
