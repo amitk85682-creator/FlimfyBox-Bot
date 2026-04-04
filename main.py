@@ -439,6 +439,16 @@ def extract_season_name(extra_info):
         num = re.search(r'\d+', s).group()
         return f"Season {int(num)}"
     return "Extra Files"
+    
+    import re
+    # S01, S1, Season 1, etc. ko dhoondhne ka regex
+    match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', extra_info)
+    if match:
+        s = match.group().upper()
+        # Number nikal lo (e.g., '01' se '1')
+        num = re.search(r'\d+', s).group()
+        return f"Season {int(num)}"
+    return "Extra Files"
 
 async def get_poster_bytes(url):
     """
