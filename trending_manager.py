@@ -3,20 +3,15 @@ import requests
 import logging
 import os
 import psycopg2
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 logger = logging.getLogger(__name__)
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 DATABASE_URL = os.environ.get('DATABASE_URL')
-
-# Yahan apna main channel ID daal de jahan post karni hai (Ensure it's correct in .env)
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1002555232489'))
 
-# ─────────────────────────────────────────────
-# 🎨 GENRE MAP — TMDB genre IDs to readable names
-# ─────────────────────────────────────────────
 GENRE_MAP = {
     28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy",
     80: "Crime", 99: "Documentary", 18: "Drama", 10751: "Family",
@@ -29,7 +24,7 @@ GENRE_MAP = {
 }
 
 # ═══════════════════════════════════════════════
-#  📦 DATABASE SETUP
+#  📦 DATABASE SETUP (With Memory Fix)
 # ═══════════════════════════════════════════════
 def setup_trending_db():
     if not DATABASE_URL:
@@ -38,6 +33,8 @@ def setup_trending_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
+        
+        # 1. Main History Table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS trending_history (
                 tmdb_id INTEGER PRIMARY KEY,
@@ -48,16 +45,56 @@ def setup_trending_db():
                 alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # 🧹 Purane 30 din se zyada records auto-delete
+        
+        # 2. 🧠 BOT MEMORY TABLE (Yeh yaad rakhega ki last check kab hua)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trending_meta (
+                id INTEGER PRIMARY KEY,
+                last_check TIMESTAMP
+            )
+        """)
+        # Initialize default timer (2000-01-01) for the first run
+        cur.execute("INSERT INTO trending_meta (id, last_check) VALUES (1, '2000-01-01') ON CONFLICT (id) DO NOTHING")
+
+        # 🧹 Cleanup Old Records
         cur.execute("DELETE FROM trending_history WHERE alerted_at < NOW() - INTERVAL '30 days'")
+        
         conn.commit()
         cur.close()
         conn.close()
-        logger.info("✅ Trending DB ready & cleaned!")
+        logger.info("✅ Trending DB ready with Smart Memory!")
         return True
     except Exception as e:
         logger.error(f"❌ Trending DB Setup Error: {e}")
         return False
+
+# --- Helper Functions for Bot Memory ---
+def get_time_since_last_check():
+    """DB se check karta hai ki aakhiri baar script kab chali thi"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT last_check FROM trending_meta WHERE id = 1")
+        last_check = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return datetime.utcnow() - last_check
+    except Exception as e:
+        logger.error(f"Time Fetch Error: {e}")
+        return timedelta(hours=4) # Error aane par turant chalne do
+
+def update_last_check_time():
+    """Loop poora hone ke baad current time DB me save kar deta hai"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("UPDATE trending_meta SET last_check = CURRENT_TIMESTAMP WHERE id = 1")
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Time Update Error: {e}")
+
 
 # ═══════════════════════════════════════════════
 #  🌐 TMDB API HELPERS
@@ -67,8 +104,8 @@ def fetch_trending(time_window="day"):
         url = f"https://api.themoviedb.org/3/trending/all/{time_window}?api_key={TMDB_API_KEY}&language=en-US"
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        return resp.json().get('results', [])[:15]  # Top 15 items
-    except requests.exceptions.RequestException as e:
+        return resp.json().get('results', [])[:15]
+    except Exception as e:
         logger.error(f"🌐 TMDB API Error: {e}")
         return []
 
@@ -80,6 +117,7 @@ def fetch_extra_details(tmdb_id, media_type):
         return resp.json()
     except Exception:
         return {}
+
 
 # ═══════════════════════════════════════════════
 #  🎨 MESSAGE BUILDERS
@@ -101,8 +139,7 @@ def build_premium_alert(item, extra):
 
     tagline = extra.get('tagline', '')
     runtime = extra.get('runtime') or extra.get('episode_run_time', [None])
-    if isinstance(runtime, list):
-        runtime = runtime[0] if runtime else None
+    if isinstance(runtime, list): runtime = runtime[0] if runtime else None
     original_lang = (extra.get('original_language') or 'en').upper()
     status = extra.get('status', 'N/A')
 
@@ -116,8 +153,7 @@ def build_premium_alert(item, extra):
     type_emoji = "🎬" if media_type == "movie" else "📺"
     type_label = "Movie" if media_type == "movie" else "TV Series"
 
-    if overview and len(overview) > 200:
-        overview = overview[:197] + "..."
+    if overview and len(overview) > 200: overview = overview[:197] + "..."
 
     text = (
         f"┌─────────────────────────┐\n"
@@ -125,6 +161,7 @@ def build_premium_alert(item, extra):
         f"└─────────────────────────┘\n\n"
         f"{type_emoji} **{title}**\n"
     )
+
     if tagline: text += f"    _\"{tagline}\"_\n"
     text += f"\n"
     text += (
@@ -133,12 +170,14 @@ def build_premium_alert(item, extra):
         f"├ 🎭 **Genre:** `{genres}`\n"
         f"├ 📅 **Released:** `{release}`\n"
     )
+
     if runtime: text += f"├ ⏱ **Runtime:** `{runtime} min`\n"
     text += (
         f"├ {stars}  **{vote_avg}/10** ({vote_count} votes)\n"
         f"├ 📊 **Status:** `{status}`\n"
         f"└ 💥 **Hype:** {pop_emoji}\n"
     )
+
     if overview: text += f"\n📝 **Synopsis:**\n_{overview}_\n"
     text += (
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -148,7 +187,7 @@ def build_premium_alert(item, extra):
 
     tmdb_url = f"https://www.themoviedb.org/{media_type}/{tmdb_id}"
     google_url = f"https://www.google.com/search?q={title.replace(' ', '+')}+{release[:4] if release != 'N/A' else ''}+download"
-    
+
     buttons = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔗 View on TMDB", url=tmdb_url),
@@ -170,7 +209,7 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
         f"└─────────────────────────┘\n\n"
         f"🕐 **Time:** `{now}`\n"
         f"🔍 **Checked:** `{total_checked}` trending items\n"
-        f"✅ **Already in DB:** `{skipped_in_db}`\n"
+        f"🚀 **Auto-Posted:** `{skipped_in_db}`\n"
         f"🔁 **Already Alerted:** `{skipped_already}`\n"
         f"🆕 **New Alerts Sent:** `{new_count}`\n\n"
     )
@@ -178,6 +217,7 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
     elif new_count <= 3: text += "👀 _Kuch nayi cheezein aayi hain. Check kar!_"
     else: text += "🔥 _Bahut kuch naya trend ho raha hai! Jaldi add kar!_"
     return text
+
 
 # ═══════════════════════════════════════════════
 #  🔄 BULLETPROOF CORE LOGIC
@@ -194,12 +234,10 @@ async def check_and_alert_trending(app, admin_id):
 
     try:
         trending_items = fetch_trending("day")
-        
-        # 🛑 TMDB FAIL SAFE
         if not trending_items:
             await app.bot.send_message(
                 chat_id=admin_id, 
-                text="⚠️ **Trending Alert System:** TMDB se koi data nahi mila. Ya toh API limit hit ho gayi hai ya server down hai.",
+                text="⚠️ **Trending Alert System:** TMDB se koi data nahi mila. Ya toh API fail hai ya timeout.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return 0
@@ -213,25 +251,24 @@ async def check_and_alert_trending(app, admin_id):
             title = item.get('title') or item.get('name')
             media_type = item.get('media_type', 'movie')
 
-            if not title or not tmdb_id:
-                continue
+            if not title or not tmdb_id: continue
 
-            # Step 1: Check History
+            # Step 1: Already Alerted?
             cur.execute("SELECT tmdb_id FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
             if cur.fetchone():
                 skipped_already += 1
                 continue
 
-            # Step 2: Prep Message
+            # Step 2: Message ka text aur image
             extra = fetch_extra_details(tmdb_id, media_type)
             text, _, image_url = build_premium_alert(item, extra) 
 
-            # Step 3: Check DB & Post/Alert
+            # Step 3: DB me check karo
             cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{title}%",))
             movie = cur.fetchone()
 
             if movie:
-                # 🎬 ALREADY IN DB -> AUTO-POST TO CHANNEL
+                # 🎬 DB MEIN HAI -> CHANNEL PE POST
                 skipped_in_db += 1
                 movie_id = movie[0]
                 watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
@@ -247,9 +284,7 @@ async def check_and_alert_trending(app, admin_id):
                         await app.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.MARKDOWN, reply_markup=channel_buttons, disable_web_page_preview=False)
                     auto_posted += 1
                     logger.info(f"✅ Auto-Posted to Channel: {title}")
-                
                 except Exception as e:
-                    # ❌ ERROR CATCHER: Agar channel pe post fail ho, toh admin ko direct DM karo with reason
                     logger.error(f"❌ Channel Post Error '{title}': {e}")
                     error_msg = (
                         f"⚠️ **Auto-Post Failed!**\n\n"
@@ -260,7 +295,7 @@ async def check_and_alert_trending(app, admin_id):
                     await app.bot.send_message(chat_id=admin_id, text=error_msg, parse_mode=ParseMode.MARKDOWN)
             
             else:
-                # 🚨 NOT IN DB -> ALERT ADMIN
+                # 🚨 DB MEIN NAHI HAI -> ADMIN KO ALERT
                 admin_buttons = InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("🔗 TMDB", url=f"https://www.themoviedb.org/{media_type}/{tmdb_id}"),
@@ -277,7 +312,7 @@ async def check_and_alert_trending(app, admin_id):
                 except Exception as e:
                     logger.error(f"❌ Admin Alert Error '{title}': {e}")
 
-            # Step 4: Save to History
+            # Step 4: History save
             try:
                 cur.execute(
                     """INSERT INTO trending_history (tmdb_id, title, media_type, popularity, vote_average) 
@@ -297,9 +332,6 @@ async def check_and_alert_trending(app, admin_id):
 
     except Exception as e:
         logger.error(f"❌ Trending Full Error: {e}")
-        try:
-            await app.bot.send_message(chat_id=admin_id, text=f"❌ **CRITICAL TRENDING ERROR:**\n`{e}`", parse_mode=ParseMode.MARKDOWN)
-        except: pass
     finally:
         if conn:
             try:
@@ -309,8 +341,9 @@ async def check_and_alert_trending(app, admin_id):
 
     return new_alerts
 
+
 # ═══════════════════════════════════════════════
-#  ♻️ BACKGROUND WORKER
+#  ♻️ BACKGROUND WORKER (With Memory Fix)
 # ═══════════════════════════════════════════════
 async def trending_worker_loop(app, admin_id):
     db_ok = setup_trending_db()
@@ -318,35 +351,32 @@ async def trending_worker_loop(app, admin_id):
         logger.error("❌ Worker NOT started!")
         return
 
-    logger.info("🚀 Trending Worker Active!")
-
-    try:
-        await app.bot.send_message(
-            chat_id=admin_id,
-            text=(
-                "┌─────────────────────────┐\n"
-                "   🚀  **TRENDING MONITOR ON**\n"
-                "└─────────────────────────┘\n\n"
-                "🔄 Har **3 Ghante** mein check hoga\n"
-                "🎬 Nayi trending movie → Alert + Auto-Post\n\n"
-                "💤 _Main kaam kar raha hoon. Tu chill kar._"
-            ),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception:
-        pass
+    logger.info("🚀 Trending Worker Active (Silent Start)!")
 
     while True:
         try:
+            # 🛑 MEMORY CHECK: Kya aakhiri check ko 3 ghante ho gaye?
+            time_since_last = get_time_since_last_check()
+            
+            if time_since_last < timedelta(hours=3):
+                # Agar 3 ghante nahi hue, toh baaki time wait karo bina kuch kiye
+                remaining_seconds = (timedelta(hours=3) - time_since_last).total_seconds()
+                logger.info(f"⏳ 3 Hours not completed. Resuming sleep for {remaining_seconds/3600:.2f} hours...")
+                await asyncio.sleep(remaining_seconds)
+            
+            # 🔥 Time poora ho gaya! Ab execution start karo
             new_count = await check_and_alert_trending(app, admin_id)
+            
+            # ⏱️ Execution hone ke baad DB me current time likh do
+            update_last_check_time()
 
-            # ⏱️ TIME ADJUSTMENT: Ab har 3 ghante me loop chalega
+            # Dynamic Wait Time set karo
             if new_count >= 5:
-                wait_hours = 2 # Agar bohot kuch trend kar raha hai toh jaldi uthega
+                wait_hours = 2 # Jyada alerts the toh thoda jaldi jag jana
             else:
-                wait_hours = 3 # Normal time: 3 hours
-
-            logger.info(f"⏳ Next check in {wait_hours}h")
+                wait_hours = 3 # Normal sleep
+                
+            logger.info(f"⏳ Loop finished. Next check in {wait_hours}h")
             await asyncio.sleep(wait_hours * 3600)
 
         except Exception as e:
