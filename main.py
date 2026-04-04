@@ -466,12 +466,15 @@ def clean_telegram_text(text):
     import unicodedata
     text = unicodedata.normalize('NFKC', text)
     
-    # 👇 NAYA: Yahan '@' aur ':' add kar diya gaya hai taaki channel mentions na katen
     import re
     text = re.sub(r'[^\w\s\.\-\'\[\]\(\)@:]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     
     text = re.sub(r'^[\.\-\s]+', '', text)
+    
+    # 👇 NAYA FIX: "Name:", "Title:", "File Name:" jaise words ko shuruat se hata dega
+    text = re.sub(r'(?i)^(name|title|file\s*name|movie)\s*:\s*', '', text).strip()
+    
     return text
 async def make_landscape_poster(url_or_bytes):
     """
