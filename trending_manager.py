@@ -3,6 +3,7 @@ import requests
 import logging
 import os
 import psycopg2
+import socket
 from datetime import datetime, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -11,6 +12,9 @@ logger = logging.getLogger(__name__)
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 DATABASE_URL = os.environ.get('DATABASE_URL')
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1002555232489'))
+
+# 🆔 BOT UNIQUE ID (Environment variable se lo)
+BOT_INSTANCE_ID = os.environ.get('BOT_INSTANCE_ID', socket.gethostname())
 
 GENRE_MAP = {
     28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy",
@@ -24,7 +28,7 @@ GENRE_MAP = {
 }
 
 # ═══════════════════════════════════════════════
-#  📦 DATABASE SETUP
+#  📦 DATABASE SETUP (WITH LOCKING)
 # ═══════════════════════════════════════════════
 def setup_trending_db():
     if not DATABASE_URL:
@@ -34,6 +38,7 @@ def setup_trending_db():
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
         
+        # ✅ Main History Table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS trending_history (
                 tmdb_id INTEGER PRIMARY KEY,
@@ -41,26 +46,105 @@ def setup_trending_db():
                 media_type TEXT DEFAULT 'movie',
                 popularity REAL DEFAULT 0,
                 vote_average REAL DEFAULT 0,
-                alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                posted_by TEXT DEFAULT NULL
+            )
+        """)
+        
+        # ✅ Meta Table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS trending_meta (
+                id INTEGER PRIMARY KEY,
+                last_check TIMESTAMP,
+                locked_by TEXT DEFAULT NULL,
+                lock_time TIMESTAMP DEFAULT NULL
             )
         """)
         
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS trending_meta (
-                id INTEGER PRIMARY KEY,
-                last_check TIMESTAMP
-            )
+            INSERT INTO trending_meta (id, last_check, locked_by, lock_time) 
+            VALUES (1, '2000-01-01', NULL, NULL) 
+            ON CONFLICT (id) DO NOTHING
         """)
-        cur.execute("INSERT INTO trending_meta (id, last_check) VALUES (1, '2000-01-01') ON CONFLICT (id) DO NOTHING")
+        
+        # ✅ Cleanup old entries
         cur.execute("DELETE FROM trending_history WHERE alerted_at < NOW() - INTERVAL '30 days'")
         
         conn.commit()
         cur.close()
         conn.close()
+        logger.info(f"✅ Database setup complete for bot: {BOT_INSTANCE_ID}")
         return True
     except Exception as e:
         logger.error(f"❌ Trending DB Setup Error: {e}")
         return False
+
+
+# ═══════════════════════════════════════════════
+#  🔒 DISTRIBUTED LOCK FUNCTIONS
+# ═══════════════════════════════════════════════
+def acquire_lock():
+    """Try to acquire exclusive lock for this bot instance"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        # Check if lock is held by another bot (and is still fresh)
+        cur.execute("""
+            SELECT locked_by, lock_time 
+            FROM trending_meta 
+            WHERE id = 1
+        """)
+        result = cur.fetchone()
+        
+        if result and result[0]:
+            locked_by, lock_time = result
+            # If lock is older than 10 minutes, consider it stale
+            if lock_time and (datetime.utcnow() - lock_time).total_seconds() < 600:
+                if locked_by != BOT_INSTANCE_ID:
+                    logger.info(f"🔒 Lock held by {locked_by}, skipping...")
+                    cur.close()
+                    conn.close()
+                    return False
+        
+        # Acquire lock
+        cur.execute("""
+            UPDATE trending_meta 
+            SET locked_by = %s, lock_time = CURRENT_TIMESTAMP 
+            WHERE id = 1
+        """, (BOT_INSTANCE_ID,))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"✅ Lock acquired by {BOT_INSTANCE_ID}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Lock acquisition error: {e}")
+        return False
+
+
+def release_lock():
+    """Release the lock after posting"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        cur.execute("""
+            UPDATE trending_meta 
+            SET locked_by = NULL, lock_time = NULL, last_check = CURRENT_TIMESTAMP
+            WHERE id = 1 AND locked_by = %s
+        """, (BOT_INSTANCE_ID,))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"🔓 Lock released by {BOT_INSTANCE_ID}")
+        
+    except Exception as e:
+        logger.error(f"❌ Lock release error: {e}")
+
 
 def get_time_since_last_check():
     try:
@@ -74,19 +158,9 @@ def get_time_since_last_check():
     except:
         return timedelta(hours=4)
 
-def update_last_check_time():
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("UPDATE trending_meta SET last_check = CURRENT_TIMESTAMP WHERE id = 1")
-        conn.commit()
-        cur.close()
-        conn.close()
-    except: pass
-
 
 # ═══════════════════════════════════════════════
-#  🌐 TMDB & MESSAGE HELPERS
+#  🌐 TMDB & MESSAGE HELPERS (SAME AS BEFORE)
 # ═══════════════════════════════════════════════
 def fetch_trending(time_window="day"):
     try:
@@ -150,6 +224,7 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
         f"┌─────────────────────────┐\n"
         f"   📊  **TRENDING SUMMARY**\n"
         f"└─────────────────────────┘\n\n"
+        f"🤖 **Bot:** `{BOT_INSTANCE_ID}`\n"
         f"🕐 **Time:** `{now}`\n"
         f"🔍 **Checked:** `{total_checked}` trending items\n"
         f"🚀 **Auto-Posted:** `{skipped_in_db}`\n"
@@ -160,17 +235,25 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
     else: text += "🔥 _Naya content aaya hai!_"
     return text
 
+
 # ═══════════════════════════════════════════════
-#  🔄 BULLETPROOF CORE LOGIC
+#  🔄 CORE LOGIC WITH LOCKING
 # ═══════════════════════════════════════════════
 async def check_and_alert_trending(app, admin_id):
-    logger.info("🔍 Checking Worldwide Trending...")
+    # ✅ Try to acquire lock first
+    if not acquire_lock():
+        logger.info(f"⏭️ Skipping check - another bot is processing")
+        return 0
+    
+    logger.info(f"🔍 {BOT_INSTANCE_ID} checking Worldwide Trending...")
     new_alerts, auto_posted, skipped_already, skipped_in_db = 0, 0, 0, 0
     conn = None
 
     try:
         trending_items = fetch_trending("day")
-        if not trending_items: return 0
+        if not trending_items: 
+            release_lock()
+            return 0
 
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
@@ -183,46 +266,49 @@ async def check_and_alert_trending(app, admin_id):
 
             if not title or not tmdb_id: continue
 
-            # ✅ STEP 1: History Check (PEHLE dekho ki pehle post kiya hai ya nahi)
-            cur.execute("SELECT tmdb_id FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
-            if cur.fetchone():
-                logger.info(f"⏭️ Already alerted: {title} (ID: {tmdb_id})")
+            # ✅ STEP 1: History Check
+            cur.execute("SELECT tmdb_id, posted_by FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
+            existing = cur.fetchone()
+            
+            if existing:
+                logger.info(f"⏭️ Already alerted by {existing[1]}: {title}")
                 skipped_already += 1
                 continue
 
-            # ✅ STEP 2: 🚨 CRITICAL - PEHLE DATABASE MEIN SAVE KARO (BEFORE POSTING!)
+            # ✅ STEP 2: Save to DB WITH bot_id
             try:
                 cur.execute(
-                    """INSERT INTO trending_history (tmdb_id, title, media_type, popularity, vote_average) 
-                       VALUES (%s, %s, %s, %s, %s) 
+                    """INSERT INTO trending_history 
+                       (tmdb_id, title, media_type, popularity, vote_average, posted_by) 
+                       VALUES (%s, %s, %s, %s, %s, %s) 
                        ON CONFLICT (tmdb_id) DO NOTHING""",
                     (tmdb_id, title, media_type, 
                      float(item.get('popularity', 0)), 
-                     float(item.get('vote_average', 0)))
+                     float(item.get('vote_average', 0)),
+                     BOT_INSTANCE_ID)
                 )
                 conn.commit()
-                logger.info(f"✅ Saved to history: {title} (ID: {tmdb_id})")
+                logger.info(f"✅ Saved by {BOT_INSTANCE_ID}: {title}")
             except Exception as e:
-                logger.error(f"❌ DB Insert Failed for {title}: {e}")
+                logger.error(f"❌ DB Insert Failed: {e}")
                 conn.rollback()
-                continue  # ⚠️ Agar save nahi hua, post mat karo
+                continue
 
-            # ✅ STEP 3: Message Prepare Karo
+            # ✅ STEP 3: Message Prepare
             extra = fetch_extra_details(tmdb_id, media_type)
             text, admin_buttons, image_url = build_premium_alert(item, extra) 
 
-            # ✅ STEP 4: Check if Movie in Database
+            # ✅ STEP 4: Check Movie DB
             cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{title}%",))
             movie = cur.fetchone()
 
-            # ✅ STEP 5: Post Logic (AB post hoga, kyunki pehle save ho chuka)
+            # ✅ STEP 5: Post
             if movie:
-                # 🎬 Movie DB mein hai -> Channel pe post karo
                 try:
                     watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie[0]}"
-                    channel_buttons = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📥 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗡𝗢𝗪", url=watch_link)]
-                    ])
+                    channel_buttons = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📥 𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗 𝗡𝗢𝗪", url=watch_link)
+                    ]])
                     
                     if image_url:
                         await app.bot.send_photo(
@@ -241,20 +327,13 @@ async def check_and_alert_trending(app, admin_id):
                         )
                     
                     auto_posted += 1
-                    skipped_in_db += 1  # Fixed counter name
-                    logger.info(f"📤 Auto-posted to channel: {title}")
+                    skipped_in_db += 1
+                    logger.info(f"📤 Posted by {BOT_INSTANCE_ID}: {title}")
                     
                 except Exception as e:
-                    logger.error(f"❌ Channel Post Failed for {title}: {e}")
-                    try:
-                        await app.bot.send_message(
-                            chat_id=admin_id, 
-                            text=f"⚠️ Auto-Post Failed!\n\n🎬 **Movie:** {title}\n❌ **Error:** {str(e)[:100]}"
-                        )
-                    except: pass
+                    logger.error(f"❌ Channel Post Failed: {e}")
             
             else:
-                # 🚨 Movie DB mein nahi -> Admin ko alert bhejo
                 try:
                     if image_url:
                         await app.bot.send_photo(
@@ -273,26 +352,19 @@ async def check_and_alert_trending(app, admin_id):
                         )
                     
                     new_alerts += 1
-                    logger.info(f"🚨 Admin alert sent: {title}")
+                    logger.info(f"🚨 Admin alert by {BOT_INSTANCE_ID}: {title}")
                     
                 except Exception as e:
-                    logger.error(f"❌ Admin Alert Failed for {title}: {e}")
+                    logger.error(f"❌ Admin Alert Failed: {e}")
 
-            await asyncio.sleep(3)  # Rate limiting
+            await asyncio.sleep(3)
 
-        # ✅ STEP 6: Summary Message
+        # ✅ Summary
         summary = build_summary_message(new_alerts, total_checked, skipped_in_db, skipped_already)
         await app.bot.send_message(chat_id=admin_id, text=summary, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
-        logger.error(f"❌ Trending Worker Crashed: {e}")
-        try:
-            await app.bot.send_message(
-                chat_id=admin_id, 
-                text=f"⚠️ Trending System Error!\n\n```\n{str(e)[:200]}\n```",
-                parse_mode=ParseMode.MARKDOWN
-            )
-        except: pass
+        logger.error(f"❌ Trending Error: {e}")
     
     finally:
         if conn:
@@ -300,6 +372,9 @@ async def check_and_alert_trending(app, admin_id):
                 cur.close()
                 conn.close()
             except: pass
+        
+        # ✅ Always release lock
+        release_lock()
 
     return new_alerts
 
@@ -311,6 +386,9 @@ async def trending_worker_loop(app, admin_id):
     db_ok = setup_trending_db()
     if not db_ok: return
 
+    # ✅ Random stagger to avoid simultaneous starts
+    await asyncio.sleep(hash(BOT_INSTANCE_ID) % 60)
+
     while True:
         try:
             time_since_last = get_time_since_last_check()
@@ -319,10 +397,10 @@ async def trending_worker_loop(app, admin_id):
                 await asyncio.sleep(remaining)
             
             new_count = await check_and_alert_trending(app, admin_id)
-            update_last_check_time()
 
             wait_hours = 2 if new_count >= 5 else 3
             await asyncio.sleep(wait_hours * 3600)
 
         except Exception as e:
+            logger.error(f"❌ Worker loop error: {e}")
             await asyncio.sleep(3600)
