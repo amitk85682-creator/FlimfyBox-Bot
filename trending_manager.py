@@ -71,15 +71,14 @@ def fetch_extra_details(tmdb_id, media_type):
 # -------------------------------------------------------------
 # NEW MESSAGE FORMAT (as requested)
 # -------------------------------------------------------------
-def build_premium_alert(item, extra):
+def build_channel_post(item, extra):
+    """Clean message for channel auto-post (no warning lines)"""
     title = item.get('title') or item.get('name') or "Unknown"
     media_type = item.get('media_type', 'movie')
-    tmdb_id = item.get('id')
-    overview = item.get('overview', '')
     vote_avg = item.get('vote_average', 0)
     release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
     
-    # Genre from extra
+    # Genre
     genre_ids = extra.get('genres', [])
     genre_names = [g['name'] for g in genre_ids if 'name' in g]
     genre_str = " | ".join(genre_names) if genre_names else "Unknown"
@@ -91,35 +90,68 @@ def build_premium_alert(item, extra):
         cast_list.append(cast.get('name', ''))
     cast_str = ", ".join(cast_list) if cast_list else "Not available"
     
-    # Runtime
-    runtime = extra.get('runtime') or extra.get('episode_run_time', [None])[0]
-    runtime_str = f"{runtime} min" if runtime else "N/A"
-    
-    # Stars rating (⭐)
-    stars = "⭐" * min(int(round(vote_avg / 2)), 5) if vote_avg else "☆☆☆☆☆"
-    
-    # Language (default)
+    # Language & Quality (placeholders, can be customized)
     lang = "Hindi + English (Dual Audio)"
-    
-    # Quality (dynamic - we'll set placeholder)
     dynamic_res = "1080p | 720p | 480p"
     
-    # Safe HTML escape
+    safe_title = str(title).replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Your custom format (without warning lines)
+    text = (
+        f"🎬 <b>{safe_title}</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"🌟 <b>#1st On 🅃🄴🄻🄴🄶🅁🄰🄼</b>\n"
+        f"📅 <b>Date:</b> {release_date}\n"
+        f"⭐ <b>iMDB Rating:</b> {vote_avg}/10\n"
+        f"🎭 <b>Genre:</b> {genre_str}\n"
+        f"🔊 <b>Language:</b> {lang}\n"
+        f"<b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"<b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+        f"👇 <b>Download Below</b> 👇"
+    )
+    return text
+
+def build_admin_alert(item, extra):
+    """Admin alert message (includes warning lines)"""
+    title = item.get('title') or item.get('name') or "Unknown"
+    media_type = item.get('media_type', 'movie')
+    tmdb_id = item.get('id')
+    overview = item.get('overview', '')
+    vote_avg = item.get('vote_average', 0)
+    release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
+    
+    # Genre
+    genre_ids = extra.get('genres', [])
+    genre_names = [g['name'] for g in genre_ids if 'name' in g]
+    genre_str = " | ".join(genre_names) if genre_names else "Unknown"
+    
+    # Cast
+    cast_list = []
+    credits = extra.get('credits', {})
+    for cast in credits.get('cast', [])[:3]:
+        cast_list.append(cast.get('name', ''))
+    cast_str = ", ".join(cast_list) if cast_list else "Not available"
+    
+    lang = "Hindi + English (Dual Audio)"
+    dynamic_res = "1080p | 720p | 480p"
+    
     safe_title = str(title).replace('<', '&lt;').replace('>', '&gt;')
     safe_overview = str(overview).replace('<', '&lt;').replace('>', '&gt;')
     if len(safe_overview) > 200:
         safe_overview = safe_overview[:197] + "..."
     
-    # New format (like Bhabiji example)
     text = (
-        f"<b>{safe_title}</b>\n"
+        f"🎬 <b>{safe_title}</b>\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"🌟 <b>#1st On 🅃🄴🄻🄴🄶🅁🄰🄼</b>\n"
         f"📅 <b>Date:</b> {release_date}\n"
         f"⭐ <b>iMDB Rating:</b> {vote_avg}/10\n"
         f"🎭 <b>Genre:</b> {genre_str}\n"
-        f"🌟 <b>Stars:</b> {cast_str}\n"
         f"🔊 <b>Language:</b> {lang}\n"
-        f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
-        f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+        f"<b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+        f"➖➖➖➖➖➖➖➖➖➖\n"
+        f"<b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
         f"👇 <b>Download Below</b> 👇\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⚠️ <i>Yeh movie database mein nahi hai!</i>\n"
@@ -340,29 +372,63 @@ async def check_and_alert_trending(app, admin_id):
             movie_row = cur.fetchone()
             
             if movie_row:
-                # Auto-post to channel
-                try:
-                    watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_row[0]}"
-                    channel_buttons = InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📥 DOWNLOAD NOW", url=watch_link)
-                    ]])
-                    if image_url:
-                        await app.bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=text, parse_mode='HTML', reply_markup=channel_buttons)
-                    else:
-                        await app.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode='HTML', reply_markup=channel_buttons)
-                    auto_posted += 1
-                    skipped_in_db += 1
-                    logger.info(f"Auto-posted: {title}")
-                except Exception as e:
-                    logger.error(f"Channel post failed: {e}")
-            else:
-                # Send to admin
-                try:
-                    if image_url:
-                        await app.bot.send_photo(chat_id=admin_id, photo=image_url, caption=text, parse_mode='HTML', reply_markup=admin_buttons)
-                    else:
-                        await app.bot.send_message(chat_id=admin_id, text=text, parse_mode='HTML', reply_markup=admin_buttons)
-                    new_alerts += 1
+    # Auto-post to channel (use clean channel message)
+    try:
+        channel_text = build_channel_post(item, extra)
+        watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_row[0]}"
+        channel_buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📥 DOWNLOAD NOW", url=watch_link)
+        ]])
+
+        if image_url:
+            await app.bot.send_photo(
+                chat_id=CHANNEL_ID, 
+                photo=image_url, 
+                caption=channel_text, 
+                parse_mode='HTML', 
+                reply_markup=channel_buttons
+            )
+        else:
+            await app.bot.send_message(
+                chat_id=CHANNEL_ID, 
+                text=channel_text, 
+                parse_mode='HTML', 
+                reply_markup=channel_buttons
+            )
+        
+        auto_posted += 1
+        logger.info(f"Auto-posted to channel: {movie_row[0]}")
+    except Exception as e:
+        logger.error(f"Channel post failed: {e}")
+
+else:
+    # Admin alert (with warning lines)
+    try:
+        admin_text, admin_buttons, admin_image = build_admin_alert(item, extra)
+        
+        # Agar build_admin_alert se koi image nahi aayi toh default image_url use karega
+        final_admin_image = admin_image if admin_image else image_url
+
+        if final_admin_image:
+            await app.bot.send_photo(
+                chat_id=admin_id, 
+                photo=final_admin_image, 
+                caption=admin_text, 
+                parse_mode='HTML', 
+                reply_markup=admin_buttons
+            )
+        else:
+            await app.bot.send_message(
+                chat_id=admin_id, 
+                text=admin_text, 
+                parse_mode='HTML', 
+                reply_markup=admin_buttons
+            )
+        
+        new_alerts += 1
+        logger.info("Admin alert sent for missing movie.")
+    except Exception as e:
+        logger.error(f"Admin alert failed: {e}")
                     logger.info(f"Admin alert: {title}")
                 except Exception as e:
                     logger.error(f"Admin alert failed: {e}")
