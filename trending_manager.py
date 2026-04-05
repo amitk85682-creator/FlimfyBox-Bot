@@ -164,6 +164,8 @@ def setup_trending_db():
             logger.error("❌ Cannot connect to DB for trending setup")
             return False
         cur = conn.cursor()
+
+        # Create trending_history if not exists
         cur.execute("""
             CREATE TABLE IF NOT EXISTS trending_history (
                 tmdb_id INTEGER PRIMARY KEY,
@@ -175,6 +177,8 @@ def setup_trending_db():
                 posted_by TEXT DEFAULT NULL
             )
         """)
+
+        # Create trending_meta if not exists, otherwise add missing columns
         cur.execute("""
             CREATE TABLE IF NOT EXISTS trending_meta (
                 id INTEGER PRIMARY KEY,
@@ -183,13 +187,34 @@ def setup_trending_db():
                 lock_time TIMESTAMP DEFAULT NULL
             )
         """)
+
+        # Check and add missing columns (for existing tables)
         cur.execute("""
-            INSERT INTO trending_meta (id, last_check, locked_by, lock_time) 
-            VALUES (1, '2000-01-01', NULL, NULL) 
-            ON CONFLICT (id) DO NOTHING
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='trending_meta' AND column_name='locked_by'
         """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE trending_meta ADD COLUMN locked_by TEXT DEFAULT NULL")
+            logger.info("➕ Added column 'locked_by' to trending_meta")
+
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='trending_meta' AND column_name='lock_time'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE trending_meta ADD COLUMN lock_time TIMESTAMP DEFAULT NULL")
+            logger.info("➕ Added column 'lock_time' to trending_meta")
+
+        # Insert default row if not exists
+        cur.execute("SELECT 1 FROM trending_meta WHERE id = 1")
+        if not cur.fetchone():
+            cur.execute("INSERT INTO trending_meta (id, last_check) VALUES (1, '2000-01-01')")
+
         # Clean old entries (30 days)
         cur.execute("DELETE FROM trending_history WHERE alerted_at < NOW() - INTERVAL '30 days'")
+
         conn.commit()
         cur.close()
         close_db_connection(conn)
