@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1002555232489'))
 BOT_INSTANCE_ID = os.environ.get('BOT_INSTANCE_ID', socket.gethostname())
-ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', '0'))
+ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', '6946322342'))
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 if not DATABASE_URL:
