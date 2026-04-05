@@ -199,26 +199,29 @@ def build_premium_alert(item, extra):
     type_emoji = "🎬" if media_type == "movie" else "📺"
     type_label = "Movie" if media_type == "movie" else "TV Series"
     
-    if overview and len(overview) > 200: overview = overview[:197] + "..."
+    # Text escape for HTML (Taaki special chars crash na karein)
+    safe_title = str(title).replace('<', '&lt;').replace('>', '&gt;')
+    safe_overview = str(overview).replace('<', '&lt;').replace('>', '&gt;')
+    if len(safe_overview) > 200: safe_overview = safe_overview[:197] + "..."
 
     text = (
         f"┌─────────────────────────┐\n"
-        f"   🚨  **TRENDING ALERT** 🚨\n"
+        f"   🚨  <b>TRENDING ALERT</b> 🚨\n"
         f"└─────────────────────────┘\n\n"
-        f"{type_emoji} **{title}**\n\n"
-        f"┌ 📌 **Type:** `{type_label}`\n"
-        f"├ 📅 **Released:** `{release}`\n"
-        f"└ {stars}  **{vote_avg}/10**\n\n"
-        f"📝 **Synopsis:**\n_{overview}_\n"
+        f"{type_emoji} <b>{safe_title}</b>\n\n"
+        f"┌ 📌 <b>Type:</b> <code>{type_label}</code>\n"
+        f"├ 📅 <b>Released:</b> <code>{release}</code>\n"
+        f"└ {stars}  <b>{vote_avg}/10</b>\n\n"
+        f"📝 <b>Synopsis:</b>\n<i>{safe_overview}</i>\n"
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ _Yeh tere database mein nahi hai!_\n"
-        f"📥 _Add kar le before users search karein._"
+        f"⚠️ <i>Yeh tere database mein nahi hai!</i>\n"
+        f"📥 <i>Add kar le before users search karein.</i>"
     )
 
     buttons = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔗 View on TMDB", url=f"https://www.themoviedb.org/{media_type}/{tmdb_id}"),
-            InlineKeyboardButton("🔍 Search Google", url=f"https://www.google.com/search?q={title.replace(' ', '+')}+download")
+            InlineKeyboardButton("🔍 Search Google", url=f"https://www.google.com/search?q={safe_title.replace(' ', '+')}+download")
         ]
     ])
 
@@ -229,17 +232,17 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
     now = datetime.utcnow().strftime("%d %b %Y, %H:%M UTC")
     text = (
         f"┌─────────────────────────┐\n"
-        f"   📊  **TRENDING SUMMARY**\n"
+        f"   📊  <b>TRENDING SUMMARY</b>\n"
         f"└─────────────────────────┘\n\n"
-        f"🤖 **Bot:** `{BOT_INSTANCE_ID}`\n"
-        f"🕐 **Time:** `{now}`\n"
-        f"🔍 **Checked:** `{total_checked}` trending items\n"
-        f"🚀 **Auto-Posted:** `{skipped_in_db}`\n"
-        f"🔁 **Already Alerted:** `{skipped_already}`\n"
-        f"🆕 **New Alerts:** `{new_count}`\n\n"
+        f"🤖 <b>Bot:</b> <code>{BOT_INSTANCE_ID}</code>\n"
+        f"🕐 <b>Time:</b> <code>{now}</code>\n"
+        f"🔍 <b>Checked:</b> <code>{total_checked}</code> trending items\n"
+        f"🚀 <b>Auto-Posted:</b> <code>{skipped_in_db}</code>\n"
+        f"🔁 <b>Already Alerted:</b> <code>{skipped_already}</code>\n"
+        f"🆕 <b>New Alerts:</b> <code>{new_count}</code>\n\n"
     )
-    if new_count == 0: text += "💤 _Sab kuch covered hai._"
-    else: text += "🔥 _Naya content aaya hai!_"
+    if new_count == 0: text += "💤 <i>Sab kuch covered hai.</i>"
+    else: text += "🔥 <i>Naya content aaya hai!</i>"
     return text
 
 
@@ -310,6 +313,7 @@ async def check_and_alert_trending(app, admin_id):
             movie = cur.fetchone()
 
             # ✅ STEP 5: Post
+            post_success = False
             if movie:
                 try:
                     watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie[0]}"
@@ -322,23 +326,30 @@ async def check_and_alert_trending(app, admin_id):
                             chat_id=CHANNEL_ID, 
                             photo=image_url, 
                             caption=text, 
-                            parse_mode=ParseMode.MARKDOWN, 
+                            parse_mode='HTML', 
                             reply_markup=channel_buttons
                         )
                     else:
                         await app.bot.send_message(
                             chat_id=CHANNEL_ID, 
                             text=text, 
-                            parse_mode=ParseMode.MARKDOWN, 
+                            parse_mode='HTML', 
                             reply_markup=channel_buttons
                         )
                     
                     auto_posted += 1
                     skipped_in_db += 1
+                    post_success = True
                     logger.info(f"📤 Posted by {BOT_INSTANCE_ID}: {title}")
                     
                 except Exception as e:
                     logger.error(f"❌ Channel Post Failed: {e}")
+                    # Agar channel post fail ho, admin ko alert karo
+                    await app.bot.send_message(
+                        chat_id=admin_id,
+                        text=f"⚠️ <b>AUTO-POST FAILED!</b>\nMovie: <i>{title}</i>\nReason: <code>{e}</code>",
+                        parse_mode='HTML'
+                    )
             
             else:
                 try:
@@ -347,28 +358,35 @@ async def check_and_alert_trending(app, admin_id):
                             chat_id=admin_id, 
                             photo=image_url, 
                             caption=text, 
-                            parse_mode=ParseMode.MARKDOWN, 
+                            parse_mode='HTML', 
                             reply_markup=admin_buttons
                         )
                     else:
                         await app.bot.send_message(
                             chat_id=admin_id, 
                             text=text, 
-                            parse_mode=ParseMode.MARKDOWN, 
+                            parse_mode='HTML', 
                             reply_markup=admin_buttons
                         )
                     
                     new_alerts += 1
+                    post_success = True
                     logger.info(f"🚨 Admin alert by {BOT_INSTANCE_ID}: {title}")
                     
                 except Exception as e:
                     logger.error(f"❌ Admin Alert Failed: {e}")
+                    await app.bot.send_message(chat_id=admin_id, text=f"⚠️ Failed to send alert for: {title}")
+
+            # Agar dono me se koi bhi fail hua, toh DB se entry delete kar do taaki agli baar retry ho sake
+            if not post_success:
+                cur.execute("DELETE FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
+                conn.commit()
 
             await asyncio.sleep(3)
 
         # ✅ Summary
         summary = build_summary_message(new_alerts, total_checked, skipped_in_db, skipped_already)
-        await app.bot.send_message(chat_id=admin_id, text=summary, parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=admin_id, text=summary, parse_mode='HTML')  # Changed to HTML
 
     except Exception as e:
         logger.error(f"❌ Trending Error: {e}")
