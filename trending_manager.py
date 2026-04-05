@@ -469,10 +469,11 @@ async def trending_worker_loop(app, admin_id):
     time_since_last = get_time_since_last_check()
     if time_since_last < timedelta(hours=3):
         remaining = (timedelta(hours=3) - time_since_last).total_seconds()
+        next_check_time = datetime.utcnow() + timedelta(seconds=remaining)
     else:
         remaining = 0
 
-    next_check_time = datetime.utcnow() + timedelta(seconds=remaining)
+    next_check_time = datetime.utcnow() + timedelta(hours=3)
     try:
         import pytz
         ist = pytz.timezone('Asia/Kolkata')
