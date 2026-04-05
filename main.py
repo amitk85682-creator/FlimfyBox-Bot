@@ -960,7 +960,7 @@ async def _extract_web_series(text, original):
         s_match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', text)
         if s_match:
             extra_parts.append(s_match.group().upper())
-        e_match = re.search(r'(?i)(\[?e\d{1,2}[-_]\d{1,2}\]?|episodes?\s*\d+\s*[-_]\s*\d+)', text)
+        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,2}\s*[-~_]\s*\d{1,2}\]?)', text)
         if e_match:
             ep = re.sub(r'[\[\]]', '', e_match.group()).upper()
             extra_parts.append(ep)
@@ -4475,7 +4475,7 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     
     # 3. Detect Series (S01, S02, S01 [E01-E10], [E01-12], S01E01, Season 1)
     # 👇 FIX: Naya Regex ab akela 'S01' ya 'Season 2' bhi aasaani se pakad lega!
-    season_match = re.search(r'(s\d{1,2}\s*\[?e\d{1,2}[-~e\d]*\]?|\[?e\d{1,2}[-~]\d{1,2}\]?|s\d{1,2}e\d{1,2}|ep\s?\d+|s\d{1,2}\b|season\s?\d+\b)', name_lower)
+    season_match = re.search(r'(s\d{1,2}\s*\[?(?:e|ep)\s*\d{1,2}[-~e\d]*\]?|\[?(?:e|ep)\s*\d{1,2}[-~_]\d{1,2}\]?|ep\s*\d+[-~_]\d+|ep\s*\d+|s\d{1,2}e\d{1,2}|s\d{1,2}\b|season\s?\d+\b)', name_lower)
     
     if season_match:
         episode_tag = season_match.group(0).upper()
