@@ -365,73 +365,37 @@ async def check_and_alert_trending(app, admin_id):
             
             # Fetch extra details for message
             extra = fetch_extra_details(tmdb_id, media_type)
-            text, admin_buttons, image_url = build_premium_alert(item, extra)
+            image_url = f"https://image.tmdb.org/t/p/w780{item.get('backdrop_path')}" if item.get('backdrop_path') else None
             
             # Check if movie exists in main 'movies' table
             cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{title}%",))
             movie_row = cur.fetchone()
             
+            # ========== CORRECT INDENTATION STARTS HERE ==========
             if movie_row:
-    # Auto-post to channel (use clean channel message)
-    try:
-        channel_text = build_channel_post(item, extra)
-        watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_row[0]}"
-        channel_buttons = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📥 DOWNLOAD NOW", url=watch_link)
-        ]])
-
-        if image_url:
-            await app.bot.send_photo(
-                chat_id=CHANNEL_ID, 
-                photo=image_url, 
-                caption=channel_text, 
-                parse_mode='HTML', 
-                reply_markup=channel_buttons
-            )
-        else:
-            await app.bot.send_message(
-                chat_id=CHANNEL_ID, 
-                text=channel_text, 
-                parse_mode='HTML', 
-                reply_markup=channel_buttons
-            )
-        
-        auto_posted += 1
-        logger.info(f"Auto-posted to channel: {movie_row[0]}")
-    except Exception as e:
-        logger.error(f"Channel post failed: {e}")
-
-else:
-    # Admin alert (with warning lines)
-    try:
-        admin_text, admin_buttons, admin_image = build_admin_alert(item, extra)
-        
-        # Agar build_admin_alert se koi image nahi aayi toh default image_url use karega
-        final_admin_image = admin_image if admin_image else image_url
-
-        if final_admin_image:
-            await app.bot.send_photo(
-                chat_id=admin_id, 
-                photo=final_admin_image, 
-                caption=admin_text, 
-                parse_mode='HTML', 
-                reply_markup=admin_buttons
-            )
-        else:
-            await app.bot.send_message(
-                chat_id=admin_id, 
-                text=admin_text, 
-                parse_mode='HTML', 
-                reply_markup=admin_buttons
-            )
-        
-        new_alerts += 1
-        logger.info("Admin alert sent for missing movie.")
-    except Exception as e:
-        logger.error(f"Admin alert failed: {e}")
-                    logger.info(f"Admin alert: {title}")
-                except Exception as e:
-                    logger.error(f"Admin alert failed: {e}")
+                # Auto-post to channel (use clean channel message)
+                channel_text = build_channel_post(item, extra)
+                watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_row[0]}"
+                channel_buttons = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📥 DOWNLOAD NOW", url=watch_link)
+                ]])
+                if image_url:
+                    await app.bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
+                else:
+                    await app.bot.send_message(chat_id=CHANNEL_ID, text=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
+                auto_posted += 1
+                skipped_in_db += 1
+                logger.info(f"Auto-posted: {title}")
+            else:
+                # Admin alert (with warning lines)
+                admin_text, admin_buttons, admin_image = build_admin_alert(item, extra)
+                if admin_image:
+                    await app.bot.send_photo(chat_id=admin_id, photo=admin_image, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
+                else:
+                    await app.bot.send_message(chat_id=admin_id, text=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
+                new_alerts += 1
+                logger.info(f"Admin alert: {title}")
+            # ========== CORRECT INDENTATION ENDS HERE ==========
             
             await asyncio.sleep(3)
         
