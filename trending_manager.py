@@ -3,10 +3,13 @@ import logging
 import os
 import socket
 from datetime import datetime, timedelta
-import pytz
+from io import BytesIO
 
+import aiohttp
+import pytz
 import requests
 import psycopg2
+from PIL import Image, ImageFilter
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # -------------------------------------------------------------
@@ -47,6 +50,76 @@ def close_db_connection(conn):
             pass
 
 # -------------------------------------------------------------
+# IMAGE PROCESSING (Cinematic Landscape Poster)
+# -------------------------------------------------------------
+async def make_landscape_poster(url_or_bytes):
+    """
+    Portrait poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
+    Heavily Blurred background aur Center me Sharp image.
+    """
+    try:
+        image_data = None
+        if isinstance(url_or_bytes, str) and url_or_bytes.startswith('http'):
+            async with aiohttp.ClientSession() as session:
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                async with session.get(url_or_bytes, headers=headers) as resp:
+                    if resp.status == 200:
+                        image_data = await resp.read()
+        elif isinstance(url_or_bytes, bytes):
+            image_data = url_or_bytes
+        elif hasattr(url_or_bytes, 'getvalue'):
+            image_data = url_or_bytes.getvalue()
+
+        if not image_data:
+            return url_or_bytes
+
+        # ---------------- IMAGE MAGIC (MOBILE FRIENDLY) ----------------
+        img = Image.open(BytesIO(image_data)).convert("RGB")
+
+        # TARGET SIZE: Square format (Phone aur Desktop dono pe best lagta hai)
+        target_w, target_h = 800, 800
+
+        # 1. Background Blur (Zoomed in and heavily blurred)
+        bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
+        if bg_img.height > target_h:
+            top = (bg_img.height - target_h) // 2
+            bg_img = bg_img.crop((0, top, target_w, top + target_h))
+        else:
+            bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=40))
+
+        # 2. Foreground Paste (Portrait poster ko centre me chhota karke lagana)
+        fg_h = int(target_h * 0.95)
+        fg_w = int(img.width * (fg_h / img.height))
+        fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
+
+        paste_x = (target_w - fg_w) // 2
+        paste_y = (target_h - fg_h) // 2
+        bg_img.paste(fg_img, (paste_x, paste_y))
+
+        # 3. Output as Bytes
+        output = BytesIO()
+        output.name = "cinematic_poster.jpg"
+        bg_img.save(output, format='JPEG', quality=95)
+        output.seek(0)
+        return output
+
+    except Exception as e:
+        logger.error(f"❌ Cinematic Conversion Error: {e}")
+        return url_or_bytes
+
+async def download_and_process_poster(url):
+    """Download image from URL and apply cinematic effect"""
+    if not url or url == 'N/A':
+        return None
+    try:
+        return await make_landscape_poster(url)
+    except Exception as e:
+        logger.error(f"Poster processing failed: {e}")
+        return None
+
+# -------------------------------------------------------------
 # TMDB API
 # -------------------------------------------------------------
 def fetch_trending(time_window="day"):
@@ -69,7 +142,7 @@ def fetch_extra_details(tmdb_id, media_type):
         return {}
 
 # -------------------------------------------------------------
-# NEW MESSAGE FORMAT (as requested)
+# MESSAGE BUILDERS (unchanged from original)
 # -------------------------------------------------------------
 def build_channel_post(item, extra):
     """Clean message for channel auto-post (no warning lines)"""
@@ -77,26 +150,25 @@ def build_channel_post(item, extra):
     media_type = item.get('media_type', 'movie')
     vote_avg = item.get('vote_average', 0)
     release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
-    
+
     # Genre
     genre_ids = extra.get('genres', [])
     genre_names = [g['name'] for g in genre_ids if 'name' in g]
     genre_str = " | ".join(genre_names) if genre_names else "Unknown"
-    
+
     # Cast (top 3)
     cast_list = []
     credits = extra.get('credits', {})
     for cast in credits.get('cast', [])[:3]:
         cast_list.append(cast.get('name', ''))
     cast_str = ", ".join(cast_list) if cast_list else "Not available"
-    
-    # Language & Quality (placeholders, can be customized)
+
+    # Language & Quality (placeholders)
     lang = "Hindi + English (Dual Audio)"
     dynamic_res = "1080p | 720p | 480p"
-    
+
     safe_title = str(title).replace('<', '&lt;').replace('>', '&gt;')
-    
-    # Your custom format (without warning lines)
+
     text = (
         f"🎬 <b>{safe_title}</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
@@ -120,27 +192,27 @@ def build_admin_alert(item, extra):
     overview = item.get('overview', '')
     vote_avg = item.get('vote_average', 0)
     release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
-    
+
     # Genre
     genre_ids = extra.get('genres', [])
     genre_names = [g['name'] for g in genre_ids if 'name' in g]
     genre_str = " | ".join(genre_names) if genre_names else "Unknown"
-    
+
     # Cast
     cast_list = []
     credits = extra.get('credits', {})
     for cast in credits.get('cast', [])[:3]:
         cast_list.append(cast.get('name', ''))
     cast_str = ", ".join(cast_list) if cast_list else "Not available"
-    
+
     lang = "Hindi + English (Dual Audio)"
     dynamic_res = "1080p | 720p | 480p"
-    
+
     safe_title = str(title).replace('<', '&lt;').replace('>', '&gt;')
     safe_overview = str(overview).replace('<', '&lt;').replace('>', '&gt;')
     if len(safe_overview) > 200:
         safe_overview = safe_overview[:197] + "..."
-    
+
     text = (
         f"🎬 <b>{safe_title}</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
@@ -157,14 +229,14 @@ def build_admin_alert(item, extra):
         f"⚠️ <i>Yeh movie database mein nahi hai!</i>\n"
         f"📥 <i>Add kar le before users search karein.</i>"
     )
-    
+
     admin_buttons = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔗 View on TMDB", url=f"https://www.themoviedb.org/{media_type}/{tmdb_id}"),
             InlineKeyboardButton("🔍 Search Google", url=f"https://www.google.com/search?q={safe_title.replace(' ', '+')}+download")
         ]
     ])
-    
+
     image_url = f"https://image.tmdb.org/t/p/w780{item.get('backdrop_path')}" if item.get('backdrop_path') else None
     return text, admin_buttons, image_url
 
@@ -196,7 +268,7 @@ def setup_trending_db():
         if not conn:
             return False
         cur = conn.cursor()
-        
+
         cur.execute("""
             CREATE TABLE IF NOT EXISTS trending_history (
                 tmdb_id INTEGER PRIMARY KEY,
@@ -216,24 +288,24 @@ def setup_trending_db():
                 lock_time TIMESTAMP DEFAULT NULL
             )
         """)
-        
+
         # Add missing columns if any
         for col in ['posted_by']:
             cur.execute(f"""
-                SELECT column_name FROM information_schema.columns 
+                SELECT column_name FROM information_schema.columns
                 WHERE table_name='trending_history' AND column_name='{col}'
             """)
             if not cur.fetchone():
                 cur.execute(f"ALTER TABLE trending_history ADD COLUMN {col} TEXT DEFAULT NULL")
-        
+
         for col in ['locked_by', 'lock_time']:
             cur.execute(f"""
-                SELECT column_name FROM information_schema.columns 
+                SELECT column_name FROM information_schema.columns
                 WHERE table_name='trending_meta' AND column_name='{col}'
             """)
             if not cur.fetchone():
                 cur.execute(f"ALTER TABLE trending_meta ADD COLUMN {col} TEXT DEFAULT NULL")
-        
+
         cur.execute("INSERT INTO trending_meta (id, last_check) VALUES (1, '2000-01-01') ON CONFLICT (id) DO NOTHING")
         conn.commit()
         cur.close()
@@ -311,46 +383,46 @@ def release_lock():
         logger.error(f"release_lock error: {e}")
 
 # -------------------------------------------------------------
-# MAIN TRENDING CHECK
+# MAIN TRENDING CHECK (with image processing)
 # -------------------------------------------------------------
 async def check_and_alert_trending(app, admin_id):
     if not acquire_lock():
         return 0
-    
+
     logger.info(f"🔍 Checking trending...")
     new_alerts = 0
     auto_posted = 0
     skipped_already = 0
     skipped_in_db = 0
-    
+
     conn = None
     try:
         items = fetch_trending("day")
         if not items:
             release_lock()
             return 0
-        
+
         conn = get_db_connection()
         if not conn:
             release_lock()
             return 0
-        
+
         cur = conn.cursor()
         total = len(items)
-        
+
         for item in items:
             tmdb_id = int(item.get('id', 0))
             title = item.get('title') or item.get('name')
             media_type = item.get('media_type', 'movie')
             if not title or not tmdb_id:
                 continue
-            
+
             # Check if already alerted
             cur.execute("SELECT tmdb_id FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
             if cur.fetchone():
                 skipped_already += 1
                 continue
-            
+
             # Insert into history
             try:
                 cur.execute("""
@@ -362,16 +434,26 @@ async def check_and_alert_trending(app, admin_id):
                 logger.error(f"Insert error: {e}")
                 conn.rollback()
                 continue
-            
+
             # Fetch extra details for message
             extra = fetch_extra_details(tmdb_id, media_type)
-            image_url = f"https://image.tmdb.org/t/p/w780{item.get('backdrop_path')}" if item.get('backdrop_path') else None
-            
+
+            # Get image URL (prefer backdrop, fallback poster)
+            image_url = None
+            if item.get('backdrop_path'):
+                image_url = f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
+            elif item.get('poster_path'):
+                image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
+
+            # Process image for cinematic effect
+            processed_image = None
+            if image_url:
+                processed_image = await download_and_process_poster(image_url)
+
             # Check if movie exists in main 'movies' table
             cur.execute("SELECT id FROM movies WHERE title ILIKE %s LIMIT 1", (f"%{title}%",))
             movie_row = cur.fetchone()
-            
-            # ========== CORRECT INDENTATION STARTS HERE ==========
+
             if movie_row:
                 # Auto-post to channel (use clean channel message)
                 channel_text = build_channel_post(item, extra)
@@ -379,8 +461,8 @@ async def check_and_alert_trending(app, admin_id):
                 channel_buttons = InlineKeyboardMarkup([[
                     InlineKeyboardButton("📥 DOWNLOAD NOW", url=watch_link)
                 ]])
-                if image_url:
-                    await app.bot.send_photo(chat_id=CHANNEL_ID, photo=image_url, caption=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
+                if processed_image:
+                    await app.bot.send_photo(chat_id=CHANNEL_ID, photo=processed_image, caption=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
                 else:
                     await app.bot.send_message(chat_id=CHANNEL_ID, text=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
                 auto_posted += 1
@@ -388,24 +470,26 @@ async def check_and_alert_trending(app, admin_id):
                 logger.info(f"Auto-posted: {title}")
             else:
                 # Admin alert (with warning lines)
-                admin_text, admin_buttons, admin_image = build_admin_alert(item, extra)
-                if admin_image:
-                    await app.bot.send_photo(chat_id=admin_id, photo=admin_image, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
+                admin_text, admin_buttons, admin_image_url = build_admin_alert(item, extra)
+                if processed_image:
+                    await app.bot.send_photo(chat_id=admin_id, photo=processed_image, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
+                elif admin_image_url:
+                    # Fallback to original URL if processing failed
+                    await app.bot.send_photo(chat_id=admin_id, photo=admin_image_url, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
                 else:
                     await app.bot.send_message(chat_id=admin_id, text=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
                 new_alerts += 1
                 logger.info(f"Admin alert: {title}")
-            # ========== CORRECT INDENTATION ENDS HERE ==========
-            
+
             await asyncio.sleep(3)
-        
+
         # Summary
         summary = build_summary_message(new_alerts, total, skipped_in_db, skipped_already)
         try:
             await app.bot.send_message(chat_id=admin_id, text=summary, parse_mode='HTML')
         except Exception as e:
             logger.error(f"Summary send failed: {e}")
-        
+
         cur.close()
         update_last_check()
     except Exception as e:
@@ -414,7 +498,7 @@ async def check_and_alert_trending(app, admin_id):
         if conn:
             close_db_connection(conn)
         release_lock()
-    
+
     return new_alerts
 
 # -------------------------------------------------------------
@@ -440,13 +524,13 @@ async def trending_worker_loop(app, admin_id):
     if not setup_trending_db():
         logger.error("DB setup failed, worker stopping")
         return
-    
+
     # Send startup message with next run time
     next_run_utc = get_next_run_time_ist()
     tz = pytz.timezone('Asia/Kolkata')
     next_ist = next_run_utc.astimezone(tz)
     time_str = next_ist.strftime("%I:%M %p IST")
-    
+
     startup_msg = (
         f"🚀 <b>TRENDING MONITOR ON</b>\n\n"
         f"🕒 Fixed Schedule: 00:00, 06:00, 12:00, 18:00 IST\n"
@@ -458,7 +542,7 @@ async def trending_worker_loop(app, admin_id):
         logger.info(f"Startup message sent to {admin_id}")
     except Exception as e:
         logger.error(f"Failed to send startup: {e}")
-    
+
     # Main loop
     while True:
         now_utc = datetime.utcnow().replace(tzinfo=pytz.UTC)
@@ -466,12 +550,10 @@ async def trending_worker_loop(app, admin_id):
         sleep_seconds = (next_run_utc - now_utc).total_seconds()
         if sleep_seconds < 0:
             sleep_seconds = 0
-        
+
         logger.info(f"Sleeping for {sleep_seconds/3600:.2f} hours until next scheduled time")
         await asyncio.sleep(sleep_seconds)
-        
+
         # Run check
         logger.info("🔍 Running scheduled trending check...")
         await check_and_alert_trending(app, admin_id)
-        
-        # After run, loop will recalculate next run
