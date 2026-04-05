@@ -414,8 +414,49 @@ async def trending_worker_loop(app, admin_id):
     # ✅ Random stagger to avoid simultaneous starts
     await asyncio.sleep(hash(BOT_INSTANCE_ID) % 60)
 
+    # 👇 NAYA STARTUP MESSAGE LOGIC 👇
+    try:
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+    except ImportError:
+        ist = None
+
+    time_since_last = get_time_since_last_check()
+    if time_since_last < timedelta(hours=3):
+        remaining = (timedelta(hours=3) - time_since_last).total_seconds()
+    else:
+        remaining = 0
+        
+    next_check_time = datetime.utcnow() + timedelta(seconds=remaining)
+    
+    if remaining == 0:
+        time_str = "Abhi turant (Checking now...)"
+    else:
+        if ist:
+            next_check_ist = next_check_time.replace(tzinfo=pytz.utc).astimezone(ist)
+            time_str = next_check_ist.strftime("%I:%M %p (IST)")
+        else:
+            time_str = next_check_time.strftime("%H:%M UTC")
+
+    startup_msg = (
+        f"┌─────────────────────────┐\n"
+        f"   🚀  <b>TRENDING MONITOR ON</b>\n"
+        f"└─────────────────────────┘\n\n"
+        f"🔄 Har 3 Ghante mein check hoga\n"
+        f"🎬 Nayi trending movie → Alert + Auto-Post\n\n"
+        f"⏱️ <b>Next Check:</b> <code>{time_str}</code>\n\n"
+        f"💤 Main kaam kar raha hoon. Tu chill kar."
+    )
+    
+    try:
+        await app.bot.send_message(chat_id=admin_id, text=startup_msg, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Failed to send trending startup msg: {e}")
+    # 👆 YAHAN TAK NAYA CODE HAI 👆
+
     while True:
         try:
+            # Har loop cycle mein naya time check hoga
             time_since_last = get_time_since_last_check()
             if time_since_last < timedelta(hours=3):
                 remaining = (timedelta(hours=3) - time_since_last).total_seconds()
