@@ -408,13 +408,13 @@ async def check_and_alert_trending(app, admin_id):
 #  ♻️ BACKGROUND WORKER
 # ═══════════════════════════════════════════════
 async def trending_worker_loop(app, admin_id):
+    print("🛠️ TRENDING WORKER STARTED! Checking DB...") # Log for Render
     db_ok = setup_trending_db()
-    if not db_ok: return
+    if not db_ok: 
+        print("❌ TRENDING DB SETUP FAILED. Worker stopping.")
+        return
 
-    # ✅ Random stagger to avoid simultaneous starts
-    await asyncio.sleep(hash(BOT_INSTANCE_ID) % 60)
-
-    # 👇 NAYA STARTUP MESSAGE LOGIC 👇
+    # 👇 STARTUP MESSAGE SABSE PEHLE BHEJO (Bina kisi sleep ke) 👇
     try:
         import pytz
         ist = pytz.timezone('Asia/Kolkata')
@@ -449,10 +449,15 @@ async def trending_worker_loop(app, admin_id):
     )
     
     try:
+        print("📤 Sending Startup Message to Telegram...")
         await app.bot.send_message(chat_id=admin_id, text=startup_msg, parse_mode='HTML')
+        print("✅ Startup Message Delivered!")
     except Exception as e:
+        print(f"❌ Failed to send trending startup msg: {e}")
         logger.error(f"Failed to send trending startup msg: {e}")
-    # 👆 YAHAN TAK NAYA CODE HAI 👆
+
+    # ✅ Message bhejne ke baad sleep hone do (Multi-bot crash se bachne ke liye)
+    await asyncio.sleep(hash(BOT_INSTANCE_ID) % 60)
 
     while True:
         try:
@@ -460,13 +465,16 @@ async def trending_worker_loop(app, admin_id):
             time_since_last = get_time_since_last_check()
             if time_since_last < timedelta(hours=3):
                 remaining = (timedelta(hours=3) - time_since_last).total_seconds()
+                print(f"⏳ Waiting {int(remaining)} seconds before next trending check...")
                 await asyncio.sleep(remaining)
             
+            print("🔍 Running check_and_alert_trending...")
             new_count = await check_and_alert_trending(app, admin_id)
 
             wait_hours = 2 if new_count >= 5 else 3
             await asyncio.sleep(wait_hours * 3600)
 
         except Exception as e:
+            print(f"❌ Worker loop error: {e}")
             logger.error(f"❌ Worker loop error: {e}")
             await asyncio.sleep(3600)
