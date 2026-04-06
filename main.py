@@ -2626,54 +2626,53 @@ def get_all_movie_qualities(movie_id):
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
-def create_quality_selection_keyboard(movie_id, title, qualities, page=0, season=None):
-    limit = 6 
-    start_idx = page * limit
-    end_idx = start_idx + limit
-    
-    current_qualities = qualities[start_idx:end_idx]
+def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1):
+    """Naya UI Video jaisa: Send All, Filters aur Pagination"""
     keyboard = []
-
-    keyboard.append([InlineKeyboardButton("🚀 SEND ALL FILES", callback_data=f"sendall_{movie_id}")])
-
-    row = []
-    # 👇 NAYA BULLETPROOF CODE 👇
-    for file_data in current_qualities:
-        quality = file_data[0]
-        file_id = file_data[2]
-        
-        extra_info = file_data[5] if len(file_data) > 5 else ""
-        
-        callback_data = f"quality_{movie_id}_{quality}"
-        icon = "📁" if file_id else "🔗"
-        
-        ep_tag = f"[{extra_info}] " if extra_info else ""
-        button_text = f"{icon} {ep_tag}{quality}"
-        
-        row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
-
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-
-    if row:
-        keyboard.append(row)
-
-    nav_buttons = []
     
-    # 👇 FIX: Ab hum 'season' ko bhi yaad rakhenge taaki Next/Back par bot reset na ho!
-    if page > 0:
-        cb_data = f"qualpage_{movie_id}_{page-1}" + (f"_{season}" if season else "")
-        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data=cb_data))
-    
-    if end_idx < len(qualities):
-        cb_data = f"qualpage_{movie_id}_{page+1}" + (f"_{season}" if season else "")
-        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=cb_data))
-
-    if nav_buttons:
+    if view == "main":
+        # Upar Send All ka button
+        keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
+        
+        # Beech mein 3 filter buttons
+        keyboard.append([
+            InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
+            InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
+            InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
+        ])
+        
+        # Neeche Pagination
+        nav_buttons = []
+        nav_buttons.append(InlineKeyboardButton("PAGE", callback_data="ignore"))
+        nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="ignore"))
+        
+        # Next Button (abhi basic next page handle karega)
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data=f"page_{page+1}"))
+        else:
+            nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
+            
         keyboard.append(nav_buttons)
 
-    keyboard.append([InlineKeyboardButton("❌ Cancel Selection", callback_data="cancel_selection")])
+    elif view == "language":
+        # Language Options
+        keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data="ignore"), InlineKeyboardButton("TAMIL", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("ENGLISH", callback_data="ignore"), InlineKeyboardButton("HINDI", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("TELUGU", callback_data="ignore"), InlineKeyboardButton("KANNADA", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+
+    elif view == "quality":
+        # Quality Options
+        keyboard.append([InlineKeyboardButton("360P", callback_data="ignore"), InlineKeyboardButton("480P", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("720P", callback_data="ignore"), InlineKeyboardButton("1080P", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+
+    elif view == "season":
+        # Season Options
+        keyboard.append([InlineKeyboardButton("SEASON 01", callback_data="ignore"), InlineKeyboardButton("SEASON 02", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("SEASON 03", callback_data="ignore"), InlineKeyboardButton("SEASON 04", callback_data="ignore")])
+        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== HELPER FUNCTION ====================
@@ -2742,8 +2741,23 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
             
-            selection_text = f"✅ We found **{title}** in multiple qualities.\n\n⬇️ **Please choose the file quality:**"
-            keyboard = create_quality_selection_keyboard(movie_id, title, all_qualities)
+            # Video jaisa Text List format banana
+            file_list_text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            
+            # Har file ko list mein add karna (Max 10 ek page par)
+            for idx, file_data in enumerate(all_qualities[:10], start=1):
+                quality = file_data[0]
+                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                
+                # Agar extra info (season/episode) hai toh add karo
+                ep_tag = f"{extra_info} " if extra_info else ""
+                file_list_text += f"**{idx}.** [{file_size}] {title} {ep_tag}{quality} mkv\n\n"
+
+            selection_text = file_list_text
+            
+            # Naya UI function call karna
+            keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=2)
             
             msg = await context.bot.send_message(chat_id=chat_id, text=selection_text, reply_markup=keyboard, parse_mode='Markdown')
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
@@ -4247,6 +4261,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
         # ==================== ADMIN ACTIONS ====================
+        
+        # ==================== NAYA UI VIEWS (Video Jaisa) ====================
+        elif query.data.startswith("v_"):
+            parts = query.data.split('_')
+            view_type = parts[1] # main, lang, qual, seas
+            movie_id = int(parts[2])
+            
+            # Naya keyboard generate karo view ke hisaab se
+            if view_type == "main":
+                keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=2)
+            elif view_type == "lang":
+                keyboard = create_quality_selection_keyboard(movie_id, view="language")
+            elif view_type == "qual":
+                keyboard = create_quality_selection_keyboard(movie_id, view="quality")
+            elif view_type == "seas":
+                keyboard = create_quality_selection_keyboard(movie_id, view="season")
+                
+            await query.edit_message_reply_markup(reply_markup=keyboard)
+            return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
         elif query.data.startswith("qualpage_"):
