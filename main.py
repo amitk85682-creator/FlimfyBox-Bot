@@ -4143,23 +4143,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'qualities': qualities
             }
 
-            # 🚀 NAYA LOGIC: Agar Web Series hai, toh pehle Seasons dikhao!
-            if category and "Series" in category:
-                seasons_set = set()
-                for file_data in qualities:
-                    extra_info = file_data[5] if len(file_data) > 5 else ""
-                    s_name = extract_season_name(extra_info)
-                    seasons_set.add(s_name)
-                
-                # Agar ek se zyada categories/seasons milein, toh Season Menu dikhao
-                if len(seasons_set) > 0:
+            # 🚀 NAYA LOGIC: Agar Series/Anime hai, YA ek hi movie me Season+Movie dono upload hue hain!
+            seasons_set = set()
+            for file_data in qualities:
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                s_name = extract_season_name(extra_info)
+                seasons_set.add(s_name)
+
+            # Agar category Series/Anime hai, ya humein "Extra Files" (Movie) aur "Season 2" dono mile hain
+            is_series = category and ("Series" in category or "Anime" in category)
+            has_multiple_groups = len(seasons_set) > 1
+
+            if is_series or has_multiple_groups:
+                # Agar sirf "Extra Files" hi hai (Yani proper single movie), toh menu mat dikhao
+                if len(seasons_set) > 0 and not (len(seasons_set) == 1 and "Extra Files" in seasons_set):
                     sorted_seasons = sorted(list(seasons_set))
                     season_keyboard = []
                     
                     # 2 Buttons per row
                     row = []
                     for s_name in sorted_seasons:
-                        row.append(InlineKeyboardButton(f"📁 {s_name}", callback_data=f"showseason_{movie_id}_{s_name}"))
+                        # Extra Files ko "Movie" likh dete hain taaki user ko saaf samajh aaye
+                        display_name = "🎬 Movie" if s_name == "Extra Files" else f"📁 {s_name}"
+                        row.append(InlineKeyboardButton(display_name, callback_data=f"showseason_{movie_id}_{s_name}"))
+                        
                         if len(row) == 2:
                             season_keyboard.append(row)
                             row = []
@@ -4169,7 +4176,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     season_keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
                     
                     await query.edit_message_text(
-                        f"📺 **{title}**\n\n👇 **Select Season:**",
+                        f"📺 **{title}**\n\n👇 **Select Option:**",
                         reply_markup=InlineKeyboardMarkup(season_keyboard),
                         parse_mode='Markdown'
                     )
