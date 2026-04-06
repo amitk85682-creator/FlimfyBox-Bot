@@ -50,12 +50,13 @@ def close_db_connection(conn):
             pass
 
 # -------------------------------------------------------------
-# IMAGE PROCESSING (Cinematic Landscape Poster)
+# IMAGE PROCESSING (Cinematic Square Poster) – SAME AS main.py
 # -------------------------------------------------------------
 async def make_landscape_poster(url_or_bytes):
     """
-    Portrait poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
-    Heavily Blurred background aur Center me Sharp image.
+    Portrait (vertical) poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
+    Heavily Blurred background aur center me sharp image.
+    Exactly the same function as used in main.py.
     """
     try:
         image_data = None
@@ -73,23 +74,20 @@ async def make_landscape_poster(url_or_bytes):
         if not image_data:
             return url_or_bytes
 
-        # ---------------- IMAGE MAGIC (MOBILE FRIENDLY) ----------------
         img = Image.open(BytesIO(image_data)).convert("RGB")
 
-        # TARGET SIZE: Square format (Phone aur Desktop dono pe best lagta hai)
-        target_w, target_h = 800, 800
+        target_w, target_h = 800, 800   # Square format
 
-        # 1. Background Blur (Zoomed in and heavily blurred)
+        # 1. Blurred background (zoomed and heavy blur)
         bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
         if bg_img.height > target_h:
             top = (bg_img.height - target_h) // 2
             bg_img = bg_img.crop((0, top, target_w, top + target_h))
         else:
             bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
         bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=40))
 
-        # 2. Foreground Paste (Portrait poster ko centre me chhota karke lagana)
+        # 2. Foreground (original poster) centred and slightly smaller
         fg_h = int(target_h * 0.95)
         fg_w = int(img.width * (fg_h / img.height))
         fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
@@ -98,7 +96,7 @@ async def make_landscape_poster(url_or_bytes):
         paste_y = (target_h - fg_h) // 2
         bg_img.paste(fg_img, (paste_x, paste_y))
 
-        # 3. Output as Bytes
+        # 3. Output as bytes
         output = BytesIO()
         output.name = "cinematic_poster.jpg"
         bg_img.save(output, format='JPEG', quality=95)
@@ -110,7 +108,7 @@ async def make_landscape_poster(url_or_bytes):
         return url_or_bytes
 
 async def download_and_process_poster(url):
-    """Download image from URL and apply cinematic effect"""
+    """Download image from URL and apply cinematic effect (vertical poster preferred)"""
     if not url or url == 'N/A':
         return None
     try:
@@ -142,28 +140,18 @@ def fetch_extra_details(tmdb_id, media_type):
         return {}
 
 # -------------------------------------------------------------
-# MESSAGE BUILDERS (unchanged from original)
+# MESSAGE BUILDERS (unchanged from your original)
 # -------------------------------------------------------------
 def build_channel_post(item, extra):
     """Clean message for channel auto-post (no warning lines)"""
     title = item.get('title') or item.get('name') or "Unknown"
-    media_type = item.get('media_type', 'movie')
     vote_avg = item.get('vote_average', 0)
     release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
 
-    # Genre
     genre_ids = extra.get('genres', [])
     genre_names = [g['name'] for g in genre_ids if 'name' in g]
     genre_str = " | ".join(genre_names) if genre_names else "Unknown"
 
-    # Cast (top 3)
-    cast_list = []
-    credits = extra.get('credits', {})
-    for cast in credits.get('cast', [])[:3]:
-        cast_list.append(cast.get('name', ''))
-    cast_str = ", ".join(cast_list) if cast_list else "Not available"
-
-    # Language & Quality (placeholders)
     lang = "Hindi + English (Dual Audio)"
     dynamic_res = "1080p | 720p | 480p"
 
@@ -193,17 +181,9 @@ def build_admin_alert(item, extra):
     vote_avg = item.get('vote_average', 0)
     release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
 
-    # Genre
     genre_ids = extra.get('genres', [])
     genre_names = [g['name'] for g in genre_ids if 'name' in g]
     genre_str = " | ".join(genre_names) if genre_names else "Unknown"
-
-    # Cast
-    cast_list = []
-    credits = extra.get('credits', {})
-    for cast in credits.get('cast', [])[:3]:
-        cast_list.append(cast.get('name', ''))
-    cast_str = ", ".join(cast_list) if cast_list else "Not available"
 
     lang = "Hindi + English (Dual Audio)"
     dynamic_res = "1080p | 720p | 480p"
@@ -258,7 +238,7 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
     return text
 
 # -------------------------------------------------------------
-# DATABASE SETUP (with missing columns)
+# DATABASE SETUP (same as before)
 # -------------------------------------------------------------
 def setup_trending_db():
     if not DATABASE_URL:
@@ -289,7 +269,6 @@ def setup_trending_db():
             )
         """)
 
-        # Add missing columns if any
         for col in ['posted_by']:
             cur.execute(f"""
                 SELECT column_name FROM information_schema.columns
@@ -383,7 +362,7 @@ def release_lock():
         logger.error(f"release_lock error: {e}")
 
 # -------------------------------------------------------------
-# MAIN TRENDING CHECK (with image processing)
+# MAIN TRENDING CHECK (with cinematic square poster & 4 buttons)
 # -------------------------------------------------------------
 async def check_and_alert_trending(app, admin_id):
     if not acquire_lock():
@@ -438,14 +417,13 @@ async def check_and_alert_trending(app, admin_id):
             # Fetch extra details for message
             extra = fetch_extra_details(tmdb_id, media_type)
 
-            # Get image URL (prefer backdrop, fallback poster)
+            # Use VERTICAL poster (portrait) for cinematic effect
             image_url = None
-            if item.get('backdrop_path'):
-                image_url = f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
-            elif item.get('poster_path'):
+            if item.get('poster_path'):
                 image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
+            elif item.get('backdrop_path'):
+                image_url = f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
 
-            # Process image for cinematic effect
             processed_image = None
             if image_url:
                 processed_image = await download_and_process_poster(image_url)
@@ -455,12 +433,18 @@ async def check_and_alert_trending(app, admin_id):
             movie_row = cur.fetchone()
 
             if movie_row:
-                # Auto-post to channel (use clean channel message)
+                # Auto-post to channel (clean channel message)
                 channel_text = build_channel_post(item, extra)
                 watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_row[0]}"
-                channel_buttons = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📥 DOWNLOAD NOW", url=watch_link)
-                ]])
+
+                # --- 4‑BUTTON LAYOUT (exactly as in main.py) ---
+                channel_buttons = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Download Now", url=watch_link),
+                     InlineKeyboardButton("Download Now", url=watch_link)],
+                    [InlineKeyboardButton("⚡ Download Now", url=watch_link)],
+                    [InlineKeyboardButton("📢 Join Channel", url=os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/FlimfyBox'))]
+                ])
+
                 if processed_image:
                     await app.bot.send_photo(chat_id=CHANNEL_ID, photo=processed_image, caption=channel_text, parse_mode='HTML', reply_markup=channel_buttons)
                 else:
@@ -474,7 +458,6 @@ async def check_and_alert_trending(app, admin_id):
                 if processed_image:
                     await app.bot.send_photo(chat_id=admin_id, photo=processed_image, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
                 elif admin_image_url:
-                    # Fallback to original URL if processing failed
                     await app.bot.send_photo(chat_id=admin_id, photo=admin_image_url, caption=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
                 else:
                     await app.bot.send_message(chat_id=admin_id, text=admin_text, parse_mode='HTML', reply_markup=admin_buttons)
@@ -502,12 +485,9 @@ async def check_and_alert_trending(app, admin_id):
     return new_alerts
 
 # -------------------------------------------------------------
-# SCHEDULER: Fixed IST times (e.g., 00:00, 06:00, 12:00, 18:00)
+# SCHEDULER: Fixed IST times (00:00, 06:00, 12:00, 18:00)
 # -------------------------------------------------------------
 def get_next_run_time_ist(hours=[0, 6, 12, 18]):
-    """
-    Returns next datetime (in UTC) when we should run, based on IST hours.
-    """
     tz = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(tz)
     candidates = []
@@ -525,7 +505,7 @@ async def trending_worker_loop(app, admin_id):
         logger.error("DB setup failed, worker stopping")
         return
 
-    # Send startup message with next run time
+    # Send startup message
     next_run_utc = get_next_run_time_ist()
     tz = pytz.timezone('Asia/Kolkata')
     next_ist = next_run_utc.astimezone(tz)
@@ -554,6 +534,5 @@ async def trending_worker_loop(app, admin_id):
         logger.info(f"Sleeping for {sleep_seconds/3600:.2f} hours until next scheduled time")
         await asyncio.sleep(sleep_seconds)
 
-        # Run check
         logger.info("🔍 Running scheduled trending check...")
         await check_and_alert_trending(app, admin_id)
