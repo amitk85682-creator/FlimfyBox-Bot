@@ -775,7 +775,7 @@ async def fallback_extraction(caption_text):
         text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
         
         # 2. Detect if it's a web series (contains season/episode indicators)
-        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,2}|\[E\d{1,2}-\d{1,2}\])\b', re.IGNORECASE)
+        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}[-~_]\d{1,3}\]?|EP\s*\d{1,3}(?:[-~_]\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
         season_match = season_pattern.search(text)
         if season_match:
             # Use existing web series logic (kept from original)
@@ -899,11 +899,13 @@ async def _extract_web_series(text, original):
         # 1. Remove language indicators line if present
         text = re.sub(r'🔊.*?(?:\n|$)', '', text, flags=re.DOTALL)
 
-        # 2. Find season/episode position to split title
+        # 2. Find season/episode/part position to split title
         split_pos = None
         season_patterns = [
+            r'\bPart\s*\d+\b', r'\bP\d+\b',
             r'\bS\d{1,2}\b', r'\bSeason\s*\d+\b',
-            r'\bS\d{1,2}E\d{1,2}\b', r'\[E\d{1,2}-\d{1,2}\]'
+            r'\bS\d{1,2}E\d{1,3}\b', r'\[?E\d{1,3}[-~_]\d{1,3}\]?',
+            r'\bEP\s*\d{1,3}(?:[-~_]\d{1,3})?\b', r'\bEpisode\s*\d+\b'
         ]
         for pattern in season_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
@@ -955,17 +957,26 @@ async def _extract_web_series(text, original):
                 languages.append(name)
         language = ', '.join(dict.fromkeys(languages)) if languages else ""
 
-        # Extra info (season/episodes)
+        # Extra info (season/episodes/parts)
         extra_parts = []
+        
+        # Pehle Part dhoondo (e.g., P1, Part 1)
+        p_match = re.search(r'(?i)\b(Part\s*\d+|P\d+)\b', text)
+        if p_match:
+            extra_parts.append(p_match.group().upper())
+            
         s_match = re.search(r'(?i)(s\d{1,2}|season\s*\d+)', text)
         if s_match:
             extra_parts.append(s_match.group().upper())
-        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,2}\s*[-~_]\s*\d{1,2}\]?)', text)
+            
+        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,3}\s*[-~_]\s*\d{1,3}\]?|\b(?:ep|e)\s*\d{1,3}\b)', text)
         if e_match:
             ep = re.sub(r'[\[\]]', '', e_match.group()).upper()
             extra_parts.append(ep)
+            
         if re.search(r'(?i)(combined|complete|batch)', text):
             extra_parts.append('COMBINED')
+            
         extra_info = ' '.join(extra_parts)
 
         # Category
@@ -2626,51 +2637,56 @@ def get_all_movie_qualities(movie_id):
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
-def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1):
-    """Naya UI Video jaisa: Send All, Filters aur Pagination"""
+def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1, current_files=None, season_view=False):
+    """नया UI: फाइल्स के लिए बटन्स, फिल्टर्स और पेजिनेशन"""
     keyboard = []
     
     if view == "main":
-        # Upar Send All ka button
+
+        # 2. अगर सीजन के अंदर हैं, तो बैक बटन दिखाओ
+        if season_view:
+            keyboard.append([InlineKeyboardButton("🔙 Back to Seasons", callback_data=f"back_to_seasons_{movie_id}")])
+
+        # 3. Send All बटन
         keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
         
-        # Beech mein 3 filter buttons
+        # 4. Filters
         keyboard.append([
             InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
             InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
             InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
         ])
         
-        # Neeche Pagination
+        # 5. Pagination
         nav_buttons = []
-        nav_buttons.append(InlineKeyboardButton("PAGE", callback_data="ignore"))
+        nav_buttons.append(InlineKeyboardButton("◀️ PREV" if page > 1 else "PAGE", callback_data=f"vpage_{movie_id}_{page-1}" if page > 1 else "ignore"))
         nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="ignore"))
-        
-        # Next Button (abhi basic next page handle karega)
-        if page < total_pages:
-            nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data=f"page_{page+1}"))
-        else:
-            nav_buttons.append(InlineKeyboardButton("NEXT >", callback_data="ignore"))
-            
+        nav_buttons.append(InlineKeyboardButton("NEXT ▶️" if page < total_pages else "NEXT >", callback_data=f"vpage_{movie_id}_{page+1}" if page < total_pages else "ignore"))
         keyboard.append(nav_buttons)
 
+    # ... (बाकी व्यूज जैसे language, quality, season पहले जैसे ही रहेंगे)
     elif view == "language":
-        # Language Options
-        keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data="ignore"), InlineKeyboardButton("TAMIL", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("ENGLISH", callback_data="ignore"), InlineKeyboardButton("HINDI", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("TELUGU", callback_data="ignore"), InlineKeyboardButton("KANNADA", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+                keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
+                keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
+                keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
+                # ✅ NAYA: Gujarati, Marathi aur Punjabi add ho gaye
+                keyboard.append([InlineKeyboardButton("GUJARATI", callback_data=f"fl_lang_{movie_id}_Gujarati"), InlineKeyboardButton("MARATHI", callback_data=f"fl_lang_{movie_id}_Marathi")])
+                keyboard.append([InlineKeyboardButton("PUNJABI", callback_data=f"fl_lang_{movie_id}_Punjabi")])
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     elif view == "quality":
-        # Quality Options
-        keyboard.append([InlineKeyboardButton("360P", callback_data="ignore"), InlineKeyboardButton("480P", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("720P", callback_data="ignore"), InlineKeyboardButton("1080P", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
+                keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
+                keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
+                # ✅ NAYA: 1440P aur 2160P (Premium Quality) add ho gaye
+                keyboard.append([InlineKeyboardButton("1440P", callback_data=f"fl_qual_{movie_id}_1440p"), InlineKeyboardButton("2160P", callback_data=f"fl_qual_{movie_id}_2160p")])
+                keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
+                keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     elif view == "season":
-        # Season Options
-        keyboard.append([InlineKeyboardButton("SEASON 01", callback_data="ignore"), InlineKeyboardButton("SEASON 02", callback_data="ignore")])
-        keyboard.append([InlineKeyboardButton("SEASON 03", callback_data="ignore"), InlineKeyboardButton("SEASON 04", callback_data="ignore")])
+        # ये डमी है, असली सीजन्स डायनामिकली बनते हैं
+        keyboard.append([InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all")])
         keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     return InlineKeyboardMarkup(keyboard)
@@ -2740,26 +2756,24 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         all_qualities = get_all_movie_qualities(movie_id)
         if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
+            context.user_data['active_filter'] = None
+            context.user_data.pop('selected_season', None)
             
-            # Video jaisa Text List format banana
-            file_list_text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            limit = 10
+            total_pages = (len(all_qualities) + limit - 1) // limit if all_qualities else 1
+            current_files = all_qualities[0:limit]
             
-            # Har file ko list mein add karna (Max 10 ek page par)
-            for idx, file_data in enumerate(all_qualities[:10], start=1):
-                quality = file_data[0]
-                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
-                extra_info = file_data[5] if len(file_data) > 5 else ""
+            text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            for idx, f_data in enumerate(current_files, start=1):
+                q_name = f_data[0]
+                f_size = f_data[3] if len(f_data)>3 else "Unknown"
+                e_info = f_data[5] if len(f_data)>5 else ""
+                ep_tag = f"[{e_info}] " if e_info else ""
+                text += f"**{idx}.** **{f_size} | {title} {ep_tag}{q_name}**\n\n"
                 
-                # Agar extra info (season/episode) hai toh add karo
-                ep_tag = f"{extra_info} " if extra_info else ""
-                file_list_text += f"**{idx}.** [{file_size}] {title} {ep_tag}{quality} mkv\n\n"
-
-            selection_text = file_list_text
+            keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
-            # Naya UI function call karna
-            keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=2)
-            
-            msg = await context.bot.send_message(chat_id=chat_id, text=selection_text, reply_markup=keyboard, parse_mode='Markdown')
+            msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode='Markdown')
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
             return
 
@@ -3114,7 +3128,80 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     close_db_connection(conn)
 
                     
+            # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
+            if payload.startswith("file_"):
+                try:
+                    parts = payload.split('_')
+                    movie_id = int(parts[1])
+                    file_index = int(parts[2])
+                    
+                    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ <b>Fetching file...</b>", parse_mode='HTML')
+                    
+                    qualities = get_all_movie_qualities(movie_id)
+                    if qualities and len(qualities) > file_index:
+                        file_data = qualities[file_index]
+                        url = file_data[1]
+                        file_id = file_data[2]
+                        
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+                        res = cur.fetchone()
+                        cur.close()
+                        close_db_connection(conn)
+                        title = res[0] if res else "Requested File"
+                        
+                        await send_movie_to_user(update, context, movie_id, title, url, file_id, send_warning=False)
+                        
+                        try: await status_msg.delete() 
+                        except: pass
+                    else:
+                        await status_msg.edit_text("❌ File not found or expired.")
+                    return
+                except Exception as e:
+                    logger.error(f"File click error: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Invalid File Link")
+                    return
+                    
             # --- CASE 1: DIRECT MOVIE ID (movie_123) ---
+            
+            # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
+            if payload.startswith("file_"):
+                try:
+                    parts = payload.split('_')
+                    movie_id = int(parts[1])
+                    file_index = int(parts[2])
+                    
+                    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ **Fetching file...**", parse_mode='Markdown')
+                    
+                    # File ka data nikalo
+                    qualities = get_all_movie_qualities(movie_id)
+                    if qualities and len(qualities) > file_index:
+                        file_data = qualities[file_index]
+                        url = file_data[1]
+                        file_id = file_data[2]
+                        
+                        # Movie ka naam nikalo
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+                        res = cur.fetchone()
+                        cur.close()
+                        close_db_connection(conn)
+                        title = res[0] if res else "Requested File"
+                        
+                        # Tera premium thumbnail wala function!
+                        await send_movie_to_user(update, context, movie_id, title, url, file_id, send_warning=False)
+                        
+                        try: await status_msg.delete() 
+                        except: pass
+                    else:
+                        await status_msg.edit_text("❌ File not found or expired.")
+                    return
+                except Exception as e:
+                    logger.error(f"File click error: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text="❌ Invalid File Link")
+                    return
             
             if payload.startswith("movie_"):
                 try:
@@ -3525,6 +3612,75 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = query.message.chat.id
     data = query.data
 
+    # ✅ NAYA: Video wala Pages Button Popup
+    if data == "ignore":
+        await query.answer("THIS IS PAGES BUTTON 🔴", show_alert=False)
+        return
+
+    if data.startswith("fl_") or data.startswith("v_"):
+        parts = query.data.split('_')
+        view_type = parts[1] if parts[0] == "v" else "main" 
+        
+        # ✅ NAYA: Video wale cool popups!
+        if view_type in ["lang", "qual", "seas"]:
+             await query.answer("Share & Support Us ❤️", show_alert=False)
+
+    # ==================== NAYA: SINGLE FILE SEND ====================
+    if data.startswith("send_single_"):
+        # Telegram File IDs mein underscores (_) ho sakte hain, isliye safai se nikalenge
+        parts = data.split('_')
+        movie_id = int(parts[-1]) # Aakhri hissa hamesha movie_id hota hai
+        file_id_to_send = data.replace("send_single_", "").replace(f"_{movie_id}", "")
+        
+        # Memory se movie ka naam nikal lo
+        movie_data = context.user_data.get('selected_movie_data')
+        title = movie_data['title'] if movie_data else "Requested Movie"
+
+        try:
+            # 🚀 NAYA: Ab simple text ki jagah tera Premium function use hoga!
+            await send_movie_to_user(
+                update=update, 
+                context=context, 
+                movie_id=movie_id, 
+                title=title, 
+                url=None, 
+                file_id=file_id_to_send, 
+                send_warning=False # Har single file ke sath auto-delete warning baar-baar na bheje
+            )
+            await query.answer("✅ File Sent!", show_alert=False)
+        except Exception as e:
+            await query.answer("❌ Error sending file.", show_alert=True)
+            logger.error(f"Single file send error: {e}")
+        return
+
+    elif data.startswith("back_to_seasons_"):
+        movie_id = int(data.split('_')[3])
+        context.user_data.pop('active_filter', None)
+        context.user_data.pop('selected_season', None)
+        movie_data = context.user_data.get('selected_movie_data')
+        if not movie_data:
+            await query.answer("❌ Session expired.", show_alert=True)
+            return
+        title = movie_data['title']
+        qualities = movie_data['qualities']
+        seasons = set()
+        for f in qualities:
+            extra = f[5] if len(f) > 5 else ""
+            if extra:
+                s_name = extract_season_name(extra)
+                if s_name != "Extra Files": seasons.add(s_name)
+        
+        keyboard = []
+        keyboard.append([InlineKeyboardButton("🎬 Movie", callback_data=f"showseason_{movie_id}_Extra Files")])
+        for s in sorted(list(seasons)):
+            keyboard.append([InlineKeyboardButton(f"📁 {s}", callback_data=f"showseason_{movie_id}_{s}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
+        
+        await query.edit_message_text(f"📺 **{title}**\n\n👇 **Select Option:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        return
+
+    
+    
     # === START MENU BUTTONS LOGIC ===
     if data.startswith("start_"):
         await query.answer()
@@ -3924,6 +4080,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pre_fetched_meta = {}
 
         qualities = get_all_movie_qualities(movie_id)
+        
+        # NAYA: Filter apply karo taaki Send All sirf filter ki hui files bheje
+        active_filter = context.user_data.get('active_filter')
+        if active_filter:
+            f_type = active_filter['type']
+            f_val = active_filter['value'].lower()
+            temp_list = []
+            for q in qualities:
+                q_name = str(q[0]).lower()
+                lang_name = str(q[4]).lower() if len(q) > 4 else ""
+                extra = str(q[5]).lower() if len(q) > 5 else ""
+                if f_type == "lang" and f_val in lang_name: temp_list.append(q)
+                elif f_type == "qual" and f_val in q_name: temp_list.append(q)
+                elif f_type == "seas" and f_val in extract_season_name(extra).lower(): temp_list.append(q)
+            qualities = temp_list
+
         if not qualities:
             await query.answer("❌ No files found!", show_alert=True)
             return
@@ -4157,53 +4329,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'qualities': qualities
             }
 
-            # 🚀 NAYA LOGIC: Agar Series/Anime hai, YA ek hi movie me Season+Movie dono upload hue hain!
-            seasons_set = set()
-            for file_data in qualities:
-                extra_info = file_data[5] if len(file_data) > 5 else ""
-                s_name = extract_season_name(extra_info)
-                seasons_set.add(s_name)
-
-            # Agar category Series/Anime hai, ya humein "Extra Files" (Movie) aur "Season 2" dono mile hain
-            is_series = category and ("Series" in category or "Anime" in category)
-            has_multiple_groups = len(seasons_set) > 1
-
-            if is_series or has_multiple_groups:
-                # Agar sirf "Extra Files" hi hai (Yani proper single movie), toh menu mat dikhao
-                if len(seasons_set) > 0 and not (len(seasons_set) == 1 and "Extra Files" in seasons_set):
-                    sorted_seasons = sorted(list(seasons_set))
-                    season_keyboard = []
-                    
-                    # 2 Buttons per row
-                    row = []
-                    for s_name in sorted_seasons:
-                        # Extra Files ko "Movie" likh dete hain taaki user ko saaf samajh aaye
-                        display_name = "🎬 Movie" if s_name == "Extra Files" else f"📁 {s_name}"
-                        row.append(InlineKeyboardButton(display_name, callback_data=f"showseason_{movie_id}_{s_name}"))
-                        
-                        if len(row) == 2:
-                            season_keyboard.append(row)
-                            row = []
-                    if row:
-                        season_keyboard.append(row)
-                        
-                    season_keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")])
-                    
-                    await query.edit_message_text(
-                        f"📺 **{title}**\n\n👇 **Select Option:**",
-                        reply_markup=InlineKeyboardMarkup(season_keyboard),
-                        parse_mode='Markdown'
-                    )
-                    return
 
             # Agar normal Movie hai (ya Series ka season logic fail hua), toh direct qualities dikhao
-            selection_text = f"✅ You selected: **{title}**\n\n⬇️ **Please choose the file quality:**"
-            keyboard = create_quality_selection_keyboard(movie_id, title, qualities)
+            bot_username = context.bot.username
+            file_list_text = f"📁 <b>{title}</b>\n\n👇 <b>Your Requested Files Are Here</b>\n\n"
+            
+            for idx, file_data in enumerate(qualities[:10], start=1):
+                quality = file_data[0]
+                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                
+                ep_tag = f"[{extra_info}] " if extra_info else ""
+                # ✅ CLEAN HTML LINK: Naruto bot jaisa neela text!
+                file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>{file_size} | {title} {ep_tag}{quality}</a></b>\n\n"
+
+            selection_text = file_list_text
+            
+            # Pagination calculate karo pehli baar ke liye
+            limit = 10
+            total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
+            
+            # CLEAR PREVIOUS FILTERS
+            context.user_data['active_filter'] = None
+            
+            # ✅ NAYA: Function ko call karo taaki 1, 2, 3 wale buttons aa jayein!
+            current_files = qualities[:limit]
+            keyboard_markup = create_quality_selection_keyboard(
+                movie_id=movie_id, 
+                view="main", 
+                page=1, 
+                total_pages=total_pages, 
+                current_files=current_files
+            )
+            
+            await query.edit_message_text(
+                selection_text,
+                reply_markup=keyboard_markup,
+                parse_mode='HTML'
+            )
+            return
 
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             
             track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
@@ -4211,14 +4380,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ==================== SEASON SELECTION (NEW) ====================
         elif query.data.startswith("showseason_"):
-            parts = query.data.split('_', 2) # Format: showseason_123_Season 1
+            parts = query.data.split('_', 2)
             movie_id = int(parts[1])
             selected_season = parts[2]
             
-            movie_data = context.user_data.get('selected_movie_data')
-            if not movie_data or movie_data.get('id') != movie_id:
-                await query.edit_message_text("❌ Session expired. Please search again.")
-                return
+            # Context me season save karo
+            context.user_data['selected_season'] = selected_season
+            context.user_data['active_filter'] = None
+            
+            # 🚀 FIX: `query.data` read-only hai, usko badalna allowed nahi hai. 
+            # Iski jagah sidha update.callback_query_data object modify nahi karke
+            # manually call karte hain ya redirect code yahi execute karte hain.
+            
+            # Naye UI logic ki taraf redirect
+            # Hum data ko sidha bhej rahe hain taaki button_callback khud ise handle kare, bina modify kiye
+            class FakeQuery:
+                def __init__(self, from_user, message, data):
+                    self.from_user = from_user
+                    self.message = message
+                    self.data = data
+                    
+                async def answer(self, *args, **kwargs):
+                    pass # Silent ignore
+                    
+                async def edit_message_text(self, *args, **kwargs):
+                    return await query.edit_message_text(*args, **kwargs)
+
+            # Ek naya fake query object banaya taki read-only error na aaye
+            update._callback_query = FakeQuery(query.from_user, query.message, f"v_main_{movie_id}")
+            
+            await button_callback(update, context)
+            return
                 
             title = movie_data['title']
             all_qualities = movie_data['qualities']
@@ -4235,7 +4427,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
                 
             # Ab sirf is Season ki files list karo
-            selection_text = f"📺 **{title} - {selected_season}**\n\n⬇️ **Please choose the file:**"
+            # Video jaisa Text List format banana
+            file_list_text = f"📺 **{title} - {selected_season}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            
+            for idx, file_data in enumerate(filtered_qualities[:10], start=1):
+                quality = file_data[0]
+                file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+                extra_info = file_data[5] if len(file_data) > 5 else ""
+                
+                ep_tag = f"[{extra_info}] " if extra_info else ""
+                file_list_text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+
+            selection_text = file_list_text
+            keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=0, season=selected_season, view="main")
             
             # Hum wahi purana keyboard function use kar rahe hain, bas list chhoti bhej rahe hain
             keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=0, season=selected_season)
@@ -4262,23 +4466,227 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         # ==================== ADMIN ACTIONS ====================
         
-        # ==================== NAYA UI VIEWS (Video Jaisa) ====================
-        elif query.data.startswith("v_"):
-            parts = query.data.split('_')
-            view_type = parts[1] # main, lang, qual, seas
-            movie_id = int(parts[2])
-            
-            # Naya keyboard generate karo view ke hisaab se
-            if view_type == "main":
-                keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=2)
-            elif view_type == "lang":
-                keyboard = create_quality_selection_keyboard(movie_id, view="language")
-            elif view_type == "qual":
-                keyboard = create_quality_selection_keyboard(movie_id, view="quality")
-            elif view_type == "seas":
-                keyboard = create_quality_selection_keyboard(movie_id, view="season")
+        # ==================== NAYA UI VIEWS, FILTERS & PAGINATION ====================
+        elif query.data.startswith("v_") or query.data.startswith("fl_") or query.data.startswith("vpage_"):
+            movie_data = context.user_data.get('selected_movie_data')
+            if not movie_data:
+                await query.answer("❌ Session expired. Search again.", show_alert=True)
+                return
+
+            movie_id = movie_data['id']
+            title = movie_data['title']
+            all_qualities = movie_data['qualities']
+
+            if 'active_filter' not in context.user_data:
+                context.user_data['active_filter'] = None
+
+            # Filter Handle Karna
+            if query.data.startswith("fl_"):
+                parts = query.data.split('_', 3)
+                f_type = parts[1]
+                if f_type == "clear":
+                    context.user_data['active_filter'] = None
+                    await query.answer("✅ Filters Cleared!")
+                else:
+                    f_val = parts[3]
+                    context.user_data['active_filter'] = {'type': f_type, 'value': f_val}
+                    await query.answer(f"✅ Filter Applied: {f_val}")
+                view_type = "main"
+                page = 1
                 
-            await query.edit_message_reply_markup(reply_markup=keyboard)
+            # Pagination Handle Karna
+            elif query.data.startswith("vpage_"):
+                parts = query.data.split('_')
+                page = int(parts[2])
+                view_type = "main"
+                
+            # Menu Navigation
+            else:
+                parts = query.data.split('_')
+                view_type = parts[1]
+                page = 1 
+                
+                # ✅ NAYA: Video wale cool popups!
+                if view_type in ["lang", "qual", "seas"]:
+                    await query.answer("Share & Support Us ❤️", show_alert=False)
+
+            # ==========================================
+            # 🚀 SMART FILTER LOGIC (Seasons + Lang + Qual)
+            # ==========================================
+            filtered_qualities = all_qualities
+            active_filter = context.user_data.get('active_filter')
+            
+            if active_filter:
+                f_type = active_filter.get('type')
+                f_val = active_filter.get('value').lower()
+                temp_list = []
+                
+                for f in all_qualities:
+                    # File ki saari details combine kar rahe hain
+                    quality_str = str(f[0]).lower()
+                    lang_name = str(f[4]).lower() if len(f) > 4 else ""
+                    extra_info = str(f[5]).lower() if len(f) > 5 else ""
+                    combined_text = f"{quality_str} {lang_name} {extra_info}"
+                    
+                    if f_type == 'seas':
+                        s_name = extract_season_name(f[5] if len(f) > 5 else "").lower()
+                        if s_name == f_val:
+                            temp_list.append(f)
+                            
+                    elif f_type == 'lang':
+                        if f_val in combined_text:
+                            temp_list.append(f)
+                            
+                    elif f_type == 'qual':
+                        if f_val in combined_text:
+                            temp_list.append(f)
+                            
+                # ✅ NAYA POP-UP LOGIC: Agar is filter ki koi file nahi mili
+                if not temp_list:
+                    # 1. Telegram ka in-built Popup dikhao
+                    await query.answer(f"❌ {active_filter['value'].upper()} format me file abhi available nahi hai!", show_alert=True)
+                    # 2. Galat filter ko history se uda do taaki bot aage na atke
+                    context.user_data['active_filter'] = None 
+                    # 3. Yahi se waapis bhej do (UI change nahi hoga, waisa hi rahega)
+                    return
+                            
+                filtered_qualities = temp_list
+
+            # ==========================================
+            # Pagination Logic (10 files per page)
+            # ==========================================
+            limit = 10
+            total_pages = (len(filtered_qualities) + limit - 1) // limit if filtered_qualities else 1
+            if page > total_pages: page = total_pages
+            if page < 1: page = 1
+            
+            start_idx = (page - 1) * limit
+            end_idx = start_idx + limit
+            current_page_files = filtered_qualities[start_idx:end_idx]
+
+            # UI Text Banana
+            if view_type == "main" or view_type == "seas":
+                text = f"📁 <b>{title}</b>\n"
+                
+                # 🚀 NAYA FIX: Season ko alag se bada aur highlight dikhane ke liye
+                if 'selected_season' in context.user_data and context.user_data['selected_season']:
+                    s_name = context.user_data['selected_season'].upper()
+                    text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                    text += f" <b>[ {s_name} ]</b> \n"
+                    text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                    
+                if active_filter:
+                    text += f"🔍 Filter: <b>{active_filter['value']}</b>\n"
+                text += f"\n👇 <b>Your Requested Files Are Here</b>\n\n"
+                
+                if not filtered_qualities:
+                    text += "❌ No files found for this filter.\n"
+                else:
+                    bot_username = context.bot.username
+                    import re # Text clean karne ke liye tool
+                    
+                    for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
+                        quality = str(file_data[0])
+                        
+                        # 🚀 NAYA FIX: Doosre Bot (Manvi Bot) ke links ko hamesha ke liye uda do
+                        quality = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', quality)
+                        quality = re.sub(r'\(https?://[^\)]+\)', '', quality)
+                        quality = re.sub(r'https?://[^\s]+', '', quality)
+                        # 👇 Ye 2 lines nayi add karni hain: t.me aur @usernames udane ke liye
+                        quality = re.sub(r'(?i)t\.me/[^\s]+', '', quality)
+                        quality = re.sub(r'@[a-zA-Z0-9_]+', '', quality)
+                        
+                        file_size = file_data[3] if len(file_data) > 3 else "Unknown"
+                        
+                        # Extra Info (Episodes) se bhi link saaf karo
+                        extra_info = str(file_data[5]) if len(file_data) > 5 else ""
+                        extra_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', extra_info)
+                        extra_info = re.sub(r'\(https?://[^\)]+\)', '', extra_info)
+                        extra_info = re.sub(r'https?://[^\s]+', '', extra_info)
+                        # 👇 Ye 2 lines yahan bhi add karni hain
+                        extra_info = re.sub(r'(?i)t\.me/[^\s]+', '', extra_info)
+                        extra_info = re.sub(r'@[a-zA-Z0-9_]+', '', extra_info)
+                        
+                        ep_tag = f"[{extra_info.strip()}] " if extra_info.strip() else ""
+                        
+                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>{file_size} | {title} {ep_tag}{quality.strip()}</a></b>\n\n"
+
+            elif view_type in ["lang", "qual"]:
+                text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
+
+            # Keyboard Banana
+            keyboard = []
+            
+            # 1. MAIN MENU: Yahan normal buttons dikhenge
+            if view_type == "main":
+                if filtered_qualities:
+                    keyboard.append([InlineKeyboardButton("🚀 SEND ALL", callback_data=f"sendall_{movie_id}")])
+                
+                keyboard.append([
+                    InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
+                    InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
+                    InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
+                ])
+                
+                nav_buttons = []
+                nav_buttons.append(InlineKeyboardButton("◀️ PREV" if page > 1 else "PAGE", callback_data=f"vpage_{movie_id}_{page-1}" if page > 1 else "ignore"))
+                nav_buttons.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="ignore"))
+                nav_buttons.append(InlineKeyboardButton("NEXT ▶️" if page < total_pages else "NEXT >", callback_data=f"vpage_{movie_id}_{page+1}" if page < total_pages else "ignore"))
+                keyboard.append(nav_buttons)
+
+            # 2. SEASON MENU: 🚀 NAYA FIX - Yahan baaki kachra gayab, sirf Seasons!
+            elif view_type == "seas":
+                keyboard.append([InlineKeyboardButton("⬇ SELECT SEASON ⬇", callback_data="ignore")])
+                
+                seasons = set()
+                for f in all_qualities:
+                    extra = f[5] if len(f) > 5 else ""
+                    if extra:
+                        s = extract_season_name(extra)
+                        if s != "Extra Files": seasons.add(s)
+                        
+                s_list = sorted(list(seasons))
+                row = []
+                for s in s_list:
+                    btn_text = s.upper()
+                    if btn_text.startswith("SEASON ") and len(btn_text.split(" ")[1]) == 1:
+                        btn_text = btn_text.replace("SEASON ", "SEASON 0")
+                        
+                    row.append(InlineKeyboardButton(btn_text, callback_data=f"fl_seas_{movie_id}_{s}"))
+                    if len(row) == 2:
+                        keyboard.append(row)
+                        row = []
+                if row: keyboard.append(row)
+                
+                keyboard.append([
+                    InlineKeyboardButton("🔄 CLEAR FILTER", callback_data=f"fl_clear_{movie_id}_all"),
+                    InlineKeyboardButton("🔼 BACK TO MENU", callback_data=f"v_main_{movie_id}")
+                ])
+
+            # 3. LANGUAGE MENU
+            elif view_type == "lang":
+                keyboard.append([InlineKeyboardButton("MALAYALAM", callback_data=f"fl_lang_{movie_id}_Malayalam"), InlineKeyboardButton("TAMIL", callback_data=f"fl_lang_{movie_id}_Tamil")])
+                keyboard.append([InlineKeyboardButton("ENGLISH", callback_data=f"fl_lang_{movie_id}_English"), InlineKeyboardButton("HINDI", callback_data=f"fl_lang_{movie_id}_Hindi")])
+                keyboard.append([InlineKeyboardButton("TELUGU", callback_data=f"fl_lang_{movie_id}_Telugu"), InlineKeyboardButton("KANNADA", callback_data=f"fl_lang_{movie_id}_Kannada")])
+                keyboard.append([InlineKeyboardButton("GUJARATI", callback_data=f"fl_lang_{movie_id}_Gujarati"), InlineKeyboardButton("MARATHI", callback_data=f"fl_lang_{movie_id}_Marathi")])
+                keyboard.append([InlineKeyboardButton("PUNJABI", callback_data=f"fl_lang_{movie_id}_Punjabi")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO MENU >>", callback_data=f"v_main_{movie_id}")])
+
+            # 4. QUALITY MENU
+            elif view_type == "qual":
+                keyboard.append([InlineKeyboardButton("360P", callback_data=f"fl_qual_{movie_id}_360p"), InlineKeyboardButton("480P", callback_data=f"fl_qual_{movie_id}_480p")])
+                keyboard.append([InlineKeyboardButton("720P", callback_data=f"fl_qual_{movie_id}_720p"), InlineKeyboardButton("1080P", callback_data=f"fl_qual_{movie_id}_1080p")])
+                keyboard.append([InlineKeyboardButton("1440P", callback_data=f"fl_qual_{movie_id}_1440p"), InlineKeyboardButton("2160P", callback_data=f"fl_qual_{movie_id}_2160p")])
+                keyboard.append([InlineKeyboardButton("4K", callback_data=f"fl_qual_{movie_id}_4K")])
+                keyboard.append([InlineKeyboardButton("<< BACK TO MENU >>", callback_data=f"v_main_{movie_id}")])
+
+            # 👇 YAHAN disable_web_page_preview=True ADD KAR DIYA HAI 👇
+            await query.edit_message_text(
+                text=text, 
+                reply_markup=InlineKeyboardMarkup(keyboard), 
+                parse_mode='HTML',
+                disable_web_page_preview=True 
+            )
             return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
@@ -5742,7 +6150,7 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Restore Feature ke liye DB me save karo
             if sent_msg:
                 save_post_to_db(
-                    movie_id, chat_id, sent_msg.message_id, bot3, 
+                    movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot",  # ✅ NAYA: bot3 hat gaya!
                     channel_caption, file_id, "photo", keyboard.to_dict(), None, "movies"
                 )
                 sent_count += 1
@@ -8066,6 +8474,12 @@ api_key = os.environ.get("TMDB_API_KEY")
 # We'll assume they are available.
 
 # ==================== API ROUTES ====================
+
+# 👇 NAYA FIX: UptimeRobot ke liye Root URL (Taaki 404 na aaye) 👇
+@flask_app.route('/', methods=['GET', 'HEAD'])
+def home():
+    return "Bot is Alive & Running!", 200
+# 👆 NAYA FIX END 👆
 
 @flask_app.route('/api/movies', methods=['GET'])
 def get_movies():
