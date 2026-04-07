@@ -2763,17 +2763,48 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             total_pages = (len(all_qualities) + limit - 1) // limit if all_qualities else 1
             current_files = all_qualities[0:limit]
             
-            text = f"📁 **{title}**\n\n👇 **Your Requested Files Are Here**\n\n"
+            # 👇 YAHAN SE FIX SHURU HOTA HAI (HTML INLINE LINKS KE LIYE) 👇
+            bot_username = context.bot.username
+            text = f"📁 <b>{title}</b>\n\n👇 <b>Your Requested Files Are Here</b>\n\n"
+            
+            import re # Text clean karne ke liye taaki links break na hon
+            
             for idx, f_data in enumerate(current_files, start=1):
-                q_name = f_data[0]
+                q_name = str(f_data[0])
+                
+                # Kachra saaf kar rahe hain taaki deep links perfect banein
+                q_name = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', q_name)
+                q_name = re.sub(r'\(https?://[^\)]+\)', '', q_name)
+                q_name = re.sub(r'https?://[^\s]+', '', q_name)
+                q_name = re.sub(r'(?i)t\.me/[^\s]+', '', q_name)
+                q_name = re.sub(r'@[a-zA-Z0-9_]+', '', q_name)
+                
                 f_size = f_data[3] if len(f_data)>3 else "Unknown"
-                e_info = f_data[5] if len(f_data)>5 else ""
-                ep_tag = f"[{e_info}] " if e_info else ""
-                text += f"**{idx}.** **{f_size} | {title} {ep_tag}{q_name}**\n\n"
+                
+                e_info = str(f_data[5]) if len(f_data)>5 else ""
+                e_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', e_info)
+                e_info = re.sub(r'\(https?://[^\)]+\)', '', e_info)
+                e_info = re.sub(r'https?://[^\s]+', '', e_info)
+                e_info = re.sub(r'(?i)t\.me/[^\s]+', '', e_info)
+                e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info)
+                
+                ep_tag = f"[{e_info.strip()}] " if e_info.strip() else ""
+                
+                # ✅ NAYA: HTML wala Neela (Inline) link
+                text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{idx-1}'>{f_size} | {title} {ep_tag}{q_name.strip()}</a></b>\n\n"
                 
             keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
-            msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode='Markdown')
+            # ✅ NAYA: parse_mode='HTML' kar diya aur link preview off kar diya
+            msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text=text, 
+                reply_markup=keyboard, 
+                parse_mode='HTML', 
+                disable_web_page_preview=True
+            )
+            # 👆 FIX KHATAM 👆
+            
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
             return
 
