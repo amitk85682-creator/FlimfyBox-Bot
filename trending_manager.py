@@ -117,16 +117,26 @@ async def download_and_process_poster(url):
         return None
 
 # -------------------------------------------------------------
-# TMDB API
+# TMDB API - NOW WITH REGIONAL SUPPORT
 # -------------------------------------------------------------
-def fetch_trending(time_window="day"):
+def fetch_trending(time_window="day", region=None):
+    """
+    Fetch trending from TMDB.
+    If region is provided (e.g., 'IN'), uses region parameter to get country-specific trends.
+    """
     try:
-        url = f"https://api.themoviedb.org/3/trending/all/{time_window}?api_key={TMDB_API_KEY}&language=en-US"
-        resp = requests.get(url, timeout=15)
+        base_url = f"https://api.themoviedb.org/3/trending/all/{time_window}"
+        params = {
+            'api_key': TMDB_API_KEY,
+            'language': 'en-US'
+        }
+        if region:
+            params['region'] = region
+        resp = requests.get(base_url, params=params, timeout=15)
         resp.raise_for_status()
         return resp.json().get('results', [])[:15]
     except Exception as e:
-        logger.error(f"fetch_trending error: {e}")
+        logger.error(f"fetch_trending error (region={region}): {e}")
         return []
 
 def fetch_extra_details(tmdb_id, media_type):
@@ -151,6 +161,7 @@ def build_channel_post(item, extra):
     genre_names = [g['name'] for g in genre_ids if 'name' in g]
     genre_str = " | ".join(genre_names) if genre_names else "Unknown"
 
+    # For Indian content we could show original language, but keep generic for now
     lang = "Hindi + English (Dual Audio)"
     dynamic_res = "1080p | 720p | 480p"
 
@@ -227,7 +238,8 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
         f"📊 <b>TRENDING SUMMARY</b>\n\n"
         f"🤖 Bot: <code>{BOT_INSTANCE_ID}</code>\n"
         f"🕐 Time: <code>{now}</code>\n"
-        f"🔍 Checked: <code>{total_checked}</code> items\n"
+        f"🌍 Checked Worldwide + India Trends\n"
+        f"🔍 Total Items: <code>{total_checked}</code>\n"
         f"🚀 Auto-Posted: <code>{skipped_in_db}</code>\n"
         f"🔁 Already Alerted: <code>{skipped_already}</code>\n"
         f"🆕 New Alerts: <code>{new_count}</code>\n\n"
@@ -239,7 +251,7 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
     return text
 
 # -------------------------------------------------------------
-# DATABASE SETUP
+# DATABASE SETUP (unchanged)
 # -------------------------------------------------------------
 def setup_trending_db():
     if not DATABASE_URL:
@@ -379,14 +391,14 @@ def release_lock():
         logger.error(f"release_lock error: {e}")
 
 # -------------------------------------------------------------
-# MAIN TRENDING CHECK (IMDb ID Priority + Exact Title Fallback)
+# MAIN TRENDING CHECK (Worldwide + India)
 # -------------------------------------------------------------
 async def check_and_alert_trending(app, admin_id):
     if not acquire_lock():
         logger.info("🔒 Lock already held by another instance")
         return 0
 
-    logger.info(f"🔍 Checking trending...")
+    logger.info(f"🔍 Checking trending (Worldwide + India)...")
     new_alerts = 0
     auto_posted = 0
     skipped_already = 0
@@ -394,11 +406,24 @@ async def check_and_alert_trending(app, admin_id):
 
     conn = None
     try:
-        items = fetch_trending("day")
+        # Fetch both worldwide and India trending
+        worldwide_items = fetch_trending("day")               # Global
+        india_items = fetch_trending("day", region="IN")      # India specific
+
+        # Combine and deduplicate by tmdb_id
+        combined_dict = {}
+        for item in worldwide_items + india_items:
+            tmdb_id = item.get('id')
+            if tmdb_id:
+                combined_dict[tmdb_id] = item
+        items = list(combined_dict.values())
+        
         if not items:
             logger.warning("⚠️ No trending items found")
             release_lock()
             return 0
+
+        logger.info(f"🌐 Worldwide: {len(worldwide_items)} | 🇮🇳 India: {len(india_items)} | Unique: {len(items)}")
 
         conn = get_db_connection()
         if not conn:
@@ -644,6 +669,7 @@ async def trending_worker_loop(app, admin_id):
 
     startup_msg = (
         f"🚀 <b>TRENDING MONITOR ACTIVE</b>\n\n"
+        f"🌍 <b>Now Checking:</b> Worldwide + 🇮🇳 India Regional Trends\n"
         f"🔍 <b>Match Priority:</b>\n"
         f"   1️⃣ IMDb ID (Most Accurate)\n"
         f"   2️⃣ Exact Title Match\n\n"
@@ -675,7 +701,7 @@ async def trending_worker_loop(app, admin_id):
         logger.info(f"💤 Sleeping for {sleep_seconds/3600:.2f} hours until {next_run_utc.astimezone(tz).strftime('%I:%M %p IST')}")
         await asyncio.sleep(sleep_seconds)
 
-        logger.info("🔍 Running scheduled trending check...")
+        logger.info("🔍 Running scheduled trending check (Worldwide + India)...")
         try:
             await check_and_alert_trending(app, admin_id)
         except Exception as e:
