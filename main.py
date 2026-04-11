@@ -758,7 +758,18 @@ Example format: alias1, alias2, alias3, alias4"""
 
     return generate_basic_aliases(movie_title, year)
 
-
+def normalize_episodes(text):
+    # 1. E12 22 -> E12-22
+    text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s+(\d{1,3})\b(?!\s*p)', r'\1\2-\3', text)
+    
+    # 2. E12 e22 / E12 ep22 -> E12-22
+    text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s+(?:e|ep|episode)\s*(\d{1,3})\b', r'\1\2-\3', text)
+    
+    # 3. E12 to 22 / E12 to22 -> E12-22
+    text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s*to\s*(?:e|ep|episode)?\s*(\d{1,3})\b', r'\1\2-\3', text)
+    
+    return text
+    
 async def fallback_extraction(caption_text):
     """
     SMART FALLBACK: Improved regex-based extraction for both movies and web series.
@@ -775,7 +786,7 @@ async def fallback_extraction(caption_text):
         text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
         
         # 2. Detect if it's a web series (contains season/episode indicators)
-        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}[-~_]\d{1,3}\]?|EP\s*\d{1,3}(?:[-~_]\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
+        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3}\]?|EP\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
         season_match = season_pattern.search(text)
         if season_match:
             # Use existing web series logic (kept from original)
@@ -891,12 +902,11 @@ async def fallback_extraction(caption_text):
 
 
 async def _extract_web_series(text, original):
-    """
-    Helper for web series extraction (adapted from original fallback logic).
-    """
-    # This is the original web series logic, slightly cleaned
     try:
-        # 1. Remove language indicators line if present
+        # 1. Episode formats ko normalize karo (to22, ep22, space etc.)
+        text = normalize_episodes(text)
+        
+        # 2. Remove language indicators line if present
         text = re.sub(r'🔊.*?(?:\n|$)', '', text, flags=re.DOTALL)
 
         # 2. Find season/episode/part position to split title
@@ -969,7 +979,7 @@ async def _extract_web_series(text, original):
         if s_match:
             extra_parts.append(s_match.group().upper())
             
-        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,3}\s*[-~_]\s*\d{1,3}\]?|\b(?:ep|e)\s*\d{1,3}\b)', text)
+        e_match = re.search(r'(?i)(\[?(?:ep|e|episode)\s*\d{1,3}\s*(?:[-~_]|to)\s*(?:e|ep)?\s*\d{1,3}\]?|\b(?:ep|e|episode)\s*\d{1,3}\b)', text)
         if e_match:
             ep = re.sub(r'[\[\]]', '', e_match.group()).upper()
             extra_parts.append(ep)
@@ -4937,8 +4947,8 @@ def get_storage_channels():
     return [int(c.strip()) for c in channels_str.split(',') if c.strip()]
 
 def generate_quality_label(file_name, file_size_str, ai_language=""):
-    """Bina hardcode kiye AI language ko use karta hai + Series/Seasons extract karta hai"""
-    name_lower = file_name.lower()
+    # Pehle episode format ko hamesha ke liye theek karo (S07E12 22 -> S07E12-22)
+    name_lower = normalize_episodes(file_name.lower())
     quality = "HD"
     
     # 1. Detect Quality
@@ -4954,7 +4964,7 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     
     # 3. Detect Series (S01, S02, S01 [E01-E10], [E01-12], S01E01, Season 1)
     # 👇 FIX: Naya Regex ab akela 'S01' ya 'Season 2' bhi aasaani se pakad lega!
-    season_match = re.search(r'(s\d{1,2}\s*\[?(?:e|ep)\s*\d{1,2}[-~e\d]*\]?|\[?(?:e|ep)\s*\d{1,2}[-~_]\d{1,2}\]?|ep\s*\d+[-~_]\d+|ep\s*\d+|s\d{1,2}e\d{1,2}|s\d{1,2}\b|season\s?\d+\b)', name_lower)
+    season_match = re.search(r'(?i)(s\d{1,2}\s*(?:\[?(?:e|ep|episode)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode)?\s*\d{1,3})?\]?)|\[?(?:e|ep|episode)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode)?\s*\d{1,3})?\]?|s\d{1,2}e\d{1,3}|s\d{1,2}\b|season\s?\d+\b)', name_lower)
     
     if season_match:
         episode_tag = season_match.group(0).upper()
