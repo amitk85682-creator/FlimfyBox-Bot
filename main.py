@@ -2044,42 +2044,6 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
 
-def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """IMDb/TMDb se data nikalne wala engine (with Adult Bypass)"""
-    search_query = query.strip()
-    
-    # ==========================================
-    # 🔥 NAYA JUGAD: 18+ ADULT CONTENT BYPASS
-    # ==========================================
-    adult_keywords = ['ullu', 'kooku', 'primeplay', 'voovi', 'hunters', 'besharams', 'rabbit', 'fliz', 'hotshot']
-    
-    if any(kw in search_query.lower() for kw in adult_keywords):
-        logger.info(f"🔞 Adult OTT Detected: Bypassing IMDb for {search_query}")
-        
-        # Jugaad 2: DuckDuckGo se real story nikalne ki koshish
-        ddg_data = scrape_adult_info(search_query)
-        
-        if ddg_data:
-            logger.info(f"✅ DuckDuckGo se plot mil gaya: {search_query}")
-            plot = ddg_data["plot"]
-        else:
-            logger.info(f"⚠️ DuckDuckGo fail hua, default plot use kar rahe hain.")
-            plot = "Exclusive 18+ Web Series. Watch online or download."
-            
-        # Return format match kar rahe hain: title, year, poster_url, genre, imdb_id, rating, plot, category
-        return search_query, search_year, None, "18+ Adult, Romance, Drama", None, "N/A", plot, "Adult"
-    # ==========================================
-
-    # Agar normal movie hai, toh apna regular setup chalne do
-    omdb_api_key = os.environ.get("OMDB_API_KEY")
-    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" 
-
-    # 🔥 JUGAD 1: TMDb search URL mein include_adult=true add kar diya
-    # Isse TMDb wali API khud adult content return karna shuru kar degi
-    tmdb_search_url = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}&include_adult=true"
-    
-    # ... (Iske aage tumhara jo pehle se code likha hai, usko waisa hi rehne do) ...
-
     try:
         # --- STEP 1: IMDb (OMDb) से बेसिक डेटा लाना ---
         if is_imdb_id:
