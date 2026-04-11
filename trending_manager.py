@@ -139,6 +139,25 @@ def fetch_trending(time_window="day", region=None):
         logger.error(f"fetch_trending error (region={region}): {e}")
         return []
 
+def fetch_indian_regional():
+    """Sirf Indian regional (Telugu, Tamil, etc.) movies dhoondhne ke liye"""
+    try:
+        # TMDB Discover API use kar rahe hain popular Indian movies ke liye
+        url = f"https://api.themoviedb.org/3/discover/movie"
+        params = {
+            'api_key': TMDB_API_KEY,
+            'region': 'IN',
+            'with_origin_country': 'IN',
+            'sort_by': 'popularity.desc',
+            'certification_country': 'IN',
+            'language': 'en-US'
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        return resp.json().get('results', [])[:10]
+    except Exception as e:
+        logger.error(f"Indian regional fetch error: {e}")
+        return []
+
 def fetch_extra_details(tmdb_id, media_type):
     try:
         url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={TMDB_API_KEY}&language=en-US"
@@ -151,31 +170,24 @@ def fetch_extra_details(tmdb_id, media_type):
 # -------------------------------------------------------------
 # MESSAGE BUILDERS
 # -------------------------------------------------------------
-def build_channel_post(item, extra):
-    """Clean message for channel auto-post (no warning lines)"""
-    title = item.get('title') or item.get('name') or "Unknown"
-    vote_avg = item.get('vote_average', 0)
-    release_date = item.get('release_date') or item.get('first_air_date') or "N/A"
-
-    genre_ids = extra.get('genres', [])
-    genre_names = [g['name'] for g in genre_ids if 'name' in g]
-    genre_str = " | ".join(genre_names) if genre_names else "Unknown"
-
-    # For Indian content we could show original language, but keep generic for now
-    lang = "Hindi + English (Dual Audio)"
-    dynamic_res = "1080p | 720p | 480p"
-
-    safe_title = str(title).replace('<', '&lt;').replace('>', '&gt;')
+def build_channel_post(item, extra, db_metadata=None):
+    # Agar DB se data mila hai toh wahi use karo, varna TMDB ka default
+    title = item.get('title') or item.get('name')
+    date = item.get('release_date') or item.get('first_air_date')
+    
+    # Database metadata (Languages aur Quality)
+    lang = db_metadata.get('languages', "Hindi + English") if db_metadata else "Dual Audio"
+    quality = db_metadata.get('quality', "1080p | 720p | 480p") if db_metadata else "HD"
 
     text = (
-        f"🎬 <b>{safe_title}</b>\n"
+        f"🎬 <b>{title}</b>\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"🌟 <b>#1st On 🅃🄴🄻🄴🄶🅁🄰🄼</b>\n"
-        f"📅 <b>Date:</b> {release_date}\n"
-        f"⭐ <b>iMDB Rating:</b> {vote_avg}/10\n"
-        f"🎭 <b>Genre:</b> {genre_str}\n"
+        f"📅 <b>Date:</b> {date}\n"
+        f"⭐ <b>iMDB Rating:</b> {item.get('vote_average')}/10\n"
+        f"🎭 <b>Genre:</b> {', '.join([g['name'] for g in extra.get('genres', [])])}\n"
         f"🔊 <b>Language:</b> {lang}\n"
-        f"<b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+        f"<b>Quality:</b> {quality}\n"
         f"➖➖➖➖➖➖➖➖➖➖\n"
         f"<b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
         f"👇 <b>Download Below</b> 👇"
@@ -406,13 +418,15 @@ async def check_and_alert_trending(app, admin_id):
 
     conn = None
     try:
-        # Fetch both worldwide and India trending
+        # 1. FETCH ALL TRENDING (Worldwide + India + Regional)
         worldwide_items = fetch_trending("day")               # Global
         india_items = fetch_trending("day", region="IN")      # India specific
+        regional_items = fetch_indian_regional()              # 🔥 FIXED: Naya function yahan call kiya!
 
         # Combine and deduplicate by tmdb_id
         combined_dict = {}
-        for item in worldwide_items + india_items:
+        # 🔥 FIXED: regional_items ko bhi loop mein add kiya
+        for item in worldwide_items + india_items + regional_items:
             tmdb_id = item.get('id')
             if tmdb_id:
                 combined_dict[tmdb_id] = item
@@ -423,7 +437,7 @@ async def check_and_alert_trending(app, admin_id):
             release_lock()
             return 0
 
-        logger.info(f"🌐 Worldwide: {len(worldwide_items)} | 🇮🇳 India: {len(india_items)} | Unique: {len(items)}")
+        logger.info(f"🌐 Worldwide: {len(worldwide_items)} | 🇮🇳 India: {len(india_items)} | Regional: {len(regional_items)} | Unique: {len(items)}")
 
         conn = get_db_connection()
         if not conn:
@@ -440,73 +454,70 @@ async def check_and_alert_trending(app, admin_id):
             media_type = item.get('media_type', 'movie')
             
             if not title or not tmdb_id:
-                logger.warning(f"⚠️ Skipping invalid item: {item}")
                 continue
 
-            # Fetch extra details to get IMDb ID and genres
             extra = fetch_extra_details(tmdb_id, media_type)
-            imdb_id = extra.get('imdb_id')  # TMDB returns IMDb ID for movies
-
-            logger.info(f"🎬 Processing: {title} (TMDB: {tmdb_id}, IMDb: {imdb_id or 'N/A'})")
+            imdb_id = extra.get('imdb_id')
 
             # ═══════════════════════════════════════════════════════
-            # STEP 1: CHECK TRENDING HISTORY (Avoid Duplicates)
+            # STEP 1: CHECK TRENDING HISTORY
             # ═══════════════════════════════════════════════════════
             cur.execute("SELECT status, imdb_id FROM trending_history WHERE tmdb_id = %s", (tmdb_id,))
             hist_row = cur.fetchone()
             hist_status = hist_row[0] if hist_row else None
-            hist_imdb = hist_row[1] if hist_row else None
 
-            # Already posted to channel? Skip!
             if hist_status == 'auto_posted':
-                logger.info(f"✅ Already posted: {title}")
                 skipped_already += 1
                 continue
 
             # ═══════════════════════════════════════════════════════
-            # STEP 2: CHECK MAIN DATABASE (IMDb ID Priority)
+            # STEP 2: CHECK MAIN DATABASE (IMDb ID + Title Priority)
             # ═══════════════════════════════════════════════════════
             movie_row = None
             match_method = None
 
-            # Priority 1: IMDb ID match (most accurate)
+            # Priority 1: IMDb ID (Sabse accurate) 🔥 FIXED: Ise delete mat karna!
             if imdb_id:
-                cur.execute("SELECT id, title, imdb_id FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
+                cur.execute("SELECT id, title, imdb_id, year, languages, quality FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
                 movie_row = cur.fetchone()
                 if movie_row:
                     match_method = "IMDb ID"
-                    logger.info(f"✅ MATCHED by IMDb ID: {imdb_id} → {movie_row[1]}")
 
-            # Priority 2: Exact title match (fallback)
+            # Priority 2: Title Match + Year Verify
             if not movie_row:
-                cur.execute("SELECT id, title, imdb_id FROM movies WHERE title = %s LIMIT 1", (title,))
+                # 🔥 FIXED: Indentation theek kar di
+                cur.execute("SELECT id, title, imdb_id, year, languages, quality FROM movies WHERE title ILIKE %s LIMIT 1", (title,))
                 movie_row = cur.fetchone()
+
                 if movie_row:
-                    match_method = "Exact Title"
-                    logger.info(f"✅ MATCHED by Title: {title} → {movie_row[1]} (IMDb: {movie_row[2]})")
+                    db_id, db_title, db_imdb, db_year, db_lang, db_quality = movie_row
                     
-                    # Cross-verify IMDb IDs if both available
-                    if imdb_id and movie_row[2] and imdb_id != movie_row[2]:
-                        logger.warning(f"⚠️ IMDb ID MISMATCH! TMDB says {imdb_id}, DB has {movie_row[2]}")
-                        logger.warning(f"⚠️ Treating as DIFFERENT movie - will alert admin")
-                        movie_row = None  # Reject this match
+                    tmdb_date = item.get('release_date') or item.get('first_air_date') or ""
+                    tmdb_year = tmdb_date.split('-')[0] if '-' in tmdb_date else "0"
+
+                    # YEAR CHECK: Agar year match nahi hota, toh reject kar do
+                    if str(db_year) != str(tmdb_year) and db_imdb != imdb_id:
+                        logger.warning(f"❌ Year mismatch: DB({db_year}) vs TMDB({tmdb_year}). Alerting Admin.")
+                        movie_row = None 
+                    else:
+                        match_method = "Title + Year"
 
             # ═══════════════════════════════════════════════════════
             # STEP 3: POST TO CHANNEL OR ALERT ADMIN
             # ═══════════════════════════════════════════════════════
             
             if movie_row:
-                # 🎬 MOVIE FOUND IN DATABASE - AUTO-POST TO CHANNEL
-                movie_id = movie_row[0]
-                db_title = movie_row[1]
-                db_imdb = movie_row[2]
+                # 🎬 MOVIE FOUND IN DATABASE
+                db_id, db_title, db_imdb, db_year, db_lang, db_quality = movie_row
                 
                 logger.info(f"🚀 Auto-posting to channel: {db_title} (matched by {match_method})")
                 
-                channel_text = build_channel_post(item, extra)
-                watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+                # 🔥 FIXED: Database ka data build_channel_post ko bheja!
+                metadata = {'languages': db_lang, 'quality': db_quality}
+                channel_text = build_channel_post(item, extra, db_metadata=metadata)
+                
+                watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{db_id}"
 
-                # 4 Button Layout
                 channel_buttons = InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("Download Now", url=watch_link),
@@ -515,6 +526,8 @@ async def check_and_alert_trending(app, admin_id):
                     [InlineKeyboardButton("⚡ Download Now", url=watch_link)],
                     [InlineKeyboardButton("📢 Join Channel", url=os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/FlimfyBox'))]
                 ])
+
+                # Process poster... (Iske aage ka code tumhara bilkul theek hai)
 
                 # Process poster (prefer vertical poster for cinematic effect)
                 image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}" if item.get('poster_path') else None
