@@ -478,7 +478,7 @@ async def check_and_alert_trending(app, admin_id):
 
             # Priority 1: IMDb ID (Sabse accurate) 🔥 FIXED: Ise delete mat karna!
             if imdb_id:
-                cur.execute("SELECT id, title, imdb_id, year, languages, quality FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
+                cur.execute("SELECT id, title, imdb_id, year, language, quality FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
                 movie_row = cur.fetchone()
                 if movie_row:
                     match_method = "IMDb ID"
@@ -486,7 +486,7 @@ async def check_and_alert_trending(app, admin_id):
             # Priority 2: Title Match + Year Verify
             if not movie_row:
                 # 🔥 FIXED: Indentation theek kar di
-                cur.execute("SELECT id, title, imdb_id, year, languages, quality FROM movies WHERE title ILIKE %s LIMIT 1", (title,))
+                cur.execute("SELECT id, title, imdb_id, year, language, quality FROM movies WHERE title ILIKE %s LIMIT 1", (title,))
                 movie_row = cur.fetchone()
 
                 if movie_row:
