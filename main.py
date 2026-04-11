@@ -28,6 +28,35 @@ from typing import Optional
 from psycopg2 import pool
 from io import BytesIO
 
+from bs4 import BeautifulSoup # Ise top par imports me add karna hai
+
+# -------------------------------------------------------------
+# ADULT SCRAPER JUGAD (DUCKDUCKGO)
+# -------------------------------------------------------------
+def scrape_adult_info(movie_name):
+    """DuckDuckGo se 18+ series ka plot nikalne ka jugaad"""
+    url = "https://html.duckduckgo.com/html/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    payload = {'q': f"{movie_name} web series plot story"}
+    
+    try:
+        res = requests.post(url, headers=headers, data=payload, timeout=5)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        result = soup.find('a', class_='result__snippet')
+        if result:
+            plot = result.text.strip()
+            # Agar plot bahut bada hai toh trim kar do
+            if len(plot) > 300:
+                plot = plot[:297] + "..."
+            return {"title": movie_name, "plot": plot, "category": "18+ Adult"}
+    except Exception as e:
+        logger.error(f"⚠️ DuckDuckGo Scrape failed: {e}")
+        
+    return None
+
 # Naya Lock banaya Auto-Batch ke liye
 auto_batch_lock = asyncio.Lock()
 
@@ -2014,6 +2043,42 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
 
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
+
+    def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
+    """IMDb/TMDb se data nikalne wala engine (with Adult Bypass)"""
+    search_query = query.strip()
+    
+    # ==========================================
+    # 🔥 NAYA JUGAD: 18+ ADULT CONTENT BYPASS
+    # ==========================================
+    adult_keywords = ['ullu', 'kooku', 'primeplay', 'voovi', 'hunters', 'besharams', 'rabbit', 'fliz', 'hotshot']
+    
+    if any(kw in search_query.lower() for kw in adult_keywords):
+        logger.info(f"🔞 Adult OTT Detected: Bypassing IMDb for {search_query}")
+        
+        # Jugaad 2: DuckDuckGo se real story nikalne ki koshish
+        ddg_data = scrape_adult_info(search_query)
+        
+        if ddg_data:
+            logger.info(f"✅ DuckDuckGo se plot mil gaya: {search_query}")
+            plot = ddg_data["plot"]
+        else:
+            logger.info(f"⚠️ DuckDuckGo fail hua, default plot use kar rahe hain.")
+            plot = "Exclusive 18+ Web Series. Watch online or download."
+            
+        # Return format match kar rahe hain: title, year, poster_url, genre, imdb_id, rating, plot, category
+        return search_query, search_year, None, "18+ Adult, Romance, Drama", None, "N/A", plot, "Adult"
+    # ==========================================
+
+    # Agar normal movie hai, toh apna regular setup chalne do
+    omdb_api_key = os.environ.get("OMDB_API_KEY")
+    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" 
+
+    # 🔥 JUGAD 1: TMDb search URL mein include_adult=true add kar diya
+    # Isse TMDb wali API khud adult content return karna shuru kar degi
+    tmdb_search_url = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}&include_adult=true"
+    
+    # ... (Iske aage tumhara jo pehle se code likha hai, usko waisa hi rehne do) ...
 
     try:
         # --- STEP 1: IMDb (OMDb) से बेसिक डेटा लाना ---
@@ -8613,7 +8678,7 @@ def get_movie_details(movie_id):
             search_term = movie['title']
             if movie['year']:
                 search_term += f" {movie['year']}"
-            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(search_term)}"
+            search_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={search_query}&include_adult=true"
             resp = requests.get(search_url, timeout=5).json()
             if resp.get('results'):
                 first = resp['results'][0]
