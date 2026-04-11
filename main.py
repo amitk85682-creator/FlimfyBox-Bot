@@ -2044,7 +2044,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
 
-    def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
+def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
     """IMDb/TMDb se data nikalne wala engine (with Adult Bypass)"""
     search_query = query.strip()
     
