@@ -758,6 +758,26 @@ Example format: alias1, alias2, alias3, alias4"""
 
     return generate_basic_aliases(movie_title, year)
 
+def generate_basic_aliases(title, year=""):
+    """
+    Fallback function to generate simple search aliases without AI.
+    """
+    aliases = set()
+    title_lower = title.lower().strip()
+    aliases.add(title_lower)
+    aliases.add(title_lower.replace(" ", ""))
+    if year:
+        aliases.add(f"{title_lower} {year}")
+        aliases.add(f"{title_lower}{year}")
+    # Remove leading 'the' variations
+    if title_lower.startswith("the "):
+        base = title_lower[4:]
+        aliases.add(base)
+        if year:
+            aliases.add(f"{base} {year}")
+            aliases.add(f"{base}{year}")
+    return list(aliases)
+
 def normalize_episodes(text):
     # 1. E12 22 -> E12-22
     text = re.sub(r'(?i)\b(e|ep|episode)\s*(\d{1,3})\s+(\d{1,3})\b(?!\s*p)', r'\1\2-\3', text)
