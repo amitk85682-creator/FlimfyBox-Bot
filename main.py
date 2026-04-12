@@ -1951,6 +1951,45 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         logger.error(f"Error in auto_fetch_and_update_metadata: {e}")
         return False
 
+# --- GOOGLE SEARCH FALLBACK (Ullu/AltBalaji ke liye) ---
+async def fetch_metadata_from_google(query):
+    API_KEY = "AIzaSyBksE4eCy7fzdRIANfCr-NK3ewhnEEHQTU"
+    CX_ID = "83e502ec075bd49ec"
+    
+    # Target sites: Ullu aur AltBalaji
+    search_query = f"{query} site:ullu.app OR site:altbalaji.com"
+    url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={search_query}"
+
+    try:
+        # requests.get ko run_async mein wrap karna zaroori hai
+        response = await run_async(requests.get, url)
+        data = response.json()
+        
+        if "items" in data:
+            item = data["items"][0]
+            title = item.get("title").split("-")[0].strip()
+            snippet = item.get("snippet")
+            
+            # Poster nikalne ka jugad
+            poster = None
+            if "pagemap" in item:
+                if "cse_image" in item["pagemap"]:
+                    poster = item["pagemap"]["cse_image"][0]["src"]
+                elif "metatags" in item["pagemap"]:
+                    poster = item["pagemap"]["metatags"][0].get("og:image")
+
+            return {
+                "title": title,
+                "plot": snippet,
+                "poster": poster or DEFAULT_POSTER,
+                "year": "2024",
+                "genre": "Adult, Romance, Drama",
+                "category": "Web Series"
+            }
+    except Exception as e:
+        logger.error(f"❌ Google Search Error: {e}")
+    return None
+
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
     """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
     try:
@@ -5052,151 +5091,6 @@ def get_readable_file_size(size_in_bytes):
         return "Unknown"
     return "Unknown"
 
-def generate_aliases_gemini(movie_title, year="", category=""):
-    """
-    🎯 FIXED: AI se 50 search aliases generate karta hai
-    """
-    logger.info(f"🚀 Generating aliases for: '{movie_title}' ({year}) [{category}]")
-    
-    if not movie_title or movie_title == "UNKNOWN":
-        logger.warning("Empty movie title, skipping alias generation")
-        return []
-    
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("❌ GEMINI_API_KEY missing!")
-        return []
-
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        # 🎯 SIMPLER, MORE EFFECTIVE PROMPT
-        prompt = f"""Generate 50 search aliases for the movie/show: "{movie_title}"
-Year: {year if year else "N/A"}
-Category: {category if category else "N/A"}
-
-Include these types of variations:
-1. Common misspellings (typos people make)
-2. With and without year
-3. Hindi transliterations if applicable
-4. Short forms and abbreviations
-5. With "movie", "film", "download" keywords
-6. Without spaces, with hyphens
-7. Regional language spellings
-
-IMPORTANT: Return ONLY comma-separated aliases, nothing else.
-Example format: alias1, alias2, alias3, alias4
-
-Do not include numbering, bullets, or explanations. Just plain comma-separated text."""
-
-        # 🚀 Gemini ko Adult/Ullu titles extract karne ki permission dena
-        safety_settings = {
-            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-            genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-        }
-
-        # 🚀 KEY ROTATION LOOP
-        response = None  # Initialize response to avoid UnboundLocalError
-        for key in gemini_keys:
-            try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel('gemini-2.0-flash')
-                
-                # Safety settings pass kiya taaki content block na ho
-                response = await run_async(model.generate_content, contents, safety_settings=safety_settings)
-                
-                # Agar response mil gayi hai, toh loop se bahar nikal jao (Break)
-                if response and response.parts:
-                    break
-            except Exception as e:
-                logger.error(f"Error with API Key: {e}")
-                continue  # Agli key try karo agar error aaye
-        
-        # Check if response was blocked or empty after trying all keys
-        if not response or not response.parts:
-            logger.warning("Gemini response was empty or blocked after trying all keys")
-            return generate_basic_aliases(movie_title, year)
-        
-        try:
-            ai_text = response.text.strip()
-        except ValueError as e:
-            logger.warning(f"Response blocked by safety: {e}")
-            return generate_basic_aliases(movie_title, year)
-        
-        logger.info(f"Gemini Alias Response (first 200 chars): {ai_text[:200]}")
-        
-        # Parse aliases
-        aliases = []
-        for item in ai_text.split(','):
-            alias = item.strip().lower()
-            # Clean each alias
-            alias = re.sub(r'^\d+[\.\)]\s*', '', alias)  # Remove numbering
-            alias = alias.strip('"\'')  # Remove quotes
-            alias = alias.strip()
-            
-            if alias and len(alias) >= 2 and len(alias) <= 100:
-                aliases.append(alias)
-        
-        # Remove duplicates and limit to 50
-        aliases = list(dict.fromkeys(aliases))[:50]
-        
-        logger.info(f"✅ Generated {len(aliases)} aliases")
-        return aliases
-
-    except Exception as e:
-        logger.error(f"❌ Alias Generation Error: {e}")
-        return generate_basic_aliases(movie_title, year)
-
-
-def generate_basic_aliases(movie_title, year=""):
-    """
-    🛡️ FALLBACK: Basic aliases without AI
-    """
-    if not movie_title:
-        return []
-    
-    aliases = []
-    title_lower = movie_title.lower().strip()
-    title_no_space = title_lower.replace(" ", "")
-    title_hyphen = title_lower.replace(" ", "-")
-    title_underscore = title_lower.replace(" ", "_")
-    
-    # Basic variations
-    aliases.extend([
-        title_lower,
-        title_no_space,
-        title_hyphen,
-        title_underscore,
-        f"{title_lower} movie",
-        f"{title_lower} film",
-        f"{title_lower} download",
-        f"{title_lower} hindi",
-        f"{title_lower} full movie",
-    ])
-    
-    # With year
-    if year:
-        aliases.extend([
-            f"{title_lower} {year}",
-            f"{title_lower} ({year})",
-            f"{title_no_space}{year}",
-        ])
-    
-    # Common typos (first/last letter swap, double letters)
-    if len(title_lower) > 3:
-        # Remove vowels
-        no_vowels = re.sub(r'[aeiou]', '', title_lower)
-        if no_vowels and no_vowels != title_lower:
-            aliases.append(no_vowels)
-    
-    aliases = list(dict.fromkeys(aliases))[:20]
-    logger.info(f"✅ Generated {len(aliases)} basic aliases (fallback)")
-    return aliases
-
-
 # ============================================================================
 # 🎬 BATCH ID COMMAND (Fully Automatic via TMDB/IMDb)
 # ============================================================================
@@ -6608,20 +6502,25 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await status_msg.edit_text(f"✅ **Gemini ने पहचाना:** {movie_name} ({movie_year})\n⏳ TMDB से डेटा ला रहा है...")
 
-            # TMDB/OMDb से मेटाडेटा (adult_mode=True)
+            # --- 1. TMDB Try Karein ---
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, True)
             
-            if metadata:
-                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
-                # फ़ाइल नाम का वर्ष प्राथमिकता पाए
-                if movie_year and str(movie_year).isdigit():
-                    if year == 0 or (year and abs(year - int(movie_year)) > 2):
-                        year = int(movie_year)
-            else:
-                title = movie_name
-                year = int(movie_year) if movie_year and str(movie_year).isdigit() else 0
-                poster_url, imdb_id = None, None
-                genre, rating, plot = "Romance, Drama", "N/A", "Exclusive 18+ Content"
+            # --- 2. JUGAD: Agar TMDB pe na mile, toh Google se uthayein ---
+            if not metadata:
+                logger.info(f"🔍 TMDB failed for {movie_name}, trying Google Search API...")
+                google_data = await fetch_metadata_from_google(movie_name)
+                
+                if google_data:
+                    title = google_data['title']
+                    year = google_data['year']
+                    poster_url = google_data['poster']
+                    genre = google_data['genre']
+                    plot = google_data['plot']
+                    rating = "7.5" # Default rating
+                    imdb_id = None
+                    category = google_data['category']
+                    # Metadata tuple format mein set kar diya
+                    metadata = (title, year, poster_url, genre, imdb_id, rating, plot, category)
 
             # कास्ट लाने की कोशिश
             cast_str = ""
