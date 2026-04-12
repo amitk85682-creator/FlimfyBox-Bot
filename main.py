@@ -1540,7 +1540,67 @@ def migrate_content_type_for_restore():
         if conn:
             conn.rollback()
             close_db_connection(conn)
+def fix_channel_posts_constraint():
+    """UNIQUE constraint add karne wala function"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_posts_unique_idx') THEN
+                    ALTER TABLE channel_posts ADD CONSTRAINT channel_posts_unique_idx UNIQUE (channel_id, message_id);
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        cur.close()
+        logger.info("✅ Database UNIQUE Constraint fixed!")
+    except Exception as e:
+        logger.error(f"❌ DB Constraint Fix Error: {e}")
+    finally:
+        close_db_connection(conn)
 
+def fix_movies_title_constraint():
+    """Movies table mein title ko UNIQUE banane ke liye"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Title column ko unique banayenge taaki ON CONFLICT kaam kare
+        cur.execute("ALTER TABLE movies ADD CONSTRAINT movies_title_unique UNIQUE (title);")
+        conn.commit()
+        cur.close()
+        logger.info("✅ Movies table UNIQUE constraint added!")
+    except Exception as e:
+        logger.error(f"❌ Movies Constraint Error: {e}")
+        if conn: conn.rollback()
+    finally:
+        close_db_connection(conn)
+        
+def fix_movies_unique_constraint():
+    """Movies table mein title ko UNIQUE banata hai taaki bot crash na ho"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Title par UNIQUE constraint add kar rahe hain
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'movies_title_key') THEN
+                    ALTER TABLE movies ADD CONSTRAINT movies_title_key UNIQUE (title);
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        cur.close()
+        logger.info("✅ Movies table UNIQUE constraint fixed!")
+    except Exception as e:
+        logger.error(f"❌ Movies DB Fix Error: {e}")
+    finally:
+        close_db_connection(conn)
 
 # 👇 Line 1225 ke baad yahan paste karein
 def migrate_channel_posts_v2():
@@ -1982,35 +2042,37 @@ async def fetch_metadata_from_google(query):
     API_KEY = "AIzaSyBksE4eCy7fzdRIANfCr-NK3ewhnEEHQTU"
     CX_ID = "83e502ec075bd49ec"
     
-    # Target sites: Ullu aur AltBalaji
-    search_query = f"{query} site:ullu.app OR site:altbalaji.com"
-    url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={search_query}"
+    # Query ko broad kar diya taaki poster aur cast mil sake
+    search_query = f"{query} movie poster plot cast"
+    url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={quote(search_query)}"
 
     try:
-        # requests.get ko run_async mein wrap karna zaroori hai
-        response = await run_async(requests.get, url)
+        response = await run_async(requests.get, url, timeout=10)
         data = response.json()
         
         if "items" in data:
             item = data["items"][0]
-            title = item.get("title").split("-")[0].strip()
-            snippet = item.get("snippet")
+            # Title clean karo
+            title = item.get("title").split("-")[0].split("|")[0].strip()
+            # Snippet ko story ki tarah use karo
+            snippet = item.get("snippet", "Story not available.")
             
-            # Poster nikalne ka jugad
             poster = None
             if "pagemap" in item:
-                if "cse_image" in item["pagemap"]:
-                    poster = item["pagemap"]["cse_image"][0]["src"]
-                elif "metatags" in item["pagemap"]:
-                    poster = item["pagemap"]["metatags"][0].get("og:image")
+                pm = item["pagemap"]
+                # Pehle image search result se poster dhoondo
+                if "cse_image" in pm:
+                    poster = pm["cse_image"][0]["src"]
+                elif "metatags" in pm:
+                    poster = pm["metatags"][0].get("og:image")
 
             return {
                 "title": title,
                 "plot": snippet,
                 "poster": poster or DEFAULT_POSTER,
-                "year": "2024",
-                "genre": "Adult, Romance, Drama",
-                "category": "Web Series"
+                "year": "2024-2026",
+                "genre": "Drama, Adult, Romance", 
+                "category": "Adult"
             }
     except Exception as e:
         logger.error(f"❌ Google Search Error: {e}")
@@ -5688,6 +5750,9 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🛡️ Ye line add karo (Line 2145 ke aas-paas)
+    if BATCH_18_SESSION.get('active') or SUPER_BATCH_SESSION.get('active'):
+        return
     # 👇 NAYA CODE: VIP Payment Screenshot Check 👇
     if context.user_data.get('payment_step') == 'screenshot' and update.message.photo:
         await payment_photo_handler(update, context)
@@ -10608,6 +10673,9 @@ async def main():
         migrate_add_imdb_columns()
         migrate_content_type_for_restore()
         migrate_channel_posts_v2()
+        fix_channel_posts_constraint()
+        fix_movies_unique_constraint()
+        fix_movies_title_constraint()
     except Exception as e:
         logger.error(f"❌ DB Setup Error: {e}")  # ← YE LINE ZAROORI HAI
 
