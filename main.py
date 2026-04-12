@@ -1347,6 +1347,7 @@ def setup_database():
             CREATE TABLE IF NOT EXISTS movies (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL UNIQUE,
                 url TEXT NOT NULL DEFAULT '',
                 file_id TEXT,
                 is_unreleased BOOLEAN DEFAULT FALSE,
@@ -2042,8 +2043,8 @@ async def fetch_metadata_from_google(query):
     API_KEY = "AIzaSyBksE4eCy7fzdRIANfCr-NK3ewhnEEHQTU"
     CX_ID = "83e502ec075bd49ec"
     
-    # Query ko broad kar diya taaki poster aur cast mil sake
-    search_query = f"{query} movie poster plot cast"
+    # 🎯 SMART QUERY: Hum movie, poster, plot sab saath dhoondh rahe hain
+    search_query = f"{query} movie poster story plot"
     url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={quote(search_query)}"
 
     try:
@@ -2052,17 +2053,21 @@ async def fetch_metadata_from_google(query):
         
         if "items" in data:
             item = data["items"][0]
-            # Title clean karo
             title = item.get("title").split("-")[0].split("|")[0].strip()
-            # Snippet ko story ki tarah use karo
-            snippet = item.get("snippet", "Story not available.")
+            # Snippet ko story ki tarah use karein
+            snippet = item.get("snippet", "Premium series available on FlimfyBox.")
             
+            # Poster nikalne ka JUGAD
             poster = None
             if "pagemap" in item:
                 pm = item["pagemap"]
-                # Pehle image search result se poster dhoondo
+                # 1. Image search results check karein
                 if "cse_image" in pm:
                     poster = pm["cse_image"][0]["src"]
+                # 2. Thumbnail results check karein
+                elif "cse_thumbnail" in pm:
+                    poster = pm["cse_thumbnail"][0]["src"]
+                # 3. Metatags check karein
                 elif "metatags" in pm:
                     poster = pm["metatags"][0].get("og:image")
 
@@ -2071,7 +2076,7 @@ async def fetch_metadata_from_google(query):
                 "plot": snippet,
                 "poster": poster or DEFAULT_POSTER,
                 "year": "2024-2026",
-                "genre": "Drama, Adult, Romance", 
+                "genre": "Drama, Adult, Romance", # Ullu content ke liye common genres
                 "category": "Adult"
             }
     except Exception as e:
