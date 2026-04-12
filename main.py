@@ -6444,172 +6444,122 @@ async def shorten_link(long_url):
         logger.error(f"Shortener Error: {e}")
     return long_url
 
-# ==================== UPDATED 18+ BATCH SYSTEM (FULL METADATA + AUTO POST) ====================
+# ==================== 18+ BATCH SYSTEM (SAME AS NORMAL BATCH) ====================
 
-# हम BATCH_18_SESSION में 'files' नाम की लिस्ट जोड़ेंगे, 'posts' की जगह
-BATCH_18_SESSION = {'active': False, 'admin_id': None, 'files': []}
+BATCH_18_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None}
 
 async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """18+ बैच सत्र चालू करता है"""
+    """18+ बैच शुरू करें - बिल्कुल /batch की तरह काम करेगा"""
     if update.effective_user.id != ADMIN_USER_ID:
         return
 
-    BATCH_18_SESSION['active'] = True
-    BATCH_18_SESSION['admin_id'] = update.effective_user.id
-    BATCH_18_SESSION['files'] = []   # पुरानी फ़ाइलें साफ़ करें
+    if BATCH_SESSION.get('active'):  # अगर नॉर्मल बैच चल रहा है तो 18+ नहीं चलेगा
+        await update.message.reply_text("❌ पहले से नॉर्मल बैच चल रहा है। कृपया उसे /done करें या /cancel करें।")
+        return
+
+    BATCH_18_SESSION.update({
+        'active': True,
+        'admin_id': update.effective_user.id,
+        'movie_id': None,
+        'movie_title': None,
+        'file_count': 0
+    })
 
     await update.message.reply_text(
         "🔞 **18+ बैच मोड चालू!**\n\n"
-        "👉 अब आप Ullu, AltBalaji, PrimeShots आदि की फ़ाइलें (वीडियो/डॉक्यूमेंट) फ़ॉरवर्ड करें।\n"
-        "👉 बॉट हर फ़ाइल का टाइटल, साल, भाषा आदि Gemini AI से निकालेगा।\n"
-        "👉 सब फ़ाइलें भेजने के बाद `/done18` टाइप करें।",
+        "👉 अब आप जिस 18+ मूवी/सीरीज़ की फ़ाइलें भेजना चाहते हैं, उसकी **पहली फ़ाइल** कैप्शन के साथ भेजें।\n"
+        "👉 बॉट उसका टाइटल, साल, भाषा आदि निकालकर आपको दिखाएगा।\n"
+        "👉 इसके बाद आप उसी मूवी की बाकी सभी फ़ाइलें (कोई भी क्वालिटी/एपिसोड) एक-एक करके भेज सकते हैं।\n"
+        "👉 सब भेजने के बाद `/done18` लिखें।",
         parse_mode='Markdown'
     )
 
 async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """18+ बैच के दौरान आई फ़ाइलों को एकत्र करता है (Gemini से मेटाडेटा बाद में निकलेगा)"""
-    if not BATCH_18_SESSION['active'] or update.effective_user.id != BATCH_18_SESSION['admin_id']:
+    """
+    यह लिसनर 18+ बैच की फ़ाइलों को पकड़ेगा और उन्हें सेव करेगा।
+    बिल्कुल वैसे ही जैसे pm_file_listener नॉर्मल बैच के लिए करता है।
+    """
+    # केवल तभी चले जब 18+ बैच सक्रिय हो और सही एडमिन हो
+    if not BATCH_18_SESSION.get('active') or update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
+        return
+
+    # अगर नॉर्मल बैच या सुपरबैच चल रहा है तो इग्नोर करें (टकराव से बचने के लिए)
+    if BATCH_SESSION.get('active') or SUPER_BATCH_SESSION.get('active'):
         return
 
     message = update.effective_message
-    if not message:
+    if not message or not (message.document or message.video):
         return
 
-    # केवल डॉक्यूमेंट या वीडियो स्वीकार करें (फ़ोटो नहीं, क्योंकि हमें वीडियो फ़ाइल चाहिए)
-    if not (message.document or message.video):
-        return
+    # ----- यहाँ से बिल्कुल वही लॉजिक है जो pm_file_listener के PHASE 1 और PHASE 2 में है -----
+    async with auto_batch_lock:
+        # ========== PHASE 1: पहली फ़ाइल = मेटाडेटा निकालो और मूवी बनाओ ==========
+        if BATCH_18_SESSION.get('movie_id') is None:
+            raw_caption = message.caption or ""
+            if not raw_caption:
+                await message.reply_text("❌ **18+ बैच:** पहली फ़ाइल के साथ कैप्शन में मूवी का नाम ज़रूर दें।")
+                return
 
-    # कैप्शन या फ़ाइल का नाम लें
-    caption = message.caption or ""
-    file_name = ""
-    file_id = None
-    file_size = 0
-    thumb_id = None
+            status_msg = await message.reply_text("🔞 Gemini 18+ कंटेंट का टाइटल निकाल रहा है...", quote=True)
 
-    if message.document:
-        file_id = message.document.file_id
-        file_name = message.document.file_name or ""
-        file_size = message.document.file_size or 0
-        if message.document.thumbnail:
-            thumb_id = message.document.thumbnail.file_id
-    elif message.video:
-        file_id = message.video.file_id
-        file_name = message.video.file_name or ""
-        file_size = message.video.file_size or 0
-        if message.video.thumbnail:
-            thumb_id = message.video.thumbnail.file_id
-
-    # बैच कतार में जोड़ें
-    BATCH_18_SESSION['files'].append({
-        'file_id': file_id,
-        'file_name': file_name,
-        'file_size': file_size,
-        'caption': caption,
-        'thumb_id': thumb_id,
-        'message_obj': message      # बाद में फ़ॉरवर्ड करने के लिए मूल मैसेज
-    })
-
-    count = len(BATCH_18_SESSION['files'])
-    # हर 5 फ़ाइलों पर अपडेट दें
-    if count % 5 == 0:
-        await message.reply_text(f"📥 अब तक {count} फ़ाइलें प्राप्त हुईं।")
-
-async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """एकत्रित 18+ फ़ाइलों को प्रोसेस करता है: ग्रुपिंग → DB सेव → ऑटो-पोस्ट"""
-    if not BATCH_18_SESSION['active'] or update.effective_user.id != BATCH_18_SESSION['admin_id']:
-        await update.message.reply_text("❌ कोई सक्रिय 18+ बैच नहीं है।")
-        return
-
-    files = BATCH_18_SESSION['files']
-    BATCH_18_SESSION['active'] = False
-    BATCH_18_SESSION['files'] = []
-    BATCH_18_SESSION['admin_id'] = None
-
-    if not files:
-        await update.message.reply_text("❌ कोई फ़ाइल प्राप्त नहीं हुई।")
-        return
-
-    status_msg = await update.message.reply_text(f"🔄 **{len(files)} फ़ाइलों को ग्रुप कर रहा हूँ...** कृपया प्रतीक्षा करें।")
-
-    # ---------- 1. फ़ाइलों को अस्थायी टाइटल के आधार पर ग्रुप करें (fallback extraction) ----------
-    grouped_movies = defaultdict(list)
-    for f in files:
-        raw_text = f['caption'] if f['caption'] else f['file_name']
-        basic_data = await fallback_extraction(raw_text)
-        temp_title = basic_data.get('title', 'Unknown_Adult_Title').lower()
-        grouped_movies[temp_title].append(f)
-
-    total_movies = len(grouped_movies)
-    await status_msg.edit_text(f"✅ **{total_movies} अलग-अलग टाइटल में ग्रुप कर लिया!**\n\nअब हर मूवी को प्रोसेस कर रहा हूँ...")
-
-    success_movies = 0
-    adult_channel_id_str = os.environ.get('ADULT_CHANNEL_ID')
-    if not adult_channel_id_str:
-        await status_msg.edit_text("❌ .env में ADULT_CHANNEL_ID सेट नहीं है। पोस्ट नहीं कर सकता।")
-        return
-    try:
-        ADULT_CHANNEL_ID = int(adult_channel_id_str)
-    except ValueError:
-        await status_msg.edit_text("❌ ADULT_CHANNEL_ID मान्य संख्या नहीं है।")
-        return
-
-    # ---------- 2. हर ग्रुप (मूवी) के लिए मेटाडेटा निकालें और सेव करें ----------
-    for i, (temp_title, movie_files) in enumerate(grouped_movies.items(), 1):
-        try:
-            await status_msg.edit_text(f"⚙️ प्रोसेसिंग {i}/{total_movies}: `{temp_title}`")
-
-            # पहली फ़ाइल का कैप्शन/नाम लें Gemini के लिए
-            first_file = movie_files[0]
-            raw_caption = first_file['caption'] or first_file['file_name']
-
-            # (वैकल्पिक) थम्बनेल से इमेज डाउनलोड करें (Gemini विज़न के लिए) - API बचाने के लिए स्किप कर सकते हैं
+            # Gemini से डेटा निकालें (थम्बनेल भेजना ऑप्शनल है)
             image_bytes = None
-            # if first_file['thumb_id']:
-            #     try:
-            #         tg_file = await context.bot.get_file(first_file['thumb_id'])
-            #         image_bytes = bytes(await tg_file.download_as_bytearray())
-            #     except: pass
+            try:
+                if message.video and message.video.thumbnail:
+                    thumb_id = message.video.thumbnail.file_id
+                elif message.document and message.document.thumbnail:
+                    thumb_id = message.document.thumbnail.file_id
+                else:
+                    thumb_id = None
+                if thumb_id:
+                    # API बचाने के लिए अभी स्किप कर सकते हैं, जैसे नॉर्मल बैच में है
+                    # tg_file = await context.bot.get_file(thumb_id)
+                    # image_bytes = bytes(await tg_file.download_as_bytearray())
+                    pass
+            except Exception:
+                pass
 
-            # ---------- Gemini AI से सटीक टाइटल, साल, भाषा निकालें ----------
             ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
-            movie_title = ai_data.get("title", temp_title)
+            movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "Hindi") or "Hindi"
-            ai_category = ai_data.get("category", "Web Series")   # आमतौर पर वेब सीरीज़ ही होगी
+            gemini_category = ai_data.get("category", "Web Series")
 
-            # हम जबरदस्ती कैटेगरी "Adult" सेट करेंगे
-            category = "Adult"
+            if movie_name == "UNKNOWN" or len(movie_name) < 2:
+                await status_msg.edit_text("❌ 18+ मूवी का नाम नहीं पहचाना जा सका। कृपया सही नाम के साथ दोबारा भेजें।")
+                return
 
-            # ---------- TMDB/OMDb से अतिरिक्त मेटाडेटा (पोस्टर, जॉनर, रेटिंग) ----------
-            metadata = await run_async(fetch_movie_metadata, movie_title, movie_year, movie_lang)
+            await status_msg.edit_text(f"✅ **Gemini ने पहचाना:** {movie_name}\n⏳ TMDB से डेटा ला रहा है...")
+
+            # TMDB/OMDb से मेटाडेटा
+            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             if metadata:
-                title, year, poster_url, genre, imdb_id, rating, plot, _ = metadata
+                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                title = movie_title
+                title = movie_name
                 year = int(movie_year) if movie_year and str(movie_year).isdigit() else 0
-                poster_url = None
-                genre = "Romance, Drama"
-                rating = "N/A"
-                plot = "Exclusive Adult Content"
-                imdb_id = None
+                poster_url, imdb_id = None, None
+                genre, rating, plot = "Romance, Drama", "N/A", "Exclusive 18+ Content"
+                category = "Adult"  # जबरदस्ती Adult ही रखेंगे
 
-            # कास्ट (अगर IMDb ID मिले तो)
+            # कास्ट लाने की कोशिश
             cast_str = ""
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
 
-            # ---------- डेटाबेस में मूवी इन्सर्ट/अपडेट करें ----------
+            # डेटाबेस में मूवी बनाएँ/अपडेट करें
             conn = get_db_connection()
             if not conn:
-                continue
+                await status_msg.edit_text("❌ डेटाबेस कनेक्शन फेल।")
+                return
 
             try:
                 cur = conn.cursor()
                 cur.execute(
                     """
-                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
-                    ON CONFLICT (title) DO UPDATE 
+                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast")
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (title) DO UPDATE
                     SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
                         year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                         genre = COALESCE(EXCLUDED.genre, movies.genre),
@@ -6620,169 +6570,230 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "cast" = COALESCE(EXCLUDED."cast", movies."cast")
                     RETURNING id
                     """,
-                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, cast_str)
+                    (title, imdb_id, poster_url, year, genre, rating, plot, "Adult", movie_lang, cast_str)
                 )
                 movie_id = cur.fetchone()[0]
                 conn.commit()
-
-                # ---------- फ़ाइलों को movie_files टेबल में डालें ----------
-                for f in movie_files:
-                    file_size_str = get_readable_file_size(f['file_size'])
-                    # क्वालिटी लेबल बनाएँ
-                    text_for_detection = f['caption'] if f['caption'] else f['file_name']
-                    label = generate_quality_label(text_for_detection, file_size_str, movie_lang)
-
-                    f_ai_data = await fallback_extraction(text_for_detection)
-                    f_lang = f_ai_data.get('language', '')
-                    f_extra = f_ai_data.get('extra_info', '')
-
-                    # यहाँ हम सीधे फ़ाइल आईडी स्टोर करेंगे (बैकअप चैनल की ज़रूरत नहीं, सीधे पोस्ट करेंगे)
-                    cur.execute(
-                        """
-                        INSERT INTO movie_files (movie_id, quality, file_size, file_id, languages, extra_info) 
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (movie_id, quality) DO UPDATE SET 
-                        file_id = EXCLUDED.file_id,
-                        file_size = EXCLUDED.file_size,
-                        languages = EXCLUDED.languages,
-                        extra_info = EXCLUDED.extra_info
-                        """,
-                        (movie_id, label, file_size_str, f['file_id'], f_lang, f_extra)
-                    )
-
-                conn.commit()
-
-                # ---------- एलियास जनरेट करें (बैकग्राउंड में) ----------
-                try:
-                    aliases = await run_async(generate_aliases_gemini, title, str(year), category)
-                    if not aliases:
-                        aliases = [title.lower().strip(), title.replace(" ", "").lower()]
-                    for alias in set(aliases):
-                        if not alias or len(alias) > 255:
-                            continue
-                        try:
-                            cur.execute("INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING", (movie_id, alias.lower().strip()))
-                        except Exception:
-                            conn.rollback()
-                    conn.commit()
-                except Exception as alias_err:
-                    logger.error(f"18+ बैच एलियास एरर: {alias_err}")
-
                 cur.close()
 
-            except Exception as db_err:
-                logger.error(f"18+ बैच DB एरर: {db_err}")
-                if conn:
-                    conn.rollback()
-                continue
+                BATCH_18_SESSION.update({
+                    'movie_id': movie_id,
+                    'movie_title': title,
+                    'file_count': 0,
+                    'year': str(year) if year else movie_year,
+                    'category': 'Adult',
+                    'language': movie_lang
+                })
+
+                await status_msg.edit_text(
+                    f"✅ **18+ बैच शुरू!**\n\n🎬 मूवी: **{title}**\n📅 वर्ष: {year if year else 'N/A'}\n🔞 श्रेणी: Adult\n\n"
+                    f"🚀 **अब इस मूवी की बाकी सभी फ़ाइलें एक-एक करके भेजें।**\nसब हो जाने पर `/done18` लिखें।",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"18+ DB Error: {e}")
+                await status_msg.edit_text(f"❌ डेटाबेस एरर: {e}")
             finally:
-                if conn:
-                    close_db_connection(conn)
+                close_db_connection(conn)
+            return  # पहली फ़ाइल का काम खत्म, बाकी फ़ाइलों के लिए नीचे जाएगा
 
-            # ---------- पोस्टर प्रोसेसिंग (लैंडस्केप ब्लर इफेक्ट) ----------
-            raw_photo = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
-            if not raw_photo and image_bytes:
-                raw_photo = image_bytes
-            if raw_photo:
-                photo_to_send = await make_landscape_poster(raw_photo)
-            else:
-                photo_to_send = DEFAULT_POSTER
+        # ========== PHASE 2: बाद की फ़ाइलें = सीधे सेव करो ==========
+        upload_status = await message.reply_text("⏳ 18+ फ़ाइल सेव हो रही है...", quote=True)
 
-            # ---------- कैप्शन (प्रीमियम स्टाइल) ----------
-            # सभी फ़ाइलों से क्वालिटी लिस्ट बनाएँ
-            res_set = set()
-            for f in movie_files:
-                match = re.search(r'(\d{3,4}p)', str(f.get('file_name', '')).lower())
-                if match:
-                    res_set.add(match.group(1))
-            res_list = sorted(list(res_set), key=lambda x: int(x.replace('p', '')), reverse=True)
-            dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+        # स्टोरेज चैनल में बैकअप (वैकल्पिक, लेकिन नॉर्मल बैच की तरह)
+        channels = get_storage_channels()
+        backup_map = {}
+        if channels:
+            for chat_id in channels:
+                try:
+                    sent = await message.copy(chat_id=chat_id)
+                    backup_map[str(chat_id)] = sent.message_id
+                except Exception as e:
+                    logger.error(f"18+ बैकअप फेल: {e}")
 
-            safe_title = title.replace('<', '').replace('>', '')
-            unicode_title = get_safe_font(safe_title)
+        file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
+        file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
+        file_size_str = get_readable_file_size(file_size)
 
-            style_choice = random.choice([1, 2])
-            if style_choice == 1:
-                caption = (
-                    f"🔞 <b>{safe_title}</b>\n"
-                    f"➖➖➖➖➖➖➖➖➖➖\n"
-                    f"✨ <b>Genre:</b> {genre if genre else 'Romance, Drama'}\n"
-                    f"🔊 <b>Language:</b> {movie_lang}\n"
-                    f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
-                    f"➖➖➖➖➖➖➖➖➖➖\n"
-                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                    f"👇 <b>Download Below</b> 👇"
-                )
-            else:
-                caption = (
-                    f"🔥 <b>{unicode_title}</b>\n"
-                    f" ├ ✨ Genre: {genre if genre else 'Romance, Drama'}\n"
-                    f" ├ 🔊 Language: {movie_lang}\n"
-                    f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
-                    f"▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁\n"
-                    f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
-                    f"👇 <b>Download Below</b> 👇"
-                )
+        # कैप्शन से क्वालिटी/सीजन निकालो
+        text_for_detection = message.caption if message.caption else file_name
+        label = generate_quality_label(text_for_detection, file_size_str, BATCH_18_SESSION.get('language', 'Hindi'))
+        ai_data = await fallback_extraction(text_for_detection)
+        f_lang = ai_data.get('language', '')
+        f_extra = ai_data.get('extra_info', '')
 
-            # ---------- सिक्योर लिंक और कीबोर्ड ----------
-            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
-            post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-                [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
-            ])
+        # मेन URL (पहला बैकअप चैनल)
+        main_url = ""
+        if channels and backup_map:
+            main_channel = channels[0]
+            main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
 
-            # ---------- पोस्ट एडल्ट चैनल में ----------
+        conn = get_db_connection()
+        if conn:
             try:
-                # अगर पोस्टर बाइट्स है तो सीधे भेजें
-                if hasattr(photo_to_send, 'read'):
-                    photo_to_send.seek(0)
-                    sent = await context.bot.send_photo(
-                        chat_id=ADULT_CHANNEL_ID,
-                        photo=photo_to_send,
-                        caption=caption,
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard
-                    )
-                else:
-                    sent = await context.bot.send_photo(
-                        chat_id=ADULT_CHANNEL_ID,
-                        photo=photo_to_send,
-                        caption=caption,
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard
-                    )
-                # पोस्ट को DB में सेव करें (रिस्टोर के लिए)
-                if sent:
-                    save_post_to_db(
-                        movie_id, ADULT_CHANNEL_ID, sent.message_id,
-                        "FlimfyBox_Bot", caption, sent.photo[-1].file_id if sent.photo else None,
-                        "photo", post_keyboard.to_dict(), None, "adult"
-                    )
-            except Exception as post_err:
-                logger.error(f"18+ पोस्ट फेल: {post_err}")
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (movie_id, quality) DO UPDATE
+                    SET url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
+                        languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
+                    """,
+                    (BATCH_18_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
+                )
+                conn.commit()
+                cur.close()
+                BATCH_18_SESSION['file_count'] += 1
+                await upload_status.edit_text(f"✅ **सेव हो गई:** `{BATCH_18_SESSION['movie_title']} {label}`\n📦 कुल फ़ाइलें: {BATCH_18_SESSION['file_count']}", parse_mode='Markdown')
+            except Exception as e:
+                await upload_status.edit_text(f"❌ सेव नहीं हो पाई: {e}")
+            finally:
+                close_db_connection(conn)
 
-            success_movies += 1
-            await asyncio.sleep(2)
 
-        except Exception as movie_err:
-            logger.error(f"18+ मूवी प्रोसेसिंग एरर ({temp_title}): {movie_err}")
-            continue
+async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """18+ बैच खत्म करें और पोस्ट बनाकर एडल्ट चैनल में भेजें"""
+    if not BATCH_18_SESSION.get('active') or update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
+        await update.message.reply_text("❌ कोई सक्रिय 18+ बैच नहीं है।")
+        return
 
-    # ---------- अंतिम रिपोर्ट ----------
-    await status_msg.edit_text(
-        f"🎉 **18+ बैच पूर्ण!**\n\n"
-        f"✅ कुल प्रोसेस्ड: {success_movies}/{total_movies}\n"
-        f"📢 सभी पोस्ट @{context.bot.username} के एडल्ट चैनल में भेज दी गई हैं।",
-        parse_mode='Markdown'
-    )
+    movie_id = BATCH_18_SESSION.get('movie_id')
+    movie_title = BATCH_18_SESSION.get('movie_title', 'Unknown')
+    file_count = BATCH_18_SESSION.get('file_count', 0)
+
+    if not movie_id or file_count == 0:
+        await update.message.reply_text("❌ कोई फ़ाइल सेव नहीं की गई। बैच रद्द किया जा रहा है।")
+        BATCH_18_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None})
+        return
+
+    status_msg = await update.message.reply_text(f"🔄 **{movie_title}** का 18+ पोस्ट बनाकर चैनल में भेज रहा हूँ...")
+
+    # चैनल ID चेक करें
+    adult_channel_id_str = os.environ.get('ADULT_CHANNEL_ID')
+    if not adult_channel_id_str:
+        await status_msg.edit_text("❌ .env में ADULT_CHANNEL_ID सेट नहीं है। पोस्ट नहीं कर सकता।")
+        BATCH_18_SESSION.update({'active': False})
+        return
+    try:
+        ADULT_CHANNEL_ID = int(adult_channel_id_str)
+    except ValueError:
+        await status_msg.edit_text("❌ ADULT_CHANNEL_ID मान्य संख्या नहीं है।")
+        BATCH_18_SESSION.update({'active': False})
+        return
+
+    # डेटाबेस से मूवी की डिटेल लें
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ डेटाबेस कनेक्शन फेल।")
+        BATCH_18_SESSION.update({'active': False})
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT poster_url, year, genre, rating, language FROM movies WHERE id = %s", (movie_id,))
+        m_data = cur.fetchone()
+        if not m_data:
+            await status_msg.edit_text("❌ मूवी डेटाबेस में नहीं मिली।")
+            return
+        poster_url, year, genre, rating, language = m_data
+
+        # क्वालिटी लिस्ट बनाएँ
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        qrows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ DB एरर: {e}")
+        return
+    finally:
+        close_db_connection(conn)
+
+    res_list = set()
+    for r in qrows:
+        match = re.search(r'(\d{3,4}p)', r[0])
+        if match:
+            res_list.add(match.group(1))
+    res_list = sorted(list(res_list), key=lambda x: int(x.replace('p', '')), reverse=True)
+    dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
+
+    # पोस्टर प्रोसेस करें (लैंडस्केप ब्लर)
+    raw_photo = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
+    if raw_photo:
+        photo_to_send = await make_landscape_poster(raw_photo)
+    else:
+        photo_to_send = DEFAULT_POSTER
+
+    # प्रीमियम कैप्शन
+    safe_title = movie_title.replace('<', '').replace('>', '')
+    unicode_title = get_safe_font(safe_title)
+    style_choice = random.choice([1, 2])
+    if style_choice == 1:
+        caption = (
+            f"🔞 <b>{safe_title}</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"✨ <b>Genre:</b> {genre or 'Romance, Drama'}\n"
+            f"🔊 <b>Language:</b> {language or 'Hindi'}\n"
+            f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
+    else:
+        caption = (
+            f"🔥 <b>{unicode_title}</b>\n"
+            f" ├ ✨ Genre: {genre or 'Romance, Drama'}\n"
+            f" ├ 🔊 Language: {language or 'Hindi'}\n"
+            f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f"▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁\n"
+            f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
+
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+    post_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+        [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+        [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+    ])
+
+    # पोस्ट भेजें
+    try:
+        if hasattr(photo_to_send, 'read'):
+            photo_to_send.seek(0)
+            sent = await context.bot.send_photo(
+                chat_id=ADULT_CHANNEL_ID,
+                photo=photo_to_send,
+                caption=caption,
+                parse_mode='HTML',
+                reply_markup=post_keyboard
+            )
+        else:
+            sent = await context.bot.send_photo(
+                chat_id=ADULT_CHANNEL_ID,
+                photo=photo_to_send,
+                caption=caption,
+                parse_mode='HTML',
+                reply_markup=post_keyboard
+            )
+        if sent:
+            save_post_to_db(
+                movie_id, ADULT_CHANNEL_ID, sent.message_id,
+                "FlimfyBox_Bot", caption, sent.photo[-1].file_id if sent.photo else None,
+                "photo", post_keyboard.to_dict(), None, "adult"
+            )
+        await status_msg.edit_text(f"✅ **18+ बैच पूर्ण!**\n🎬 {movie_title}\n📦 कुल फ़ाइलें: {file_count}\n📢 पोस्ट एडल्ट चैनल में भेज दी गई।")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ पोस्ट भेजने में एरर: {e}")
+
+    # सेशन खत्म
+    BATCH_18_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None})
+
 
 async def batch18_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """18+ बैच रद्द करें"""
     if update.effective_user.id == BATCH_18_SESSION.get('admin_id'):
-        BATCH_18_SESSION['active'] = False
-        BATCH_18_SESSION['files'] = []
-        await update.message.reply_text("🛑 18+ बैच रद्द कर दिया गया और कतार साफ़ कर दी गई।")
+        BATCH_18_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None})
+        await update.message.reply_text("🛑 18+ बैच रद्द कर दिया गया।")
 
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Premium 18+ Post - Single Item (Fixed Crash)"""
