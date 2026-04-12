@@ -2040,43 +2040,54 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 
 # --- GOOGLE SEARCH FALLBACK (Ullu/AltBalaji ke liye) ---
 async def fetch_metadata_from_google(query):
+    # --- TERI API DETAILS ---
     API_KEY = "AIzaSyBksE4eCy7fzdRIANfCr-NK3ewhnEEHQTU"
     CX_ID = "83e502ec075bd49ec"
     
-    # 🎯 SMART QUERY: Hum movie, poster, plot sab saath dhoondh rahe hain
-    search_query = f"{query} movie poster story plot"
+    # 🎯 SMART QUERY: Hum Google ko bol rahe hain poster aur story dono chahiye
+    search_query = f"{query} series cast story poster"
     url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={quote(search_query)}"
 
     try:
         response = await run_async(requests.get, url, timeout=10)
         data = response.json()
         
+        # Log for Debugging (Check karo console mein data aa raha hai ya nahi)
         if "items" in data:
             item = data["items"][0]
-            title = item.get("title").split("-")[0].split("|")[0].strip()
-            # Snippet ko story ki tarah use karein
-            snippet = item.get("snippet", "Premium series available on FlimfyBox.")
+            title = item.get("title").split("-")[0].strip()
+            snippet = item.get("snippet", "No story found.")
             
-            # Poster nikalne ka JUGAD
             poster = None
             if "pagemap" in item:
                 pm = item["pagemap"]
-                # 1. Image search results check karein
+                # Poster nikalne ke 3 alag tareeke (Full Proof)
                 if "cse_image" in pm:
                     poster = pm["cse_image"][0]["src"]
-                # 2. Thumbnail results check karein
-                elif "cse_thumbnail" in pm:
-                    poster = pm["cse_thumbnail"][0]["src"]
-                # 3. Metatags check karein
                 elif "metatags" in pm:
                     poster = pm["metatags"][0].get("og:image")
+                elif "cse_thumbnail" in pm:
+                    poster = pm["cse_thumbnail"][0]["src"]
 
+            logger.info(f"✅ Google Found: {title} | Poster: {'Yes' if poster else 'No'}")
+            
             return {
                 "title": title,
                 "plot": snippet,
                 "poster": poster or DEFAULT_POSTER,
                 "year": "2024-2026",
-                "genre": "Drama, Adult, Romance", # Ullu content ke liye common genres
+                "genre": "Adult, Drama, Romance",
+                "category": "Adult"
+            }
+        else:
+            logger.warning(f"❌ Google zero results for: {query}")
+            # Agar Google fail ho, toh Error mat do, ek dummy data bhej do
+            return {
+                "title": query,
+                "plot": "Premium 18+ content from Kahaniplay/Ullu.",
+                "poster": DEFAULT_POSTER,
+                "year": "2026",
+                "genre": "Adult, Romance",
                 "category": "Adult"
             }
     except Exception as e:
