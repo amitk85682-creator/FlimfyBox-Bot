@@ -6541,7 +6541,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ----- यहाँ से बिल्कुल वही लॉजिक है जो pm_file_listener के PHASE 1 और PHASE 2 में है -----
     async with auto_batch_lock:
-        # ========== PHASE 1: पहली फ़ाइल = मेटाडेटा निकालो और मूवी बनाओ ==========
+                # ========== PHASE 1: पहली फ़ाइल = मेटाडेटा निकालो और मूवी बनाओ ==========
         if BATCH_18_SESSION.get('movie_id') is None:
             raw_caption = message.caption or ""
             if not raw_caption:
@@ -6550,7 +6550,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             status_msg = await message.reply_text("🔞 Gemini 18+ कंटेंट का टाइटल निकाल रहा है...", quote=True)
 
-            # Gemini से डेटा निकालें (थम्बनेल भेजना ऑप्शनल है)
+            # Gemini से डेटा निकालें
             image_bytes = None
             try:
                 if message.video and message.video.thumbnail:
@@ -6560,18 +6560,17 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     thumb_id = None
                 if thumb_id:
-                    # API बचाने के लिए अभी स्किप कर सकते हैं, जैसे नॉर्मल बैच में है
+                    # API बचाने के लिए अभी स्किप कर सकते हैं
                     # tg_file = await context.bot.get_file(thumb_id)
                     # image_bytes = bytes(await tg_file.download_as_bytearray())
                     pass
             except Exception:
                 pass
 
-                        ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
+            ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "Hindi") or "Hindi"
-            gemini_category = ai_data.get("category", "Web Series")
 
             if movie_name == "UNKNOWN" or len(movie_name) < 2:
                 await status_msg.edit_text("❌ 18+ मूवी का नाम नहीं पहचाना जा सका। कृपया सही नाम के साथ दोबारा भेजें।")
@@ -6579,11 +6578,12 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await status_msg.edit_text(f"✅ **Gemini ने पहचाना:** {movie_name} ({movie_year})\n⏳ TMDB से डेटा ला रहा है...")
 
-            # TMDB/OMDb से मेटाडेटा
-            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
+            # TMDB/OMDb से मेटाडेटा (adult_mode=True)
+            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, True)
+            
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
-                # 👇 अगर फ़ाइल नाम में वर्ष दिया है और TMDB ने 0 या गलत दिया तो फ़ाइल वाला रखें
+                # फ़ाइल नाम का वर्ष प्राथमिकता पाए
                 if movie_year and str(movie_year).isdigit():
                     if year == 0 or (year and abs(year - int(movie_year)) > 2):
                         year = int(movie_year)
@@ -6592,7 +6592,6 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 year = int(movie_year) if movie_year and str(movie_year).isdigit() else 0
                 poster_url, imdb_id = None, None
                 genre, rating, plot = "Romance, Drama", "N/A", "Exclusive 18+ Content"
-                category = "Adult"
 
             # कास्ट लाने की कोशिश
             cast_str = ""
@@ -6637,17 +6636,37 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'language': movie_lang
                 })
 
-                await status_msg.edit_text(
-                    f"✅ **18+ बैच शुरू!**\n\n🎬 मूवी: **{title}**\n📅 वर्ष: {year if year else 'N/A'}\n🔞 श्रेणी: Adult\n\n"
-                    f"🚀 **अब इस मूवी की बाकी सभी फ़ाइलें एक-एक करके भेजें।**\nसब हो जाने पर `/done18` लिखें।",
-                    parse_mode='Markdown'
-                )
+                # सफलता का सुंदर मैसेज
+                cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
+                if metadata:
+                    success_msg = (
+                        f"✅ **Dada! Metadata Fetched Successfully**\n\n"
+                        f"🎬 **Title:** `{title}`\n"
+                        f"📅 **Year:** {year if year else 'N/A'}\n"
+                        f"🎭 **Genre:** {genre if genre else 'Romance, Drama'}\n"
+                        f"⭐️ **Rating:** {rating if rating and rating != 'N/A' else 'N/A'}\n"
+                        f"🏷️ **Category:** Adult\n"
+                        f"{cast_display}\n"
+                        f"🚀 **अब फाइल्स भेजें, फिर `/done18` लिखें।**"
+                    )
+                else:
+                    success_msg = (
+                        f"⚠️ **TMDB पर मेटाडेटा नहीं मिला!**\n\n"
+                        f"🎬 **Title:** `{title}`\n"
+                        f"📅 **Year:** {year}\n"
+                        f"🎭 **Genre:** {genre}\n"
+                        f"⭐️ **Rating:** N/A\n"
+                        f"🏷️ **Category:** Adult\n\n"
+                        f"🚀 **फाइल्स भेजें, फिर `/done18` लिखें।**"
+                    )
+                await status_msg.edit_text(success_msg, parse_mode='Markdown')
+
             except Exception as e:
                 logger.error(f"18+ DB Error: {e}")
                 await status_msg.edit_text(f"❌ डेटाबेस एरर: {e}")
             finally:
                 close_db_connection(conn)
-            return  # पहली फ़ाइल का काम खत्म, बाकी फ़ाइलों के लिए नीचे जाएगा
+            return
 
         # ========== PHASE 2: बाद की फ़ाइलें = सीधे सेव करो ==========
         upload_status = await message.reply_text("⏳ 18+ फ़ाइल सेव हो रही है...", quote=True)
