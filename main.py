@@ -2038,60 +2038,216 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         logger.error(f"Error in auto_fetch_and_update_metadata: {e}")
         return False
 
-# --- GOOGLE SEARCH FALLBACK (Ullu/AltBalaji ke liye) ---
-async def fetch_metadata_from_google(query):
-    # --- TERI API DETAILS ---
-    API_KEY = "AIzaSyBksE4eCy7fzdRIANfCr-NK3ewhnEEHQTU"
-    CX_ID = "83e502ec075bd49ec"
+# ============================================================================
+# 🔍 GOOGLE SEARCH METADATA FETCHER (Premium Edition)
+# ============================================================================
+
+async def fetch_metadata_from_google(query: str, search_year: str = ""):
+    """
+    🎯 Smart Google Search: Movie/Series data + Poster + Plot
+    Returns: dict with title, poster, plot, year, genre, category
+    """
+    API_KEY = os.environ.get("GOOGLE_API_KEY")  # Custom Search API Key
+    CX_ID = os.environ.get("GOOGLE_CX_ID")      # Search Engine ID
     
-    # 🎯 SMART QUERY: Hum Google ko bol rahe hain poster aur story dono chahiye
-    search_query = f"{query} series cast story poster"
-    url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={quote(search_query)}"
+    if not API_KEY or not CX_ID:
+        logger.warning("⚠️ Google API keys missing in .env")
+        return None
+    
+    # 🎯 Smart Query Building
+    search_terms = [
+        f"{query} movie poster story",
+        f"{query} series poster plot",
+        f"{query} film cast review"
+    ]
+    
+    # Agar year hai toh add karo (accuracy badhegi)
+    if search_year and str(search_year).isdigit():
+        search_terms = [f"{t} {search_year}" for t in search_terms]
+    
+    best_result = None
+    
+    for attempt, search_query in enumerate(search_terms, 1):
+        try:
+            # URL encode karo
+            encoded_query = quote(search_query)
+            url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={encoded_query}&num=3"
+            
+            logger.info(f"🔍 Google Search Attempt {attempt}: '{search_query[:50]}...'")
+            
+            # API Call
+            response = await run_async(requests.get, url, timeout=10)
+            data = response.json()
+            
+            # Check for API errors
+            if "error" in data:
+                logger.error(f"❌ Google API Error: {data['error'].get('message', 'Unknown')}")
+                continue
+            
+            items = data.get("items", [])
+            if not items:
+                logger.warning(f"⚠️ No results for: {search_query}")
+                continue
+            
+            # 🎯 Best Result Processing
+            for item in items:
+                title = clean_google_title(item.get("title", ""))
+                snippet = item.get("snippet", "Premium content available.")
+                pagemap = item.get("pagemap", {})
+                
+                # 🔥 POSTER EXTRACTION (Multiple Sources)
+                poster = None
+                
+                # Source 1: cse_image (Best quality)
+                if "cse_image" in pagemap and pagemap["cse_image"]:
+                    poster = pagemap["cse_image"][0].get("src")
+                
+                # Source 2: cse_thumbnail
+                if not poster and "cse_thumbnail" in pagemap:
+                    poster = pagemap["cse_thumbnail"][0].get("src")
+                
+                # Source 3: metatags og:image
+                if not poster and "metatags" in pagemap:
+                    for tag in pagemap["metatags"]:
+                        if "og:image" in tag:
+                            poster = tag["og:image"]
+                            break
+                
+                # Source 4: Website specific (IMDb, TMDB, etc.)
+                link = item.get("link", "")
+                if not poster:
+                    if "imdb.com" in link:
+                        # IMDb poster extraction via page parsing (fallback)
+                        poster = await extract_imdb_poster(link)
+                    elif "tmdb.org" in link or "themoviedb.org" in link:
+                        poster = extract_tmdb_poster_from_url(link)
+                
+                # 🎯 YEAR EXTRACTION
+                extracted_year = search_year
+                if not extracted_year:
+                    year_match = re.search(r'\b(19|20)\d{2}\b', title + " " + snippet)
+                    if year_match:
+                        extracted_year = year_match.group()
+                
+                # 🎯 GENRE DETECTION (From snippet)
+                genre_keywords = {
+                    'romance': 'Romance', 'drama': 'Drama', 'thriller': 'Thriller',
+                    'horror': 'Horror', 'comedy': 'Comedy', 'action': 'Action',
+                    'adult': 'Adult', 'erotic': 'Adult', 'hot': 'Adult'
+                }
+                
+                detected_genre = "Drama, Romance"  # Default for 18+
+                snippet_lower = snippet.lower()
+                for keyword, genre_name in genre_keywords.items():
+                    if keyword in snippet_lower:
+                        detected_genre = genre_name
+                        if genre_name == "Adult":
+                            break  # Adult prioritize karo
+                
+                # 🎯 VALIDATION: Valid result mila?
+                if title and len(title) > 2:
+                    best_result = {
+                        "title": title,
+                        "poster": poster or DEFAULT_POSTER,
+                        "plot": clean_plot(snippet),
+                        "year": extracted_year or "2024-2026",
+                        "genre": detected_genre,
+                        "category": "Adult" if "adult" in snippet_lower else "Web Series"
+                    }
+                    
+                    logger.info(f"✅ Google SUCCESS: '{title}' | Poster: {'Yes' if poster else 'No'}")
+                    return best_result  # Pehla valid result return karo
+            
+        except Exception as e:
+            logger.error(f"❌ Google Search Error (Attempt {attempt}): {e}")
+            continue
+    
+    # Sab attempts fail ho gaye
+    logger.warning(f"⚠️ Google Search completely failed for: {query}")
+    return None
 
+
+# ============================================================================
+# 🔧 HELPER FUNCTIONS
+# ============================================================================
+
+def clean_google_title(raw_title: str) -> str:
+    """Google title se junk hatao"""
+    # Common patterns remove karo
+    junk_patterns = [
+        r' - IMDb$', r' - Wikipedia$', r' - Rotten Tomatoes$',
+        r' \| Netflix$', r' - Prime Video$', r' \| .*?Official',
+        r'Watch ', r' Online', r' Full Movie', r' Download'
+    ]
+    
+    title = raw_title
+    for pattern in junk_patterns:
+        title = re.sub(pattern, '', title, flags=re.IGNORECASE)
+    
+    # Year hatao agar title me hai
+    title = re.sub(r'\s*\(\d{4}\)\s*', ' ', title)
+    title = re.sub(r'\s+', ' ', title).strip()
+    
+    return title
+
+
+def clean_plot(raw_snippet: str) -> str:
+    """Google snippet ko clean plot banao"""
+    # Ellipsis hatao
+    plot = raw_snippet.replace('...', ' ')
+    
+    # URLs hatao
+    plot = re.sub(r'https?://\S+', '', plot)
+    
+    # Extra spaces clean karo
+    plot = re.sub(r'\s+', ' ', plot).strip()
+    
+    # Limit karo
+    if len(plot) > 300:
+        plot = plot[:297] + "..."
+    
+    return plot if plot else "Premium content available on FlimfyBox."
+
+
+async def extract_imdb_poster(imdb_url: str) -> Optional[str]:
+    """IMDb page se poster nikalo (Fallback)"""
     try:
-        response = await run_async(requests.get, url, timeout=10)
-        data = response.json()
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0'
+        }
+        response = await run_async(requests.get, imdb_url, headers=headers, timeout=8)
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Log for Debugging (Check karo console mein data aa raha hai ya nahi)
-        if "items" in data:
-            item = data["items"][0]
-            title = item.get("title").split("-")[0].strip()
-            snippet = item.get("snippet", "No story found.")
-            
-            poster = None
-            if "pagemap" in item:
-                pm = item["pagemap"]
-                # Poster nikalne ke 3 alag tareeke (Full Proof)
-                if "cse_image" in pm:
-                    poster = pm["cse_image"][0]["src"]
-                elif "metatags" in pm:
-                    poster = pm["metatags"][0].get("og:image")
-                elif "cse_thumbnail" in pm:
-                    poster = pm["cse_thumbnail"][0]["src"]
-
-            logger.info(f"✅ Google Found: {title} | Poster: {'Yes' if poster else 'No'}")
-            
-            return {
-                "title": title,
-                "plot": snippet,
-                "poster": poster or DEFAULT_POSTER,
-                "year": "2024-2026",
-                "genre": "Adult, Drama, Romance",
-                "category": "Adult"
-            }
-        else:
-            logger.warning(f"❌ Google zero results for: {query}")
-            # Agar Google fail ho, toh Error mat do, ek dummy data bhej do
-            return {
-                "title": query,
-                "plot": "Premium 18+ content from Kahaniplay/Ullu.",
-                "poster": DEFAULT_POSTER,
-                "year": "2026",
-                "genre": "Adult, Romance",
-                "category": "Adult"
-            }
+        # Meta tag se poster
+        meta_img = soup.find('meta', property='og:image')
+        if meta_img:
+            return meta_img.get('content')
+        
+        # JSON-LD se poster
+        script = soup.find('script', type='application/ld+json')
+        if script:
+            import json
+            data = json.loads(script.string)
+            if 'image' in data:
+                return data['image']
+                
     except Exception as e:
-        logger.error(f"❌ Google Search Error: {e}")
+        logger.warning(f"IMDb poster extraction failed: {e}")
+    
+    return None
+
+
+def extract_tmdb_poster_from_url(tmdb_url: str) -> Optional[str]:
+    """TMDB URL se poster ID nikalo"""
+    try:
+        # Pattern: themoviedb.org/movie/12345-movie-name
+        match = re.search(r'/(movie|tv)/(\d+)', tmdb_url)
+        if match:
+            media_type, tmdb_id = match.groups()
+            # TMDB poster URL construct karo
+            return f"https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"  # Simplified
+    except:
+        pass
     return None
 
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
@@ -6553,12 +6709,20 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+# ============================================================================
+# 🔞 18+ BATCH LISTENER (Fully Optimized & Fixed)
+# ============================================================================
+
 async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     🔞 18+ BATCH LISTENER: Auto-extracts metadata and saves files.
+    Fixed: Clean logs, better adult detection, proper error handling.
     """
-    # Keval tabhi chale jab 18+ batch active ho aur sahi admin ho
-    if not BATCH_18_SESSION.get('active') or update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
+    # === GUARD CLAUSES ===
+    if not BATCH_18_SESSION.get('active'):
+        return
+    
+    if update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
         return
 
     # Takrav se bachne ke liye checks
@@ -6569,204 +6733,339 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or not (message.document or message.video):
         return
 
-    async with auto_batch_lock:
-        # ========== PHASE 1: Pehli File = Metadata & Movie Creation ==========
-        if BATCH_18_SESSION.get('movie_id') is None:
-            raw_caption = message.caption or ""
-            if not raw_caption:
-                await message.reply_text("❌ **18+ बैच:** Pehli file ke sath caption mein movie ka naam zaroor dein.")
-                return
+    # === PHASE 1: FIRST FILE = METADATA & MOVIE CREATION ===
+    if BATCH_18_SESSION.get('movie_id') is None:
+        raw_caption = message.caption or ""
+        if not raw_caption:
+            await message.reply_text(
+                "❌ **18+ बैच:** पहली फाइल के साथ caption में movie का naam zaroor dein.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # 🎯 Adult content auto-detection from filename
+        raw_lower = raw_caption.lower()
+        force_adult = any(tag in raw_lower for tag in ['unrated', '18+', 'adult', 'hot', 'bhabhi', 'mastani'])
+        
+        status_msg = await message.reply_text(
+            "🔞 **Analyzing 18+ content...**" + (" (Forced Adult Mode)" if force_adult else ""),
+            quote=True
+        )
 
-            status_msg = await message.reply_text("🔞 Gemini 18+ content ka title nikal raha hai...", quote=True)
-
-            # Gemini se data nikalne ka try
-            image_bytes = None
+        # === AI EXTRACTION ===
+        image_bytes = None
+        try:
             ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "Hindi") or "Hindi"
+            movie_extra = ai_data.get("extra_info", "")
+            
+            # Force adult if detected in filename
+            gemini_category = "Adult" if force_adult else (ai_data.get("category", "Web Series") or "Web Series")
+            
+        except Exception as e:
+            logger.error(f"AI extraction failed: {e}")
+            movie_name = clean_telegram_text(raw_caption.split('\n')[0][:50])
+            movie_year = ""
+            movie_lang = "Hindi"
+            movie_extra = ""
+            gemini_category = "Adult" if force_adult else "Web Series"
 
-            if movie_name == "UNKNOWN" or len(movie_name) < 2:
-                await status_msg.edit_text("❌ Name identify nahi ho paya. Sahi naam ke sath dobara bhein.")
-                return
+        if movie_name == "UNKNOWN" or len(movie_name) < 2:
+            await status_msg.edit_text(
+                "❌ Name identify nahi ho paya. Sahi naam ke sath dobara bhejein."
+            )
+            return
+        
+        await status_msg.edit_text(
+            f"✅ **Extracted:** 🎬 `{movie_name}` ({movie_year or 'N/A'})\n"
+            f"⏳ Fetching metadata from TMDB/Google...",
+            parse_mode='Markdown'
+        )
 
-            await status_msg.edit_text(f"✅ **Gemini Identified:** {movie_name} ({movie_year})\n⏳ Fetching data from TMDB & Google...")
+        # === METADATA FETCHING WITH CLEAN FALLBACK ===
+        title, year, poster_url, genre, imdb_id, rating, plot, category = (
+            movie_name, 
+            int(movie_year) if str(movie_year).isdigit() else 0,
+            None,  # poster_url
+            "Adult, Romance, Drama",  # default genre
+            None,  # imdb_id
+            "N/A",  # rating
+            "Watch exclusive 18+ content on FlimfyBox Premium.",  # default plot
+            gemini_category  # category
+        )
+        
+        cast_str = ""
 
-            # --- 🛡️ CRITICAL FIX: Variables Initialization (Crash se bachne ke liye) ---
-            imdb_id = None
-            cast_str = ""
-            title = movie_name
-            year = int(movie_year) if str(movie_year).isdigit() else 0
-            poster_url = DEFAULT_POSTER
-            genre = "Adult, Romance, Drama"
-            plot = "Watch exclusive 18+ content on FlimfyBox."
-            rating = "7.5"
-            category = "Adult"
-            metadata = None
-
-            # --- 1. TMDB TRY KAREIN ---
-            metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, True)
+        # Try TMDB first (with adult_mode=True)
+        try:
+            metadata = await run_async(
+                fetch_movie_metadata, 
+                movie_name, 
+                movie_year, 
+                movie_lang, 
+                adult_mode=True  # Critical for 18+ content
+            )
             
             if metadata:
-                # TMDB se data mil gaya toh unpack karo
-                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
-                logger.info(f"✨ TMDB Success for: {title}")
-            else:
-                # --- 2. GOOGLE FALLBACK: Agar TMDB fail hua ---
-                logger.info(f"🔍 TMDB failed for {movie_name}, trying Google Search API...")
-                google_data = await fetch_metadata_from_google(movie_name)
+                t_title, t_year, t_poster, t_genre, t_imdb, t_rating, t_plot, t_cat = metadata
+                # Only update if we got valid data
+                if t_title and t_title != "N/A": title = t_title
+                if t_year and t_year > 0: year = t_year
+                if t_poster and t_poster != "N/A": poster_url = t_poster
+                if t_genre and t_genre != "N/A": genre = t_genre
+                if t_imdb and t_imdb != "N/A": imdb_id = t_imdb
+                if t_rating and t_rating != "N/A": rating = t_rating
+                if t_plot and t_plot != "N/A": plot = t_plot
+                # Keep Adult category even if TMDB says something else
+                category = gemini_category if force_adult else (t_cat if t_cat else gemini_category)
                 
-                if google_data:
-                    # 🔥 Google se variables update karo
-                    title = google_data.get('title', movie_name)
-                    year = int(google_data.get('year', year)) if str(google_data.get('year')).isdigit() else year
-                    poster_url = google_data.get('poster', DEFAULT_POSTER)
-                    genre = google_data.get('genre', "Adult, Romance, Drama")
-                    plot = google_data.get('plot', "Watch exclusive content on FlimfyBox.")
-                    category = "Adult"
-                    # Google data milne ka pakka saboot (Log)
-                    logger.info(f"✅ Google Search SUCCESS: Data found for '{title}'")
-                else:
-                    logger.warning(f"❌ Google Search also FAILED for: {movie_name}. Data will be empty.")
+                logger.info(f"✅ TMDB metadata found for: {title}")
+                
+                # Fetch cast if we have IMDB ID
+                if imdb_id:
+                    cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ TMDB failed for {movie_name}: {e}")
 
-            # --- 3. CAST FETCHING (Sirf agar IMDb ID mila ho) ---
-            if imdb_id:
-                cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
-
-            # --- 4. DATABASE UPDATION (Strict Data Push) ---
-            conn = get_db_connection()
-            if not conn:
-                await status_msg.edit_text("❌ Database Connection Failed.")
-                return
-
+        # If TMDB failed completely, try Google
+        if not poster_url or poster_url == "N/A":
             try:
-                cur = conn.cursor()
-                # 🎯 Note: Yahan 'title' unique constraint hai, toh ye update trigger karega
-                cur.execute(
-                    """
-                    INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast")
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (title) DO UPDATE 
-                    SET poster_url = EXCLUDED.poster_url,
-                        year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
-                        genre = EXCLUDED.genre,
-                        rating = EXCLUDED.rating,
-                        description = EXCLUDED.description,
-                        category = EXCLUDED.category,
-                        language = EXCLUDED.language,
-                        "cast" = COALESCE(EXCLUDED."cast", movies."cast")
-                    RETURNING id
-                    """,
-                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, cast_str)
-                )
-                movie_id = cur.fetchone()[0]
-                conn.commit()
-                # Baki ka code (Session update etc.) waise hi rehne do...
-
-                # Session Update
-                BATCH_18_SESSION.update({
-                    'movie_id': movie_id,
-                    'movie_title': title,
-                    'file_count': 0,
-                    'year': str(year) if year else movie_year,
-                    'category': 'Adult',
-                    'language': movie_lang
-                })
-
-                # --- 5. UI RESPONSE WITH BUTTONS ---
-                cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
-                success_msg = (
-                    f"✅ **18+ Metadata Fetched Successfully**\n\n"
-                    f"🎬 **Title:** `{title}`\n"
-                    f"📅 **Year:** {year if year else 'N/A'}\n"
-                    f"🎭 **Genre:** {genre}\n"
-                    f"⭐️ **Rating:** {rating}\n"
-                    f"🏷️ **Category:** Adult\n"
-                    f"{cast_display}\n"
-                    f"🚀 **Ab files bhein, phir `/done18` likhein.**"
-                )
-                
-                # Check for old files
-                conn2 = get_db_connection()
-                file_count_old = 0
-                if conn2:
-                    try:
-                        cur2 = conn2.cursor()
-                        cur2.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-                        file_count_old = cur2.fetchone()[0]
-                        cur2.close()
-                    except: pass
-                    finally: close_db_connection(conn2)
-
-                keyboard = []
-                if file_count_old > 0:
-                    keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
-                keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch18")])
-
-                await status_msg.edit_text(success_msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
+                google_data = await fetch_metadata_from_google(movie_name)
+                if google_data:
+                    # Only fill missing fields from Google
+                    if not poster_url or poster_url == "N/A":
+                        poster_url = google_data.get('poster')
+                    if not genre or genre == "Adult, Romance, Drama":
+                        genre = google_data.get('genre', "Adult, Romance, Drama")
+                    if not plot or plot == "Watch exclusive 18+ content on FlimfyBox Premium.":
+                        plot = google_data.get('plot', plot)
+                    
+                    logger.info(f"✅ Google fallback used for: {title}")
+                else:
+                    logger.info(f"⚠️ No Google results for: {title}, using defaults")
+                    
             except Exception as e:
-                logger.error(f"18+ DB Error: {e}")
-                await status_msg.edit_text(f"❌ Database Error: {e}")
-            finally:
-                close_db_connection(conn)
+                logger.warning(f"⚠️ Google search failed for {title}: {e}")
+
+        # === DATABASE INSERTION ===
+        conn = get_db_connection()
+        if not conn:
+            await status_msg.edit_text("❌ Database Connection Failed.")
             return
 
-        # ========== PHASE 2: Baki Files = Direct Saving ==========
-        upload_status = await message.reply_text("⏳ 18+ File save ho rahi hai...", quote=True)
+        try:
+            cur = conn.cursor()
+            
+            # Check for existing movie
+            cur.execute(
+                "SELECT id, poster_url, year FROM movies WHERE title ILIKE %s",
+                (title,)
+            )
+            existing = cur.fetchone()
 
-        channels = get_storage_channels()
-        backup_map = {}
-        if channels:
-            for chat_id in channels:
-                try:
-                    sent = await message.copy(chat_id=chat_id)
-                    backup_map[str(chat_id)] = sent.message_id
-                except Exception as e:
-                    logger.error(f"18+ Backup Failed: {e}")
+            if existing:
+                # Update existing with better data if available
+                existing_id, existing_poster, existing_year = existing
+                final_poster = poster_url if poster_url else existing_poster
+                final_year = year if (year and year > 0) else existing_year
+                
+                cur.execute("""
+                    UPDATE movies 
+                    SET poster_url = COALESCE(%s, poster_url),
+                        year = CASE WHEN %s > 0 THEN %s ELSE year END,
+                        genre = COALESCE(%s, genre),
+                        rating = COALESCE(%s, rating),
+                        description = COALESCE(%s, description),
+                        category = %s,
+                        language = COALESCE(NULLIF(%s, ''), language),
+                        extra_info = COALESCE(NULLIF(%s, ''), extra_info),
+                        "cast" = COALESCE(%s, "cast")
+                    WHERE id = %s
+                    RETURNING id
+                """, (final_poster, final_year, final_year, genre, rating, plot, 
+                      category, movie_lang, movie_extra, cast_str, existing_id))
+                movie_id = cur.fetchone()[0]
+                logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
+                
+            else:
+                # Insert new movie
+                cur.execute("""
+                    INSERT INTO movies 
+                    (title, url, imdb_id, poster_url, year, genre, rating, 
+                     description, category, language, extra_info, "cast") 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (title, imdb_id, poster_url, year, genre, rating, 
+                      plot, category, movie_lang, movie_extra, cast_str))
+                movie_id = cur.fetchone()[0]
+                logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
 
-        file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
-        file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
-        file_size_str = get_readable_file_size(file_size)
+            conn.commit()
 
-        text_for_detection = message.caption if message.caption else file_name
-        label = generate_quality_label(text_for_detection, file_size_str, BATCH_18_SESSION.get('language', 'Hindi'))
+            # Check for old files
+            cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+            file_count_old = cur.fetchone()[0]
+            cur.close()
+
+            # Update session
+            BATCH_18_SESSION.update({
+                'movie_id': movie_id,
+                'movie_title': title,
+                'file_count': 0,
+                'year': str(year) if year else movie_year,
+                'category': category,
+                'language': movie_lang
+            })
+
+            # Build success message
+            cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
+            source_info = "TMDB" if imdb_id else ("Google" if poster_url else "Default")
+            
+            success_msg = (
+                f"✅ **18+ Metadata Ready** ({source_info})\n\n"
+                f"🎬 **Title:** `{title}`\n"
+                f"📅 **Year:** {year if year else 'N/A'}\n"
+                f"🎭 **Genre:** {genre}\n"
+                f"⭐️ **Rating:** {rating}\n"
+                f"🏷️ **Category:** {category}\n"
+                f"{cast_display}\n"
+                f"🚀 **Ab files bhejein, phir `/done18` likhein.**"
+            )
+
+            # Build keyboard
+            keyboard = []
+            if file_count_old > 0:
+                keyboard.append([InlineKeyboardButton(
+                    "🗑️ Delete OLD Files", 
+                    callback_data=f"clearfiles_{movie_id}"
+                )])
+            keyboard.append([InlineKeyboardButton(
+                "❌ Cancel Batch", 
+                callback_data="cancel_batch18"
+            )])
+
+            await status_msg.edit_text(
+                success_msg, 
+                parse_mode='Markdown', 
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        except Exception as e:
+            logger.error(f"❌ 18+ DB Error: {e}")
+            if conn: conn.rollback()
+            await status_msg.edit_text(f"❌ Database Error: {e}")
+        finally:
+            close_db_connection(conn)
+        
+        return  # First file processed, wait for more
+
+    # === PHASE 2: SUBSEQUENT FILES ===
+    upload_status = await message.reply_text(
+        "⏳ Saving 18+ file...", 
+        quote=True
+    )
+
+    # Get storage channels
+    channels = get_storage_channels()
+    backup_map = {}
+    
+    if channels:
+        for chat_id in channels:
+            try:
+                sent = await message.copy(chat_id=chat_id)
+                backup_map[str(chat_id)] = sent.message_id
+            except Exception as e:
+                logger.error(f"18+ Backup failed for {chat_id}: {e}")
+
+    # Extract file info
+    file_name = (message.document.file_name if message.document 
+                 else (message.video.file_name if message.video else "File"))
+    file_size = (message.document.file_size if message.document 
+                 else (message.video.file_size if message.video else 0))
+    file_size_str = get_readable_file_size(file_size)
+
+    # Generate quality label
+    text_for_detection = message.caption if message.caption else file_name
+    current_lang = BATCH_18_SESSION.get('language', 'Hindi')
+    label = generate_quality_label(text_for_detection, file_size_str, current_lang)
+
+    # Extract extra info
+    try:
         ai_data_f = await fallback_extraction(text_for_detection)
         f_lang = ai_data_f.get('language', '')
         f_extra = ai_data_f.get('extra_info', '')
+    except:
+        f_lang = ''
+        f_extra = ''
 
-        main_url = ""
-        if channels and backup_map:
-            main_channel = channels[0]
-            main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
+    # Build main URL
+    main_url = ""
+    if channels and backup_map:
+        main_channel = channels[0]
+        main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
 
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (movie_id, quality) DO UPDATE
-                    SET url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
-                        languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
-                    """,
-                    (BATCH_18_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
-                )
-                conn.commit()
-                cur.close()
-                BATCH_18_SESSION['file_count'] += 1
-                await upload_status.edit_text(f"✅ **Save ho gayi:** `{BATCH_18_SESSION['movie_title']} {label}`\n📦 Total Files: {BATCH_18_SESSION['file_count']}", parse_mode='Markdown')
-            except Exception as e:
-                await upload_status.edit_text(f"❌ Save Error: {e}")
-            finally:
-                close_db_connection(conn)
+    # Save to database
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO movie_files 
+                (movie_id, quality, file_size, url, backup_map, languages, extra_info) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (movie_id, quality) DO UPDATE SET 
+                    url = EXCLUDED.url, 
+                    file_size = EXCLUDED.file_size, 
+                    backup_map = EXCLUDED.backup_map,
+                    file_id = NULL,
+                    languages = EXCLUDED.languages, 
+                    extra_info = EXCLUDED.extra_info
+            """, (
+                BATCH_18_SESSION['movie_id'], 
+                label, 
+                file_size_str, 
+                main_url, 
+                json.dumps(backup_map),
+                f_lang, 
+                f_extra
+            ))
+            conn.commit()
+            cur.close()
+            
+            BATCH_18_SESSION['file_count'] += 1
+            
+            await upload_status.edit_text(
+                f"✅ **Saved:** `{BATCH_18_SESSION['movie_title']} {label}`\n"
+                f"📦 Total Files: {BATCH_18_SESSION['file_count']}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"18+ File Save Error: {e}")
+            if conn: conn.rollback()
+            await upload_status.edit_text(f"❌ Save Error: {e}")
+        finally:
+            close_db_connection(conn)
+    else:
+        await upload_status.edit_text("❌ Database connection failed")
+
+
+# ============================================================================
+# 🔞 18+ BATCH DONE (Optimized)
+# ============================================================================
 
 async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """18+ बैच खत्म करें और पोस्ट बनाकर एडल्ट चैनल में भेजें"""
-    if not BATCH_18_SESSION.get('active') or update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
+    """Complete 18+ batch and post to adult channel"""
+    
+    # Validation
+    if not BATCH_18_SESSION.get('active'):
         await update.message.reply_text("❌ कोई सक्रिय 18+ बैच नहीं है।")
+        return
+
+    if update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
         return
 
     movie_id = BATCH_18_SESSION.get('movie_id')
@@ -6774,70 +7073,88 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_count = BATCH_18_SESSION.get('file_count', 0)
 
     if not movie_id or file_count == 0:
-        await update.message.reply_text("❌ कोई फ़ाइल सेव नहीं की गई। बैच रद्द किया जा रहा है।")
-        BATCH_18_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None})
+        await update.message.reply_text(
+            "❌ कोई फ़ाइल सेव नहीं की गई। बैच रद्द किया जा रहा है।"
+        )
+        BATCH_18_SESSION.update({
+            'active': False, 'movie_id': None, 'movie_title': None,
+            'file_count': 0, 'admin_id': None
+        })
         return
 
-    status_msg = await update.message.reply_text(f"🔄 **{movie_title}** का 18+ पोस्ट बनाकर चैनल में भेज रहा हूँ...")
-
-    # चैनल ID चेक करें
+    # Get adult channel
     adult_channel_id_str = os.environ.get('ADULT_CHANNEL_ID')
     if not adult_channel_id_str:
-        await status_msg.edit_text("❌ .env में ADULT_CHANNEL_ID सेट नहीं है। पोस्ट नहीं कर सकता।")
-        BATCH_18_SESSION.update({'active': False})
+        await update.message.reply_text("❌ .env में ADULT_CHANNEL_ID सेट नहीं है।")
         return
+    
     try:
         ADULT_CHANNEL_ID = int(adult_channel_id_str)
     except ValueError:
-        await status_msg.edit_text("❌ ADULT_CHANNEL_ID मान्य संख्या नहीं है।")
-        BATCH_18_SESSION.update({'active': False})
+        await update.message.reply_text("❌ ADULT_CHANNEL_ID invalid है।")
         return
 
-    # डेटाबेस से मूवी की डिटेल लें
+    status_msg = await update.message.reply_text(
+        f"🔄 **{movie_title}** का 18+ पोस्ट बन रहा है..."
+    )
+
+    # Fetch movie data
     conn = get_db_connection()
     if not conn:
-        await status_msg.edit_text("❌ डेटाबेस कनेक्शन फेल।")
-        BATCH_18_SESSION.update({'active': False})
+        await status_msg.edit_text("❌ Database error.")
         return
 
     try:
         cur = conn.cursor()
-        cur.execute("SELECT poster_url, year, genre, rating, language FROM movies WHERE id = %s", (movie_id,))
+        cur.execute("""
+            SELECT poster_url, year, genre, rating, language, description 
+            FROM movies WHERE id = %s
+        """, (movie_id,))
         m_data = cur.fetchone()
+        
         if not m_data:
-            await status_msg.edit_text("❌ मूवी डेटाबेस में नहीं मिली।")
+            await status_msg.edit_text("❌ Movie DB में नहीं मिली।")
             return
-        poster_url, year, genre, rating, language = m_data
+            
+        poster_url, year, genre, rating, language, description = m_data
 
-        # क्वालिटी लिस्ट बनाएँ
-        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        # Get qualities
+        cur.execute(
+            "SELECT quality FROM movie_files WHERE movie_id = %s", 
+            (movie_id,)
+        )
         qrows = cur.fetchall()
         cur.close()
+        
     except Exception as e:
-        await status_msg.edit_text(f"❌ DB एरर: {e}")
+        await status_msg.edit_text(f"❌ DB Error: {e}")
         return
     finally:
         close_db_connection(conn)
 
+    # Build quality string
     res_list = set()
     for r in qrows:
         match = re.search(r'(\d{3,4}p)', r[0])
         if match:
             res_list.add(match.group(1))
+    
     res_list = sorted(list(res_list), key=lambda x: int(x.replace('p', '')), reverse=True)
     dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
 
-    # पोस्टर प्रोसेस करें (लैंडस्केप ब्लर)
+    # Process poster
     raw_photo = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
     if raw_photo:
         photo_to_send = await make_landscape_poster(raw_photo)
     else:
         photo_to_send = DEFAULT_POSTER
 
-    # प्रीमियम कैप्शन
+    # Build caption
     safe_title = movie_title.replace('<', '').replace('>', '')
     unicode_title = get_safe_font(safe_title)
+    
     style_choice = random.choice([1, 2])
+    
     if style_choice == 1:
         caption = (
             f"🔞 <b>{safe_title}</b>\n"
@@ -6855,55 +7172,88 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f" ├ ✨ Genre: {genre or 'Romance, Drama'}\n"
             f" ├ 🔊 Language: {language or 'Hindi'}\n"
             f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
-            f"▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁ ▁\n"
+            f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
             f"🔞 <b>18+ Content:</b> <a href='https://t.me/+wcYoTQhIz-ZmOTY1'>Join Premium</a>\n"
             f"👇 <b>Download Below</b> 👇"
         )
 
+    # Build keyboard
     secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
     post_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+        [
+            InlineKeyboardButton("Download Now", url=secure_url),
+            InlineKeyboardButton("Download Now", url=secure_url)
+        ],
         [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
         [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
     ])
 
-    # पोस्ट भेजें
+    # Send to adult channel
     try:
         if hasattr(photo_to_send, 'read'):
             photo_to_send.seek(0)
-            sent = await context.bot.send_photo(
-                chat_id=ADULT_CHANNEL_ID,
-                photo=photo_to_send,
-                caption=caption,
-                parse_mode='HTML',
-                reply_markup=post_keyboard
-            )
-        else:
-            sent = await context.bot.send_photo(
-                chat_id=ADULT_CHANNEL_ID,
-                photo=photo_to_send,
-                caption=caption,
-                parse_mode='HTML',
-                reply_markup=post_keyboard
-            )
+            
+        sent = await context.bot.send_photo(
+            chat_id=ADULT_CHANNEL_ID,
+            photo=photo_to_send,
+            caption=caption,
+            parse_mode='HTML',
+            reply_markup=post_keyboard
+        )
+
+        # Save to DB for restore feature
         if sent:
             save_post_to_db(
-                movie_id, ADULT_CHANNEL_ID, sent.message_id,
-                "FlimfyBox_Bot", caption, sent.photo[-1].file_id if sent.photo else None,
-                "photo", post_keyboard.to_dict(), None, "adult"
+                movie_id=movie_id,
+                channel_id=ADULT_CHANNEL_ID,
+                message_id=sent.message_id,
+                bot_username="FlimfyBox_Bot",
+                caption=caption,
+                media_file_id=sent.photo[-1].file_id if sent.photo else None,
+                media_type="photo",
+                keyboard_data=post_keyboard.to_dict(),
+                topic_id=None,
+                content_type="adult"
             )
-        await status_msg.edit_text(f"✅ **18+ बैच पूर्ण!**\n🎬 {movie_title}\n📦 कुल फ़ाइलें: {file_count}\n📢 पोस्ट एडल्ट चैनल में भेज दी गई।")
+
+        await status_msg.edit_text(
+            f"✅ **18+ बैच पूर्ण!**\n\n"
+            f"🎬 {movie_title}\n"
+            f"📦 कुल फ़ाइलें: {file_count}\n"
+            f"📢 एडल्ट चैनल में पोस्ट भेज दी गई।"
+        )
+
     except Exception as e:
+        logger.error(f"18+ Post Error: {e}")
         await status_msg.edit_text(f"❌ पोस्ट भेजने में एरर: {e}")
 
-    # सेशन खत्म
-    BATCH_18_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None})
+    # Clear session
+    BATCH_18_SESSION.update({
+        'active': False,
+        'movie_id': None,
+        'movie_title': None,
+        'file_count': 0,
+        'admin_id': None,
+        'year': '',
+        'category': '',
+        'language': ''
+    })
 
+
+# ============================================================================
+# 🔞 18+ BATCH CANCEL
+# ============================================================================
 
 async def batch18_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """18+ बैच रद्द करें"""
+    """Cancel active 18+ batch"""
     if update.effective_user.id == BATCH_18_SESSION.get('admin_id'):
-        BATCH_18_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None})
+        BATCH_18_SESSION.update({
+            'active': False,
+            'movie_id': None,
+            'movie_title': None,
+            'file_count': 0,
+            'admin_id': None
+        })
         await update.message.reply_text("🛑 18+ बैच रद्द कर दिया गया।")
 
 async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
