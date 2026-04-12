@@ -2003,39 +2003,86 @@ def get_tmdb_backdrop(query, search_year=""):
         logger.error(f"TMDB Error: {e}")
     return None
 
-def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = ""):
-    """IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन"""
+def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "", adult_mode: bool = False):
+    """
+    IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन
+    adult_mode=True होने पर TMDb सर्च में include_adult=true भेजेगा और OMDb को बायपास करेगा।
+    """
     omdb_api_key = os.environ.get("OMDB_API_KEY")
-    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" # TMDb Key
-    
-    if not omdb_api_key:
-        logger.error("❌ OMDB_API_KEY missing in .env")
-        return None
+    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
 
+    # ----- एडल्ट मोड: OMDb का उपयोग न करें (क्योंकि उसमें एडल्ट डेटा नहीं) -----
+    if adult_mode:
+        # सीधे TMDb का उपयोग करें
+        try:
+            tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}&include_adult=true"
+            if search_year and search_year.strip().isdigit():
+                tmdb_search += f"&year={search_year.strip()}"
+            t_resp = requests.get(tmdb_search, timeout=10).json()
+            if not t_resp.get('results'):
+                return None
+
+            best_match = t_resp['results'][0]
+            # वर्ष मैच करने की कोशिश
+            if search_year and str(search_year).strip().isdigit():
+                for item in t_resp['results']:
+                    item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
+                    if str(search_year).strip() == item_year:
+                        best_match = item
+                        break
+
+            title = best_match.get('title') or best_match.get('name') or search_query
+            year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
+            year = int(year_str) if year_str.isdigit() else 0
+            plot = best_match.get('overview', 'No story available.')
+            rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
+            category = "Adult"  # जबरदस्ती Adult
+            genre = "Romance, Drama"  # डिफ़ॉल्ट, TMDb जॉनर बाद में ला सकते हैं
+
+            path = best_match.get('poster_path')
+            poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
+
+            imdb_id = None
+            try:
+                tmdb_id = best_match.get('id')
+                media_type = best_match.get('media_type', 'movie')
+                ext_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
+                imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
+            except:
+                pass
+
+            return title, year, poster_url, genre, imdb_id, rating, plot, category
+        except Exception as e:
+            logger.error(f"Adult TMDb Fetch Error: {e}")
+            return None
+
+    # ----- नॉर्मल मोड (मूल कोड) -----
+    if not omdb_api_key:
+        logger.error("❌ OMDB_API_KEY missing in .env")
+        return None
+
     try:
-        # --- STEP 1: IMDb (OMDb) से बेसिक डेटा लाना ---
         if is_imdb_id:
             url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}&plot=full"
         else:
             url = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}&plot=full"
-            # 👇 NAYA FIX: OMDb ko Year (Saal) bhi batana zaroori hai, warna wo galat movie dega!
             if search_year and str(search_year).strip().isdigit():
                 url += f"&y={str(search_year).strip()}"
 
         resp = requests.get(url, timeout=10).json()
-        
-        # 👇 NAYA FIX: Agar OMDb movie dhoondhne me fail ho jaye, toh TMDB se saara data nikalenge 👇
+
         if resp.get("Response") != "True":
+            # OMDb फेल होने पर TMDb का उपयोग करें
             tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}"
+            if search_year and str(search_year).strip().isdigit():
+                tmdb_search += f"&year={search_year.strip()}"
             t_resp = requests.get(tmdb_search, timeout=10).json()
-            
             if not t_resp.get('results'):
-                return None  # Agar TMDB bhi fail ho jaye tabhi aage badhega
-                
-            # TMDB me saal (year) match karne ki koshish
+                return None
+
             best_match = t_resp['results'][0]
             if search_year and str(search_year).strip().isdigit():
                 for item in t_resp['results']:
@@ -2043,31 +2090,29 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                     if str(search_year).strip() == item_year:
                         best_match = item
                         break
-            
-            # TMDB se data extract karna
+
             title = best_match.get('title') or best_match.get('name') or search_query
             year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
             year = int(year_str) if year_str.isdigit() else 0
             plot = best_match.get('overview', 'No story available.')
             rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
             category = "Movies" if best_match.get('media_type') == 'movie' else "Web Series"
-            genre = "Action, Drama" # TMDB genres numbers me hote hain, isliye default
-            
+            genre = "Action, Drama"
             path = best_match.get('poster_path')
             poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
-            
-            # TMDB se IMDb ID nikalna (Taaki DB crash na ho)
-            tmdb_id = best_match.get('id')
-            media_type = best_match.get('media_type', 'movie')
+
             imdb_id = None
             try:
+                tmdb_id = best_match.get('id')
+                media_type = best_match.get('media_type', 'movie')
                 ext_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
                 imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
-            except: pass
-            
-            return title, year, poster_url, genre, imdb_id, rating, plot, category
-        # 👆 -------------------------------------------------------------------------------- 👆
+            except:
+                pass
 
+            return title, year, poster_url, genre, imdb_id, rating, plot, category
+
+        # OMDb से डेटा सफल
         title = resp.get('Title')
         year = int(resp.get('Year', '0').split('–')[0]) if resp.get('Year') else 0
         genre = resp.get('Genre', 'Action, Drama')
@@ -2077,43 +2122,40 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         country = resp.get('Country', '')
         lang = resp.get('Language', '').lower()
 
-        # --- STEP 2: Smart Category Detection ---
         category = "Movies"
         g_low = genre.lower()
-        if "animation" in g_low or "anime" in g_low: category = "Anime"
-        elif "series" in g_low or "episode" in g_low: category = "Web Series"
+        if "animation" in g_low or "anime" in g_low:
+            category = "Anime"
+        elif "series" in g_low or "episode" in g_low:
+            category = "Web Series"
         elif "india" in country.lower():
-            if any(x in lang for x in ['telugu', 'tamil', 'kannada', 'malayalam']): category = "South"
-            else: category = "Bollywood"
-        else: category = "Hollywood"
+            if any(x in lang for x in ['telugu', 'tamil', 'kannada', 'malayalam']):
+                category = "South"
+            else:
+                category = "Bollywood"
+        else:
+            category = "Hollywood"
 
-        # --- STEP 3: TMDb से HD Poster लाना (100% Exact Match) ---
-        poster_url = resp.get('Poster') # Default OMDb
-
+        # TMDb से HD पोस्टर लाना
+        poster_url = resp.get('Poster')
         if imdb_id and imdb_id != 'N/A':
-            # 🎯 JUGAD: Agar IMDb ID hai, toh TMDB ko seedha ID do, naam nahi! Isse galti ka chance 0% ho jayega.
             tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
             t_resp = requests.get(tmdb_find, timeout=10).json()
-            
-            # Movie ya TV dono me se poster nikal lo
             results = t_resp.get('movie_results', []) + t_resp.get('tv_results', [])
             if results:
                 path = results[0].get('poster_path')
                 if path:
                     poster_url = f"https://image.tmdb.org/t/p/original{path}"
         else:
-            # 🛡️ FALLBACK: Agar IMDb ID nahi hai, toh Name aur Year dono mila kar check karo
             tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
             t_resp = requests.get(tmdb_search, timeout=10).json()
             if t_resp.get('results'):
                 for item in t_resp['results']:
                     item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
-                    # Saal (Year) match karne ki koshish karo
                     if str(year) == item_year and item.get('poster_path'):
                         poster_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
                         break
                 else:
-                    # Saal match na ho toh jo pehla lamba poster mile utha lo
                     path = t_resp['results'][0].get('poster_path')
                     if path:
                         poster_url = f"https://image.tmdb.org/t/p/original{path}"
@@ -4962,12 +5004,18 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     # 2. Add AI Detected Language
     lang_tag = f" ({ai_language})" if ai_language else ""
     
-    # 3. Detect Series (S01, S02, S01 [E01-E10], [E01-12], S01E01, Season 1)
-    # 👇 FIX: Naya Regex ab akela 'S01' ya 'Season 2' bhi aasaani se pakad lega!
-    season_match = re.search(r'(?i)(s\d{1,2}\s*(?:\[?(?:e|ep|episode)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode)?\s*\d{1,3})?\]?)|\[?(?:e|ep|episode)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode)?\s*\d{1,3})?\]?|s\d{1,2}e\d{1,3}|s\d{1,2}\b|season\s?\d+\b)', name_lower)
+    # 3. Detect Series (S01, S02, S01E01, S01P01, Season 1, etc.)
+    # 👇 नया पैटर्न जो S01P01 और S01E01 दोनों पकड़ेगा
+    season_match = re.search(
+        r'(?i)(s\d{1,2}\s*(?:[ep]\d{1,3})?'                 # S01 या S01E01 या S01P01
+        r'|s\d{1,2}\s*\[?(?:e|ep|episode|p|part)\s*\d{1,3}' # S01E01, S01P01
+        r'|\[?(?:e|ep|episode|p|part)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode|p|part)?\s*\d{1,3})?\]?'
+        r'|season\s?\d+\b)', 
+        name_lower
+    )
     
     if season_match:
-        episode_tag = season_match.group(0).upper()
+        episode_tag = season_match.group(0).upper().replace("P", "E")  # P01 को E01 जैसा दिखाने के लिए
         return f"{episode_tag} {quality}{lang_tag} [{file_size_str}]"
         
     return f"{quality}{lang_tag} [{file_size_str}]"
@@ -6519,7 +6567,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-            ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
+                        ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "Hindi") or "Hindi"
@@ -6529,18 +6577,22 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("❌ 18+ मूवी का नाम नहीं पहचाना जा सका। कृपया सही नाम के साथ दोबारा भेजें।")
                 return
 
-            await status_msg.edit_text(f"✅ **Gemini ने पहचाना:** {movie_name}\n⏳ TMDB से डेटा ला रहा है...")
+            await status_msg.edit_text(f"✅ **Gemini ने पहचाना:** {movie_name} ({movie_year})\n⏳ TMDB से डेटा ला रहा है...")
 
             # TMDB/OMDb से मेटाडेटा
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+                # 👇 अगर फ़ाइल नाम में वर्ष दिया है और TMDB ने 0 या गलत दिया तो फ़ाइल वाला रखें
+                if movie_year and str(movie_year).isdigit():
+                    if year == 0 or (year and abs(year - int(movie_year)) > 2):
+                        year = int(movie_year)
             else:
                 title = movie_name
                 year = int(movie_year) if movie_year and str(movie_year).isdigit() else 0
                 poster_url, imdb_id = None, None
                 genre, rating, plot = "Romance, Drama", "N/A", "Exclusive 18+ Content"
-                category = "Adult"  # जबरदस्ती Adult ही रखेंगे
+                category = "Adult"
 
             # कास्ट लाने की कोशिश
             cast_str = ""
