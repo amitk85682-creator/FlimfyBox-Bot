@@ -1541,6 +1541,32 @@ def migrate_content_type_for_restore():
             conn.rollback()
             close_db_connection(conn)
 
+
+# 👇 Line 1225 ke baad yahan paste karein
+def migrate_channel_posts_v2():
+    """Ye function channel_posts table mein missing columns add karega"""
+    conn = get_db_connection()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Ek ek karke saare missing columns check aur add karega
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS caption TEXT;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_file_id TEXT;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo';")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS keyboard_data TEXT;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS topic_id INTEGER;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT 'movies';")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS is_restored BOOLEAN DEFAULT FALSE;")
+        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS restored_at TIMESTAMP;")
+        
+        conn.commit()
+        cur.close()
+        logger.info("✅ channel_posts table migrated to V2 successfully!")
+    except Exception as e:
+        logger.error(f"❌ Migration V2 Error: {e}")
+    finally:
+        close_db_connection(conn)
+
 def save_post_to_db(
     movie_id,
     channel_id,
@@ -10581,6 +10607,7 @@ async def main():
         setup_database()
         migrate_add_imdb_columns()
         migrate_content_type_for_restore()
+        migrate_channel_posts_v2()
     except Exception as e:
         logger.error(f"❌ DB Setup Error: {e}")  # ← YE LINE ZAROORI HAI
 
