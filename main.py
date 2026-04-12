@@ -5099,27 +5099,31 @@ Do not include numbering, bullets, or explanations. Just plain comma-separated t
         }
 
         # 🚀 KEY ROTATION LOOP
+        response = None  # Initialize response to avoid UnboundLocalError
         for key in gemini_keys:
             try:
                 genai.configure(api_key=key)
                 model = genai.GenerativeModel('gemini-2.0-flash')
                 
-                # NAYA: Safety settings pass kiya taaki content block na ho
+                # Safety settings pass kiya taaki content block na ho
                 response = await run_async(model.generate_content, contents, safety_settings=safety_settings)
+                
+                # Agar response mil gayi hai, toh loop se bahar nikal jao (Break)
+                if response and response.parts:
+                    break
+            except Exception as e:
+                logger.error(f"Error with API Key: {e}")
+                continue  # Agli key try karo agar error aaye
         
-        # Check if response was blocked
+        # Check if response was blocked or empty after trying all keys
         if not response or not response.parts:
-            logger.warning("Gemini response was empty or blocked")
+            logger.warning("Gemini response was empty or blocked after trying all keys")
             return generate_basic_aliases(movie_title, year)
         
         try:
             ai_text = response.text.strip()
         except ValueError as e:
             logger.warning(f"Response blocked by safety: {e}")
-            return generate_basic_aliases(movie_title, year)
-        
-        if not ai_text:
-            logger.warning("Empty response from Gemini")
             return generate_basic_aliases(movie_title, year)
         
         logger.info(f"Gemini Alias Response (first 200 chars): {ai_text[:200]}")
