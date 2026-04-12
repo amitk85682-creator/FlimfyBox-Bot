@@ -6448,14 +6448,13 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    यह लिसनर 18+ बैच की फ़ाइलों को पकड़ेगा और उन्हें सेव करेगा।
-    बिल्कुल वैसे ही जैसे pm_file_listener नॉर्मल बैच के लिए करता है।
+    🔞 18+ BATCH LISTENER: Auto-extracts metadata and saves files.
     """
-    # केवल तभी चले जब 18+ बैच सक्रिय हो और सही एडमिन हो
+    # Keval tabhi chale jab 18+ batch active ho aur sahi admin ho
     if not BATCH_18_SESSION.get('active') or update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
         return
 
-    # अगर नॉर्मल बैच या सुपरबैच चल रहा है तो इग्नोर करें (टकराव से बचने के लिए)
+    # Takrav se bachne ke liye checks
     if BATCH_SESSION.get('active') or SUPER_BATCH_SESSION.get('active'):
         return
 
@@ -6463,74 +6462,69 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or not (message.document or message.video):
         return
 
-    # ----- यहाँ से बिल्कुल वही लॉजिक है जो pm_file_listener के PHASE 1 और PHASE 2 में है -----
     async with auto_batch_lock:
-                # ========== PHASE 1: पहली फ़ाइल = मेटाडेटा निकालो और मूवी बनाओ ==========
+        # ========== PHASE 1: Pehli File = Metadata & Movie Creation ==========
         if BATCH_18_SESSION.get('movie_id') is None:
             raw_caption = message.caption or ""
             if not raw_caption:
-                await message.reply_text("❌ **18+ बैच:** पहली फ़ाइल के साथ कैप्शन में मूवी का नाम ज़रूर दें।")
+                await message.reply_text("❌ **18+ बैच:** Pehli file ke sath caption mein movie ka naam zaroor dein.")
                 return
 
-            status_msg = await message.reply_text("🔞 Gemini 18+ कंटेंट का टाइटल निकाल रहा है...", quote=True)
+            status_msg = await message.reply_text("🔞 Gemini 18+ content ka title nikal raha hai...", quote=True)
 
-            # Gemini से डेटा निकालें
+            # Gemini se data nikalne ka try
             image_bytes = None
-            try:
-                if message.video and message.video.thumbnail:
-                    thumb_id = message.video.thumbnail.file_id
-                elif message.document and message.document.thumbnail:
-                    thumb_id = message.document.thumbnail.file_id
-                else:
-                    thumb_id = None
-                if thumb_id:
-                    # API बचाने के लिए अभी स्किप कर सकते हैं
-                    # tg_file = await context.bot.get_file(thumb_id)
-                    # image_bytes = bytes(await tg_file.download_as_bytearray())
-                    pass
-            except Exception:
-                pass
-
             ai_data = await get_movie_name_from_caption(raw_caption, image_bytes)
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "Hindi") or "Hindi"
 
             if movie_name == "UNKNOWN" or len(movie_name) < 2:
-                await status_msg.edit_text("❌ 18+ मूवी का नाम नहीं पहचाना जा सका। कृपया सही नाम के साथ दोबारा भेजें।")
+                await status_msg.edit_text("❌ Name identify nahi ho paya. Sahi naam ke sath dobara bhein.")
                 return
 
-            await status_msg.edit_text(f"✅ **Gemini ने पहचाना:** {movie_name} ({movie_year})\n⏳ TMDB से डेटा ला रहा है...")
+            await status_msg.edit_text(f"✅ **Gemini Identified:** {movie_name} ({movie_year})\n⏳ Fetching data from TMDB & Google...")
 
-            # --- 1. TMDB Try Karein ---
+            # --- 🛡️ CRITICAL FIX: Variables Initialization (Crash se bachne ke liye) ---
+            imdb_id = None
+            cast_str = ""
+            title = movie_name
+            year = int(movie_year) if str(movie_year).isdigit() else 0
+            poster_url = DEFAULT_POSTER
+            genre = "Adult, Romance, Drama"
+            plot = "Watch exclusive 18+ content on FlimfyBox."
+            rating = "7.5"
+            category = "Adult"
+            metadata = None
+
+            # --- 1. TMDB TRY KAREIN ---
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, True)
             
-            # --- 2. JUGAD: Agar TMDB pe na mile, toh Google se uthayein ---
-            if not metadata:
+            if metadata:
+                # TMDB se data mil gaya
+                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+            else:
+                # --- 2. GOOGLE FALLBACK: Agar TMDB fail hua (Ullu/Alt case) ---
                 logger.info(f"🔍 TMDB failed for {movie_name}, trying Google Search API...")
                 google_data = await fetch_metadata_from_google(movie_name)
                 
                 if google_data:
-                    title = google_data['title']
-                    year = google_data['year']
-                    poster_url = google_data['poster']
-                    genre = google_data['genre']
-                    plot = google_data['plot']
-                    rating = "7.5" # Default rating
-                    imdb_id = None
-                    category = google_data['category']
-                    # Metadata tuple format mein set kar diya
-                    metadata = (title, year, poster_url, genre, imdb_id, rating, plot, category)
+                    title = google_data.get('title', movie_name)
+                    year = google_data.get('year', year)
+                    poster_url = google_data.get('poster', DEFAULT_POSTER)
+                    genre = google_data.get('genre', genre)
+                    plot = google_data.get('plot', plot)
+                    category = google_data.get('category', "Adult")
+                    # Note: Google Search mein imdb_id nahi milta, isliye ye None hi rahega
 
-            # कास्ट लाने की कोशिश
-            cast_str = ""
+            # --- 3. CAST FETCHING (Ab imdb_id safe hai) ---
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
 
-            # डेटाबेस में मूवी बनाएँ/अपडेट करें
+            # --- 4. DATABASE UPDATION ---
             conn = get_db_connection()
             if not conn:
-                await status_msg.edit_text("❌ डेटाबेस कनेक्शन फेल।")
+                await status_msg.edit_text("❌ Database Connection Failed.")
                 return
 
             try:
@@ -6556,6 +6550,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
                 cur.close()
 
+                # Session Update
                 BATCH_18_SESSION.update({
                     'movie_id': movie_id,
                     'movie_title': title,
@@ -6565,31 +6560,20 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'language': movie_lang
                 })
 
-                # सफलता का सुंदर मैसेज
+                # --- 5. UI RESPONSE WITH BUTTONS ---
                 cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
-                if metadata:
-                    success_msg = (
-                        f"✅ **Dada! Metadata Fetched Successfully**\n\n"
-                        f"🎬 **Title:** `{title}`\n"
-                        f"📅 **Year:** {year if year else 'N/A'}\n"
-                        f"🎭 **Genre:** {genre if genre else 'Romance, Drama'}\n"
-                        f"⭐️ **Rating:** {rating if rating and rating != 'N/A' else 'N/A'}\n"
-                        f"🏷️ **Category:** Adult\n"
-                        f"{cast_display}\n"
-                        f"🚀 **अब फाइल्स भेजें, फिर `/done18` लिखें।**"
-                    )
-                else:
-                    success_msg = (
-                        f"⚠️ **TMDB पर मेटाडेटा नहीं मिला! (Using AI Name)**\n\n"
-                        f"🎬 **Title:** `{title}`\n"
-                        f"📅 **Year:** {year}\n"
-                        f"🎭 **Genre:** {genre}\n"
-                        f"⭐️ **Rating:** N/A\n"
-                        f"🏷️ **Category:** Adult\n\n"
-                        f"🚀 **फाइल्स भेजें, फिर `/done18` लिखें।**"
-                    )
+                success_msg = (
+                    f"✅ **18+ Metadata Fetched Successfully**\n\n"
+                    f"🎬 **Title:** `{title}`\n"
+                    f"📅 **Year:** {year if year else 'N/A'}\n"
+                    f"🎭 **Genre:** {genre}\n"
+                    f"⭐️ **Rating:** {rating}\n"
+                    f"🏷️ **Category:** Adult\n"
+                    f"{cast_display}\n"
+                    f"🚀 **Ab files bhein, phir `/done18` likhein.**"
+                )
                 
-                # 👇 NAYA: Database se check karein ki kya pehle se iski files hain
+                # Check for old files
                 conn2 = get_db_connection()
                 file_count_old = 0
                 if conn2:
@@ -6601,7 +6585,6 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except: pass
                     finally: close_db_connection(conn2)
 
-                # 👇 NAYA: Cancel aur Delete Buttons
                 keyboard = []
                 if file_count_old > 0:
                     keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
@@ -6610,10 +6593,62 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text(success_msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
             except Exception as e:
-                await status_msg.edit_text(f"❌ डेटाबेस एरर: {e}")
+                logger.error(f"18+ DB Error: {e}")
+                await status_msg.edit_text(f"❌ Database Error: {e}")
             finally:
                 close_db_connection(conn)
             return
+
+        # ========== PHASE 2: Baki Files = Direct Saving ==========
+        upload_status = await message.reply_text("⏳ 18+ File save ho rahi hai...", quote=True)
+
+        channels = get_storage_channels()
+        backup_map = {}
+        if channels:
+            for chat_id in channels:
+                try:
+                    sent = await message.copy(chat_id=chat_id)
+                    backup_map[str(chat_id)] = sent.message_id
+                except Exception as e:
+                    logger.error(f"18+ Backup Failed: {e}")
+
+        file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
+        file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
+        file_size_str = get_readable_file_size(file_size)
+
+        text_for_detection = message.caption if message.caption else file_name
+        label = generate_quality_label(text_for_detection, file_size_str, BATCH_18_SESSION.get('language', 'Hindi'))
+        ai_data_f = await fallback_extraction(text_for_detection)
+        f_lang = ai_data_f.get('language', '')
+        f_extra = ai_data_f.get('extra_info', '')
+
+        main_url = ""
+        if channels and backup_map:
+            main_channel = channels[0]
+            main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
+
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (movie_id, quality) DO UPDATE
+                    SET url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
+                        languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
+                    """,
+                    (BATCH_18_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
+                )
+                conn.commit()
+                cur.close()
+                BATCH_18_SESSION['file_count'] += 1
+                await upload_status.edit_text(f"✅ **Save ho gayi:** `{BATCH_18_SESSION['movie_title']} {label}`\n📦 Total Files: {BATCH_18_SESSION['file_count']}", parse_mode='Markdown')
+            except Exception as e:
+                await upload_status.edit_text(f"❌ Save Error: {e}")
+            finally:
+                close_db_connection(conn)
 
         # ========== PHASE 2: बाद की फ़ाइलें = सीधे सेव करो ==========
         upload_status = await message.reply_text("⏳ 18+ फ़ाइल सेव हो रही है...", quote=True)
