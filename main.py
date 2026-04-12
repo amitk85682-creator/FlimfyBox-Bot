@@ -2043,129 +2043,81 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
 # ============================================================================
 
 async def fetch_metadata_from_google(query: str, search_year: str = ""):
-    """
-    🎯 Smart Google Search: Movie/Series data + Poster + Plot
-    Returns: dict with title, poster, plot, year, genre, category
-    """
-    API_KEY = os.environ.get("GOOGLE_API_KEY")  # Custom Search API Key
-    CX_ID = os.environ.get("GOOGLE_CX_ID")      # Search Engine ID
+    API_KEY = os.environ.get("GOOGLE_API_KEY")
+    CX_ID = os.environ.get("GOOGLE_CX_ID")
     
     if not API_KEY or not CX_ID:
-        logger.warning("⚠️ Google API keys missing in .env")
         return None
     
-    # 🎯 Smart Query Building
-    search_terms = [
-        f"{query} movie poster story",
-        f"{query} series poster plot",
-        f"{query} film cast review"
-    ]
+    search_query = f"{query} {search_year} poster plot".strip()
     
-    # Agar year hai toh add karo (accuracy badhegi)
-    if search_year and str(search_year).isdigit():
-        search_terms = [f"{t} {search_year}" for t in search_terms]
-    
-    best_result = None
-    
-    for attempt, search_query in enumerate(search_terms, 1):
-        try:
-            # URL encode karo
-            encoded_query = quote(search_query)
-            url = f"https://www.googleapis.com/customsearch/v1?key={API_KEY}&cx={CX_ID}&q={encoded_query}&num=3"
-            
-            logger.info(f"🔍 Google Search Attempt {attempt}: '{search_query[:50]}...'")
-            
-            # API Call
-            response = await run_async(requests.get, url, timeout=10)
+    try:
+        encoded = quote(search_query)
+        
+        base_url = "https://www.googleapis.com/customsearch/v1"
+        
+        # ---------- IMAGE SEARCH ----------
+        img_url = f"{base_url}?key={API_KEY}&cx={CX_ID}&q={encoded}&num=5&searchType=image"
+        response = await run_async(requests.get, img_url, timeout=10)
+        data = response.json()
+        
+        items = data.get("items", [])
+        
+        # ---------- FALLBACK TO TEXT ----------
+        if not items:
+            txt_url = f"{base_url}?key={API_KEY}&cx={CX_ID}&q={encoded}&num=5"
+            response = await run_async(requests.get, txt_url, timeout=10)
             data = response.json()
-            
-            # Check for API errors
-            if "error" in data:
-                logger.error(f"❌ Google API Error: {data['error'].get('message', 'Unknown')}")
-                continue
-            
             items = data.get("items", [])
-            if not items:
-                logger.warning(f"⚠️ No results for: {search_query}")
-                continue
-            
-            # 🎯 Best Result Processing
-            for item in items:
-                title = clean_google_title(item.get("title", ""))
-                snippet = item.get("snippet", "Premium content available.")
-                pagemap = item.get("pagemap", {})
-                
-                # 🔥 POSTER EXTRACTION (Multiple Sources)
-                poster = None
-                
-                # Source 1: cse_image (Best quality)
-                if "cse_image" in pagemap and pagemap["cse_image"]:
-                    poster = pagemap["cse_image"][0].get("src")
-                
-                # Source 2: cse_thumbnail
-                if not poster and "cse_thumbnail" in pagemap:
-                    poster = pagemap["cse_thumbnail"][0].get("src")
-                
-                # Source 3: metatags og:image
-                if not poster and "metatags" in pagemap:
-                    for tag in pagemap["metatags"]:
-                        if "og:image" in tag:
-                            poster = tag["og:image"]
-                            break
-                
-                # Source 4: Website specific (IMDb, TMDB, etc.)
-                link = item.get("link", "")
-                if not poster:
-                    if "imdb.com" in link:
-                        # IMDb poster extraction via page parsing (fallback)
-                        poster = await extract_imdb_poster(link)
-                    elif "tmdb.org" in link or "themoviedb.org" in link:
-                        poster = extract_tmdb_poster_from_url(link)
-                
-                # 🎯 YEAR EXTRACTION
-                extracted_year = search_year
-                if not extracted_year:
-                    year_match = re.search(r'\b(19|20)\d{2}\b', title + " " + snippet)
-                    if year_match:
-                        extracted_year = year_match.group()
-                
-                # 🎯 GENRE DETECTION (From snippet)
-                genre_keywords = {
-                    'romance': 'Romance', 'drama': 'Drama', 'thriller': 'Thriller',
-                    'horror': 'Horror', 'comedy': 'Comedy', 'action': 'Action',
-                    'adult': 'Adult', 'erotic': 'Adult', 'hot': 'Adult'
-                }
-                
-                detected_genre = "Drama, Romance"  # Default for 18+
-                snippet_lower = snippet.lower()
-                for keyword, genre_name in genre_keywords.items():
-                    if keyword in snippet_lower:
-                        detected_genre = genre_name
-                        if genre_name == "Adult":
-                            break  # Adult prioritize karo
-                
-                # 🎯 VALIDATION: Valid result mila?
-                if title and len(title) > 2:
-                    best_result = {
-                        "title": title,
-                        "poster": poster or DEFAULT_POSTER,
-                        "plot": clean_plot(snippet),
-                        "year": extracted_year or "2024-2026",
-                        "genre": detected_genre,
-                        "category": "Adult" if "adult" in snippet_lower else "Web Series"
-                    }
-                    
-                    logger.info(f"✅ Google SUCCESS: '{title}' | Poster: {'Yes' if poster else 'No'}")
-                    return best_result  # Pehla valid result return karo
-            
-        except Exception as e:
-            logger.error(f"❌ Google Search Error (Attempt {attempt}): {e}")
-            continue
-    
-    # Sab attempts fail ho gaye
-    logger.warning(f"⚠️ Google Search completely failed for: {query}")
-    return None
-
+        
+        if not items:
+            return None
+        
+        # ---------- PICK BEST RESULT ----------
+        best_item = items[0]
+        
+        title = clean_title(best_item.get("title", query))
+        snippet = best_item.get("snippet", "")
+        
+        # ---------- IMAGE EXTRACTION ----------
+        image_url = None
+        pagemap = best_item.get("pagemap", {})
+        
+        if "cse_image" in pagemap:
+            image_url = pagemap["cse_image"][0].get("src")
+        elif "cse_thumbnail" in pagemap:
+            image_url = pagemap["cse_thumbnail"][0].get("src")
+        
+        # fallback: direct link image
+        if not image_url:
+            link = best_item.get("link", "")
+            if link.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                image_url = link
+        
+        # ---------- EXTRA CLEANUPS ----------
+        plot = snippet[:300] if snippet else "Premium content available."
+        
+        # better genre detection (thoda smart banaya 😏)
+        q_lower = query.lower()
+        if any(x in q_lower for x in ['bhabhi', 'unrated', 'adult', 'hot']):
+            genre = "Adult"
+        elif any(x in q_lower for x in ['crime', 'murder', 'thriller']):
+            genre = "Crime/Thriller"
+        else:
+            genre = "Drama"
+        
+        return {
+            "title": title,
+            "poster": image_url or DEFAULT_POSTER,
+            "plot": plot,
+            "year": search_year or "2024-2026",
+            "genre": genre,
+            "category": "Web Series"
+        }
+        
+    except Exception as e:
+        logger.error(f"Google Search Error: {e}")
+        return None
 
 # ============================================================================
 # 🔧 HELPER FUNCTIONS
