@@ -6752,61 +6752,6 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 close_db_connection(conn)
 
-        # ========== PHASE 2: बाद की फ़ाइलें = सीधे सेव करो ==========
-        upload_status = await message.reply_text("⏳ 18+ फ़ाइल सेव हो रही है...", quote=True)
-
-        # स्टोरेज चैनल में बैकअप (वैकल्पिक, लेकिन नॉर्मल बैच की तरह)
-        channels = get_storage_channels()
-        backup_map = {}
-        if channels:
-            for chat_id in channels:
-                try:
-                    sent = await message.copy(chat_id=chat_id)
-                    backup_map[str(chat_id)] = sent.message_id
-                except Exception as e:
-                    logger.error(f"18+ बैकअप फेल: {e}")
-
-        file_name = message.document.file_name if message.document else (message.video.file_name if message.video else "File")
-        file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
-        file_size_str = get_readable_file_size(file_size)
-
-        # कैप्शन से क्वालिटी/सीजन निकालो
-        text_for_detection = message.caption if message.caption else file_name
-        label = generate_quality_label(text_for_detection, file_size_str, BATCH_18_SESSION.get('language', 'Hindi'))
-        ai_data = await fallback_extraction(text_for_detection)
-        f_lang = ai_data.get('language', '')
-        f_extra = ai_data.get('extra_info', '')
-
-        # मेन URL (पहला बैकअप चैनल)
-        main_url = ""
-        if channels and backup_map:
-            main_channel = channels[0]
-            main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
-
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO movie_files (movie_id, quality, file_size, url, backup_map, languages, extra_info)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (movie_id, quality) DO UPDATE
-                    SET url = EXCLUDED.url, file_size = EXCLUDED.file_size, backup_map = EXCLUDED.backup_map, file_id = NULL,
-                        languages = EXCLUDED.languages, extra_info = EXCLUDED.extra_info
-                    """,
-                    (BATCH_18_SESSION['movie_id'], label, file_size_str, main_url, json.dumps(backup_map), f_lang, f_extra)
-                )
-                conn.commit()
-                cur.close()
-                BATCH_18_SESSION['file_count'] += 1
-                await upload_status.edit_text(f"✅ **सेव हो गई:** `{BATCH_18_SESSION['movie_title']} {label}`\n📦 कुल फ़ाइलें: {BATCH_18_SESSION['file_count']}", parse_mode='Markdown')
-            except Exception as e:
-                await upload_status.edit_text(f"❌ सेव नहीं हो पाई: {e}")
-            finally:
-                close_db_connection(conn)
-
-
 async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """18+ बैच खत्म करें और पोस्ट बनाकर एडल्ट चैनल में भेजें"""
     if not BATCH_18_SESSION.get('active') or update.effective_user.id != BATCH_18_SESSION.get('admin_id'):
