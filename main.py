@@ -4306,6 +4306,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
         
+    # === CANCEL 18+ BATCH LOGIC ===
+    if query.data == "cancel_batch18":
+        if update.effective_user.id != ADMIN_USER_ID:
+            await query.answer("❌ Sirf Admin ke liye!", show_alert=True)
+            return
+
+        BATCH_18_SESSION.update({
+            'active': False, 'movie_id': None, 'movie_title': None,
+            'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
+        })
+
+        await query.answer("🛑 18+ Batch Stopped!", show_alert=True)
+        await query.edit_message_text(
+            "❌ **18+ Batch Stopped & Cancelled.**\n\n"
+            "Aap chaho to manually naya batch start kar sakte ho.",
+            parse_mode='Markdown'
+        )
+        return
+    
     # === 1. VERIFY BUTTON LOGIC (UPDATED) ===
     if data == "verify":
         await query.answer("🔍 Checking membership...", show_alert=False) # Alert False rakha taki user disturb na ho
@@ -5071,7 +5090,7 @@ Example format: alias1, alias2, alias3, alias4
 
 Do not include numbering, bullets, or explanations. Just plain comma-separated text."""
 
-        # Safety settings to avoid blocks
+        # 🚀 Gemini ko Adult/Ullu titles extract karne ki permission dena
         safety_settings = {
             genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
             genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_NONE,
@@ -5079,7 +5098,14 @@ Do not include numbering, bullets, or explanations. Just plain comma-separated t
             genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
         }
 
-        response = model.generate_content(prompt, safety_settings=safety_settings)
+        # 🚀 KEY ROTATION LOOP
+        for key in gemini_keys:
+            try:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                
+                # NAYA: Safety settings pass kiya taaki content block na ho
+                response = await run_async(model.generate_content, contents, safety_settings=safety_settings)
         
         # Check if response was blocked
         if not response or not response.parts:
@@ -6651,7 +6677,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 else:
                     success_msg = (
-                        f"⚠️ **TMDB पर मेटाडेटा नहीं मिला!**\n\n"
+                        f"⚠️ **TMDB पर मेटाडेटा नहीं मिला! (Using AI Name)**\n\n"
                         f"🎬 **Title:** `{title}`\n"
                         f"📅 **Year:** {year}\n"
                         f"🎭 **Genre:** {genre}\n"
@@ -6659,10 +6685,28 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"🏷️ **Category:** Adult\n\n"
                         f"🚀 **फाइल्स भेजें, फिर `/done18` लिखें।**"
                     )
-                await status_msg.edit_text(success_msg, parse_mode='Markdown')
+                
+                # 👇 NAYA: Database se check karein ki kya pehle se iski files hain
+                conn2 = get_db_connection()
+                file_count_old = 0
+                if conn2:
+                    try:
+                        cur2 = conn2.cursor()
+                        cur2.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                        file_count_old = cur2.fetchone()[0]
+                        cur2.close()
+                    except: pass
+                    finally: close_db_connection(conn2)
+
+                # 👇 NAYA: Cancel aur Delete Buttons
+                keyboard = []
+                if file_count_old > 0:
+                    keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch18")])
+
+                await status_msg.edit_text(success_msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
             except Exception as e:
-                logger.error(f"18+ DB Error: {e}")
                 await status_msg.edit_text(f"❌ डेटाबेस एरर: {e}")
             finally:
                 close_db_connection(conn)
