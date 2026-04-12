@@ -263,7 +263,7 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
     return text
 
 # -------------------------------------------------------------
-# DATABASE SETUP (unchanged)
+# DATABASE SETUP
 # -------------------------------------------------------------
 def setup_trending_db():
     if not DATABASE_URL:
@@ -421,11 +421,10 @@ async def check_and_alert_trending(app, admin_id):
         # 1. FETCH ALL TRENDING (Worldwide + India + Regional)
         worldwide_items = fetch_trending("day")               # Global
         india_items = fetch_trending("day", region="IN")      # India specific
-        regional_items = fetch_indian_regional()              # 🔥 FIXED: Naya function yahan call kiya!
+        regional_items = fetch_indian_regional()              # Indian regional movies
 
         # Combine and deduplicate by tmdb_id
         combined_dict = {}
-        # 🔥 FIXED: regional_items ko bhi loop mein add kiya
         for item in worldwide_items + india_items + regional_items:
             tmdb_id = item.get('id')
             if tmdb_id:
@@ -476,21 +475,20 @@ async def check_and_alert_trending(app, admin_id):
             movie_row = None
             match_method = None
 
-            # Priority 1: IMDb ID (Sabse accurate) 🔥 FIXED: Ise delete mat karna!
+            # Priority 1: IMDb ID (Sabse accurate)
             if imdb_id:
-                cur.execute("SELECT id, title, imdb_id, year, language, quality FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
+                cur.execute("SELECT id, title, imdb_id, year, language FROM movies WHERE imdb_id = %s LIMIT 1", (imdb_id,))
                 movie_row = cur.fetchone()
                 if movie_row:
                     match_method = "IMDb ID"
 
             # Priority 2: Title Match + Year Verify
             if not movie_row:
-                # 🔥 FIXED: Indentation theek kar di
-                cur.execute("SELECT id, title, imdb_id, year, language, quality FROM movies WHERE title ILIKE %s LIMIT 1", (title,))
+                cur.execute("SELECT id, title, imdb_id, year, language FROM movies WHERE title ILIKE %s LIMIT 1", (title,))
                 movie_row = cur.fetchone()
 
                 if movie_row:
-                    db_id, db_title, db_imdb, db_year, db_lang, db_quality = movie_row
+                    db_id, db_title, db_imdb, db_year, db_lang = movie_row
                     
                     tmdb_date = item.get('release_date') or item.get('first_air_date') or ""
                     tmdb_year = tmdb_date.split('-')[0] if '-' in tmdb_date else "0"
@@ -508,12 +506,15 @@ async def check_and_alert_trending(app, admin_id):
             
             if movie_row:
                 # 🎬 MOVIE FOUND IN DATABASE
-                db_id, db_title, db_imdb, db_year, db_lang, db_quality = movie_row
+                db_id, db_title, db_imdb, db_year, db_lang = movie_row
                 
                 logger.info(f"🚀 Auto-posting to channel: {db_title} (matched by {match_method})")
                 
-                # 🔥 FIXED: Database ka data build_channel_post ko bheja!
-                metadata = {'languages': db_lang, 'quality': db_quality}
+                # Use default quality if not in DB
+                metadata = {
+                    'languages': db_lang or "Hindi + English", 
+                    'quality': "1080p | 720p | 480p"  # Default quality
+                }
                 channel_text = build_channel_post(item, extra, db_metadata=metadata)
                 
                 watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{db_id}"
@@ -526,8 +527,6 @@ async def check_and_alert_trending(app, admin_id):
                     [InlineKeyboardButton("⚡ Download Now", url=watch_link)],
                     [InlineKeyboardButton("📢 Join Channel", url=os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/FlimfyBox'))]
                 ])
-
-                # Process poster... (Iske aage ka code tumhara bilkul theek hai)
 
                 # Process poster (prefer vertical poster for cinematic effect)
                 image_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}" if item.get('poster_path') else None
