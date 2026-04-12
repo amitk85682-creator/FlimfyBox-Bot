@@ -6597,27 +6597,32 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, True)
             
             if metadata:
-                # TMDB se data mil gaya
+                # TMDB se data mil gaya toh unpack karo
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+                logger.info(f"✨ TMDB Success for: {title}")
             else:
-                # --- 2. GOOGLE FALLBACK: Agar TMDB fail hua (Ullu/Alt case) ---
+                # --- 2. GOOGLE FALLBACK: Agar TMDB fail hua ---
                 logger.info(f"🔍 TMDB failed for {movie_name}, trying Google Search API...")
                 google_data = await fetch_metadata_from_google(movie_name)
                 
                 if google_data:
+                    # 🔥 Google se variables update karo
                     title = google_data.get('title', movie_name)
-                    year = google_data.get('year', year)
+                    year = int(google_data.get('year', year)) if str(google_data.get('year')).isdigit() else year
                     poster_url = google_data.get('poster', DEFAULT_POSTER)
-                    genre = google_data.get('genre', genre)
-                    plot = google_data.get('plot', plot)
-                    category = google_data.get('category', "Adult")
-                    # Note: Google Search mein imdb_id nahi milta, isliye ye None hi rahega
+                    genre = google_data.get('genre', "Adult, Romance, Drama")
+                    plot = google_data.get('plot', "Watch exclusive content on FlimfyBox.")
+                    category = "Adult"
+                    # Google data milne ka pakka saboot (Log)
+                    logger.info(f"✅ Google Search SUCCESS: Data found for '{title}'")
+                else:
+                    logger.warning(f"❌ Google Search also FAILED for: {movie_name}. Data will be empty.")
 
-            # --- 3. CAST FETCHING (Ab imdb_id safe hai) ---
+            # --- 3. CAST FETCHING (Sirf agar IMDb ID mila ho) ---
             if imdb_id:
                 cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
 
-            # --- 4. DATABASE UPDATION ---
+            # --- 4. DATABASE UPDATION (Strict Data Push) ---
             conn = get_db_connection()
             if not conn:
                 await status_msg.edit_text("❌ Database Connection Failed.")
@@ -6625,26 +6630,27 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             try:
                 cur = conn.cursor()
+                # 🎯 Note: Yahan 'title' unique constraint hai, toh ye update trigger karega
                 cur.execute(
                     """
                     INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast")
                     VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (title) DO UPDATE
-                    SET poster_url = COALESCE(EXCLUDED.poster_url, movies.poster_url),
+                    ON CONFLICT (title) DO UPDATE 
+                    SET poster_url = EXCLUDED.poster_url,
                         year = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
-                        genre = COALESCE(EXCLUDED.genre, movies.genre),
-                        rating = COALESCE(EXCLUDED.rating, movies.rating),
-                        description = COALESCE(EXCLUDED.description, movies.description),
-                        category = COALESCE(EXCLUDED.category, movies.category),
-                        language = CASE WHEN EXCLUDED.language != '' THEN EXCLUDED.language ELSE movies.language END,
+                        genre = EXCLUDED.genre,
+                        rating = EXCLUDED.rating,
+                        description = EXCLUDED.description,
+                        category = EXCLUDED.category,
+                        language = EXCLUDED.language,
                         "cast" = COALESCE(EXCLUDED."cast", movies."cast")
                     RETURNING id
                     """,
-                    (title, imdb_id, poster_url, year, genre, rating, plot, "Adult", movie_lang, cast_str)
+                    (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, cast_str)
                 )
                 movie_id = cur.fetchone()[0]
                 conn.commit()
-                cur.close()
+                # Baki ka code (Session update etc.) waise hi rehne do...
 
                 # Session Update
                 BATCH_18_SESSION.update({
