@@ -10282,7 +10282,7 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                                     ${buttonsHtml}
                                 </div>
                                 <div style="margin-top: 20px; padding: 0 10px;">
-                                    <button onclick="requestSilent('${term}')" class="request-glow-btn">
+                                    <button onclick="requestSilent(this.dataset.title)" data-title="${term.replace(/"/g, '&quot;').replace(/'/g, '&apos;')}" class="request-glow-btn">
                                         <i class="fas fa-paper-plane"></i> Request This Movie (मूवी रिक्वेस्ट करें)
                                     </button>
                                 </div>
@@ -10302,10 +10302,11 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 };
                 
                 function showFallbackUI(term) {
+                    const safeTitle = term.replace(/"/g, '&quot;').replace(/'/g, '&apos;');
                     searchGrid.innerHTML = `
                         <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
                             <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
-                            <button onclick="requestSilent('${term}')" class="request-glow-btn">
+                            <button onclick="requestSilent(this.dataset.title)" data-title="${safeTitle}" class="request-glow-btn">
                                 <i class="fas fa-paper-plane"></i> Request This Movie (मूवी रिक्वेस्ट करें)
                             </button>
                         </div>
