@@ -4562,17 +4562,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Sirf Admin ke liye!", show_alert=True)
             return
 
+        movie_id = BATCH_SESSION.get('movie_id')
+
+        # 👇 NAYA LOGIC: Agar koi file save nahi hui thi, toh galat naam DB se uda do
+        if movie_id:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                    file_count = cur.fetchone()[0]
+                    
+                    # Agar movie khali hai, toh delete maar do!
+                    if file_count == 0:
+                        cur.execute("DELETE FROM movies WHERE id = %s", (movie_id,))
+                        conn.commit()
+                    cur.close()
+                except Exception as e:
+                    logger.error(f"Cleanup error: {e}")
+                finally:
+                    close_db_connection(conn)
+
         # Session ko off kar do taaki aur files save na hon
         BATCH_SESSION.update({
             'active': False, 'movie_id': None, 'movie_title': None,
             'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
         })
 
-        await query.answer("🛑 Batch Stopped!", show_alert=True)
+        await query.answer("🛑 Batch Stopped & Cleaned!", show_alert=True)
         await query.edit_message_text(
-            "❌ **Batch Stopped & Cancelled.**\n\n"
+            "❌ **Batch Cancelled & Junk Data Removed.**\n\n"
             "Aap chaho to manually sahi naam dekar naya batch start kar sakte ho:\n"
-            "`/batch Sahi Movie Name`",
+            "`/batch Sahi Movie Name, 2024`",
             parse_mode='Markdown'
         )
         return
@@ -4583,6 +4604,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Sirf Admin ke liye!", show_alert=True)
             return
 
+        movie_id = BATCH_18_SESSION.get('movie_id')
+
+        # 👇 NAYA LOGIC: 18+ wale kachre ko bhi uda do
+        if movie_id:
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                    if cur.fetchone()[0] == 0:
+                        cur.execute("DELETE FROM movies WHERE id = %s", (movie_id,))
+                        conn.commit()
+                    cur.close()
+                except Exception as e:
+                    pass
+                finally:
+                    close_db_connection(conn)
+
         BATCH_18_SESSION.update({
             'active': False, 'movie_id': None, 'movie_title': None,
             'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
@@ -4590,7 +4629,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.answer("🛑 18+ Batch Stopped!", show_alert=True)
         await query.edit_message_text(
-            "❌ **18+ Batch Stopped & Cancelled.**\n\n"
+            "❌ **18+ Batch Stopped & Junk Removed.**\n\n"
             "Aap chaho to manually naya batch start kar sakte ho.",
             parse_mode='Markdown'
         )
@@ -9884,6 +9923,32 @@ def serve_mini_app():
         }
         .toast.show { bottom: 30px; }
         .loader { text-align: center; padding: 40px; color: var(--primary); font-size: 16px; }
+        
+        /* 🌟 NAYA: Request Button Glow Animation */
+        @keyframes requestBlink {
+            0% { box-shadow: 0 0 10px var(--primary); transform: scale(1); }
+            50% { box-shadow: 0 0 25px var(--primary), 0 0 10px white; transform: scale(1.02); background: var(--primary); }
+            100% { box-shadow: 0 0 10px var(--primary); transform: scale(1); }
+        }
+        .request-glow-btn {
+            animation: requestBlink 1.5s infinite;
+            background: linear-gradient(135deg, var(--primary), var(--primary-soft));
+            color: white;
+            border: 1px solid rgba(255,255,255,0.4);
+            padding: 14px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: 0.2s;
+        }
+        .request-glow-btn:active { transform: scale(0.95); }
+
     </style>
 </head>
 <body>
@@ -10216,9 +10281,9 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                                 <div style="background: rgba(0,0,0,0.2); border-radius: 12px; overflow: hidden;">
                                     ${buttonsHtml}
                                 </div>
-                                <div style="margin-top: 15px; padding: 0 10px;">
-                                    <button onclick="requestSilent('${term}')" style="background: #27272a; color: var(--text-muted); border: 1px solid rgba(255,255,255,0.1); padding: 12px; border-radius: 30px; font-size: 13px; cursor: pointer; width: 100%;">
-                                        <i class="fas fa-paper-plane"></i> No, Request "${term}" Anyway
+                                <div style="margin-top: 20px; padding: 0 10px;">
+                                    <button onclick="requestSilent('${term}')" class="request-glow-btn">
+                                        <i class="fas fa-paper-plane"></i> Request This Movie (मूवी रिक्वेस्ट करें)
                                     </button>
                                 </div>
                             </div>
@@ -10240,8 +10305,8 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                     searchGrid.innerHTML = `
                         <div style="grid-column: 1 / -1; text-align: center; padding: 30px 20px; background: var(--surface); border-radius: 16px;">
                             <p style="color: var(--text-muted); margin-bottom: 20px;">We couldn't find "${term}".</p>
-                            <button onclick="requestSilent('${term}')" style="background: linear-gradient(135deg, var(--primary), var(--primary-soft)); color: white; border: none; padding: 14px; border-radius: 30px; font-weight: bold; cursor: pointer; width: 100%;">
-                                <i class="fas fa-paper-plane"></i> Request This Movie
+                            <button onclick="requestSilent('${term}')" class="request-glow-btn">
+                                <i class="fas fa-paper-plane"></i> Request This Movie (मूवी रिक्वेस्ट करें)
                             </button>
                         </div>
                     `;
