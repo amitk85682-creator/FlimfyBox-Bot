@@ -4774,20 +4774,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 current_files=current_files
             )
             
+            # Message update aur link preview disable
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard_markup,
-                parse_mode='HTML'
-            )
-            return
-
-            await query.edit_message_text(
-                selection_text,
-                reply_markup=keyboard,
-                parse_mode='HTML'
+                parse_mode='HTML',
+                disable_web_page_preview=True
             )
             
+            # Auto-delete timer lagao (return se pehle!)
             track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
+            
+            return
 
 
         # ==================== SEASON SELECTION (NEW) ====================
@@ -4866,16 +4864,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.edit_message_text(
                 selection_text,
-                reply_markup=new_keyboard,
-                parse_mode='Markdown'
+                reply_markup=keyboard_markup,
+                parse_mode='HTML',
+                disable_web_page_preview=True
             )
             return
             
-            await query.edit_message_text(
-                selection_text,
-                reply_markup=keyboard,
-                parse_mode='Markdown'
-            )
+
         # ==================== ADMIN ACTIONS ====================
         
         # ==================== NAYA UI VIEWS, FILTERS & PAGINATION ====================
