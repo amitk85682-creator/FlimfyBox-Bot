@@ -5334,12 +5334,12 @@ def generate_quality_label(file_name, file_size_str, ai_language=""):
     lang_tag = f" ({ai_language})" if ai_language else ""
     
     # 3. Detect Series (S01, S02, S01E01, S01P01, Season 1, etc.)
-    # 👇 नया पैटर्न जो S01P01 और S01E01 दोनों पकड़ेगा
+    # Yahan \b add kiya gaya hai taaki 1080p 10bit ka 'p 10' E10 na ban jaye
     season_match = re.search(
-        r'(?i)(s\d{1,2}\s*(?:[ep]\d{1,3})?'                 # S01 या S01E01 या S01P01
-        r'|s\d{1,2}\s*\[?(?:e|ep|episode|p|part)\s*\d{1,3}' # S01E01, S01P01
-        r'|\[?(?:e|ep|episode|p|part)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode|p|part)?\s*\d{1,3})?\]?'
-        r'|season\s?\d+\b)', 
+        r'(?i)(\bs\d{1,2}\s*(?:[ep]\d{1,3})?'                 
+        r'|\bs\d{1,2}\s*\[?(?:e|ep|episode|p|part)\s*\d{1,3}' 
+        r'|\b\[?(?:e|ep|episode|p|part)\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep|episode|p|part)?\s*\d{1,3})?\]?'
+        r'|\bseason\s?\d+\b)', 
         name_lower
     )
     
