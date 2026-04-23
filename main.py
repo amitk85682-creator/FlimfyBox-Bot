@@ -5632,7 +5632,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grouped_movies = defaultdict(list)
     for f in files:
         raw_text = f['caption'] if f['caption'] else f['file_name']
-        basic_data = await fallback_extraction(raw_text)
+        # 🚀 FIX: Gemini AI use karo (pm_file_listener ki tarah) — fallback nahi
+        basic_data = await get_movie_name_from_caption(raw_text)
         temp_title = basic_data.get('title', 'Unknown_Movie').lower()
         grouped_movies[temp_title].append(f)
 
@@ -5731,7 +5732,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text_for_detection = f['caption'] if f['caption'] else f['file_name']
                     label = generate_quality_label(text_for_detection, file_size_str, movie_lang)
 
-                    f_ai_data = await fallback_extraction(text_for_detection)
+                    # 🚀 FIX: Gemini AI se language/extra_info nikalo (pm_file_listener ki tarah)
+                    f_ai_data = await get_movie_name_from_caption(text_for_detection)
                     f_lang = f_ai_data.get('language', '')
                     f_extra = f_ai_data.get('extra_info', '')
 
@@ -6174,8 +6176,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_channel_id = channels[0]
         main_url = f"https://t.me/c/{str(main_channel_id).replace('-100', '')}/{backup_map.get(str(main_channel_id))}"
 
-        # Yahan bhi kate hue naam ki jagah text_for_detection denge
-        ai_data = await fallback_extraction(text_for_detection)
+        # 🚀 FIX: Same Gemini AI jo Phase 1 mein use hua (consistent extraction)
+        ai_data = await get_movie_name_from_caption(text_for_detection)
         f_lang = ai_data.get('language', '')
         f_extra = ai_data.get('extra_info', '')
 
@@ -6998,9 +7000,9 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_lang = BATCH_18_SESSION.get('language', 'Hindi')
     label = generate_quality_label(text_for_detection, file_size_str, current_lang)
 
-    # Extract extra info
+    # 🚀 FIX: Gemini AI se language/extra_info nikalo (pm_file_listener ki tarah)
     try:
-        ai_data_f = await fallback_extraction(text_for_detection)
+        ai_data_f = await get_movie_name_from_caption(text_for_detection)
         f_lang = ai_data_f.get('language', '')
         f_extra = ai_data_f.get('extra_info', '')
     except:
