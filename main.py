@@ -4249,24 +4249,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # --- 1. DATABASE SE DATA NIKALNA ---
         conn = get_db_connection()
-        if not conn:
-            await query.edit_message_text("❌ Error: Database connection fail ho gayi!")
-            return
-
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-            rows = cur.fetchall()
-            cur.execute("SELECT title, genre, language, poster_url FROM movies WHERE id = %s", (movie_id,))
-            m_data = cur.fetchone()
-            cur.close()
-        except Exception as db_err:
-            logger.error(f"Autopost DB fetch error: {db_err}")
-            await query.edit_message_text(f"❌ Database Error: {db_err}")
-            return
-        finally:
-            try: close_db_connection(conn)
-            except: pass
+        cur = conn.cursor()
+        
+        # क्वालिटी निकालें
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        rows = cur.fetchall()
+        
+        # मूवी की डिटेल्स निकालें (🚀 NAYA: Ab poster_url bhi nikalega)
+        cur.execute("SELECT title, genre, language, poster_url FROM movies WHERE id = %s", (movie_id,))
+        m_data = cur.fetchone()
+        cur.close()
+        
+        # Connection close (Tera custom function)
+        try: close_db_connection(conn) 
+        except: db_pool.putconn(conn) 
 
         if not m_data:
             await query.edit_message_text("❌ Error: Movie DB mein nahi mili!")
@@ -4390,8 +4386,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # DB mein save karne wala tera purana logic
                 if sent_msg:
                     try:
-                        bot_info = await context.bot.get_me()
-                        save_post_to_db(movie_id, chat_id, sent_msg.message_id, bot_info.username, channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
+                        save_post_to_db(movie_id, chat_id, sent_msg.message_id, "bot3", channel_caption, telegram_photo_id, "photo", post_keyboard.to_dict(), None, "movies")
                     except Exception as db_err:
                         logger.error(f"Save to DB Error: {db_err}")
                         
@@ -5674,11 +5669,19 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 🎯 2. TMDB & IMDB METADATA
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             
-            if metadata:
-                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
-            else:
-                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
-                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
+            # ❌ SKIP: Agar TMDB/IMDB se koi data nahi mila toh is movie ko bilkul ignore karo
+            if not metadata:
+                logger.warning(f"⏭️ SKIPPED (no metadata found): '{movie_name}'")
+                await status_msg.edit_text(
+                    f"⚙️ Processing Movie {i}/{total_movies}...\n"
+                    f"⏭️ **SKIPPED** (No data found): `{movie_name}`\n"
+                    f"✅ Processed so far: {success_movies}",
+                    parse_mode='Markdown'
+                )
+                await asyncio.sleep(1)
+                continue  # DB mein kuch bhi save nahi hoga
+
+            title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
 
             # 🎯 3. CAST FETCHING
             cast_str = ""
@@ -5925,12 +5928,16 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"SuperBatch Movie Error: {e}")
             continue
 
-    await status_msg.edit_text(
+    skipped_movies = total_movies - success_movies
+    summary = (
         f"🎉 **SUPER BATCH COMPLETED!**\n\n"
-        f"✅ Total Movies Processed: {success_movies}/{total_movies}\n"
-        f"🚀 All movies auto-posted to Channels & Forum successfully!",
-        parse_mode='Markdown'
+        f"✅ **Saved & Posted:** {success_movies}/{total_movies}\n"
     )
+    if skipped_movies > 0:
+        summary += f"⏭️ **Skipped (no data found):** {skipped_movies}\n"
+    summary += f"🚀 All done!"
+
+    await status_msg.edit_text(summary, parse_mode='Markdown')
 
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
@@ -6375,14 +6382,12 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id = update.message.photo[-1].file_id
     status_msg = await update.message.reply_text("⏳ Publishing to channels...")
 
-    # 1. Database se Title, Genre, Language aur Quality nikalo
+    # 1. Database se sirf Title nikalo
     conn = get_db_connection()
     if not conn: return
     cur = conn.cursor()
-    cur.execute("SELECT title, genre, language FROM movies WHERE id = %s", (movie_id,))
+    cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
     res = cur.fetchone()
-    cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-    qrows = cur.fetchall()
     cur.close()
     close_db_connection(conn)
 
@@ -6390,22 +6395,10 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
         await status_msg.edit_text("❌ Movie not found in DB.")
         context.user_data.pop('waiting_for_poster', None)
         return
+    
+    m_title = res[0]
 
-    m_title  = res[0]
-    m_genre  = res[1] if res[1] else "Action, Drama"
-    m_lang   = res[2] if res[2] else "Hindi + English"
-
-    # Quality list from movie_files
-    res_list = sorted(
-        list(set(
-            m.group(1)
-            for r in qrows if r and r[0]
-            for m in [re.search(r"(\d{3,4}p)", r[0])] if m
-        )),
-        key=lambda x: int(x.replace("p", "")), reverse=True
-    )
-    dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
-
+    # 🎯 FIX: This block must be indented to match the rest of the function
     channel_caption = (
         f"🎬 <b>{m_title}</b>\n"
         f"✨ Genre: {m_genre}\n"
