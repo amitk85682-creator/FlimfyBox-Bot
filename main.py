@@ -6757,19 +6757,70 @@ async def fetch_adult_metadata_combo(
     # ─────────────────────────────────────────────
     # SOURCE 1: TMDB with include_adult=true
     # ─────────────────────────────────────────────
+    # ⚠️ STRICT YEAR CHECK: Agar caption mein year diya hai aur TMDB ne
+    # 3 saal se zyada purani cheez pakdi, toh wo result REJECT karo.
+    # Example: Caption="2026", TMDB returned "1972" → REJECT
     try:
         tmdb_data = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, adult_mode=True)
         if tmdb_data:
             t_title, t_year, t_poster, t_genre, t_imdb, t_rating, t_plot, t_cat = tmdb_data
-            if t_title and t_title != movie_name: result["title"] = t_title
-            if t_year and t_year > 0: result["year"] = t_year
-            if t_poster: result["poster_url"] = t_poster
-            if t_genre and t_genre not in ("Romance, Drama", ""): result["genre"] = t_genre
-            if t_imdb: result["imdb_id"] = t_imdb
-            if t_rating and t_rating != "N/A": result["rating"] = t_rating
-            if t_plot and len(t_plot) > 20: result["plot"] = t_plot
-            result["source"] = "TMDB"
-            logger.info(f"✅ TMDB found: {result['title']}")
+
+            # Year mismatch check
+            year_ok = True
+            if movie_year and str(movie_year).isdigit() and t_year and t_year > 0:
+                caption_year = int(movie_year)
+                if abs(caption_year - t_year) > 3:
+                    year_ok = False
+                    logger.warning(
+                        f"⛔ TMDB year mismatch REJECTED: caption={caption_year}, TMDB={t_year} "
+                        f"for '{movie_name}' — ye galat movie hai!"
+                    )
+
+            if year_ok:
+                if t_title and t_title != movie_name: result["title"] = t_title
+                if t_year and t_year > 0: result["year"] = t_year
+                if t_genre and t_genre not in ("Romance, Drama", ""): result["genre"] = t_genre
+                if t_imdb: result["imdb_id"] = t_imdb
+                if t_rating and t_rating != "N/A": result["rating"] = t_rating
+                if t_plot and len(t_plot) > 20: result["plot"] = t_plot
+                result["source"] = "TMDB"
+                logger.info(f"✅ TMDB accepted: {result['title']} ({t_year})")
+
+                # Poster: agar TMDB ne direct nahi diya, TMDB search se poster dhundho
+                if t_poster:
+                    result["poster_url"] = t_poster
+                elif t_imdb:
+                    # IMDB ID se TMDB poster
+                    try:
+                        tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+                        find_url = f"https://api.themoviedb.org/3/find/{t_imdb}?api_key={tmdb_api_key}&external_source=imdb_id"
+                        find_resp = await run_async(requests.get, find_url, timeout=8)
+                        find_data = find_resp.json()
+                        all_results = find_data.get("movie_results", []) + find_data.get("tv_results", [])
+                        for r in all_results:
+                            if r.get("poster_path"):
+                                result["poster_url"] = f"https://image.tmdb.org/t/p/original{r['poster_path']}"
+                                logger.info(f"✅ TMDB poster found via IMDB ID")
+                                break
+                    except Exception as pe:
+                        logger.warning(f"⚠️ TMDB poster fetch failed: {pe}")
+                else:
+                    # Title se TMDB poster search
+                    try:
+                        tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+                        search_url = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(result['title'])}&include_adult=true"
+                        search_resp = await run_async(requests.get, search_url, timeout=8)
+                        search_data = search_resp.json()
+                        for item in search_data.get("results", []):
+                            if item.get("poster_path"):
+                                result["poster_url"] = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
+                                logger.info(f"✅ TMDB poster found via title search")
+                                break
+                    except Exception as pe:
+                        logger.warning(f"⚠️ TMDB title poster search failed: {pe}")
+
+            else:
+                logger.info(f"⏭️ TMDB skipped — wrong year match, trying other sources...")
     except Exception as e:
         logger.warning(f"⚠️ TMDB failed: {e}")
 
@@ -6876,53 +6927,67 @@ async def fetch_adult_metadata_combo(
     # Sirf tab call karo jab plot ya cast khaali ho
     gemini_needed = not result["plot"] or len(result.get("plot","")) < 50 or not result["cast"]
     if gemini_needed:
-        try:
-            api_keys = []
-            std_key = os.environ.get("GEMINI_API_KEY")
-            if std_key: api_keys.append(std_key)
-            for i in range(1, 6):
-                k = os.environ.get(f"GEMINI_API_KEY_{i}")
-                if k: api_keys.append(k)
+        # ─────────────────────────────────────────────
+        # SOURCE 5: Gemini AI with full key rotation
+        # ─────────────────────────────────────────────
+        import google.generativeai as genai
 
-            if api_keys:
-                import google.generativeai as genai
-                genai.configure(api_key=api_keys[0])
-                model = genai.GenerativeModel('gemini-2.0-flash')
+        api_keys = []
+        std_key = os.environ.get("GEMINI_API_KEY")
+        if std_key: api_keys.append(std_key)
+        for i in range(1, 10):
+            k = os.environ.get(f"GEMINI_API_KEY_{i}")
+            if k: api_keys.append(k)
 
-                prompt = f"""You are an expert on Indian OTT platforms like Ullu, AltBalaji, PrimeShots, Kooku, NeonX, etc.
+        # Platform detect
+        raw_caption_lower = movie_name.lower()
+        platform_hint = "Indian OTT (Ullu / AltBalaji / Akkuott / PrimeShots / Kooku)"
+        for plat in ["ullu", "altbalaji", "akkuott", "primeshots", "kooku", "neonx", "hotx", "voovi", "bigmoviezoo"]:
+            if plat in raw_caption_lower:
+                platform_hint = plat.capitalize()
+                break
 
-Give me accurate metadata for this web series/movie:
+        prompt = f"""You are an expert database of Indian adult OTT web series (Ullu, AltBalaji, Akkuott, PrimeShots, Kooku, NeonX, etc.).
+
+IMPORTANT: I need metadata for a RECENT web series, NOT old Bollywood movies.
+
 Title: "{movie_name}"
-Year: {movie_year or "unknown"}
-Platform hint: Ullu / AltBalaji / Indian OTT
+Release Year: {movie_year or "2024-2026"} <- THIS IS THE YEAR, use it exactly
+Platform: {platform_hint}
+Content Type: Adult / 18+ Web Series (NOT classic cinema)
+
+STRICT RULES:
+- "year" MUST be {movie_year or "2024"} or close to it — do NOT return years like 1972, 1990 etc.
+- This is a web series, NOT an old film
+- If you know this series, give real data; if not, generate realistic data for this title
 
 Respond ONLY in this exact JSON format (no markdown, no backticks):
 {{
-  "title": "exact title",
-  "year": 2024,
+  "title": "{movie_name}",
+  "year": {movie_year or 2024},
   "genre": "Adult, Romance, Drama",
   "rating": "18+",
   "plot": "2-3 line story summary in Hindi or English",
   "cast": "Actor1, Actor2, Actress1",
   "category": "Web Series"
-}}
+}}"""
 
-If you don't know this specific title, generate a realistic plot based on the title name and typical Indian OTT adult content style. Always provide all fields."""
+        safety = {
+            genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+            genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+        }
 
-                gemini_resp = await run_async(
-                    model.generate_content,
-                    prompt,
-                    safety_settings={
-                        genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-                        genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
-                    }
-                )
+        gemini_success = False
+        for key_idx, api_key in enumerate(api_keys):
+            try:
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-2.0-flash')
+                gemini_resp = await run_async(model.generate_content, prompt, safety_settings=safety)
 
                 raw = gemini_resp.text.strip()
-                # JSON clean karo
-                raw = re.sub(r'^```json\s*', '', raw)
-                raw = re.sub(r'^```\s*', '', raw)
-                raw = re.sub(r'\s*```$', '', raw)
+                raw = re.sub(r'```json\s*', '', raw)
+                raw = re.sub(r'```\s*', '', raw)
+                raw = re.sub(r'\s*```', '', raw).strip()
 
                 g_data = json.loads(raw)
 
@@ -6937,16 +7002,30 @@ If you don't know this specific title, generate a realistic plot based on the ti
                     if gem_genre: result["genre"] = gem_genre
                 if result["year"] == 0:
                     gem_year = g_data.get("year", 0)
-                    if gem_year and str(gem_year).isdigit():
-                        result["year"] = int(gem_year)
+                    try:
+                        if int(str(gem_year)) > 2000:
+                            result["year"] = int(str(gem_year))
+                    except: pass
 
                 result["source"] = result["source"] + "+Gemini" if result["source"] != "Default" else "Gemini AI"
-                logger.info(f"✅ Gemini AI metadata generated for: {movie_name}")
+                logger.info(f"✅ Gemini success with key #{key_idx + 1} for: {movie_name}")
+                gemini_success = True
+                break  # Success — baaki keys try mat karo
 
-        except json.JSONDecodeError as je:
-            logger.warning(f"⚠️ Gemini JSON parse failed: {je}")
-        except Exception as e:
-            logger.warning(f"⚠️ Gemini generation failed: {e}")
+            except json.JSONDecodeError as je:
+                logger.warning(f"⚠️ Gemini key #{key_idx+1} JSON parse failed: {je}")
+                break  # JSON error = response aaya, parse fail — retry se fayda nahi
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "quota" in err_str.lower() or "rate" in err_str.lower():
+                    logger.warning(f"⚠️ Gemini key #{key_idx+1} quota exceeded, trying next key...")
+                    continue  # Next key try karo
+                else:
+                    logger.warning(f"⚠️ Gemini key #{key_idx+1} failed: {e}")
+                    break  # Unknown error — stop
+
+        if not gemini_success:
+            logger.warning(f"⚠️ All {len(api_keys)} Gemini keys exhausted for: {movie_name}")
 
     # ─────────────────────────────────────────────
     # FINAL: Default fallback values fill karo
