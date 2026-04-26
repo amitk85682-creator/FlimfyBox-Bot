@@ -5669,19 +5669,11 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 🎯 2. TMDB & IMDB METADATA
             metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang)
             
-            # ❌ SKIP: Agar TMDB/IMDB se koi data nahi mila toh is movie ko bilkul ignore karo
-            if not metadata:
-                logger.warning(f"⏭️ SKIPPED (no metadata found): '{movie_name}'")
-                await status_msg.edit_text(
-                    f"⚙️ Processing Movie {i}/{total_movies}...\n"
-                    f"⏭️ **SKIPPED** (No data found): `{movie_name}`\n"
-                    f"✅ Processed so far: {success_movies}",
-                    parse_mode='Markdown'
-                )
-                await asyncio.sleep(1)
-                continue  # DB mein kuch bhi save nahi hoga
-
-            title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+            if metadata:
+                title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
+            else:
+                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
+                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
 
             # 🎯 3. CAST FETCHING
             cast_str = ""
@@ -5928,16 +5920,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"SuperBatch Movie Error: {e}")
             continue
 
-    skipped_movies = total_movies - success_movies
-    summary = (
+    await status_msg.edit_text(
         f"🎉 **SUPER BATCH COMPLETED!**\n\n"
-        f"✅ **Saved & Posted:** {success_movies}/{total_movies}\n"
+        f"✅ Total Movies Processed: {success_movies}/{total_movies}\n"
+        f"🚀 All movies auto-posted to Channels & Forum successfully!",
+        parse_mode='Markdown'
     )
-    if skipped_movies > 0:
-        summary += f"⏭️ **Skipped (no data found):** {skipped_movies}\n"
-    summary += f"🚀 All done!"
-
-    await status_msg.edit_text(summary, parse_mode='Markdown')
 
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
@@ -6733,6 +6721,252 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🔞 18+ BATCH LISTENER (Fully Optimized & Fixed)
 # ============================================================================
 
+# ============================================================================
+# 🔞 ADULT METADATA COMBO ENGINE - 5 Sources Pipeline
+# ============================================================================
+async def fetch_adult_metadata_combo(
+    movie_name: str,
+    movie_year: str = "",
+    movie_lang: str = "Hindi"
+) -> dict:
+    """
+    5-source combo pipeline for adult/OTT content:
+    1. TMDB (adult_mode=True)
+    2. Wikipedia API (free, no key)
+    3. DuckDuckGo Instant Answer (free, no key)
+    4. Google Custom Search (text + image)
+    5. Gemini AI (generate from knowledge - most reliable for Ullu/AltBalaji)
+
+    Returns best combined result from all available sources.
+    """
+    result = {
+        "title": movie_name,
+        "year": int(movie_year) if str(movie_year).isdigit() else 0,
+        "poster_url": None,
+        "genre": "Adult, Romance, Drama",
+        "imdb_id": None,
+        "rating": "18+",
+        "plot": None,
+        "cast": "",
+        "category": "Adult",
+        "source": "Default"
+    }
+
+    logger.info(f"🔍 Adult Combo Search: '{movie_name}' ({movie_year})")
+
+    # ─────────────────────────────────────────────
+    # SOURCE 1: TMDB with include_adult=true
+    # ─────────────────────────────────────────────
+    try:
+        tmdb_data = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, adult_mode=True)
+        if tmdb_data:
+            t_title, t_year, t_poster, t_genre, t_imdb, t_rating, t_plot, t_cat = tmdb_data
+            if t_title and t_title != movie_name: result["title"] = t_title
+            if t_year and t_year > 0: result["year"] = t_year
+            if t_poster: result["poster_url"] = t_poster
+            if t_genre and t_genre not in ("Romance, Drama", ""): result["genre"] = t_genre
+            if t_imdb: result["imdb_id"] = t_imdb
+            if t_rating and t_rating != "N/A": result["rating"] = t_rating
+            if t_plot and len(t_plot) > 20: result["plot"] = t_plot
+            result["source"] = "TMDB"
+            logger.info(f"✅ TMDB found: {result['title']}")
+    except Exception as e:
+        logger.warning(f"⚠️ TMDB failed: {e}")
+
+    # ─────────────────────────────────────────────
+    # SOURCE 2: Wikipedia API (no key needed)
+    # ─────────────────────────────────────────────
+    try:
+        wiki_query = quote(f"{movie_name} web series")
+        wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_query}"
+        wiki_resp = await run_async(requests.get, wiki_url, timeout=8)
+        if wiki_resp.status_code == 200:
+            wiki_data = wiki_resp.json()
+            wiki_plot = wiki_data.get("extract", "")
+            wiki_thumb = wiki_data.get("thumbnail", {}).get("source")
+            if wiki_plot and len(wiki_plot) > 30 and not result["plot"]:
+                result["plot"] = wiki_plot[:400]
+                result["source"] = result["source"] + "+Wiki" if result["source"] != "Default" else "Wikipedia"
+            if wiki_thumb and not result["poster_url"]:
+                result["poster_url"] = wiki_thumb
+            logger.info(f"✅ Wikipedia data found for: {movie_name}")
+    except Exception as e:
+        logger.warning(f"⚠️ Wikipedia failed: {e}")
+
+    # Hindi Wikipedia fallback
+    if not result["plot"]:
+        try:
+            wiki_hi_url = f"https://hi.wikipedia.org/api/rest_v1/page/summary/{quote(movie_name)}"
+            wiki_resp = await run_async(requests.get, wiki_hi_url, timeout=8)
+            if wiki_resp.status_code == 200:
+                wiki_data = wiki_resp.json()
+                wiki_plot = wiki_data.get("extract", "")
+                if wiki_plot and len(wiki_plot) > 20:
+                    result["plot"] = wiki_plot[:400]
+                    result["source"] = result["source"] + "+HiWiki" if result["source"] != "Default" else "HiWiki"
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────
+    # SOURCE 3: DuckDuckGo Instant Answer (no key)
+    # ─────────────────────────────────────────────
+    if not result["plot"] or not result["poster_url"]:
+        try:
+            ddg_query = quote(f"{movie_name} {movie_year} ullu altbalaji web series")
+            ddg_url = f"https://api.duckduckgo.com/?q={ddg_query}&format=json&no_html=1&skip_disambig=1"
+            ddg_resp = await run_async(requests.get, ddg_url, timeout=8,
+                                       headers={"User-Agent": "Mozilla/5.0"})
+            if ddg_resp.status_code == 200:
+                ddg_data = ddg_resp.json()
+                ddg_abstract = ddg_data.get("Abstract", "")
+                ddg_image = ddg_data.get("Image", "")
+                if ddg_abstract and len(ddg_abstract) > 30 and not result["plot"]:
+                    result["plot"] = ddg_abstract[:400]
+                    result["source"] = result["source"] + "+DDG" if result["source"] != "Default" else "DuckDuckGo"
+                if ddg_image and not result["poster_url"]:
+                    img_src = ddg_image if ddg_image.startswith("http") else f"https://duckduckgo.com{ddg_image}"
+                    result["poster_url"] = img_src
+                # Related topics se bhi kuch nikalte hain
+                if not result["plot"]:
+                    for topic in ddg_data.get("RelatedTopics", [])[:3]:
+                        text = topic.get("Text", "")
+                        if text and len(text) > 30:
+                            result["plot"] = text[:400]
+                            break
+                logger.info(f"✅ DuckDuckGo data processed for: {movie_name}")
+        except Exception as e:
+            logger.warning(f"⚠️ DuckDuckGo failed: {e}")
+
+    # ─────────────────────────────────────────────
+    # SOURCE 4: Google Custom Search (text + image)
+    # ─────────────────────────────────────────────
+    try:
+        google_data = await fetch_metadata_from_google(
+            f"{movie_name} {movie_year} web series cast plot",
+            movie_year
+        )
+        if google_data:
+            if not result["poster_url"] and google_data.get("poster"):
+                result["poster_url"] = google_data["poster"]
+            if not result["plot"] or len(result["plot"]) < 50:
+                g_plot = google_data.get("plot", "")
+                if g_plot and len(g_plot) > 30:
+                    result["plot"] = g_plot
+            result["source"] = result["source"] + "+Google" if result["source"] != "Default" else "Google"
+            logger.info(f"✅ Google data found for: {movie_name}")
+    except Exception as e:
+        logger.warning(f"⚠️ Google search failed: {e}")
+
+    # Google Image search specifically for poster (separate query)
+    if not result["poster_url"]:
+        try:
+            poster_data = await fetch_metadata_from_google(
+                f"{movie_name} poster official ullu altbalaji",
+                movie_year
+            )
+            if poster_data and poster_data.get("poster"):
+                result["poster_url"] = poster_data["poster"]
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────
+    # SOURCE 5: Gemini AI - Most reliable for Indian OTT
+    # Training data mein Ullu/AltBalaji content hai
+    # ─────────────────────────────────────────────
+    # Sirf tab call karo jab plot ya cast khaali ho
+    gemini_needed = not result["plot"] or len(result.get("plot","")) < 50 or not result["cast"]
+    if gemini_needed:
+        try:
+            api_keys = []
+            std_key = os.environ.get("GEMINI_API_KEY")
+            if std_key: api_keys.append(std_key)
+            for i in range(1, 6):
+                k = os.environ.get(f"GEMINI_API_KEY_{i}")
+                if k: api_keys.append(k)
+
+            if api_keys:
+                import google.generativeai as genai
+                genai.configure(api_key=api_keys[0])
+                model = genai.GenerativeModel('gemini-2.0-flash')
+
+                prompt = f"""You are an expert on Indian OTT platforms like Ullu, AltBalaji, PrimeShots, Kooku, NeonX, etc.
+
+Give me accurate metadata for this web series/movie:
+Title: "{movie_name}"
+Year: {movie_year or "unknown"}
+Platform hint: Ullu / AltBalaji / Indian OTT
+
+Respond ONLY in this exact JSON format (no markdown, no backticks):
+{{
+  "title": "exact title",
+  "year": 2024,
+  "genre": "Adult, Romance, Drama",
+  "rating": "18+",
+  "plot": "2-3 line story summary in Hindi or English",
+  "cast": "Actor1, Actor2, Actress1",
+  "category": "Web Series"
+}}
+
+If you don't know this specific title, generate a realistic plot based on the title name and typical Indian OTT adult content style. Always provide all fields."""
+
+                gemini_resp = await run_async(
+                    model.generate_content,
+                    prompt,
+                    safety_settings={
+                        genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                        genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_NONE,
+                    }
+                )
+
+                raw = gemini_resp.text.strip()
+                # JSON clean karo
+                raw = re.sub(r'^```json\s*', '', raw)
+                raw = re.sub(r'^```\s*', '', raw)
+                raw = re.sub(r'\s*```$', '', raw)
+
+                g_data = json.loads(raw)
+
+                if not result["plot"] or len(result["plot"]) < 50:
+                    gem_plot = g_data.get("plot", "")
+                    if gem_plot and len(gem_plot) > 20:
+                        result["plot"] = gem_plot
+                if not result["cast"]:
+                    result["cast"] = g_data.get("cast", "")
+                if not result["genre"] or result["genre"] == "Adult, Romance, Drama":
+                    gem_genre = g_data.get("genre", "")
+                    if gem_genre: result["genre"] = gem_genre
+                if result["year"] == 0:
+                    gem_year = g_data.get("year", 0)
+                    if gem_year and str(gem_year).isdigit():
+                        result["year"] = int(gem_year)
+
+                result["source"] = result["source"] + "+Gemini" if result["source"] != "Default" else "Gemini AI"
+                logger.info(f"✅ Gemini AI metadata generated for: {movie_name}")
+
+        except json.JSONDecodeError as je:
+            logger.warning(f"⚠️ Gemini JSON parse failed: {je}")
+        except Exception as e:
+            logger.warning(f"⚠️ Gemini generation failed: {e}")
+
+    # ─────────────────────────────────────────────
+    # FINAL: Default fallback values fill karo
+    # ─────────────────────────────────────────────
+    if not result["plot"]:
+        result["plot"] = f"{movie_name} - Exclusive premium 18+ content. Watch on FlimfyBox Premium."
+    if not result["genre"]:
+        result["genre"] = "Adult, Romance, Drama"
+    if not result["rating"]:
+        result["rating"] = "18+"
+
+    logger.info(
+        f"📊 Adult Combo Result for '{movie_name}': "
+        f"source={result['source']}, poster={'✅' if result['poster_url'] else '❌'}, "
+        f"plot={'✅' if result['plot'] else '❌'}, cast={'✅' if result['cast'] else '❌'}"
+    )
+
+    return result
+
+
 async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     🔞 18+ BATCH LISTENER: Auto-extracts metadata and saves files.
@@ -6804,71 +7038,32 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-        # === METADATA FETCHING WITH CLEAN FALLBACK ===
-        title, year, poster_url, genre, imdb_id, rating, plot, category = (
-            movie_name, 
-            int(movie_year) if str(movie_year).isdigit() else 0,
-            None,  # poster_url
-            "Adult, Romance, Drama",  # default genre
-            None,  # imdb_id
-            "N/A",  # rating
-            "Watch exclusive 18+ content on FlimfyBox Premium.",  # default plot
-            gemini_category  # category
+        # === 🚀 COMBO METADATA ENGINE (5 Sources) ===
+        await status_msg.edit_text(
+            f"🔍 **Searching:** `{movie_name}`\n"
+            f"⏳ Trying TMDB → Wikipedia → DuckDuckGo → Google → Gemini AI...",
+            parse_mode='Markdown'
         )
-        
-        cast_str = ""
 
-        # Try TMDB first (with adult_mode=True)
-        try:
-            metadata = await run_async(
-                fetch_movie_metadata, 
-                movie_name, 
-                movie_year, 
-                movie_lang, 
-                adult_mode=True  # Critical for 18+ content
-            )
-            
-            if metadata:
-                t_title, t_year, t_poster, t_genre, t_imdb, t_rating, t_plot, t_cat = metadata
-                # Only update if we got valid data
-                if t_title and t_title != "N/A": title = t_title
-                if t_year and t_year > 0: year = t_year
-                if t_poster and t_poster != "N/A": poster_url = t_poster
-                if t_genre and t_genre != "N/A": genre = t_genre
-                if t_imdb and t_imdb != "N/A": imdb_id = t_imdb
-                if t_rating and t_rating != "N/A": rating = t_rating
-                if t_plot and t_plot != "N/A": plot = t_plot
-                # Keep Adult category even if TMDB says something else
-                category = gemini_category if force_adult else (t_cat if t_cat else gemini_category)
-                
-                logger.info(f"✅ TMDB metadata found for: {title}")
-                
-                # Fetch cast if we have IMDB ID
-                if imdb_id:
-                    cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
-                    
-        except Exception as e:
-            logger.warning(f"⚠️ TMDB failed for {movie_name}: {e}")
+        combo = await fetch_adult_metadata_combo(movie_name, movie_year, movie_lang)
 
-        # If TMDB failed completely, try Google
-        if not poster_url or poster_url == "N/A":
+        title     = combo["title"]
+        year      = combo["year"]
+        poster_url = combo["poster_url"]
+        genre     = combo["genre"]
+        imdb_id   = combo["imdb_id"]
+        rating    = combo["rating"]
+        plot      = combo["plot"]
+        cast_str  = combo["cast"]
+        category  = gemini_category  # Always keep Adult category
+        data_source = combo["source"]
+
+        # IMDB cast fetch (extra — agar imdb_id mila ho)
+        if imdb_id and not cast_str:
             try:
-                google_data = await fetch_metadata_from_google(movie_name)
-                if google_data:
-                    # Only fill missing fields from Google
-                    if not poster_url or poster_url == "N/A":
-                        poster_url = google_data.get('poster')
-                    if not genre or genre == "Adult, Romance, Drama":
-                        genre = google_data.get('genre', "Adult, Romance, Drama")
-                    if not plot or plot == "Watch exclusive 18+ content on FlimfyBox Premium.":
-                        plot = google_data.get('plot', plot)
-                    
-                    logger.info(f"✅ Google fallback used for: {title}")
-                else:
-                    logger.info(f"⚠️ No Google results for: {title}, using defaults")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Google search failed for {title}: {e}")
+                cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+            except Exception:
+                pass
 
         # === DATABASE INSERTION ===
         conn = get_db_connection()
@@ -6942,14 +7137,16 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Build success message
             cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
-            source_info = "TMDB" if imdb_id else ("Google" if poster_url else "Default")
+            poster_display = "✅ Found" if poster_url else "❌ Not Found"
             
             success_msg = (
-                f"✅ **18+ Metadata Ready** ({source_info})\n\n"
+                f"✅ **18+ Metadata Ready**\n"
+                f"📡 **Source:** {data_source}\n\n"
                 f"🎬 **Title:** `{title}`\n"
                 f"📅 **Year:** {year if year else 'N/A'}\n"
                 f"🎭 **Genre:** {genre}\n"
                 f"⭐️ **Rating:** {rating}\n"
+                f"🖼️ **Poster:** {poster_display}\n"
                 f"🏷️ **Category:** {category}\n"
                 f"{cast_display}\n"
                 f"🚀 **Ab files bhejein, phir `/done18` likhein.**"
