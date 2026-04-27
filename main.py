@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import traceback
+import time
 import os
 import secrets
 import pytz
@@ -37,6 +38,27 @@ logging.basicConfig(
     level=logging.DEBUG  # Change from INFO to DEBUG if needed
 )
 logger = logging.getLogger(__name__)
+
+# ==================== CACHING ====================
+class FastCache:
+    def __init__(self, ttl_seconds=3600):
+        self.cache = {}
+        self.ttl = ttl_seconds
+
+    def get(self, key):
+        if key in self.cache:
+            data, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                return data
+            else:
+                del self.cache[key]
+        return None
+
+    def set(self, key, value):
+        self.cache[key] = (value, time.time())
+
+search_cache = FastCache(ttl_seconds=3600)  # 1 Hour cache for SQL/Fuzzy searches
+api_movies_cache = FastCache(ttl_seconds=1800) # 30 Mins cache for Web App Home
 
 # ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
@@ -1802,6 +1824,15 @@ def update_movies_in_db():
 
 
 def get_movies_from_db(user_query, limit=10):
+    cache_key = f"db_fuzzy_{user_query}_{limit}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = _get_movies_from_db_nocache(user_query, limit)
+    search_cache.set(cache_key, result)
+    return result
+
+def _get_movies_from_db_nocache(user_query, limit=10):
     """Search for MULTIPLE movies in database with fuzzy matching"""
     conn = None
     try:
@@ -1876,6 +1907,15 @@ def get_movies_from_db(user_query, limit=10):
 
 
 def get_movies_fast_sql(query: str, limit: int = 5):
+    cache_key = f"db_fast_{query}_{limit}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = _get_movies_fast_sql_nocache(query, limit)
+    search_cache.set(cache_key, result)
+    return result
+
+def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
     """
     Smart SQL Search: Fast like SQL + Smart like FuzzyWuzzy.
     Handles typos using PostgreSQL 'pg_trgm' (Similarity).
@@ -9493,6 +9533,12 @@ def get_movies():
     # Pagination Logic
     page = int(request.args.get('page', 1))
     limit = int(request.args.get('limit', 40)) # Ek baar mein 40 movies bhejo
+    
+    cache_key = f"api_movies_{page}_{limit}"
+    cached = api_movies_cache.get(cache_key)
+    if cached:
+        return jsonify(cached)
+        
     offset = (page - 1) * limit
 
     conn = get_db_connection()
@@ -9528,7 +9574,9 @@ def get_movies():
         # Check if more movies exist
         has_more = len(movies) == limit 
         
-        return jsonify({'status': 'success', 'movies': movies, 'has_more': has_more})
+        result = {'status': 'success', 'movies': movies, 'has_more': has_more}
+        api_movies_cache.set(cache_key, result)
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error in /api/movies: {e}")
         close_db_connection(conn)
@@ -9537,6 +9585,11 @@ def get_movies():
 
 @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
 def get_movie_details(movie_id):
+    cache_key = f"api_movie_{movie_id}"
+    cached = api_movies_cache.get(cache_key)
+    if cached:
+        return jsonify(cached)
+
     conn = get_db_connection()
     if not conn:
         return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
@@ -9608,7 +9661,9 @@ def get_movie_details(movie_id):
             movie['trailer_key'] = None
             movie['backdrop'] = None
 
-        return jsonify({'status': 'success', 'movie': movie})
+        result = {'status': 'success', 'movie': movie}
+        api_movies_cache.set(cache_key, result)
+        return jsonify(result)
     except Exception as e:
         logger.error(f"Error in /api/movie/{movie_id}: {e}")
         close_db_connection(conn)
@@ -9620,6 +9675,11 @@ def search_movies_api():
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify({'status': 'error', 'message': 'Missing query'}), 400
+
+    cache_key = f"api_search_{query}"
+    cached = search_cache.get(cache_key)
+    if cached:
+        return jsonify(cached)
 
     conn = get_db_connection()
     local_results = []
@@ -9694,60 +9754,9 @@ def search_movies_api():
             seen.add(key)
             combined.append(m)
 
-    return jsonify({'status': 'success', 'results': combined})
-    
-    # 🔥 TMDB Fix for "Thamma 2025" -> API ko saal (year) se confusion hoti hai, isliye usko hata do
-    clean_query = re.sub(r'\b(19|20)\d{2}\b', '', query).strip() 
-    if not clean_query: 
-        clean_query = query # Agar user ne sirf saal hi likh diya ho
-
-    tmdb_results = []
-    if len(local_results) < 15: # Agar local DB me kam movies mili tabhi TMDB me dhoondo
-        try:
-            tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(clean_query)}"
-            resp = requests.get(tmdb_url, timeout=5).json()
-            for item in resp.get('results', []):
-                # Agar poster na ho, toh backdrop image utha lo (Thamma ke liye fix)
-                img_path = item.get('poster_path') or item.get('backdrop_path')
-                if not img_path:
-                    continue
-                
-                tmdb_results.append({
-                    'id': 'tmdb_' + str(item['id']),
-                    'title': item.get('title') or item.get('name') or 'Unknown',
-                    'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
-                    'image': f"https://image.tmdb.org/t/p/w500{img_path}",
-                    'rating': round(item.get('vote_average', 0), 1),
-                    'genre': 'Action, Drama',
-                    'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
-                    'source': 'tmdb',
-                    'description': item.get('overview', '')
-                })
-        except Exception as e:
-            logger.error(f"TMDB search error: {e}")
-    
-    # 🔥 FIX: "Avengers: Endgame" aur "Avengers Endgame" ko ek hi movie manega
-    def normalize_title(t):
-        return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
-
-    seen_titles = set()
-    combined = []
-    
-    # Pehle Local movies daalo (Taaki unpar Download ka button aaye)
-    for m in local_results:
-        key = normalize_title(m['title'])
-        if key not in seen_titles:
-            seen_titles.add(key)
-            combined.append(m)
-            
-    # Phir TMDB movies daalo (Jo duplicate nahi hain)
-    for m in tmdb_results:
-        key = normalize_title(m['title'])
-        if key not in seen_titles and len(combined) < 30:
-            seen_titles.add(key)
-            combined.append(m)
-            
-    return jsonify({'status': 'success', 'results': combined})
+    result = {'status': 'success', 'results': combined}
+    search_cache.set(cache_key, result)
+    return jsonify(result)
 
 
 @flask_app.route('/api/request', methods=['POST'])
