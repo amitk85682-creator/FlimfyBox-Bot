@@ -5614,12 +5614,47 @@ async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+def _normalize_math_unicode(text: str) -> str:
+    """Unicode Bold/Italic math chars (jaise 𝟏𝒎𝒊𝒏) ko normal ASCII mein convert karta hai"""
+    result = ""
+    for char in text:
+        cp = ord(char)
+        if 0x1D7CE <= cp <= 0x1D7D7:   # Bold digits 0-9
+            result += chr(ord('0') + cp - 0x1D7CE)
+        elif 0x1D7D8 <= cp <= 0x1D7E1: # Double-struck digits 0-9
+            result += chr(ord('0') + cp - 0x1D7D8)
+        elif 0x1D468 <= cp <= 0x1D481: # Bold Italic A-Z
+            result += chr(ord('A') + cp - 0x1D468)
+        elif 0x1D482 <= cp <= 0x1D49B: # Bold Italic a-z
+            result += chr(ord('a') + cp - 0x1D482)
+        elif 0x1D400 <= cp <= 0x1D419: # Bold A-Z
+            result += chr(ord('A') + cp - 0x1D400)
+        elif 0x1D41A <= cp <= 0x1D433: # Bold a-z
+            result += chr(ord('a') + cp - 0x1D41A)
+        else:
+            result += char
+    return result
+
+def _is_sample_clip(text: str) -> bool:
+    """
+    Sample/Preview clips detect karta hai jaise:
+    '𝟏𝒎𝒊𝒏 𝒇𝒓𝒐𝒎 𝟏:𝟏𝟓:𝟒𝟏 𝒐𝒇 𝑮𝒂𝒏𝒈𝒔𝒕𝒆𝒓'  →  '1min from 1:15:41 of Gangster'
+    """
+    normalized = _normalize_math_unicode(text).lower()
+    # Pattern: "Xmin from H:MM:SS of MovieName"
+    return bool(re.search(r'\d+\s*min\s+from\s+\d+:\d+', normalized))
+
 async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Super batch me aayi hui files ko chupchap memory me save karega"""
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
 
     message = update.effective_message
+
+    # ✅ FIX 1: Sticker ko ignore karo
+    if message.sticker:
+        return
+
     if not (message.document or message.video or message.audio): return
     
     caption = message.caption or message.text or ""
@@ -5630,14 +5665,29 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if message.document:
         file_id = message.document.file_id
-        file_name = message.document.file_name
-        file_size = message.document.file_size
+        file_name = message.document.file_name or "File"
+        file_size = message.document.file_size or 0
         if message.document.thumbnail: thumb_id = message.document.thumbnail.file_id
+        # ✅ FIX 2: Webm stickers (document ke roop mein aate hain) ignore karo
+        mime = message.document.mime_type or ""
+        if mime == 'video/webm' and file_size < 512 * 1024:  # 512KB se chota = sticker
+            return
     elif message.video:
         file_id = message.video.file_id
-        file_name = message.video.file_name
-        file_size = message.video.file_size
+        file_name = message.video.file_name or "File"
+        file_size = message.video.file_size or 0
         if message.video.thumbnail: thumb_id = message.video.thumbnail.file_id
+        # ✅ FIX 3: 5 minute (300 sec) ya usse choti videos = sample, skip karo
+        duration = message.video.duration or 0
+        if duration > 0 and duration <= 300:
+            logger.info(f"SuperBatch: Skipping short sample video (duration={duration}s): {file_name}")
+            return
+
+    # ✅ FIX 4: Sample clip detect karo (jaise "1min from 1:15:41 of Gangster")
+    text_to_check = caption if caption else file_name
+    if _is_sample_clip(text_to_check):
+        logger.info(f"SuperBatch: Skipping sample clip: {text_to_check[:60]}")
+        return
 
     # Queue me save karo
     SUPER_BATCH_SESSION['files'].append({
@@ -5712,8 +5762,16 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
-                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
+                # ✅ FIX: Agar koi bhi metadata nahi mila to is movie ko skip karo
+                # (Unknown/Auto Added wali movies DB mein nahi daalni chahiye)
+                logger.warning(f"SuperBatch: No metadata found for '{movie_name}' — SKIPPING.")
+                await status_msg.edit_text(
+                    f"⚙️ Processing Movie {i}/{total_movies}...\n"
+                    f"⚠️ Skipped (no data found): `{movie_name}`",
+                    parse_mode='Markdown'
+                )
+                await asyncio.sleep(1)
+                continue
 
             # 🎯 3. CAST FETCHING
             cast_str = ""
