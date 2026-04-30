@@ -349,15 +349,17 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get('DATABASE_URL')
     # 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
+db_pool_lock = threading.Lock()  # Thread-safe pool access ke liye
 try:
-    # Pool create kar rahe hain taki baar baar connection na banana pade
+    # ThreadedConnectionPool use karo — Flask multi-threaded hai, SimpleConnectionPool safe nahi
     pool_url = FIXED_DATABASE_URL or DATABASE_URL
     if pool_url:
-        db_pool = psycopg2.pool.SimpleConnectionPool(
-            1, 20, # Min 1, Max 20 connections
-            dsn=pool_url
+        db_pool = psycopg2.pool.ThreadedConnectionPool(
+            2, 30,  # Min 2, Max 30 connections (3 bots + Flask threads + workers handle kar sake)
+            dsn=pool_url,
+            connect_timeout=10
         )
-        logger.info("✅ Database Connection Pool Created!")
+        logger.info("✅ Database ThreadedConnectionPool Created (max=30)!")
 except Exception as e:
     logger.error(f"❌ Error creating pool: {e}")
 # 👆👆👆 END COPY HERE 👆👆👆
@@ -1725,16 +1727,23 @@ def save_post_to_db(
 
 # 👇👇👇 START COPY HERE (New Function) 👇👇👇
 def get_db_connection():
-    """Pool se connection lene wala naya function"""
+    """Pool se connection lene wala function — pool exhausted ho to 3 baar retry karta hai"""
     if not db_pool:
         logger.error("Database pool is not ready.")
         return None
-    try:
-        conn = db_pool.getconn()
-        return conn
-    except Exception as e:
-        logger.error(f"Error getting connection from pool: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            conn = db_pool.getconn()
+            if conn:
+                conn.autocommit = False  # Explicit transaction control
+                return conn
+        except Exception as e:
+            if "exhausted" in str(e).lower() and attempt < 2:
+                time.sleep(1 + attempt)  # 1s, 2s retry delay
+                continue
+            logger.error(f"Error getting connection from pool: {e}")
+            return None
+    return None
 
 def close_db_connection(conn):
     """Connection ko wapas pool me dalne ke liye helper"""
@@ -5614,47 +5623,12 @@ async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-def _normalize_math_unicode(text: str) -> str:
-    """Unicode Bold/Italic math chars (jaise 𝟏𝒎𝒊𝒏) ko normal ASCII mein convert karta hai"""
-    result = ""
-    for char in text:
-        cp = ord(char)
-        if 0x1D7CE <= cp <= 0x1D7D7:   # Bold digits 0-9
-            result += chr(ord('0') + cp - 0x1D7CE)
-        elif 0x1D7D8 <= cp <= 0x1D7E1: # Double-struck digits 0-9
-            result += chr(ord('0') + cp - 0x1D7D8)
-        elif 0x1D468 <= cp <= 0x1D481: # Bold Italic A-Z
-            result += chr(ord('A') + cp - 0x1D468)
-        elif 0x1D482 <= cp <= 0x1D49B: # Bold Italic a-z
-            result += chr(ord('a') + cp - 0x1D482)
-        elif 0x1D400 <= cp <= 0x1D419: # Bold A-Z
-            result += chr(ord('A') + cp - 0x1D400)
-        elif 0x1D41A <= cp <= 0x1D433: # Bold a-z
-            result += chr(ord('a') + cp - 0x1D41A)
-        else:
-            result += char
-    return result
-
-def _is_sample_clip(text: str) -> bool:
-    """
-    Sample/Preview clips detect karta hai jaise:
-    '𝟏𝒎𝒊𝒏 𝒇𝒓𝒐𝒎 𝟏:𝟏𝟓:𝟒𝟏 𝒐𝒇 𝑮𝒂𝒏𝒈𝒔𝒕𝒆𝒓'  →  '1min from 1:15:41 of Gangster'
-    """
-    normalized = _normalize_math_unicode(text).lower()
-    # Pattern: "Xmin from H:MM:SS of MovieName"
-    return bool(re.search(r'\d+\s*min\s+from\s+\d+:\d+', normalized))
-
 async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Super batch me aayi hui files ko chupchap memory me save karega"""
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
 
     message = update.effective_message
-
-    # ✅ FIX 1: Sticker ko ignore karo
-    if message.sticker:
-        return
-
     if not (message.document or message.video or message.audio): return
     
     caption = message.caption or message.text or ""
@@ -5665,29 +5639,14 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if message.document:
         file_id = message.document.file_id
-        file_name = message.document.file_name or "File"
-        file_size = message.document.file_size or 0
+        file_name = message.document.file_name
+        file_size = message.document.file_size
         if message.document.thumbnail: thumb_id = message.document.thumbnail.file_id
-        # ✅ FIX 2: Webm stickers (document ke roop mein aate hain) ignore karo
-        mime = message.document.mime_type or ""
-        if mime == 'video/webm' and file_size < 512 * 1024:  # 512KB se chota = sticker
-            return
     elif message.video:
         file_id = message.video.file_id
-        file_name = message.video.file_name or "File"
-        file_size = message.video.file_size or 0
+        file_name = message.video.file_name
+        file_size = message.video.file_size
         if message.video.thumbnail: thumb_id = message.video.thumbnail.file_id
-        # ✅ FIX 3: 5 minute (300 sec) ya usse choti videos = sample, skip karo
-        duration = message.video.duration or 0
-        if duration > 0 and duration <= 300:
-            logger.info(f"SuperBatch: Skipping short sample video (duration={duration}s): {file_name}")
-            return
-
-    # ✅ FIX 4: Sample clip detect karo (jaise "1min from 1:15:41 of Gangster")
-    text_to_check = caption if caption else file_name
-    if _is_sample_clip(text_to_check):
-        logger.info(f"SuperBatch: Skipping sample clip: {text_to_check[:60]}")
-        return
 
     # Queue me save karo
     SUPER_BATCH_SESSION['files'].append({
@@ -5762,16 +5721,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if metadata:
                 title, year, poster_url, genre, imdb_id, rating, plot, category = metadata
             else:
-                # ✅ FIX: Agar koi bhi metadata nahi mila to is movie ko skip karo
-                # (Unknown/Auto Added wali movies DB mein nahi daalni chahiye)
-                logger.warning(f"SuperBatch: No metadata found for '{movie_name}' — SKIPPING.")
-                await status_msg.edit_text(
-                    f"⚙️ Processing Movie {i}/{total_movies}...\n"
-                    f"⚠️ Skipped (no data found): `{movie_name}`",
-                    parse_mode='Markdown'
-                )
-                await asyncio.sleep(1)
-                continue
+                title, year, poster_url, imdb_id = movie_name, (int(movie_year) if str(movie_year).isdigit() else 0), None, None
+                genre, rating, plot, category = "Unknown", "N/A", "Auto Added", gemini_category
 
             # 🎯 3. CAST FETCHING
             cast_str = ""
@@ -11145,7 +11096,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def auto_delete_worker(app: Application):
     """
-    Background worker jo har 5 second me DB check karega, 
+    Background worker jo har 30 second me DB check karega, 
     messages delete karega aur fir DB se bhi entry uda dega (Self-Cleaning).
     """
     try:
@@ -11158,6 +11109,7 @@ async def auto_delete_worker(app: Application):
     logger.info(f"🧹 Auto-Delete Worker Started for @{bot_username}")
 
     while True:
+        conn = None
         try:
             conn = get_db_connection()
             if conn:
@@ -11180,15 +11132,21 @@ async def auto_delete_worker(app: Application):
                         
                     # 3. DB se turant delete karo (TAAKI DB CLEAN RAHE!)
                     cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
-                    conn.commit()
                     
+                conn.commit()
                 cur.close()
-                close_db_connection(conn)
         except Exception as e:
             logger.error(f"Auto-delete worker error: {e}")
+            if conn:
+                try: conn.rollback()
+                except: pass
+        finally:
+            # ✅ Connection HAMESHA wapas pool mein dalo — leak band
+            if conn:
+                close_db_connection(conn)
             
-        # Har 5 second me database check karega
-        await asyncio.sleep(5)
+        # ✅ FIX: 5s → 30s (3 workers × 5s = pool jaldi khatam, 30s kaafi hai)
+        await asyncio.sleep(30)
 
 # 👇 YAHAN SE COPY KARO AUR EXACTLY 'def register_handlers' KE THEEK UPAR PASTE KARO 👇
 
