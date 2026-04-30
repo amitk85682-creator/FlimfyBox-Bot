@@ -349,17 +349,15 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get('DATABASE_URL')
     # 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
-db_pool_lock = threading.Lock()  # Thread-safe pool access ke liye
 try:
-    # ThreadedConnectionPool use karo — Flask multi-threaded hai, SimpleConnectionPool safe nahi
+    # Pool create kar rahe hain taki baar baar connection na banana pade
     pool_url = FIXED_DATABASE_URL or DATABASE_URL
     if pool_url:
-        db_pool = psycopg2.pool.ThreadedConnectionPool(
-            2, 30,  # Min 2, Max 30 connections (3 bots + Flask threads + workers handle kar sake)
-            dsn=pool_url,
-            connect_timeout=10
+        db_pool = psycopg2.pool.SimpleConnectionPool(
+            1, 20, # Min 1, Max 20 connections
+            dsn=pool_url
         )
-        logger.info("✅ Database ThreadedConnectionPool Created (max=30)!")
+        logger.info("✅ Database Connection Pool Created!")
 except Exception as e:
     logger.error(f"❌ Error creating pool: {e}")
 # 👆👆👆 END COPY HERE 👆👆👆
@@ -374,11 +372,11 @@ ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 # ==================== DYNAMIC FSUB SYSTEM ====================
 ACTIVE_FSUB = {
     'id': os.environ.get('REQUIRED_CHANNEL_ID', '-1003916450868'),
-    'url': 'https://t.me/+dxaCr_cMmGpkYTFlx' 
+    'url': 'https://t.me/FlimfyBoxx' 
 }
 BACKUP_FSUB_LIST = [
-    {'id': '-1003586110697', 'url': 'https://t.me/+dxaCr_cMmGpkYTFlmovies'}, 
-    {'id': '-1002222222222', 'url': 'https://t.me/FlimfyBoxx'}  
+    {'id': '-1003916450868', 'url': 'https://t.me/FlimfyBoxx'}, 
+    {'id': '-1002222222222', 'url': 'https://t.me/BackupChannel2'}  
 ]
 # =============================================================
 
@@ -1727,23 +1725,16 @@ def save_post_to_db(
 
 # 👇👇👇 START COPY HERE (New Function) 👇👇👇
 def get_db_connection():
-    """Pool se connection lene wala function — pool exhausted ho to 3 baar retry karta hai"""
+    """Pool se connection lene wala naya function"""
     if not db_pool:
         logger.error("Database pool is not ready.")
         return None
-    for attempt in range(3):
-        try:
-            conn = db_pool.getconn()
-            if conn:
-                conn.autocommit = False  # Explicit transaction control
-                return conn
-        except Exception as e:
-            if "exhausted" in str(e).lower() and attempt < 2:
-                time.sleep(1 + attempt)  # 1s, 2s retry delay
-                continue
-            logger.error(f"Error getting connection from pool: {e}")
-            return None
-    return None
+    try:
+        conn = db_pool.getconn()
+        return conn
+    except Exception as e:
+        logger.error(f"Error getting connection from pool: {e}")
+        return None
 
 def close_db_connection(conn):
     """Connection ko wapas pool me dalne ke liye helper"""
@@ -2563,7 +2554,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
         "➖➖➖➖➖➖➖➖➖➖\n"
         "🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
         "➖➖➖➖➖➖➖➖➖➖\n"
-        "🔹 <b>Support group:</b> https://t.me/+2hFeRL4DYfBjZDQ1\n"
+        "🔹 <b>Support group:</b> https://t.me/+dxaCr_cMmGpkYTFl\n"
     )
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
@@ -3201,7 +3192,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"{lang_display}"  
             f"\n🔗 <b>JOIN »</b> <a href='{FILMFYBOX_CHANNEL_URL}'>FilmfyBox</a>\n\n"
             f"🔹 <b>Please drop the movie name, and I'll find it for you as soon as possible. 🎬✨👇</b>\n"
-            f"🔹 <b><a href='https://t.me/+2hFeRL4DYfBjZDQ1'>FlimfyBox Chat</a></b>"
+            f"🔹 <b><a href='https://t.me/+dxaCr_cMmGpkYTFl'>FlimfyBox Chat</a></b>"
         )
         
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
@@ -6607,7 +6598,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         channel_caption += (
             "➖➖➖➖➖➖➖\n"
-            f"<b>Support:</b> <a href='https://t.me/+2hFeRL4DYfBjZDQ1'>Join Chat</a>\n"
+            f"<b>Support:</b> <a href='https://t.me/+dxaCr_cMmGpkYTFl'>Join Chat</a>\n"
             "➖➖➖➖➖➖➖\n"
             "<b>👇 Download Below</b>"
         )
@@ -8485,7 +8476,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         sent_msg = None
         media_type = "unknown"
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/+dxaCr_cMmGpkYTFlx")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FlimfyBoxx")]])
 
         if replied_message.document:
             media_type = "file"
@@ -8610,7 +8601,7 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/+dxaCr_cMmGpkYTFlx")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FlimfyBoxx")]])
 
         for user_id, first_name, username in all_users:
             try:
@@ -8718,7 +8709,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/+dxaCr_cMmGpkYTFlx")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FlimfyBoxx")]])
 
         for user_id, first_name, username in target_users:
             try:
@@ -11096,7 +11087,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def auto_delete_worker(app: Application):
     """
-    Background worker jo har 30 second me DB check karega, 
+    Background worker jo har 5 second me DB check karega, 
     messages delete karega aur fir DB se bhi entry uda dega (Self-Cleaning).
     """
     try:
@@ -11109,7 +11100,6 @@ async def auto_delete_worker(app: Application):
     logger.info(f"🧹 Auto-Delete Worker Started for @{bot_username}")
 
     while True:
-        conn = None
         try:
             conn = get_db_connection()
             if conn:
@@ -11132,21 +11122,15 @@ async def auto_delete_worker(app: Application):
                         
                     # 3. DB se turant delete karo (TAAKI DB CLEAN RAHE!)
                     cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
+                    conn.commit()
                     
-                conn.commit()
                 cur.close()
+                close_db_connection(conn)
         except Exception as e:
             logger.error(f"Auto-delete worker error: {e}")
-            if conn:
-                try: conn.rollback()
-                except: pass
-        finally:
-            # ✅ Connection HAMESHA wapas pool mein dalo — leak band
-            if conn:
-                close_db_connection(conn)
             
-        # ✅ FIX: 5s → 30s (3 workers × 5s = pool jaldi khatam, 30s kaafi hai)
-        await asyncio.sleep(30)
+        # Har 5 second me database check karega
+        await asyncio.sleep(5)
 
 # 👇 YAHAN SE COPY KARO AUR EXACTLY 'def register_handlers' KE THEEK UPAR PASTE KARO 👇
 
