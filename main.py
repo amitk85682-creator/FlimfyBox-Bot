@@ -378,7 +378,7 @@ ACTIVE_FSUB = {
 }
 BACKUP_FSUB_LIST = [
     {'id': '-1003586110697', 'url': 'https://t.me/+dxaCr_cMmGpkYTFlmovies'}, 
-    {'id': '-1002222222222', 'url': 'https://t.me/BackupChannel2'}  
+    {'id': '-1002222222222', 'url': 'https://t.me/FlimfyBoxx'}  
 ]
 # =============================================================
 
