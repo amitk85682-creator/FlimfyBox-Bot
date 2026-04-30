@@ -373,11 +373,11 @@ ADMIN_CHANNEL_ID = os.environ.get('ADMIN_CHANNEL_ID')
 
 # ==================== DYNAMIC FSUB SYSTEM ====================
 ACTIVE_FSUB = {
-    'id': os.environ.get('REQUIRED_CHANNEL_ID', '-1002555232489'),
-    'url': 'https://t.me/MovieHdmoviehub' 
+    'id': os.environ.get('REQUIRED_CHANNEL_ID', '-1003916450868'),
+    'url': 'https://t.me/+dxaCr_cMmGpkYTFlx' 
 }
 BACKUP_FSUB_LIST = [
-    {'id': '-1003586110697', 'url': 'https://t.me/FlimfyBoxmovies'}, 
+    {'id': '-1003586110697', 'url': 'https://t.me/+dxaCr_cMmGpkYTFlmovies'}, 
     {'id': '-1002222222222', 'url': 'https://t.me/BackupChannel2'}  
 ]
 # =============================================================
@@ -386,7 +386,7 @@ BACKUP_FSUB_LIST = [
 FILMFYBOX_CHANNEL_URL = ACTIVE_FSUB['url']
 
 REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003460387180')
-FILMFYBOX_GROUP_URL = 'https://t.me/FlimfyBox'
+FILMFYBOX_GROUP_URL = 'https://t.me/+dxaCr_cMmGpkYTFl'
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
 FORCE_JOIN_ENABLED = True
@@ -8485,7 +8485,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         sent_msg = None
         media_type = "unknown"
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/MovieHdmoviehub")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/+dxaCr_cMmGpkYTFlx")]])
 
         if replied_message.document:
             media_type = "file"
@@ -8610,7 +8610,7 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/MovieHdmoviehub")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/+dxaCr_cMmGpkYTFlx")]])
 
         for user_id, first_name, username in all_users:
             try:
@@ -8718,7 +8718,7 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         success_count = 0
         failed_count = 0
-        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/MovieHdmoviehub")]])
+        join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/+dxaCr_cMmGpkYTFlx")]])
 
         for user_id, first_name, username in target_users:
             try:
