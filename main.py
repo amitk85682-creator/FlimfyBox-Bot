@@ -5947,7 +5947,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 
                         # ✅ DB me save karna zaroori hai taaki baad me /restore kaam kare
                         if sent_msg:
-                            save_post_to_db(movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot", caption, uploaded_file_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
+                            save_post_to_db(movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot", caption, uploaded_file_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies")
                             await asyncio.sleep(1.5)
                             
                     except Exception as e:
@@ -6474,7 +6474,7 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Restore Feature ke liye DB me save karo
             if sent_msg:
                 save_post_to_db(
-                    movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot",  # ✅ NAYA: bot3 hat gaya!
+                    movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot",  # ✅ NAYA: bot3 hat gaya!
                     channel_caption, file_id, "photo", keyboard.to_dict(), None, "movies"
                 )
                 sent_count += 1
@@ -6553,7 +6553,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 5. Generate Secure Links (Anti-Bot)
         bot1 = "FlimfyBox_SearchBot"
         bot2 = "urmoviebot"
-        bot3 = "FlimfyBox_Bot"
+        bot3 = "FlimfyBoxBot"
         
         if movie_id:
             # ✅ FIXED: Web App Secure Link (Exactly like /superdone)
@@ -7543,7 +7543,7 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_id=movie_id,
                 channel_id=ADULT_CHANNEL_ID,
                 message_id=sent.message_id,
-                bot_username="FlimfyBox_Bot",
+                bot_username="FlimfyBoxBot",
                 caption=caption,
                 media_file_id=sent.photo[-1].file_id if sent.photo else None,
                 media_type="photo",
@@ -8518,7 +8518,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
                 # Hum save kar rahe hain ki is movie ka post is channel me is ID par hai
                 cur.execute(
                     "INSERT INTO channel_posts (movie_id, channel_id, message_id, bot_username) VALUES (%s, %s, %s, %s)",
-                    (movie_id, chat_id, sent_msg.message_id, "FlimfyBox_Bot") # Current Main Bot Username
+                    (movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot") # Current Main Bot Username
                 )
                 conn.commit()
                 cur.close()
@@ -9283,7 +9283,7 @@ async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TY
                             for old_b in [
                                 "FlimfyBox_SearchBot",
                                 "urmoviebot",
-                                "FlimfyBox_Bot"
+                                "FlimfyBoxBot"
                             ]:
                                 if old_b in new_url:
                                     new_url = new_url.replace(old_b, new_bot)
@@ -9903,7 +9903,7 @@ def gen_secure_link(movie_id):
         finally:
             close_db_connection(conn)
             
-    bot_username = os.environ.get('BOT_USERNAME', 'FlimfyBox_Bot')
+    bot_username = os.environ.get('BOT_USERNAME', 'FlimfyBoxBot')
     tg_url = f"tg://resolve?domain={bot_username}&start={token}"
     return jsonify({"url": tg_url})
 
@@ -10350,7 +10350,7 @@ def serve_mini_app():
         const tg = window.Telegram.WebApp;
         tg.expand();
         tg.ready();
-        const BOT_USERNAME = "FlimfyBox_Bot"; // change if needed
+        const BOT_USERNAME = "FlimfyBoxBot"; // change if needed
 
         // State
         let allMovies = [];
