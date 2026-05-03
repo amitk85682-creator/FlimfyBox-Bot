@@ -386,7 +386,7 @@ FILMFYBOX_CHANNEL_URL = ACTIVE_FSUB['url']
 REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003460387180')
 FILMFYBOX_GROUP_URL = 'https://t.me/+dxaCr_cMmGpkYTFl'
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
-DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')
+DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1003893346701')
 FORCE_JOIN_ENABLED = True
 
 # ✅ NEW ENVIRONMENT VARIABLES FOR MULTI-CHANNEL & AI
@@ -3177,7 +3177,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             try:
                 warning_msg = await context.bot.copy_message(
                     chat_id=chat_id,
-                    from_chat_id=-1002683355160,
+                    from_chat_id=-1003893346701,
                     message_id=1773
                 )
             except Exception as e:
@@ -4197,7 +4197,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Original GIF wapas send karo
         await context.bot.copy_message(
             chat_id=chat_id,
-            from_chat_id=int(os.environ.get('DUMP_CHANNEL_ID', '-1002683355160')),
+            from_chat_id=int(os.environ.get('DUMP_CHANNEL_ID', '-1003893346701')),
             message_id=6057, 
             caption=caption_text,
             parse_mode='HTML',
@@ -4519,7 +4519,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             warning_msg = await context.bot.copy_message(
                 chat_id=chat_id,
-                from_chat_id=-1002683355160, # Apka Channel ID
+                from_chat_id=-1003893346701, # Apka Channel ID
                 message_id=1773              # Warning File Message ID
             )
             track_message_for_deletion(context, chat_id, warning_msg.message_id, 60)
