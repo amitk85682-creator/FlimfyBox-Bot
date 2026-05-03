@@ -353,11 +353,11 @@ try:
     # Pool create kar rahe hain taki baar baar connection na banana pade
     pool_url = FIXED_DATABASE_URL or DATABASE_URL
     if pool_url:
-        db_pool = psycopg2.pool.SimpleConnectionPool(
-            1, 20, # Min 1, Max 20 connections
+        db_pool = psycopg2.pool.ThreadedConnectionPool(
+            1, 10, # Supabase ki 10 connections limit ke hisaab se aur Thread-Safe
             dsn=pool_url
         )
-        logger.info("✅ Database Connection Pool Created!")
+        logger.info("✅ Database Connection Pool Created (Thread-Safe)!")
 except Exception as e:
     logger.error(f"❌ Error creating pool: {e}")
 # 👆👆👆 END COPY HERE 👆👆👆
@@ -383,7 +383,7 @@ BACKUP_FSUB_LIST = [
 # 👇👇 YAHAN YE EK LINE PASTE KAR DO 👇👇
 FILMFYBOX_CHANNEL_URL = ACTIVE_FSUB['url']
 
-REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-5252222398')
+REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003930961567')
 FILMFYBOX_GROUP_URL = 'https://t.me/+dxaCr_cMmGpkYTFl'
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1003893346701')
