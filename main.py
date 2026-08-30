@@ -7,7 +7,6 @@ import pytz
 import re
 import json
 import threading
-import hashlib
 import asyncio
 import logging  # Logging import zaroori hai
 import random
@@ -31,135 +30,36 @@ from typing import Optional
 from psycopg2 import pool
 from io import BytesIO
 
-# 🚦 AIORateLimiter ko `python-telegram-bot[rate-limiter]` extra chahiye (aiolimiter).
-# requirements.txt me add kar diya gaya hai, lekin agar kisi purane environment me
-# install na ho to bot crash nahi hona chahiye — tab bina rate limiter ke chalega.
-try:
-    from telegram.ext import AIORateLimiter
-except ImportError:  # aiolimiter missing
-    AIORateLimiter = None
-
 # Naya Lock banaya Auto-Batch ke liye
 auto_batch_lock = asyncio.Lock()
 
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO  # DEBUG par har TMDb score/httpx/psycopg2 line print hoti thi — bot slow ho jata tha
+    level=logging.DEBUG  # Change from INFO to DEBUG if needed
 )
 logger = logging.getLogger(__name__)
 
-# Third-party libraries ka DEBUG spam band — ye Render pe I/O block karta hai
-for _noisy in ('httpx', 'httpcore', 'telegram.ext.ExtBot', 'urllib3', 'asyncio',
-               'google.generativeai', 'google_genai', 'PIL', 'aiohttp'):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
-
 # ==================== CACHING ====================
 class FastCache:
-    """
-    Thread-safe TTL cache. Parallel metadata fetch (thread pool) isko ek saath
-    padhta/likhta hai, isliye lock zaroori hai — warna `del` pe KeyError aa sakta tha.
-    """
     def __init__(self, ttl_seconds=3600):
         self.cache = {}
         self.ttl = ttl_seconds
-        self._lock = threading.Lock()
 
     def get(self, key):
-        with self._lock:
-            entry = self.cache.get(key)
-            if entry is None:
-                return None
-            data, timestamp = entry
+        if key in self.cache:
+            data, timestamp = self.cache[key]
             if time.time() - timestamp < self.ttl:
                 return data
-            self.cache.pop(key, None)
-            return None
+            else:
+                del self.cache[key]
+        return None
 
     def set(self, key, value):
-        with self._lock:
-            self.cache[key] = (value, time.time())
+        self.cache[key] = (value, time.time())
 
 search_cache = FastCache(ttl_seconds=30)  # 30 Seconds cache for SQL/Fuzzy searches
 api_movies_cache = FastCache(ttl_seconds=30) # 30 Seconds cache for Web App Home
-
-# ==================== ⚡ SHARED HTTP SESSION + METADATA CACHE ====================
-# Pehle har requests.get() naya TCP + TLS handshake karta tha (~150-300ms waste).
-# Ek movie ke metadata me 5-15 calls hoti hain, to ye Session bahut time bachata hai.
-_http_session = requests.Session()
-_http_session.headers.update({'User-Agent': 'Mozilla/5.0 (FlimfyBox)'})
-try:
-    from requests.adapters import HTTPAdapter
-    _adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=0)
-    _http_session.mount('https://', _adapter)
-    _http_session.mount('http://', _adapter)
-except Exception as _e:  # pragma: no cover
-    logger.warning(f"HTTPAdapter mount skipped: {_e}")
-
-# Metadata lookups (TMDb/OMDb/cast/genre) — same movie dubara search ho to
-# network hit hi na ho. Superbatch me ye sabse bada win hai.
-metadata_cache = FastCache(ttl_seconds=21600)   # 6 ghante
-# imdb_id → (tmdb_id, media_type). fetch_movie_metadata isko bhar deta hai taaki
-# fetch_cast_from_imdb ka extra /find call bach jaye.
-_tmdb_id_cache = FastCache(ttl_seconds=21600)
-
-TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
-# Timeouts kam kiye: pehle 10s tha, ek slow/miss call pura pipeline rok deti thi.
-HTTP_TIMEOUT = 6
-HTTP_TIMEOUT_SHORT = 4
-
-# Ek series ke saare `/season/{n}` calls ek saath bhejne ke liye chhota pool.
-# Ye run_async ke MAIN executor se ALAG hai — warna nested submit deadlock kar
-# sakta tha (main pool ke saare threads season calls ka wait kar rahe hote).
-_season_pool = concurrent.futures.ThreadPoolExecutor(
-    max_workers=int(os.environ.get('SEASON_POOL_SIZE', '12')),
-    thread_name_prefix='season',
-)
-
-
-def _http_get_json(url, timeout=HTTP_TIMEOUT, **kwargs):
-    """Shared session se GET + JSON. Fail hone par {} deta hai (caller crash na ho)."""
-    try:
-        resp = _http_session.get(url, timeout=timeout, **kwargs)
-        return resp.json() or {}
-    except Exception as e:
-        logger.warning(f"HTTP GET failed ({url.split('?')[0]}): {e}")
-        return {}
-
-
-def _get_tmdb_genre_map():
-    """
-    TMDb genre_id → genre naam. Ye list kabhi nahi badalti, isliye ek baar cache.
-    Isse TMDb-fallback path me hardcoded "Action, Drama" ki jagah ASLI genre milega.
-    """
-    cached = metadata_cache.get('tmdb_genre_map')
-    if cached is not None:
-        return cached
-    genre_map = {}
-    for kind in ('movie', 'tv'):
-        data = _http_get_json(
-            f"https://api.themoviedb.org/3/genre/{kind}/list?api_key={TMDB_API_KEY}",
-            timeout=HTTP_TIMEOUT_SHORT,
-        )
-        for g in data.get('genres', []):
-            if g.get('id') and g.get('name'):
-                genre_map[int(g['id'])] = g['name']
-    if genre_map:
-        metadata_cache.set('tmdb_genre_map', genre_map)
-    return genre_map
-
-
-def _genres_from_ids(genre_ids, limit=3):
-    """genre_ids list ko 'Action, Thriller' jaise string me badalta hai."""
-    if not genre_ids:
-        return ""
-    try:
-        genre_map = _get_tmdb_genre_map()
-        names = [genre_map[int(gid)] for gid in genre_ids if int(gid) in genre_map]
-        return ", ".join(names[:limit])
-    except Exception:
-        return ""
-
 
 # ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
@@ -250,30 +150,41 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     # --- 1. MOVIE SEARCH ---
     movie_search_name = " ".join(context.args).strip() if context.args else ""
 
-    # 🚀 off-loop: pehle ye SELECT event loop par blocking thi
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ Database connection failed.")
+        return
+
+    cursor = conn.cursor()
+
     query = """
-        SELECT id, title, year, rating, genre,
-               poster_url, description, category, seasons_data
+        SELECT id, title, year, rating, genre, 
+               poster_url, description, category, seasons_data 
         FROM movies
     """
 
     if movie_search_name:
-        movie_data = await db_query(query + " WHERE title ILIKE %s LIMIT 1",
-                                    (f"%{movie_search_name}%",), mode='one')
+        cursor.execute(
+            query + " WHERE title ILIKE %s LIMIT 1",
+            (f"%{movie_search_name}%",)
+        )
     elif BATCH_SESSION.get('active'):
-        movie_data = await db_query(query + " WHERE id = %s",
-                                    (BATCH_SESSION['movie_id'],), mode='one')
+        cursor.execute(
+            query + " WHERE id = %s",
+            (BATCH_SESSION['movie_id'],)
+        )
     else:
         await update.message.reply_text(
             "❌ Naam batao!\nExample: `/post Pushpa`",
             parse_mode='Markdown'
         )
+        cursor.close()
+        close_db_connection(conn)
         return
 
-    if movie_data is None:
-        # None = DB fail. "Movie nahi mili" bolna GALAT hoga — movie ho bhi sakti hai.
-        await update.message.reply_text("⏳ Database busy hai — thodi der baad dobara try karein.")
-        return
+    movie_data = cursor.fetchone()
+    cursor.close()
+    close_db_connection(conn)
 
     if not movie_data:
         await update.message.reply_text("❌ Movie nahi mili database mein.")
@@ -355,8 +266,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     # --- 7. POST SEND (Anti-Block Mode) ---
     # 👇 GLOBAL DUPLICATE CHECK — 7 din me kahi bhi post hui ho to skip
-    # 🚀 run_async: blocking DB call, event loop par nahi
-    if await run_async(is_movie_posted_recently, movie_id, 7):
+    if is_movie_posted_recently(movie_id, days=7):
         await update.message.reply_text(
             f"⏭️ **{title}** pehle se 7 din ke andar post ho chuki hai. Skipping.",
             parse_mode='Markdown'
@@ -388,27 +298,20 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.error(f"Failed to post to {chat_id}: {e}")
 
         # --- 8. DB SAVE (Restore ke liye) ---
-        sent_to = 0
         try:
-            # 🚀 get_me() ki jagah cached username — ek Telegram API call bachi
-            try:
-                bot_uname = context.bot.username
-            except Exception:
-                bot_uname = (await context.bot.get_me()).username
+            bot_info = await context.bot.get_me()
             if sent_msg:
-                sent_to = 1
-                await run_async(
-                    save_post_to_db,
-                    movie_id,
-                    target_channels[0],
-                    sent_msg.message_id,
-                    bot_uname,
-                    caption,
-                    final_photo,
-                    "photo",
-                    keyboard_data,
-                    None,
-                    (
+                save_post_to_db(
+                    movie_id      = movie_id,
+                    channel_id    = target_channels[0],
+                    message_id    = sent_msg.message_id,
+                    bot_username  = bot_info.username,
+                    caption       = caption,
+                    media_file_id = final_photo,
+                    media_type    = "photo",
+                    keyboard_data = keyboard_data,
+                    topic_id      = None,
+                    content_type  = (
                         "adult"  if "adult"    in cat_lower else
                         "series" if "series"   in cat_lower else
                         "anime"  if "anime"    in cat_lower else
@@ -420,20 +323,11 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
             logger.warning(f"Post DB save failed (non-critical): {save_err}")
             save_status = "⚠️ DB save nahi hua"
 
-        # 🐛 FIX: pehle yahan `topic_id` print hota tha jo is function me define hi
-        #    nahi hai (save_post_to_db ko bhi None hi jaata hai) → confirmation
-        #    message par NameError, admin ko post hone ke baad bhi error dikhta tha.
-        if sent_msg:
-            await update.message.reply_text(
-                f"✅ **{title}** posted in {sent_to} channel\n"
-                f"{save_status}",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ **{title}** kisi bhi channel me post nahi hui (log check karein).",
-                parse_mode='Markdown'
-            )
+        await update.message.reply_text(
+            f"✅ **{title}** posted in Topic `{topic_id}`\n"
+            f"{save_status}",
+            parse_mode='Markdown'
+        )
 
     except Exception as e:
         logger.error(f"Post failed: {e}")
@@ -442,7 +336,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
 # ==================== ENVIRONMENT VARIABLES ====================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DATABASE_URL = "postgresql://postgres.vzixjxeppvpxrhntaidb:l0aDck2NUeD4Jws5@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres"
+DATABASE_URL = os.environ.get('DATABASE_URL')
 # Keep the Telegram Web App endpoint configurable. The old Render service was
 # still hard-coded in several buttons, so Telegram opened the retired Mini App.
 WEB_APP_URL = os.environ.get(
@@ -450,94 +344,16 @@ WEB_APP_URL = os.environ.get(
     'https://flimfybox-bot-yht0.onrender.com/webapp'
 ).rstrip('/')
     # 👇👇👇 START COPY HERE 👇👇👇
-# ==================== 🗄️ DB POOL BUDGET ====================
-# ⚠️ Ye EK HI pool bot + Flask mini-app DONO share karte hain
-#    (webapp_routes ko wahi get_db_connection pass hota hai, aur waitress
-#     8 threads se chalta hai). Isliye budget banana zaroori hai:
-#
-#      superbatch Phase A (metadata)   ≤ SUPERBATCH_META_CONCURRENCY  (8)
-#      superbatch Phase B (post/save)  ≤ SUPERBATCH_POST_CONCURRENCY  (4)
-#      Flask mini-app (waitress)       ≤ FLASK_THREADS                (8)
-#      user handlers + job_queue       ≤ DB_USER_RESERVE              (10)
-#      ─────────────────────────────────────────────────────────────
-#      pool ka size in sabka JOD hona chahiye
-#
-#    🐛 Purana bug: DB_POOL_MAX=20 par 8+4+8 = 20 → user handlers ke liye
-#       ZERO connection bachta tha. Superbatch chalte waqt user search karta
-#       to get_db_connection() None deta, aur callers "Not Found" / "No files
-#       found" bol dete (ya crash ho jaate). Yahi "respond nahi karta" tha.
-#
-#    ⚙️ Isliye ab pool KHUD size hota hai — env me DB_POOL_MAX na ho to
-#       zarurat ke hisaab se nikal aata hai (8+4+8+10 = 30). Agar tum
-#       DB_POOL_MAX khud set karte ho to wahi maana jaata hai, aur zarurat se
-#       chota hone par superbatch clamp ho jaata hai (neeche RESERVE GUARD) —
-#       taaki user searches kabhi starve na hon. Speed se pehle jawab dena.
-SUPERBATCH_META_CONCURRENCY = max(1, int(os.environ.get('SUPERBATCH_META_CONCURRENCY', '8')))
-SUPERBATCH_POST_CONCURRENCY = max(1, int(os.environ.get('SUPERBATCH_POST_CONCURRENCY', '4')))
-FLASK_THREADS = max(1, int(os.environ.get('FLASK_THREADS', '8')))
-DB_USER_RESERVE = max(2, int(os.environ.get('DB_USER_RESERVE', '10')))
-
-_db_needed = (SUPERBATCH_META_CONCURRENCY + SUPERBATCH_POST_CONCURRENCY
-              + FLASK_THREADS + DB_USER_RESERVE)
-_db_pool_env = os.environ.get('DB_POOL_MAX')
-if _db_pool_env:
-    # Floor 6 hai: meta(1) + post(1) + flask(2) + reserve(2) — isse neeche
-    # koi bhi config kaam nahi kar sakti.
-    DB_POOL_MAX = max(6, int(_db_pool_env))
-else:
-    # 40 par cap: Supabase/pgbouncer ki apni connection limit na tootne paye.
-    DB_POOL_MAX = min(40, _db_needed)
-
-# 🚨 Pool itna chota hai ki Flask + user reserve bhi na samayen?
-#    Tab pehle FLASK ke threads kaato — mini-app thoda dheema hoga, par bot ke
-#    search zinda rahenge. User reserve sabse aakhir me chheden.
-if DB_POOL_MAX < FLASK_THREADS + DB_USER_RESERVE + 2:
-    _old_f, _old_r = FLASK_THREADS, DB_USER_RESERVE
-    FLASK_THREADS = max(2, min(FLASK_THREADS, DB_POOL_MAX - DB_USER_RESERVE - 2))
-    if DB_POOL_MAX < FLASK_THREADS + DB_USER_RESERVE + 2:
-        DB_USER_RESERVE = max(2, DB_POOL_MAX - FLASK_THREADS - 2)
-    logger.error(
-        f"🚨 DB_POOL_MAX={DB_POOL_MAX} bahut chota hai — flask {_old_f}→{FLASK_THREADS}, "
-        f"user_reserve {_old_r}→{DB_USER_RESERVE} kar diya. Kam se kam "
-        f"DB_POOL_MAX={_old_f + _old_r + 2} rakho (ya env se hata do, auto-size ho jayega), "
-        f"warna user searches dheemi rahengi."
-    )
-
-# 🛡️ RESERVE GUARD — bulk kaam (superbatch) kabhi user ka hissa na khaye.
-#    Superbatch ka DB draw = META + POST (har task ek waqt me max 1 connection
-#    pakadta hai). Isse clamp na karein to knobs badhate hi user searches phir
-#    starve hone lagengi — wahi bug wapas aa jaata hai.
-_db_bulk_budget = DB_POOL_MAX - FLASK_THREADS - DB_USER_RESERVE
-if _db_bulk_budget < 2:
-    _db_bulk_budget = 2      # kam se kam thodi parallelism to chahiye
-if SUPERBATCH_META_CONCURRENCY + SUPERBATCH_POST_CONCURRENCY > _db_bulk_budget:
-    _old = (SUPERBATCH_META_CONCURRENCY, SUPERBATCH_POST_CONCURRENCY)
-    # Post ko pehle bachao (wo Telegram-bound hai, use kaatne ka fayda nahi),
-    # meta ko clamp karo.
-    SUPERBATCH_POST_CONCURRENCY = min(SUPERBATCH_POST_CONCURRENCY, max(1, _db_bulk_budget // 3))
-    SUPERBATCH_META_CONCURRENCY = max(1, _db_bulk_budget - SUPERBATCH_POST_CONCURRENCY)
-    logger.warning(
-        f"⚠️ Superbatch concurrency clamped {_old} → "
-        f"({SUPERBATCH_META_CONCURRENCY}, {SUPERBATCH_POST_CONCURRENCY}) — "
-        f"DB_POOL_MAX={DB_POOL_MAX} me flask({FLASK_THREADS}) + "
-        f"user_reserve({DB_USER_RESERVE}) ke baad sirf {_db_bulk_budget} bachte hain. "
-        f"Tez chalana ho to DB_POOL_MAX badhao ya env se hata do (auto-size ho jayega)."
-    )
-
 db_pool = None
 try:
     # Pool create kar rahe hain taki baar baar connection na banana pade
     pool_url = FIXED_DATABASE_URL or DATABASE_URL
     if pool_url:
         db_pool = psycopg2.pool.ThreadedConnectionPool(
-            2, DB_POOL_MAX,
+            2, 8,  # Supabase Free Tier (60 connections) ke liye optimized
             dsn=pool_url
         )
-        logger.info(
-            f"✅ Database Connection Pool Created (max={DB_POOL_MAX}, "
-            f"flask={FLASK_THREADS}, user_reserve={DB_USER_RESERVE}, "
-            f"superbatch={SUPERBATCH_META_CONCURRENCY}+{SUPERBATCH_POST_CONCURRENCY})"
-        )
+        logger.info("✅ Database Connection Pool Created (Thread-Safe)!")
 except Exception as e:
     logger.error(f"❌ Error creating pool: {e}")
 # 👆👆👆 END COPY HERE 👆👆👆
@@ -769,13 +585,11 @@ async def get_poster_bytes(url):
             'Referer': 'https://www.imdb.com/'
         }
         
-        # Shared session (keep-alive) — per-call ClientSession banane se har poster
-        # par naya TLS handshake lagta tha.
-        session = await get_aiohttp_session()
-        async with session.get(url, headers=headers) as response:
-            if response.status == 200:
-                image_data = await response.read()
-                return BytesIO(image_data)  # Image ko bytes me convert kar diya
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                    return BytesIO(image_data) # Image ko bytes me convert kar diya
         return None
     except Exception as e:
         logger.error(f"Error downloading poster: {e}")
@@ -855,14 +669,11 @@ async def make_landscape_poster(url_or_bytes):
     try:
         image_data = None
         if isinstance(url_or_bytes, str) and url_or_bytes.startswith('http'):
-            # 🚀 Shared session — pehle har poster ke liye NAYA ClientSession banta
-            # tha (naya connector + naya TLS handshake). Superbatch me 150 posters
-            # = 150 handshakes. Ab keep-alive wala ek hi pool use hota hai.
-            session = await get_aiohttp_session()
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            async with session.get(url_or_bytes, headers=headers) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
+            async with aiohttp.ClientSession() as session:
+                headers = {'User-Agent': 'Mozilla/5.0'}
+                async with session.get(url_or_bytes, headers=headers) as resp:
+                    if resp.status == 200:
+                        image_data = await resp.read()
         elif isinstance(url_or_bytes, bytes):
             image_data = url_or_bytes
         elif hasattr(url_or_bytes, 'getvalue'):
@@ -924,145 +735,6 @@ def get_gemini_keys():
         if k and k not in keys:
             keys.append(k)
     return keys
-
-
-# ==================== ⚡ ASYNC GEMINI (REST) ====================
-# PEHLE KYA PROBLEM THI:
-#   genai.configure(api_key=key) PROCESS-GLOBAL state set karta hai. Do movies
-#   parallel process karte waqt dono ek doosre ki key overwrite kar deti thin —
-#   isliye parallel karna hi possible nahi tha.
-# AB:
-#   REST endpoint pe key per-request (?key=...) jaati hai. Koi global state nahi,
-#   fully async (thread pool bhi nahi chahiye), aur parallel-safe.
-# ACCURACY:
-#   Same model, same prompt. Upar se response_mime_type=application/json aur
-#   temperature=0 — matlab JSON reliable aata hai (pehle markdown se regex se
-#   nikalna padta tha aur kabhi-kabhi fail hota tha).
-GEMINI_MODEL = 'gemini-flash-latest'
-_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-# Rotation ka starting point — taaki har call pehli key pe load na daale.
-_gemini_key_cursor = 0
-_gemini_cursor_lock = asyncio.Lock()
-
-_GEMINI_SAFETY_OFF = [
-    {"category": c, "threshold": "BLOCK_NONE"} for c in (
-        "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
-        "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
-    )
-]
-
-# Shared aiohttp session — per-call ClientSession banane se keep-alive nahi milta
-# aur har call naya TLS handshake karti hai. Lazily banti hai (running loop chahiye).
-_aiohttp_session = None
-_aiohttp_session_lock = asyncio.Lock()
-
-
-async def get_aiohttp_session() -> aiohttp.ClientSession:
-    """Ek hi shared aiohttp session (connection pooling + keep-alive)."""
-    global _aiohttp_session
-    if _aiohttp_session is not None and not _aiohttp_session.closed:
-        return _aiohttp_session
-    async with _aiohttp_session_lock:
-        if _aiohttp_session is None or _aiohttp_session.closed:
-            connector = aiohttp.TCPConnector(limit=64, limit_per_host=16, ttl_dns_cache=300)
-            _aiohttp_session = aiohttp.ClientSession(
-                connector=connector,
-                timeout=aiohttp.ClientTimeout(total=30),
-                headers={'User-Agent': 'Mozilla/5.0 (FlimfyBox)'},
-            )
-    return _aiohttp_session
-
-
-
-async def _gemini_rotated_keys():
-    """Keys ko round-robin order me deta hai — ek key pe saara load na pade."""
-    global _gemini_key_cursor
-    keys = get_gemini_keys()
-    if not keys:
-        return []
-    async with _gemini_cursor_lock:
-        start = _gemini_key_cursor % len(keys)
-        _gemini_key_cursor = (_gemini_key_cursor + 1) % len(keys)
-    return keys[start:] + keys[:start]
-
-
-async def gemini_generate_json(prompt: str, timeout: int = 25, json_mode: bool = True,
-                               safety_off: bool = False) -> Optional[dict]:
-    """
-    Gemini se JSON object mangta hai. Saari keys try karta hai (quota rotation).
-    Return: parsed dict, ya None agar sab keys fail ho gayi.
-    """
-    keys = await _gemini_rotated_keys()
-    if not keys:
-        return None
-
-    gen_config = {"temperature": 0, "candidateCount": 1}
-    if json_mode:
-        gen_config["response_mime_type"] = "application/json"
-
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": gen_config,
-    }
-    if safety_off:
-        payload["safetySettings"] = _GEMINI_SAFETY_OFF
-
-    url = _GEMINI_URL.format(model=GEMINI_MODEL)
-    last_error = None
-
-    for key in keys:
-        try:
-            session = await get_aiohttp_session()
-            async with session.post(
-                url, params={'key': key}, json=payload,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                body = await resp.text()
-                if resp.status != 200:
-                    # 429/quota → agli key. Baaki errors bhi agli key try karte hain.
-                    last_error = f"HTTP {resp.status}: {body[:200]}"
-                    if resp.status in (429, 403):
-                        logger.warning("⚠️ Gemini key quota/permission issue — next key")
-                    else:
-                        logger.warning(f"⚠️ Gemini key failed ({resp.status}) — next key")
-                    continue
-                data = json.loads(body)
-
-            candidates = data.get('candidates') or []
-            if not candidates:
-                last_error = "no candidates in response"
-                continue
-            parts = (candidates[0].get('content') or {}).get('parts') or []
-            text = "".join(p.get('text', '') for p in parts).strip()
-            if not text:
-                last_error = "empty text in response"
-                continue
-
-            # json_mode on hai to text seedha JSON hota hai. Phir bhi safety ke liye
-            # regex fallback rakha hai (agar model markdown fence laga de).
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                match = re.search(r'\{.*\}', text, re.DOTALL)
-                if not match:
-                    last_error = f"no JSON object in: {text[:150]}"
-                    continue
-                parsed = json.loads(match.group())
-
-            if isinstance(parsed, dict):
-                return parsed
-            last_error = "JSON was not an object"
-        except asyncio.TimeoutError:
-            last_error = f"timeout after {timeout}s"
-            logger.warning("⚠️ Gemini timeout — next key")
-        except Exception as exc:
-            last_error = str(exc)
-            logger.warning(f"⚠️ Gemini call error — next key: {exc}")
-
-    logger.error(f"❌ Gemini failed on all {len(keys)} keys: {last_error}")
-    return None
-
 
 
 # 👇 UPDATED FUNCTION 1: Name Extraction (With Multi-Key Rotation)
@@ -1406,23 +1078,9 @@ async def reconcile_evidence_with_gemini(
     Gemini sirf identity reconcile karta hai; TMDB/IMDb lookup baad mein code karta hai.
     """
     fallback = _local_evidence_fallback(caption_evidence, filename_evidence)
-    if not get_gemini_keys():
+    gemini_keys = get_gemini_keys()
+    if not gemini_keys:
         return fallback
-
-    # ⚡ IDENTITY CACHE: same caption+filename dubara aaye (superbatch me ek movie ki
-    # 5 files, ya admin ne wahi file re-forward ki) to Gemini call dobara na ho.
-    # Key raw text pe hai, isliye result bilkul same rahega — accuracy pe zero asar.
-    cache_key = None
-    try:
-        cache_key = "evidence_" + hashlib.md5(
-            f"{caption_raw or ''}||{filename_raw or ''}".encode('utf-8', 'ignore')
-        ).hexdigest()
-        cached = metadata_cache.get(cache_key)
-        if cached is not None:
-            logger.info("⚡ Evidence cache hit: %s", cached.get('title'))
-            return dict(cached)
-    except Exception:
-        cache_key = None
 
     evidence_bundle = {
         "source_context": (
@@ -1469,27 +1127,44 @@ Required JSON example:
 {{"title":"Movie Name","year":"2026","language":"Hindi (Line), English","extra_info":"","category":"Movies"}}
 """
 
-    # Async REST call — koi global genai.configure nahi, isliye parallel-safe.
-    parsed = await gemini_generate_json(prompt, timeout=25)
-    if not parsed:
-        logger.error("Evidence Engine reconciliation failed on all keys — local fallback use kar raha hoon")
-        return fallback
+    last_error = None
+    for key in gemini_keys:
+        try:
+            genai.configure(api_key=key)
+            model = genai.GenerativeModel('gemini-flash-latest')
+            response = await run_async(model.generate_content, prompt)
+            response_text = (getattr(response, "text", "") or "").strip()
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if not json_match:
+                raise ValueError("Gemini returned no JSON object")
 
-    final_data = _normalize_evidence_dict(parsed)
-    for field in _EVIDENCE_KEYS:
-        if not final_data.get(field):
-            final_data[field] = fallback.get(field, "")
-    if not _valid_evidence_title(final_data.get("title")):
-        final_data["title"] = fallback.get("title", "UNKNOWN")
+            parsed = json.loads(json_match.group())
+            if not isinstance(parsed, dict):
+                raise ValueError("Gemini JSON was not an object")
 
-    logger.info(
-        "✅ Evidence reconciliation success: %s (%s)",
-        final_data.get("title"),
-        final_data.get("year") or "no year",
-    )
-    if cache_key:
-        metadata_cache.set(cache_key, dict(final_data))
-    return final_data
+            final_data = _normalize_evidence_dict(parsed)
+            for field in _EVIDENCE_KEYS:
+                if not final_data.get(field):
+                    final_data[field] = fallback.get(field, "")
+            if not _valid_evidence_title(final_data.get("title")):
+                final_data["title"] = fallback.get("title", "UNKNOWN")
+
+            logger.info(
+                "✅ Evidence reconciliation success: %s (%s)",
+                final_data.get("title"),
+                final_data.get("year") or "no year",
+            )
+            return final_data
+        except Exception as exc:
+            last_error = exc
+            error_msg = str(exc).lower()
+            if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                logger.warning("⚠️ Evidence Gemini key quota exhausted; trying next key")
+            else:
+                logger.warning("⚠️ Evidence Gemini key failed; trying next key: %s", exc)
+
+    logger.error("Evidence Engine reconciliation failed on all keys: %s", last_error)
+    return fallback
 
 
 async def process_file_with_evidence_engine(message) -> dict:
@@ -1536,64 +1211,6 @@ def _best_local_identity(record):
     title = merged.get("title") or "Unknown_Movie"
     year = str(merged.get("year") or "").strip()
     return title, year, _canonical_evidence_title(title)
-
-
-# ── SUPERBATCH PARALLELISM KNOBS ────────────────────────────────────────
-# Phase A (metadata) me Telegram ka koi kaam nahi hai, sirf Gemini/TMDb/DB —
-# isliye yahan chaudi parallelism safe hai.
-# Phase B (upload + channel post) me asli limit Telegram ki hai; zyada
-# concurrency = FloodWait = ulta slow. Isliye ise kam rakha gaya hai.
-#
-# 📍 SUPERBATCH_META_CONCURRENCY / SUPERBATCH_POST_CONCURRENCY ab UPAR
-#    "DB POOL BUDGET" block me define hote hain (db_pool banane se pehle),
-#    kyunki pool ka size inhi par depend karta hai. Yahan dobara define mat
-#    karna — warna clamp guard bypass ho jayega aur user searches starve
-#    hongi. Value badalni ho to env var use karo.
-
-
-class _ThrottledProgress:
-    """
-    Progress message ko throttle karta hai.
-
-    Pehle har movie par ek `edit_text` hota tha → 150 movies = 150 API calls,
-    aur Telegram ka edit-rate limit hit hone par har call me extra wait lagta
-    tha. Ab max ek edit har `interval` second me. Parallel tasks se aane wale
-    updates safely drop ho jaate hain (progress cosmetic hai, critical nahi).
-    """
-
-    def __init__(self, status_msg, interval: float = 3.0):
-        self.msg = status_msg
-        self.interval = interval
-        self._last = 0.0
-        self._last_text = None
-        self._lock = asyncio.Lock()
-
-    async def _edit(self, text, parse_mode='Markdown'):
-        if text == self._last_text:
-            return
-        try:
-            await self.msg.edit_text(text, parse_mode=parse_mode)
-            self._last_text = text
-            self._last = time.time()
-        except Exception:
-            # "message is not modified" / flood wait — progress ke liye ignore
-            self._last = time.time()
-
-    async def maybe(self, text, parse_mode='Markdown'):
-        """Sirf tab edit karo jab interval nikal gaya ho."""
-        if time.time() - self._last < self.interval:
-            return
-        if self._lock.locked():
-            return
-        async with self._lock:
-            if time.time() - self._last < self.interval:
-                return
-            await self._edit(text, parse_mode)
-
-    async def force(self, text, parse_mode='Markdown'):
-        """Phase boundary / final summary — ye zaroor dikhna chahiye."""
-        async with self._lock:
-            await self._edit(text, parse_mode)
 
 
 def _build_superbatch_groups(files):
@@ -1956,23 +1573,6 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
     
     result = {'is_member': False, 'channel': False, 'group': False, 'error': None}
     VALID_STATUSES = ['member', 'administrator', 'creator']
-
-    # ⚡ SPEED: pehle channel-check aur group-check SEQUENTIAL the — har search par
-    #    do Telegram round-trips ek ke baad ek. Ab group-check yahin shuru kar dete
-    #    hain aur channel-check ke saath PARALLEL chalta hai, to sirf ek round-trip
-    #    ka time lagta hai. (Ye har private message par chalta hai, isliye har
-    #    search direct 1 round-trip tez ho gayi.)
-    #    Wrapper kabhi raise nahi karta — isliye task orphan hone par bhi
-    #    "exception was never retrieved" warning nahi aayegi.
-    async def _check_group():
-        try:
-            gm = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
-            return gm.status in VALID_STATUSES
-        except Exception as ge:
-            logger.error(f"Group Check Error: {ge}")
-            return False
-
-    group_task = asyncio.create_task(_check_group())
     
     # --- 1. SMART CHANNEL CHECK (WITH AUTO-SWITCH) ---
     try:
@@ -1998,7 +1598,6 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
             except: pass
             
             # Naye channel ke sath wapas check karo
-            group_task.cancel()   # purana in-flight group check waste na ho
             return await is_user_member(context, user_id, force_fresh)
         else:
             result['channel'] = True # Agar saare backup khatam, toh FSub bypass kar do taaki bot chalta rahe
@@ -2019,8 +1618,7 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
                         parse_mode='Markdown'
                     )
                 except: pass
-
-                group_task.cancel()   # purana in-flight group check waste na ho
+                
                 return await is_user_member(context, user_id, force_fresh)
             else:
                 result['channel'] = True
@@ -2033,8 +1631,14 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
         logger.error(f"Temporary Channel Check Error: {e}")
         result['channel'] = False 
 
-    # --- 2. GROUP CHECK --- (upar hi shuru ho chuka hai, channel-check ke parallel)
-    result['group'] = await group_task
+    # --- 2. GROUP CHECK ---
+    try:
+        group_member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
+        if group_member.status in VALID_STATUSES:
+            result['group'] = True
+    except Exception as e:
+        logger.error(f"Group Check Error: {e}")
+        result['group'] = False
 
     result['is_member'] = result['channel'] and result['group']
     verified_users[user_id] = (current_time, result)
@@ -2236,54 +1840,32 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
 
 # ==================== DATABASE-BACKED AUTO-DELETE FUNCTIONS ====================
 
-def _queue_deletes_sync(bot_username, chat_id, message_ids, delete_time):
-    """auto_delete_queue me rows daalna — WORKER THREAD me chalta hai."""
-    conn = get_db_connection()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.executemany(
-            "INSERT INTO auto_delete_queue (bot_username, chat_id, message_id, delete_at) "
-            "VALUES (%s, %s, %s, %s)",
-            [(bot_username, chat_id, m, delete_time) for m in message_ids]
-        )
-        conn.commit()
-        cur.close()
-        return True
-    except Exception as e:
-        logger.error(f"Error saving to delete queue: {e}")
-        return False
-    finally:
-        close_db_connection(conn)
-
-
 async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
-    """Messages ko DB me save karta hai taaki restart hone par bhi yaad rahe.
-
-    ⚡ FIX: ye function HAR bheje gaye message par chalta hai. Pehle do
-       problem theen:
-         1. `await context.bot.get_me()` = har baar ek Telegram API call.
-            `context.bot.username` already cached hai (initialize par set hota
-            hai) — API call ki zarurat hi nahi.
-         2. INSERT loop EVENT LOOP par chal raha tha → poora bot ruk jaata tha.
-            Ab executemany + run_async se worker thread me jaata hai.
-    """
+    """Messages ko DB me save karta hai taaki restart hone par bhi yaad rahe"""
     try:
-        if not message_ids:
-            return
-        try:
-            bot_username = context.bot.username          # cached, no API call
-        except Exception:
-            bot_username = (await context.bot.get_me()).username
-
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+        
         # Exact time calculate karo kab delete karna hai
         delete_time = datetime.now() + timedelta(seconds=delay)
-
-        await run_async(_queue_deletes_sync, bot_username, chat_id,
-                        list(message_ids), delete_time)
+        
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                for msg_id in message_ids:
+                    cur.execute(
+                        "INSERT INTO auto_delete_queue (bot_username, chat_id, message_id, delete_at) VALUES (%s, %s, %s, %s)",
+                        (bot_username, chat_id, msg_id, delete_time)
+                    )
+                conn.commit()
+                cur.close()
+            except Exception as e:
+                logger.error(f"Error saving to delete queue: {e}")
+            finally:
+                close_db_connection(conn)
     except Exception as e:
-        logger.error(f"Failed to queue messages for delete: {e}")
+        logger.error(f"Failed to get bot info for delete queue: {e}")
 
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
     """Old function ab sidha DB me save karega (No sleep)"""
@@ -2608,7 +2190,7 @@ def fix_movies_unique_constraint():
 def fix_movie_files_table():
     """
     movie_files table migration:
-    1. Missing columns add karta hai (languages, extra_info, file_unique_id, server_name, source)
+    1. Missing columns add karta hai (languages, extra_info)
     2. PURANE restrictive constraints DROP karta hai (movie_id+quality)
     3. NAYA file_unique_id based constraint ensure karta hai
     """
@@ -2620,14 +2202,12 @@ def fix_movie_files_table():
         # Step 1: Missing columns add karo (safe hai)
         cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS languages TEXT DEFAULT '';")
         cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS extra_info TEXT DEFAULT '';")
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS file_unique_id TEXT;")
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS server_name VARCHAR(50);")
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'telegram';")
 
         # Step 2: PURANE restrictive constraints DROP karo
+        # Yeh zaroori hai kyunki ab ek movie ke andar same quality ke multiple files
+        # (episodes, parts, different encodes) store hone chahiye
         cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS movie_files_movie_id_quality_key;")
         cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS movie_files_unique_size;")
-        cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS unique_movie_quality;")
         logger.info("✅ Old constraints (movie_id+quality) dropped successfully")
 
         # Step 3: NAYA file_unique_id constraint ensure karo
@@ -2640,20 +2220,6 @@ def fix_movie_files_table():
                 ) THEN
                     ALTER TABLE movie_files
                     ADD CONSTRAINT movie_files_file_unique_id_key UNIQUE (file_unique_id);
-                END IF;
-            END $$;
-        """)
-        
-        # Step 4: NAYA server_name constraint ensure karo (for scrap bot compatibility)
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_constraint
-                    WHERE conname = 'unique_movie_quality_server'
-                ) THEN
-                    ALTER TABLE movie_files
-                    ADD CONSTRAINT unique_movie_quality_server UNIQUE (movie_id, quality, server_name);
                 END IF;
             END $$;
         """)
@@ -2781,62 +2347,23 @@ def is_movie_posted_recently(movie_id, days=7):
 
 # 👇👇👇 START COPY HERE (New Function) 👇👇👇
 def get_db_connection():
-    """
-    Pool se connection lene wala naya function.
-
-    ⚠️ psycopg2 ka getconn() pool full hone par WAIT nahi karta — turant
-    PoolError phenk deta hai. Pehle iska matlab tha: conn None → caller chupchaap
-    fail → movie/file skip. Sequential code me ye kabhi hota hi nahi tha, lekin ab
-    parallel Phase-A + concurrent_updates ke saath ho sakta hai. Isliye ab thodi
-    der wait karke retry karte hain (max ~2.4s) — skip karne se behtar hai ki
-    200ms ruk jaayein.
-
-    ⚠️⚠️ LEKIN: `time.sleep()` sirf WORKER THREAD me safe hai. Event loop thread
-    par ye POORE bot ko freeze kar deta — ek user ka search 2.4s ke liye baaki
-    sabko (superbatch samet) rok deta. Isliye event loop par detect karke turant
-    return karte hain. Event-loop callers ko `await run_async(...)` use karna
-    chahiye — tab wo worker thread me chalte hain aur wait ka fayda milta hai.
-    """
+    """Pool se connection lene wala naya function"""
     if not db_pool:
         logger.error("Database pool is not ready.")
         return None
-
-    # Kya hum event loop thread par hain? (get_running_loop sirf wahin succeed karta hai)
     try:
-        asyncio.get_running_loop()
-        on_event_loop = True
-    except RuntimeError:
-        on_event_loop = False
-
-    attempts = 1 if on_event_loop else 12
-    last_error = None
-    for _attempt in range(attempts):
+        conn = db_pool.getconn()
+        # A previous query can leave a pooled connection in an aborted
+        # transaction. Reusing it makes catalogue searches silently fail and
+        # incorrectly fall back to TMDB request results.
         try:
-            conn = db_pool.getconn()
-            # A previous query can leave a pooled connection in an aborted
-            # transaction. Reusing it makes catalogue searches silently fail and
-            # incorrectly fall back to TMDB request results.
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-            return conn
-        except Exception as e:
-            last_error = e
-            if 'exhausted' not in str(e).lower():
-                break          # asli connection error — retry ka koi fayda nahi
-            if on_event_loop:
-                break          # loop ko block nahi karenge — fail fast
-            time.sleep(0.2)    # pool full — kisi ke putconn() ka intezaar
-
-    if on_event_loop and 'exhausted' in str(last_error).lower():
-        logger.warning(
-            "⚠️ DB pool exhausted on EVENT LOOP — caller ko run_async() me hona "
-            "chahiye. Ye call fail ho rahi hai (loop freeze se behtar hai)."
-        )
-    else:
-        logger.error(f"Error getting connection from pool: {last_error}")
-    return None
+            conn.rollback()
+        except Exception:
+            pass
+        return conn
+    except Exception as e:
+        logger.error(f"Error getting connection from pool: {e}")
+        return None
 
 def close_db_connection(conn):
     """Connection ko wapas pool me dalne ke liye helper"""
@@ -2851,158 +2378,6 @@ def close_db_connection(conn):
         except Exception:
             pass
 # 👆👆👆 END COPY HERE 👆👆👆
-
-
-# ==================== ⚡ NON-BLOCKING DB HELPERS ====================
-# Problem jo ye solve karte hain:
-#   `concurrent_updates(True)` ke baad handlers parallel chalte hain, LEKIN
-#   agar koi handler event loop par SEEDHA psycopg2 call kare to poora bot
-#   ruk jaata hai (Supabase remote hai — ek query 100-500ms). User search
-#   karta tha aur superbatch ki DB call loop ko pakad ke baithi hoti thi.
-#
-#   Doosri (badi) problem: pool exhaust hone par get_db_connection() None
-#   deta hai, aur bahut se callers `conn.cursor()` bina check ke karte the →
-#   AttributeError → handler crash → USER KO KOI REPLY HI NAHI MILTA.
-#   Isliye ye helpers None-safe hain: kabhi raise nahi karte, `None` dete hain
-#   (= "DB nahi mila", jo "kuch nahi mila" se ALAG hai).
-
-def _db_query_sync(sql, params=(), mode='one'):
-    """
-    Blocking query — sirf run_async/thread se call karo.
-    mode: 'one' | 'all' | 'none' (write/commit) | 'one_commit' (write + RETURNING)
-
-    Return contract (ISKA DHYAN RAKHNA — accuracy isi par tiki hai):
-        None        = DB hi nahi mila / query fail  → "server busy" bolo
-        ()          = mode 'one', row NAHI mila     → "not found" bolo
-        (a, b, ...) = mode 'one', row mila
-        []          = mode 'all', koi row nahi
-        True        = mode 'none' (write) safal
-    """
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        if mode == 'one':
-            out = cur.fetchone()
-            # 🐛 FIX: fetchone() "row nahi mila" par bhi None deta hai — wahi None
-            #    jo hum "DB fail" ke liye use karte hain. Dono ek jaise dikhte to
-            #    bot maujood movie ko "busy" aur gayab movie ko bhi "busy" bolta.
-            #    Isliye khaali result ko () bana dete hain: falsy hai, None nahi.
-            if out is None:
-                out = ()
-        elif mode == 'all':
-            out = cur.fetchall()
-        elif mode == 'one_commit':
-            # INSERT ... RETURNING id jaise cases — pehle row, phir commit
-            out = cur.fetchone()
-            conn.commit()
-            if out is None:
-                out = ()
-        else:
-            conn.commit()
-            out = True
-        cur.close()
-        return out
-    except Exception as exc:
-        logger.error(f"_db_query_sync failed ({sql.split()[0]}...): {exc}")
-        return None
-    finally:
-        close_db_connection(conn)
-
-
-async def db_query(sql, params=(), mode='one'):
-    """
-    ⚡ Event loop ko block kiye bina DB query.
-    `None` = DB unavailable / error.  `()` ya `[]` = genuinely khaali result.
-    Ye farak zaroori hai — warna pool busy hone par bot "Not Found" bol deta
-    hai jabki movie DB me maujood hai (accuracy bug).
-
-    Isliye caller me hamesha DO check karo, ek nahi:
-        row = await db_query(...)
-        if row is None: ...   # server busy — user ko dobara try karne bolo
-        if not row:     ...   # sach me nahi mila
-    """
-    return await run_async(_db_query_sync, sql, params, mode)
-
-
-def _delete_movie_files_sync(movie_id):
-    """movie_files se saari files hatao, kitni hatin wo batao.
-    Return: rowcount (int) ya None agar DB hi na mile / fail ho."""
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM movie_files WHERE movie_id = %s", (movie_id,))
-        n = cur.rowcount
-        conn.commit()
-        cur.close()
-        return n
-    except Exception as exc:
-        logger.error(f"_delete_movie_files_sync failed: {exc}")
-        return None
-    finally:
-        close_db_connection(conn)
-
-
-def _cleanup_empty_movie_sync(movie_id):
-    """Agar movie ke paas ek bhi file nahi hai to us junk movie row ko uda do.
-    COUNT + DELETE ek hi connection/transaction me — race na ho.
-    Return: True agar delete hui, False agar files theen, None agar DB fail."""
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-        row = cur.fetchone()
-        file_count = row[0] if row else 0
-        deleted = False
-        if file_count == 0:
-            cur.execute("DELETE FROM movies WHERE id = %s", (movie_id,))
-            conn.commit()
-            deleted = True
-        cur.close()
-        return deleted
-    except Exception as exc:
-        logger.error(f"_cleanup_empty_movie_sync failed: {exc}")
-        return None
-    finally:
-        close_db_connection(conn)
-
-
-def _burn_temp_link_sync(token):
-    """
-    Mini-app ka temp link 'burn on read' — SELECT + DELETE ek hi transaction me.
-
-    ⚡ Ye alag helper isliye hai ki dono statements EK connection par honi
-       chahiye (warna token do baar use ho sakta hai), lekin event loop par
-       nahi chalni chahiye.
-    Return: row / () agar token nahi mila / None agar DB hi na mile.
-    """
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT movie_id, movie_file_id, created_at FROM temp_links WHERE token = %s",
-            (token,)
-        )
-        res = cur.fetchone()
-        # Token TURANT delete kar do (Single Use)
-        cur.execute("DELETE FROM temp_links WHERE token = %s", (token,))
-        conn.commit()
-        cur.close()
-        return res if res else ()
-    except Exception as exc:
-        logger.error(f"_burn_temp_link_sync failed: {exc}")
-        return None
-    finally:
-        close_db_connection(conn)
-
 
 def update_movies_in_db():
     """Update movies from Blogger API"""
@@ -3135,58 +2510,16 @@ def get_movies_from_db(user_query, limit=10):
     if cached is not None:
         return cached
     result = _get_movies_from_db_nocache(user_query, limit)
-    # 🐛 FIX: `None` ka matlab hai "DB hi nahi mila / query fail" — ye "kuch nahi
-    # mila" NAHI hai. Pehle dono cases [] dete the aur wo [] CACHE ho jaata tha:
-    # matlab superbatch ke dauran ek search fail hui to us movie ke liye bot
-    # agle poore cache-TTL tak "Not Found" bolta rehta tha, jabki movie DB me
-    # maujood thi. Isliye failure ko kabhi cache nahi karte.
-    if result is None:
-        return None
     search_cache.set(cache_key, result)
     return result
 
-
-# Sirf ye user-facing search ke liye — DB busy ho to chhota retry karke
-# sahi jawab lete hain, "Not Found" jhoot bolne ke bajaye.
-SEARCH_BUSY_TEXT = (
-    "⏳ <b>Server abhi busy hai</b>\n\n"
-    "✦ Naye files add ho rahe hain. 2-3 second baad wahi naam dobara bhejein — "
-    "movie mil jayegi."
-)
-
-
-async def search_db_resilient(term, limit=10, retries=2):
-    """
-    ⚡ Event loop free rakhte hue search, DB busy hone par retry ke saath.
-
-    Kyun: superbatch chalte waqt DB pool bhar sakta hai. Us waqt pehle search
-    chupchaap "Not Found" bol deti thi (aur wo galat jawab cache bhi ho jaata
-    tha). Ab retry karte hain — async sleep se, taaki baaki bot chalta rahe.
-
-    Return: list  = results (khaali list = sach me kuch nahi mila)
-            None  = DB ab bhi busy (caller ko "busy" bolna chahiye, "Not Found" nahi)
-    """
-    for attempt in range(retries + 1):
-        movies = await run_async(get_movies_from_db, term, limit=limit)
-        if movies is not None:
-            return movies
-        if attempt < retries:
-            await asyncio.sleep(0.4 * (attempt + 1))
-    logger.warning(f"search_db_resilient: DB busy after retries for '{term}'")
-    return None
-
 def _get_movies_from_db_nocache(user_query, limit=10):
-    """
-    Search for MULTIPLE movies in database with fuzzy matching.
-
-    Return: list  = results (khaali list = genuinely kuch nahi mila)
-            None  = DB unavailable / query error (caller retry ya "busy" bole)
-    """
+    """Search for MULTIPLE movies in database with fuzzy matching"""
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
-            return None          # ⚠️ [] nahi — warna galat "Not Found" cache ho jaata hai
+            return []
 
         cur = conn.cursor()
 
@@ -3267,7 +2600,7 @@ def _get_movies_from_db_nocache(user_query, limit=10):
 
     except Exception as e:
         logger.error(f"Database query error: {e}")
-        return None          # ⚠️ [] nahi — ye failure hai, "no result" nahi
+        return []
     finally:
         if conn:
             try:
@@ -3553,11 +2886,7 @@ async def fetch_metadata_from_google(query: str, search_year: str = ""):
         # ---------- PICK BEST RESULT ----------
         best_item = items[0]
         
-        # 🐛 FIX: pehle yahan `clean_title(...)` tha jo kahin define hi nahi hai.
-        #    Isi section ka asli helper `clean_google_title` hai (neeche defined).
-        #    Purane code me har Google-metadata fetch NameError se mar jaata tha →
-        #    poster/plot fallback kabhi chalta hi nahi tha (accuracy ka nuksan).
-        title = clean_google_title(best_item.get("title", query))
+        title = clean_title(best_item.get("title", query))
         snippet = best_item.get("snippet", "")
         
         # ---------- IMAGE EXTRACTION ----------
@@ -3684,48 +3013,26 @@ def extract_tmdb_poster_from_url(tmdb_url: str) -> Optional[str]:
     return None
 
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
-    """
-    Fetch cast list from TMDB using IMDb ID, return comma-separated string.
-    ⚡ SPEED: agar fetch_movie_metadata ne pehle hi tmdb_id nikal liya hai, to
-    /find call skip ho jaati hai (2 calls → 1 call).
-    """
-    if not imdb_id:
-        return ""
-    cache_key = f"cast_{imdb_id}_{limit}"
-    cached = metadata_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    result = ""
+    """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
     try:
-        tmdb_id = None
-        media_type = None
-        hint = _tmdb_id_cache.get(imdb_id)
-        if hint:
-            tmdb_id, media_type = hint
-
-        if not tmdb_id:
-            find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={TMDB_API_KEY}&external_source=imdb_id"
-            resp = _http_get_json(find_url)
-            tmdb_results = resp.get('movie_results', [])
-            media_type = 'movie'
-            if not tmdb_results:
-                tmdb_results = resp.get('tv_results', [])
-                media_type = 'tv'
-            if not tmdb_results:
-                metadata_cache.set(cache_key, "")
-                return ""
-            tmdb_id = tmdb_results[0]['id']
-            _tmdb_id_cache.set(imdb_id, (tmdb_id, media_type))
-
-        credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={TMDB_API_KEY}"
-        credits = _http_get_json(credits_url)
+        api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+        find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&external_source=imdb_id"
+        resp = requests.get(find_url, timeout=10).json()
+        tmdb_results = resp.get('movie_results', [])
+        if not tmdb_results:
+            tmdb_results = resp.get('tv_results', [])
+        if not tmdb_results:
+            return ""
+        tmdb_id = tmdb_results[0]['id']
+        media_type = 'movie' if resp.get('movie_results') else 'tv'
+        credits_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/credits?api_key={api_key}"
+        credits = requests.get(credits_url, timeout=10).json()
         cast = credits.get('cast', [])[:limit]
         if cast:
-            result = ', '.join([c['name'] for c in cast if c.get('name')])
+            return ', '.join([c['name'] for c in cast])
     except Exception as e:
         logger.error(f"Failed to fetch cast for {imdb_id}: {e}")
-    metadata_cache.set(cache_key, result)
-    return result
+    return ""
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
@@ -3815,120 +3122,13 @@ def _find_best_tmdb_match(tmdb_results: list, search_query: str, search_year: st
     logger.info(f"✅ TMDb Best Match: '{best_match.get('title') or best_match.get('name')}' (score: {best_score})")
     return best_match
 
-def _fetch_seasons_data(tmdb_id, need_episodes: bool = True) -> dict:
-    """
-    TMDb se seasons_data banata hai.
-
-    ⚡ SPEED FIX: pehle per-season `/season/{n}` calls SEQUENTIALLY hoti thin — ek
-    8-season series ke liye 9 sequential HTTP calls (~15-25s). Ab saari season
-    calls EK SAATH jaati hain (shared thread pool), isliye 9 calls ka time ~1 call
-    ke barabar ho gaya. Iska matlab: episode-level accuracy ka koi speed cost nahi
-    raha, isliye ise ON hi rakha gaya hai.
-
-    need_episodes=False (lite mode) sirf 1 call karta hai — tab season-level
-    year/poster/episode_count aata hai, per-EPISODE air_date nahi.
-    """
-    seasons_data = {}
-    if not tmdb_id:
-        return seasons_data
-    try:
-        tv_details = _http_get_json(
-            f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={TMDB_API_KEY}"
-        )
-
-        valid_seasons = []
-        for s in tv_details.get('seasons', []):
-            s_num = str(s.get('season_number', ''))
-            if not s_num or s_num == "0":
-                continue
-            valid_seasons.append((s_num, s))
-
-        # Saari seasons ki episode lists parallel me — sequential nahi
-        episodes_by_season = {}
-        if need_episodes and valid_seasons:
-            def _season_episodes(s_num):
-                try:
-                    season_details = _http_get_json(
-                        f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}"
-                        f"?api_key={TMDB_API_KEY}",
-                        timeout=HTTP_TIMEOUT_SHORT,
-                    )
-                    return s_num, {
-                        str(ep.get('episode_number')): {'air_date': ep.get('air_date', '')}
-                        for ep in season_details.get('episodes', [])
-                    }
-                except Exception as ep_e:
-                    logger.error(f"Episode fetch error (S{s_num}): {ep_e}")
-                    return s_num, {}
-
-            futures = [_season_pool.submit(_season_episodes, s_num) for s_num, _ in valid_seasons]
-            for fut in futures:
-                try:
-                    # Har HTTP call ka apna 4s timeout hai; ye wala sirf deadlock
-                    # guard hai (task pool me queue ho to jaldi haar na maane).
-                    s_num, eps = fut.result(timeout=30)
-                    episodes_by_season[s_num] = eps
-                except Exception as fe:
-                    logger.error(f"Season future failed: {fe}")
-
-        for s_num, s in valid_seasons:
-            s_air_date = str(s.get('air_date') or '')
-            s_year = s_air_date[:4]
-            s_poster = (
-                f"https://image.tmdb.org/t/p/original{s.get('poster_path')}"
-                if s.get('poster_path') else None
-            )
-            seasons_data[s_num] = {
-                "year": int(s_year) if s_year.isdigit() else 0,
-                "poster": s_poster,
-                "air_date": s_air_date,
-                "episode_count": s.get('episode_count', 0),
-                "episodes": episodes_by_season.get(s_num, {}),
-            }
-    except Exception as e:
-        logger.error(f"Seasons Fetch Error: {e}")
-    return seasons_data
-
-
-def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "",
-                         adult_mode: bool = False, hint_category: str = "",
-                         need_seasons: bool = True, need_episodes: bool = True):
-    """
-    Cached wrapper. Same movie ka metadata 6 ghante tak dubara network se nahi aayega.
-    Superbatch me ye sabse bada win hai (ek movie ki multiple files / re-runs).
-
-    need_seasons / need_episodes se caller decide karta hai kitna deep jaana hai —
-    default purana behaviour hi hai, isliye baaki callers pe koi asar nahi.
-    """
-    cache_key = (
-        f"meta_{(query or '').strip().lower()}_{search_year}_{search_lang}"
-        f"_{int(bool(adult_mode))}_{hint_category}_{int(bool(need_seasons))}_{int(bool(need_episodes))}"
-    )
-    cached = metadata_cache.get(cache_key)
-    if cached is not None:
-        logger.info(f"⚡ Metadata cache hit: '{query}'")
-        return cached
-
-    result = _fetch_movie_metadata_uncached(
-        query, search_year, search_lang, adult_mode, hint_category,
-        need_seasons=need_seasons, need_episodes=need_episodes,
-    )
-    # None (fail) ko cache NAHI karte — transient network error 6 ghante tak
-    # galat "not found" na de.
-    if result:
-        metadata_cache.set(cache_key, result)
-    return result
-
-
-def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lang: str = "",
-                                   adult_mode: bool = False, hint_category: str = "",
-                                   need_seasons: bool = True, need_episodes: bool = True):
+def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "", adult_mode: bool = False, hint_category: str = ""):
     """
     IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन
     adult_mode=True होने पर TMDb सर्च में include_adult=true भेजेगा और OMDb को बायपास करेगा।
     """
     omdb_api_key = os.environ.get("OMDB_API_KEY")
-    tmdb_api_key = TMDB_API_KEY
+    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
 
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
@@ -3941,7 +3141,7 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
             tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}&include_adult=true"
             if search_year and search_year.strip().isdigit():
                 tmdb_search += f"&year={search_year.strip()}"
-            t_resp = _http_get_json(tmdb_search)
+            t_resp = requests.get(tmdb_search, timeout=10).json()
             if not t_resp.get('results'):
                 return None
 
@@ -3956,7 +3156,7 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
             plot = best_match.get('overview', 'No story available.')
             rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
             category = "Adult"
-            genre = _genres_from_ids(best_match.get('genre_ids')) or "Romance, Drama"
+            genre = "Romance, Drama"
 
             path = best_match.get('poster_path')
             poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
@@ -3966,10 +3166,8 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
                 tmdb_id = best_match.get('id')
                 media_type = best_match.get('media_type', 'movie')
                 ext_url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
-                imdb_id = _http_get_json(ext_url, timeout=HTTP_TIMEOUT_SHORT).get('imdb_id')
-                if imdb_id and tmdb_id:
-                    _tmdb_id_cache.set(imdb_id, (tmdb_id, media_type))
-            except Exception:
+                imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
+            except:
                 pass
 
             return title, year, poster_url, genre, imdb_id, rating, plot, category, {}
@@ -3983,16 +3181,16 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
 
     try:
         omdb_resp = None
-
+        
         # ━━━━━ STEP 1: OMDb Search (agar key hai toh) ━━━━━
         if omdb_api_key and not is_imdb_id:
             # 🔧 FIX: Pehle BINA type ke try karo (type galat hone se result miss hota tha)
             url_no_type = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}&plot=full"
             if search_year and str(search_year).strip().isdigit():
                 url_no_type += f"&y={str(search_year).strip()}"
-
-            resp = _http_get_json(url_no_type)
-
+            
+            resp = requests.get(url_no_type, timeout=10).json()
+            
             if resp.get("Response") == "True":
                 omdb_resp = resp
             else:
@@ -4002,13 +3200,13 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
                     url_with_type = f"https://www.omdbapi.com/?t={quote(search_query)}&type=series&apikey={omdb_api_key}&plot=full"
                     if search_year and str(search_year).strip().isdigit():
                         url_with_type += f"&y={str(search_year).strip()}"
-                    resp2 = _http_get_json(url_with_type)
+                    resp2 = requests.get(url_with_type, timeout=10).json()
                     if resp2.get("Response") == "True":
                         omdb_resp = resp2
-
+                        
         elif omdb_api_key and is_imdb_id:
             url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}&plot=full"
-            resp = _http_get_json(url)
+            resp = requests.get(url, timeout=10).json()
             if resp.get("Response") == "True":
                 omdb_resp = resp
 
@@ -4027,7 +3225,7 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
             category = "Movies"
             omdb_type = omdb_resp.get('Type', '').lower()
             g_low = genre.lower()
-
+            
             if omdb_type == 'series':
                 category = "Web Series"
             elif "animation" in g_low or "anime" in g_low:
@@ -4042,76 +3240,84 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
 
             # TMDb se HD poster laao
             poster_url = omdb_resp.get('Poster')
-            tmdb_id = None
-            tmdb_media_type = 'tv' if category in ("Web Series", "Anime") else 'movie'
             if imdb_id and imdb_id != 'N/A':
                 try:
                     tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
-                    t_resp = _http_get_json(tmdb_find)
-                    movie_res = t_resp.get('movie_results', []) or []
-                    tv_res = t_resp.get('tv_results', []) or []
-                    results = movie_res + tv_res
+                    t_resp = requests.get(tmdb_find, timeout=10).json()
+                    results = t_resp.get('movie_results', []) + t_resp.get('tv_results', [])
                     if results:
                         path = results[0].get('poster_path')
                         if path:
                             poster_url = f"https://image.tmdb.org/t/p/original{path}"
-                        # tmdb_id yahin mil gaya — cast fetch aur seasons fetch dono
-                        # isko reuse karenge (extra /find call bachegi).
-                        tmdb_id = results[0].get('id')
-                        tmdb_media_type = 'movie' if movie_res else 'tv'
-                        if tmdb_id:
-                            _tmdb_id_cache.set(imdb_id, (tmdb_id, tmdb_media_type))
-                except Exception:
+                except:
                     pass
             else:
                 try:
                     tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
-                    t_resp = _http_get_json(tmdb_search)
+                    t_resp = requests.get(tmdb_search, timeout=10).json()
                     if t_resp.get('results'):
                         for item in t_resp['results']:
                             item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
                             if str(year) == item_year and item.get('poster_path'):
                                 poster_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
-                                tmdb_id = item.get('id')
-                                tmdb_media_type = item.get('media_type') or tmdb_media_type
                                 break
                         else:
-                            first = t_resp['results'][0]
-                            path = first.get('poster_path')
+                            path = t_resp['results'][0].get('poster_path')
                             if path:
                                 poster_url = f"https://image.tmdb.org/t/p/original{path}"
-                            tmdb_id = first.get('id')
-                            tmdb_media_type = first.get('media_type') or tmdb_media_type
-                except Exception:
+                except:
                     pass
 
+            
             seasons_data = {}
-            if need_seasons and category in ["Web Series", "Anime", "Adult"]:
-                # tmdb_id upar se hi mil gaya hota hai → wo extra /find call ab nahi hoti
-                if not tmdb_id and imdb_id and imdb_id != 'N/A':
-                    try:
+            try:
+                tmdb_id = None
+                if category in ["Web Series", "Anime", "Adult"]:
+                    if not tmdb_id and imdb_id:
                         tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
-                        t_resp = _http_get_json(tmdb_find)
+                        t_resp = requests.get(tmdb_find, timeout=10).json()
                         tv_res = t_resp.get('tv_results', [])
-                        if tv_res:
-                            tmdb_id = tv_res[0].get('id')
-                    except Exception as e:
-                        logger.error(f"Seasons tmdb_id lookup error: {e}")
-                if tmdb_id and tmdb_media_type != 'movie':
-                    seasons_data = _fetch_seasons_data(tmdb_id, need_episodes=need_episodes)
-
+                        if tv_res: tmdb_id = tv_res[0].get('id')
+                    if tmdb_id:
+                        tv_details = requests.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={tmdb_api_key}", timeout=10).json()
+                        for s in tv_details.get('seasons', []):
+                            s_num = str(s.get('season_number', ''))
+                            if s_num and str(s_num) != "0":
+                                s_air_date = str(s.get('air_date', ''))
+                                s_year = s_air_date[:4]
+                                s_poster = f"https://image.tmdb.org/t/p/original{s.get('poster_path')}" if s.get('poster_path') else None
+                                episode_count = s.get('episode_count', 0)
+                                episodes_info = {}
+                                try:
+                                    season_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}?api_key={tmdb_api_key}"
+                                    season_details = requests.get(season_url, timeout=5).json()
+                                    for ep in season_details.get('episodes', []):
+                                        ep_num = str(ep.get('episode_number'))
+                                        episodes_info[ep_num] = {'air_date': ep.get('air_date', '')}
+                                except Exception as ep_e:
+                                    logger.error(f"Episode fetch error: {ep_e}")
+                                seasons_data[str(s_num)] = {
+                                    "year": int(s_year) if s_year.isdigit() else 0,
+                                    "poster": s_poster,
+                                    "air_date": s_air_date,
+                                    "episode_count": episode_count,
+                                    "episodes": episodes_info
+                                }
+            except Exception as e:
+                logger.error(f"Seasons Fetch Error: {e}")
+                
             logger.info(f"✅ OMDb Success: '{title}' ({year}) [{category}]")
             return title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data
 
         # ━━━━━ STEP 3: OMDb fail — TMDb SMART FALLBACK ━━━━━
         logger.info(f"⚠️ OMDb miss for '{search_query}', trying TMDb smart search...")
-
-        # 🔧 FIX: search/multi use karo (movie + tv dono milenge)
+        
+        # 🔧 FIX: search/multi use karo (movie + tv dono milenge) 
         tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}"
         if search_year and str(search_year).strip().isdigit():
             tmdb_search += f"&year={search_year.strip()}"
-        t_resp = _http_get_json(tmdb_search)
-
+        t_resp = requests.get(tmdb_search, timeout=10).json()
+        
         if not t_resp.get('results'):
             # Agar multi mein nahi mila, try TV-only search (agar series hint hai)
             is_series = "series" in hint_category.lower() if hint_category else False
@@ -4119,8 +3325,8 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
                 tmdb_tv = f"https://api.themoviedb.org/3/search/tv?api_key={tmdb_api_key}&query={quote(search_query)}"
                 if search_year and str(search_year).strip().isdigit():
                     tmdb_tv += f"&first_air_date_year={search_year.strip()}"
-                t_resp = _http_get_json(tmdb_tv)
-
+                t_resp = requests.get(tmdb_tv, timeout=10).json()
+            
             if not t_resp.get('results'):
                 logger.warning(f"❌ TMDb bhi fail for '{search_query}'")
                 return None
@@ -4137,7 +3343,7 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
         year = int(year_str) if year_str.isdigit() else 0
         plot = best_match.get('overview', 'No story available.')
         rating = str(round(best_match.get('vote_average', 0), 1)) if best_match.get('vote_average') else 'N/A'
-
+        
         # Smart category from TMDb media_type
         media_type = best_match.get('media_type', '')
         if media_type == 'tv':
@@ -4146,33 +3352,54 @@ def _fetch_movie_metadata_uncached(query: str, search_year: str = "", search_lan
             category = "Movies"
         else:
             category = "Web Series" if ("series" in hint_category.lower() if hint_category else False) else "Movies"
-
-        # ✅ ACCURACY FIX: pehle yahan genre HARDCODED "Action, Drama" tha — har
-        # OMDb-miss movie ko galat genre milta tha, aur Animation/Anime detection
-        # bhi fail ho jaati thi. Ab TMDb ke genre_ids se asli genre nikalte hain
-        # (genre list ek baar cache hoti hai, to koi extra latency nahi).
-        genre = _genres_from_ids(best_match.get('genre_ids')) or "Action, Drama"
-
+        
+        genre = "Action, Drama"  # TMDb genre IDs need separate API call, using default
+        
         # TMDb poster
         path = best_match.get('poster_path')
         poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
 
         # IMDb ID nikalo TMDb se
         imdb_id = None
-        tmdb_id = best_match.get('id')
-        mt = 'tv' if media_type == 'tv' else 'movie'
         try:
+            tmdb_id = best_match.get('id')
+            mt = 'tv' if media_type == 'tv' else 'movie'
             ext_url = f"https://api.themoviedb.org/3/{mt}/{tmdb_id}/external_ids?api_key={tmdb_api_key}"
-            imdb_id = _http_get_json(ext_url, timeout=HTTP_TIMEOUT_SHORT).get('imdb_id')
-            if imdb_id and tmdb_id:
-                _tmdb_id_cache.set(imdb_id, (tmdb_id, mt))
-        except Exception:
+            imdb_id = requests.get(ext_url, timeout=5).json().get('imdb_id')
+        except:
             pass
 
+        
         seasons_data = {}
-        if need_seasons and category in ["Web Series", "Anime", "Adult"] and tmdb_id and mt == 'tv':
-            seasons_data = _fetch_seasons_data(tmdb_id, need_episodes=need_episodes)
-
+        try:
+            if category in ["Web Series", "Anime", "Adult"] and tmdb_id:
+                tv_details = requests.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={tmdb_api_key}", timeout=10).json()
+                for s in tv_details.get('seasons', []):
+                    s_num = str(s.get('season_number', ''))
+                    if s_num and str(s_num) != "0":
+                        s_air_date = str(s.get('air_date', ''))
+                        s_year = s_air_date[:4]
+                        s_poster = f"https://image.tmdb.org/t/p/original{s.get('poster_path')}" if s.get('poster_path') else None
+                        episode_count = s.get('episode_count', 0)
+                        episodes_info = {}
+                        try:
+                            season_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{s_num}?api_key={tmdb_api_key}"
+                            season_details = requests.get(season_url, timeout=5).json()
+                            for ep in season_details.get('episodes', []):
+                                ep_num = str(ep.get('episode_number'))
+                                episodes_info[ep_num] = {'air_date': ep.get('air_date', '')}
+                        except Exception as ep_e:
+                            logger.error(f"Episode fetch error: {ep_e}")
+                        seasons_data[str(s_num)] = {
+                            "year": int(s_year) if s_year.isdigit() else 0,
+                            "poster": s_poster,
+                            "air_date": s_air_date,
+                            "episode_count": episode_count,
+                            "episodes": episodes_info
+                        }
+        except Exception as e:
+            logger.error(f"Seasons Fetch Error: {e}")
+            
         logger.info(f"✅ TMDb Success: '{title}' ({year}) [{category}]")
         return title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data
 
@@ -4255,6 +3482,8 @@ async def send_admin_notification(context, user, movie_title, group_info=None):
 
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
     logger.info(f"Attempting to notify users for movie: {movie_title}")
+    conn = None
+    cur = None
     notified_count = 0
 
     caption_text = (
@@ -4267,18 +3496,16 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
     try:
-        # ⚡ FIX: pehle yahan ek pooled connection lekar POORE notify loop tak
-        #    (har user ke send_video/copy_message ke beech) pakde rakha jaata
-        #    tha. Ye function file SAVE hote waqt hi chalta hai — matlab
-        #    exactly us waqt jab user search kar raha hota hai. Ab connection
-        #    sirf query ke bhar ke liye liya jaata hai.
-        users_to_notify = await db_query(
-            "SELECT user_id, username, first_name FROM user_requests "
-            "WHERE movie_title ILIKE %s AND notified = FALSE",
-            (f'%{movie_title}%',), mode='all'
-        )
-        if not users_to_notify:
+        conn = get_db_connection()
+        if not conn:
             return 0
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+            (f'%{movie_title}%',)
+        )
+        users_to_notify = cur.fetchall()
 
         for user_id, username, first_name in users_to_notify:
             try:
@@ -4375,11 +3602,11 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 if ids:
                     asyncio.create_task(delete_messages_after_delay(context, user_id, ids, 60))
 
-                await db_query(
-                    "UPDATE user_requests SET notified = TRUE "
-                    "WHERE user_id = %s AND movie_title ILIKE %s",
-                    (user_id, f'%{movie_title}%'), mode='none'
+                cur.execute(
+                    "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                    (user_id, f'%{movie_title}%')
                 )
+                conn.commit()
                 notified_count += 1
 
                 await asyncio.sleep(0.1)
@@ -4396,18 +3623,30 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     except Exception as e:
         logger.error(f"Error in notify_users_for_movie: {e}", exc_info=True)
         return 0
+    finally:
+        if cur:
+            try: cur.close()
+            except Exception: pass
+        if conn:
+            close_db_connection(conn)
 
 async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     """Notify users in group when a requested movie becomes available"""
     logger.info(f"Attempting to notify users in group for movie: {movie_title}")
+    conn = None
+    cur = None
     try:
-        # ⚡ FIX: connection ab group send_message ke aar-paar nahi pakda jaata
-        #    (ye bhi save ke waqt chalta hai — user search ka wahi window).
-        users_to_notify = await db_query(
-            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests "
-            "WHERE movie_title ILIKE %s AND notified = FALSE",
-            (f'%{movie_title}%',), mode='all'
+        conn = get_db_connection()
+        if not conn:
+            return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+            (f'%{movie_title}%',)
         )
+        users_to_notify = cur.fetchall()
+
         if not users_to_notify:
             return
 
@@ -4439,12 +3678,12 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                     parse_mode='Markdown'
                 )
 
-                # Ek hi batch UPDATE (pehle per-user execute + commit tha)
-                await db_query(
-                    "UPDATE user_requests SET notified = TRUE "
-                    "WHERE user_id = ANY(%s) AND movie_title ILIKE %s",
-                    (notified_users_ids, f'%{movie_title}%'), mode='none'
-                )
+                for user_id in notified_users_ids:
+                    cur.execute(
+                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                        (user_id, f'%{movie_title}%')
+                    )
+                conn.commit()
 
             except Exception as e:
                 logger.error(f"Failed to send message to group {group_id}: {e}")
@@ -4452,6 +3691,9 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
 
     except Exception as e:
         logger.error(f"Error in notify_in_group: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: close_db_connection(conn)
 
 # ==================== NEW GENRE FUNCTIONS ====================
 
@@ -4682,57 +3924,35 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5, requester
     return InlineKeyboardMarkup(keyboard)
 
 def get_all_movie_qualities(movie_id):
-    """
-    Fetch all available qualities and their SIZES for a given movie ID.
-
-    Return: list  = files (khaali list = sach me koi file nahi)
-            None  = DB unavailable / error
-    🐛 Pehle dono cases [] dete the, isliye pool busy hone par user ko
-    "❌ No files found!" dikh jaata tha jabki files DB me maujood theen.
-    """
+    """Fetch all available qualities and their SIZES for a given movie ID"""
     conn = get_db_connection()
     if not conn:
-        return None
+        return []
 
     try:
         cur = conn.cursor()
-        # Fetch quality, url, file_id, file_size, languages, extra_info, server_name, source
+        # NAYI QUERY: languages aur extra_info add kiya hai
         cur.execute("""
-            SELECT quality, url, file_id, file_size, languages, extra_info,
-                   COALESCE(server_name, '') as server_name,
-                   COALESCE(source, '') as source
+            SELECT quality, url, file_id, file_size, languages, extra_info
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
-            ORDER BY quality, server_name
+            ORDER BY CASE quality
+                WHEN '4K' THEN 1
+                WHEN 'HD Quality' THEN 2
+                WHEN 'Standart Quality'  THEN 3
+                WHEN 'Low Quality'  THEN 4
+                ELSE 5
+            END DESC
         """, (movie_id,))
         results = cur.fetchall()
         cur.close()
         return results
     except Exception as e:
         logger.error(f"Error fetching movie qualities for {movie_id}: {e}")
-        return None
+        return []
     finally:
         if conn:
             close_db_connection(conn)
-
-
-async def get_qualities_resilient(movie_id, retries=2):
-    """
-    ⚡ Event loop block kiye bina movie ki files laata hai, DB busy par retry.
-
-    Return: list  = files (khaali list = sach me koi file nahi)
-            None  = DB ab bhi busy → caller ko "busy" bolna chahiye,
-                    "No files found" NAHI (wo jhoot hoga)
-    """
-    for attempt in range(retries + 1):
-        q = await run_async(get_all_movie_qualities, movie_id)
-        if q is not None:
-            return q
-        if attempt < retries:
-            await asyncio.sleep(0.4 * (attempt + 1))
-    logger.warning(f"get_qualities_resilient: DB busy for movie_id={movie_id}")
-    return None
-
 
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
@@ -4803,7 +4023,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     year = ""
     lang_display = ""
     extra_display = "" # NAYA: Info (Ep) dikhane ke liye
-    db_poster = ""
 
     # ✅ OPTIMIZATION: Agar data pehle se diya gaya hai, to DB connect mat karo
     seasons_data_db = None
@@ -4812,7 +4031,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         db_year = pre_fetched_meta.get('year')
         db_lang = pre_fetched_meta.get('language')
         seasons_data_db = pre_fetched_meta.get('seasons_data')
-        db_poster = pre_fetched_meta.get('poster_url', '')
         
         if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
         if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
@@ -4820,16 +4038,22 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     # Agar data nahi diya gaya, tabhi DB open karo
     else:
-        # ⚡ FIX: event loop par blocking query thi — ab worker thread me.
-        result = await db_query(
-            "SELECT genre, year, language, seasons_data, poster_url FROM movies WHERE id = %s",
-            (movie_id,), mode='one'
-        )
-        if result:
-            db_genre, db_year, db_lang, seasons_data_db, db_poster = result
-            if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
-            if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
-            if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT genre, year, language, seasons_data FROM movies WHERE id = %s", (movie_id,))
+                result = cur.fetchone()
+                if result:
+                    db_genre, db_year, db_lang, seasons_data_db = result
+                    if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
+                    if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
+                    if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+                cur.close()
+            except Exception as e:
+                logger.error(f"Error fetching movie info: {e}")
+            finally:
+                close_db_connection(conn)
 
 
     # 👇 NAYA CODE: Yahan hum us ek specific file ka info 'movie_files' table se nikalenge! 👇
@@ -4875,56 +4099,61 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 logger.error(f"Error parsing season date: {parse_e}")
     
     elif url or file_id:
-        # ⚡ FIX: ye query bhi seedha event loop par chal rahi thi — har file
-        #    bhejne par poora bot ~100-500ms ke liye ruk jaata tha.
-        if file_id:
-            res = await db_query("SELECT extra_info FROM movie_files WHERE file_id = %s LIMIT 1",
-                                 (file_id,), mode='one')
-        else:
-            res = await db_query("SELECT extra_info FROM movie_files WHERE url = %s LIMIT 1",
-                                 (url,), mode='one')
-        try:
-            if res and res[0] and res[0].strip():
-                extra_val = res[0].strip()
-                ext = extra_val.upper()
-
-                # 👇 SMART FIX: Check karega ki kya likhna sahi rahega
-                edition_keywords = ["UNCUT", "EXTENDED", "CUT", "UNRATED", "REMASTERED", "EDITION"]
-
-                if any(word in ext for word in edition_keywords):
-                    extra_display = f"📌 <b>Edition:</b> {extra_val}\n"
-                elif "S" in ext and "E" in ext:
-                    extra_display = f"📌 <b>Season & Episode:</b> {extra_val}\n"
-                elif "S" in ext:
-                    extra_display = f"📌 <b>Season:</b> {extra_val}\n"
-                elif "E" in ext:
-                    extra_display = f"📌 <b>Episode:</b> {extra_val}\n"
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                if file_id:
+                    cur.execute("SELECT extra_info FROM movie_files WHERE file_id = %s LIMIT 1", (file_id,))
                 else:
-                    extra_display = f"📌 <b>Info:</b> {extra_val}\n"
-
-                # SMART FIX: Update year based on seasons_data if specific season/episode year is available
-                if ("S" in ext or "SEASON" in ext) and seasons_data_db:
-                    try:
-                        s_match = re.search(r'(?i)(?:S|SEASON\s*)0*(\d+)', ext)
-                        e_match = re.search(r'(?i)(?:E|EPISODE\s*)0*(\d+)', ext)
-                        if s_match:
-                            s_num = str(int(s_match.group(1)))
-                            if isinstance(seasons_data_db, dict) and s_num in seasons_data_db:
-                                s_data = seasons_data_db[s_num]
-                                specific_year = s_data.get('year') or (s_data.get('air_date', '')[:4] if s_data.get('air_date') else None)
-
-                                if e_match and 'episodes' in s_data:
-                                    e_num = str(int(e_match.group(1)))
-                                    ep_info = s_data['episodes'].get(e_num)
-                                    if ep_info and ep_info.get('air_date'):
-                                        specific_year = ep_info['air_date'][:4]
-
-                                if specific_year and str(specific_year).isdigit() and int(specific_year) > 0:
-                                    year = f"📅 <b>Year:</b> {specific_year}\n"
-                    except Exception as parse_e:
-                        logger.error(f"Error parsing season date: {parse_e}")
-        except Exception:
-            pass
+                    cur.execute("SELECT extra_info FROM movie_files WHERE url = %s LIMIT 1", (url,))
+                
+                res = cur.fetchone()
+                if res and res[0] and res[0].strip():
+                    extra_val = res[0].strip()
+                    ext = extra_val.upper()
+                    
+                    # 👇 SMART FIX: Check karega ki kya likhna sahi rahega
+                    edition_keywords = ["UNCUT", "EXTENDED", "CUT", "UNRATED", "REMASTERED", "EDITION"]
+                    
+                    if any(word in ext for word in edition_keywords):
+                        extra_display = f"📌 <b>Edition:</b> {extra_val}\n"
+                    elif "S" in ext and "E" in ext:
+                        extra_display = f"📌 <b>Season & Episode:</b> {extra_val}\n"
+                    elif "S" in ext:
+                        extra_display = f"📌 <b>Season:</b> {extra_val}\n"
+                    elif "E" in ext:
+                        extra_display = f"📌 <b>Episode:</b> {extra_val}\n"
+                    else:
+                        extra_display = f"📌 <b>Info:</b> {extra_val}\n"
+                        
+                    # SMART FIX: Update year based on seasons_data if specific season/episode year is available
+                    if ("S" in ext or "SEASON" in ext) and seasons_data_db:
+                        try:
+                            s_match = re.search(r'(?i)(?:S|SEASON\s*)0*(\d+)', ext)
+                            e_match = re.search(r'(?i)(?:E|EPISODE\s*)0*(\d+)', ext)
+                            if s_match:
+                                s_num = str(int(s_match.group(1)))
+                                if isinstance(seasons_data_db, dict) and s_num in seasons_data_db:
+                                    s_data = seasons_data_db[s_num]
+                                    specific_year = s_data.get('year') or (s_data.get('air_date', '')[:4] if s_data.get('air_date') else None)
+                                    
+                                    if e_match and 'episodes' in s_data:
+                                        e_num = str(int(e_match.group(1)))
+                                        ep_info = s_data['episodes'].get(e_num)
+                                        if ep_info and ep_info.get('air_date'):
+                                            specific_year = ep_info['air_date'][:4]
+                                            
+                                    if specific_year and str(specific_year).isdigit() and int(specific_year) > 0:
+                                        year = f"📅 <b>Year:</b> {specific_year}\n"
+                        except Exception as parse_e:
+                            logger.error(f"Error parsing season date: {parse_e}")
+                            
+                cur.close()
+            except Exception:
+                pass
+            finally:
+                close_db_connection(conn)
     # 👆 ---------------------------------------------------- 👆
 
     # A Mini App quality button must never fall back to the whole movie list.
@@ -4939,13 +4168,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
-        all_qualities = await get_qualities_resilient(movie_id)   # ⚡ thread me, retry ke saath
-        if all_qualities is None:
-            try:
-                await update.effective_message.reply_text(SEARCH_BUSY_TEXT, parse_mode='HTML')
-            except Exception:
-                pass
-            return
+        all_qualities = get_all_movie_qualities(movie_id)
         if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
             context.user_data['active_filter'] = None
@@ -4957,71 +4180,46 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             
             # 👇 YAHAN SE FIX SHURU HOTA HAI (HTML INLINE LINKS KE LIYE) 👇
             bot_username = context.bot.username
-            text = f"⚠️ <b>Dhyan Dein: Agar koi link kaam na kare (dead ho), toh usi quality ka agla Download link try karein.</b>\n\n"
+            text = f"<b>━━━━━━ 📁 𝗙𝗶𝗹𝗲 𝗟𝗶𝘀𝘁 ━━━━━━</b>\n✦ <b>{title}</b>\n\n⟐ <b>𝗨𝗼𝘂𝗿 𝗥𝗲𝘄𝘂𝗲𝘀𝘁𝗲𝗱 𝗙𝗶𝗹𝗲𝘀 𝗔𝗿𝗲 𝗗𝗲𝗿𝗲</b> 👇\n\n"
             
             
             for idx, f_data in enumerate(current_files, start=1):
-                q_name = str(f_data[0]) if len(f_data) > 0 and f_data[0] else ""
+                q_name = str(f_data[0])
                 
                 # Kachra saaf kar rahe hain taaki deep links perfect banein
                 q_name = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', q_name)
                 q_name = re.sub(r'\(https?://[^\)]+\)', '', q_name)
                 q_name = re.sub(r'https?://[^\s]+', '', q_name)
                 q_name = re.sub(r'(?i)t\.me/[^\s]+', '', q_name)
-                q_name = re.sub(r'@[a-zA-Z0-9_]+', '', q_name).strip()
+                q_name = re.sub(r'@[a-zA-Z0-9_]+', '', q_name)
                 
-                f_size = str(f_data[3]).strip() if len(f_data) > 3 and f_data[3] else ""
-                lang_name = str(f_data[4]).strip() if len(f_data) > 4 and f_data[4] else ""
+                f_size = f_data[3] if len(f_data)>3 else "Unknown"
                 
-                e_info = str(f_data[5]) if len(f_data) > 5 and f_data[5] else ""
+                e_info = str(f_data[5]) if len(f_data)>5 else ""
                 e_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', e_info)
                 e_info = re.sub(r'\(https?://[^\)]+\)', '', e_info)
                 e_info = re.sub(r'https?://[^\s]+', '', e_info)
                 e_info = re.sub(r'(?i)t\.me/[^\s]+', '', e_info)
-                e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info).strip()
+                e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info)
                 
-                link_parts = []
-                if f_size and f_size.lower() not in ['n/a', 'unknown', 'none', 'unknown size', '']:
-                    link_parts.append(f_size)
-                if q_name and q_name.lower() not in ['n/a', 'unknown', 'none']:
-                    link_parts.append(q_name)
-                link_parts.append(title)
-                if lang_name and lang_name.lower() not in ['n/a', 'unknown', 'none']:
-                    link_parts.append(lang_name)
-                if e_info:
-                    link_parts.append(e_info)
+                ep_tag = f"[{e_info.strip()}] " if e_info.strip() else ""
                 
-                link_label = " | ".join(link_parts) if link_parts else "Download Link"
-                
+                # ✅ NAYA: HTML wala Neela (Inline) link
                 real_idx = all_qualities.index(f_data)
-                text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{link_label}</a></b>\n\n"
+                text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{f_size} | {title} {ep_tag}{q_name.strip()}</a></b>\n\n"
             
             text += f"<b>Update Channel:</b> <a href='{UPDATE_CHANNEL_URL}'>Join BackUp</a>\n"
 
             keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
             # ✅ NAYA: parse_mode='HTML' kar diya aur link preview off kar diya
-            msg = None
-            if db_poster and "http" in db_poster:
-                try:
-                    msg = await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=db_poster,
-                        caption=text,
-                        reply_markup=keyboard,
-                        parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send poster: {e}")
-                    
-            if not msg:
-                msg = await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=text, 
-                    reply_markup=keyboard, 
-                    parse_mode='HTML', 
-                    disable_web_page_preview=True
-                )
+            msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text=text, 
+                reply_markup=keyboard, 
+                parse_mode='HTML', 
+                disable_web_page_preview=True
+            )
             # 👆 FIX KHATAM 👆
             
             track_message_for_deletion(context, chat_id, msg.message_id, 60)
@@ -5178,28 +4376,26 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
     try:
         # 1. PEHLE EXACT MATCH CHECK KAREIN (Ye FAST hai - 0.1 sec)
         # This saves resources if the user clicked a precise link
-        # ⚡ FIX: pehle ye query EVENT LOOP par chalti thi — function ka naam
-        #    "background_search" hai lekin ye poore bot ko rok deti thi (Supabase
-        #    remote hai, 100-500ms). Ab db_query() thread me chalati hai.
-        exact_movie = await db_query(
-            "SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1",
-            (query_text.strip(),), mode='one'
-        )
+        conn = get_db_connection()
+        exact_movie = None
+        if conn:
+            try:
+                cur = conn.cursor()
+                # Use ILIKE for case-insensitive exact match
+                cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (query_text.strip(),))
+                exact_movie = cur.fetchone()
+            except Exception as db_e:
+                logger.error(f"Database error in exact match: {db_e}")
+            finally:
+                if conn: close_db_connection(conn)
 
         movies_found = []
         if exact_movie:
             movies_found = [exact_movie] # Exact match found, skip fuzzy search
         else:
             # Agar exact nahi mila to hi Fuzzy Search karein (Slower process)
-            movies_found = await search_db_resilient(query_text, limit=1)
-
-        # ⏳ DB busy → "Not Found" mat bolo, sach bolo
-        if movies_found is None:
-            try:
-                await status_msg.edit_text(SEARCH_BUSY_TEXT, parse_mode='HTML')
-            except Exception:
-                pass
-            return
+            # Assuming get_movies_from_db is your existing function
+            movies_found = await run_async(get_movies_from_db, query_text, limit=1)
 
         # 2. Result Handle karein
         if not movies_found:
@@ -5264,36 +4460,27 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
 
     conn = None
     try:
-        # ⚡ FIX: deep-link se file lene ka sabse hot path yahi hai, aur query
-        #    seedha event loop par chal rahi thi. Pehle pool busy hone par
-        #    status_msg chupchap delete hoke user ko KUCH BHI nahi milta tha —
-        #    "respond nahi karta" ki exact shikayat. Ab thread me chalti hai
-        #    aur busy hone par user ko saaf bataya jaata hai.
-        movie_data = await db_query(
-            "SELECT title, url, file_id FROM movies WHERE id = %s",
-            (movie_id,), mode='one'
-        )
-        if movie_data is None:
-            if status_msg:
-                try:
-                    await status_msg.edit_text(SEARCH_BUSY_TEXT, parse_mode='HTML')
-                except Exception:
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
-            else:
-                try:
-                    await context.bot.send_message(chat_id, SEARCH_BUSY_TEXT, parse_mode='HTML')
-                except Exception:
+        conn = get_db_connection()
+        if not conn:
+            # User ko technical error mat dikhao, bas chupchap delete kar do
+            if status_msg: 
+                try: 
+                    await status_msg.delete() 
+                except: 
                     pass
             return
 
+        cur = conn.cursor()
+        cur.execute("SELECT title, url, file_id FROM movies WHERE id = %s", (movie_id,))
+        movie_data = cur.fetchone()
+        cur.close()
+        close_db_connection(conn)
+
         # 2. Movie milne ke baad turant Loading Msg delete karo
         if status_msg:
-            try:
+            try: 
                 await status_msg.delete()
-            except:
+            except: 
                 pass
 
         if movie_data:
@@ -5400,22 +4587,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # 🔐 NAYA: ANTI-BOT TEMPORARY LINK SYSTEM (BURN ON READ)
             if payload.startswith("tmp_"):
-                # ⚡ FIX: SELECT + DELETE dono event loop par thay. Ab ek hi
-                #    transaction me, worker thread se (burn-on-read waise hi
-                #    atomic raha).
-                res = await run_async(_burn_temp_link_sync, payload)
-                if res is None:
-                    msg = await context.bot.send_message(
-                        chat_id, SEARCH_BUSY_TEXT, parse_mode='HTML')
-                    track_message_for_deletion(context, chat_id, msg.message_id, 30)
+                conn = get_db_connection()
+                if not conn:
+                    await context.bot.send_message(chat_id, "❌ System Error.")
                     return
 
                 try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT movie_id, movie_file_id, created_at FROM temp_links WHERE token = %s", (payload,))
+                    res = cur.fetchone()
+                    
+                    # Token TURANT delete kar do (Single Use)
+                    cur.execute("DELETE FROM temp_links WHERE token = %s", (payload,))
+                    conn.commit()
+                    cur.close()
+                    
                     if not res:
                         msg = await context.bot.send_message(chat_id, "❌ <b>Link Expired ya Invalid hai!</b>\nKripya app par jaakar dobara click karein.", parse_mode='HTML')
                         track_message_for_deletion(context, chat_id, msg.message_id, 15)
                         return
-
+                    
                     movie_id, movie_file_id, created_at = res
                     time_diff = (datetime.now() - created_at).total_seconds()
                     
@@ -5427,16 +4618,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # A Mini App quality click includes a concrete movie_files
                     # record, so send only that file rather than the whole list.
                     if movie_file_id:
-                        selected_file = await db_query("""
+                        cur = conn.cursor()
+                        cur.execute("""
                             SELECT m.title, mf.url, mf.file_id
                             FROM movie_files mf
                             JOIN movies m ON m.id = mf.movie_id
                             WHERE mf.id = %s AND mf.movie_id = %s
-                        """, (movie_file_id, movie_id), mode='one')
-                        if selected_file is None:
-                            await context.bot.send_message(chat_id, SEARCH_BUSY_TEXT,
-                                                           parse_mode='HTML')
-                            return
+                        """, (movie_file_id, movie_id))
+                        selected_file = cur.fetchone()
+                        cur.close()
                         if not selected_file:
                             await context.bot.send_message(chat_id, "❌ Selected file is no longer available.")
                             return
@@ -5455,10 +4645,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Temp Link Error: {e}")
                     await context.bot.send_message(chat_id, "❌ Processing error.")
                     return
-                # (pehle yahan `finally: close_db_connection(conn)` tha —
-                #  connection ab _burn_temp_link_sync khud band karta hai)
+                finally:
+                    close_db_connection(conn)
 
-
+                    
             # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
             if payload.startswith("file_"):
                 try:
@@ -5474,19 +4664,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ))
                     
                     # File ka data nikalo
-                    qualities = await get_qualities_resilient(movie_id)   # ⚡ thread me
+                    qualities = get_all_movie_qualities(movie_id)
                     if qualities and len(qualities) > file_index:
                         file_data = qualities[file_index]
                         url = file_data[1]
                         file_id = file_data[2]
                         
                         # Movie ka naam nikalo
-                        # 🐛 FIX: pehle yahan `conn.cursor()` bina None check
-                        #    ke tha. Pool busy hote hi conn=None → AttributeError
-                        #    → handler crash → user ko FILE HI NAHI MILTI (koi
-                        #    error bhi nahi). Ab db_query None-safe hai.
-                        res = await db_query("SELECT title FROM movies WHERE id = %s",
-                                             (movie_id,), mode='one')
+                        conn = get_db_connection()
+                        cur = conn.cursor()
+                        cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+                        res = cur.fetchone()
+                        cur.close()
+                        close_db_connection(conn)
                         title = res[0] if res else "Requested File"
                         
                         # ✅ FIX: Sticker PEHLE delete karo, phir file bhejo
@@ -5676,35 +4866,31 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query == '📊 My Stats':
             user_id = update.effective_user.id
+            conn = None
             try:
-                # ⚡ FIX: dono COUNT event loop par blocking chal rahi theen, aur
-                #    connection reply_text ke aar-paar khula rehta tha. Ab parallel
-                #    aur thread me.
-                # 🐛 FIX 2: pehle `request_count` ek TUPLE tha (fetchone ka result),
-                #    isliye user ko "Total Requests: (5,)" dikhta tha. Ab [0] liya.
-                # 🐛 FIX 3: track_message_for_deletion(chat_id, msg_id, 180) —
-                #    signature (context, chat_id, message_id, delay) hai, matlab
-                #    args ek-ek khisak gaye the aur auto-delete kaam hi nahi karta tha.
-                req, ful = await asyncio.gather(
-                    db_query("SELECT COUNT(*) FROM user_requests WHERE user_id = %s",
-                             (user_id,), mode='one'),
-                    db_query("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE",
-                             (user_id,), mode='one'),
-                )
-                if req is None or ful is None:
-                    await update.message.reply_text("⏳ Server busy hai — thodi der baad try karein.")
-                    return MAIN_MENU
+                conn = get_db_connection()
+                if conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+                    request_count = cur.fetchone()
 
-                stats_text = (
-                    "📊 Your Stats:\n"
-                    f"- Total Requests: {req[0] if req else 0}\n"
-                    f"- Fulfilled Requests: {ful[0] if ful else 0}\n"
-                )
-                msg = await update.message.reply_text(stats_text)
-                track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 180)
+                    cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+                    fulfilled_count = cur.fetchone()
+
+                    stats_text = f"""
+📊 Your Stats:
+- Total Requests: {request_count}
+- Fulfilled Requests: {fulfilled_count}
+"""
+                    msg = await update.message.reply_text(stats_text)
+                    track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
+                else:
+                    await update.message.reply_text("Sorry, database connection failed.")
             except Exception as e:
                 logger.error(f"Error getting stats: {e}")
                 await update.message.reply_text("Sorry, couldn't retrieve your stats at the moment.")
+            finally:
+                if conn: close_db_connection(conn)
 
             return MAIN_MENU
 
@@ -5755,15 +4941,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 1. Search DB (Ab bot 'The Great' dhoondhega, 'The Great S03' nahi)
         movies = await run_async(get_movies_from_db, search_term, limit=10)
-
-        # ⏳ DB busy tha? Retry karo — "Not Found" bolna galat hoga (movie DB me
-        #    ho sakti hai, bas us waqt pool superbatch ne pakad rakha tha).
-        if movies is None:
-            movies = await search_db_resilient(search_term, limit=10)
-        if movies is None:
-            msg = await update.message.reply_text(SEARCH_BUSY_TEXT, parse_mode='HTML')
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
-            return
         
         # 2. Not Found
         if not movies:
@@ -5859,15 +5036,15 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         burst = user_burst_count(user.id, window_seconds=60)
         if burst >= MAX_REQUESTS_PER_MINUTE:
             msg = await update.message.reply_text(
-                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो。 कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें。\n"
-                "बार‑बार भेजने से फ़ायदा नहीं होगा。"
+                "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।\n"
+                "बार‑बार भेजने से फ़ायदा नहीं होगा।"
             )
             track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
         intent = await analyze_intent(user_message)
         if not intent["is_request"]:
-            msg = await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है。 कृपया सही नाम भेजें。")
+            msg = await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है। कृपया सही नाम भेजें।")
             track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
             return REQUESTING
 
@@ -5881,8 +5058,8 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             minutes_left = max(0, REQUEST_COOLDOWN_MINUTES - minutes_passed)
             if minutes_left > 0:
                 strict_text = (
-                    "🛑 Ruk jao! Aapne ye request abhi bheji thi。\n\n"
-                    "Baar‑baar request karne se movie jaldi nahi aayegi。\n\n"
+                    "🛑 Ruk jao! Aapne ye request abhi bheji thi.\n\n"
+                    "Baar‑baar request karne se movie jaldi nahi aayegi.\n\n"
                     f"Similar previous request: \"{similar.get('stored_title')}\" ({similar.get('score')}% match)\n"
                     f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                 )
@@ -5959,121 +5136,6 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
         logger.error(f"Error in request_movie_from_button: {e}")
         return MAIN_MENU
 
-async def send_premium_scraped_message(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, qualities: list):
-    import re
-    
-    chat_id = update.effective_chat.id
-    
-    # Fetch poster
-    db_poster = ""
-    result = await db_query("SELECT poster_url FROM movies WHERE id = %s", (movie_id,), mode='one')
-    if result and result[0]:
-        db_poster = result[0]
-        
-    # ✅ FIX: Filter buttons ke liye session data save karo (scraped movies ke liye bhi)
-    context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': qualities}
-    context.user_data['active_filter'] = None
-    context.user_data.pop('selected_season', None)
-    
-    # Pagination calculate karo pehli baar ke liye
-    limit = 10
-    total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
-    current_files = qualities[0:limit]
-    
-    text = "⚠️ <b>Dhyan Dein: Agar koi link kaam na kare (dead ho), toh usi quality ka agla Download link try karein.</b>\n\n"
-    
-    for idx, f_data in enumerate(current_files, start=1):
-        q_name = str(f_data[0]) if len(f_data) > 0 and f_data[0] else ""
-        url = str(f_data[1]) if len(f_data) > 1 and f_data[1] else ""
-        
-        if not url:
-            continue
-        
-        # Kachra saaf kar rahe hain
-        q_name = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', q_name)
-        q_name = re.sub(r'\(https?://[^\)]+\)', '', q_name)
-        q_name = re.sub(r'https?://[^\s]+', '', q_name)
-        q_name = re.sub(r'(?i)t\.me/[^\s]+', '', q_name)
-        q_name = re.sub(r'@[a-zA-Z0-9_]+', '', q_name).strip()
-        
-        # Values DB se nikalo
-        f_size = str(f_data[3]).strip() if len(f_data) > 3 and f_data[3] else ""
-        lang_name = str(f_data[4]).strip() if len(f_data) > 4 and f_data[4] else ""
-        server_name = str(f_data[6]).strip() if len(f_data) > 6 and f_data[6] else ""
-        
-        e_info = str(f_data[5]) if len(f_data) > 5 and f_data[5] else ""
-        e_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', e_info)
-        e_info = re.sub(r'\(https?://[^\)]+\)', '', e_info)
-        e_info = re.sub(r'https?://[^\s]+', '', e_info)
-        e_info = re.sub(r'(?i)t\.me/[^\s]+', '', e_info)
-        e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info).strip()
-        
-        ep_tag = ""
-        
-        # ✅ NAYA FORMAT: Size | Quality | Title | Language | Episode (pipe se separate)
-        link_parts = []
-        
-        # 1. Size (sabse pehle)
-        if f_size and f_size.lower() not in ['n/a', 'unknown', 'none', 'unknown size', '']:
-            link_parts.append(f_size)
-        
-        # 2. Quality
-        if q_name and q_name.lower() not in ['n/a', 'unknown', 'none']:
-            link_parts.append(q_name)
-        
-        # 3. Title (hamesha)
-        link_parts.append(title)
-        
-        # 4. Language (sirf agar available ho)
-        if lang_name and lang_name.lower() not in ['n/a', 'unknown', 'none']:
-            link_parts.append(lang_name)
-        
-        # 5. Episode/Season info (sirf agar available ho)
-        if e_info:
-            link_parts.append(e_info)
-        
-        # Pipe ( | ) se join karo
-        link_label = " | ".join(link_parts) if link_parts else "Download Link"
-        
-        text += f"<b>{idx}.</b> <b><a href='{url}'>{link_label}</a></b>\n\n"
-    
-    text += f"<b>Update Channel:</b> <a href='{UPDATE_CHANNEL_URL}'>Join BackUp</a>\n"
-
-    # EXACT Keyboard function 
-    keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
-    
-    try:
-        msg = None
-        if db_poster and "http" in db_poster:
-            try:
-                msg = await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=db_poster,
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Failed to send premium photo: {e}")
-                
-        if not msg:
-            msg = await context.bot.send_message(
-                chat_id=chat_id, 
-                text=text, 
-                reply_markup=keyboard, 
-                parse_mode='HTML', 
-                disable_web_page_preview=True
-            )
-        
-        if msg:
-            # ✅ 5 minutes auto-delete timer (300s)
-            track_message_for_deletion(context, chat_id, msg.message_id, 300)
-            
-        return msg
-    except Exception as e:
-        logger.error(f"Failed to send premium scraped message: {e}")
-        return None
-
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -6087,10 +5149,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         suggested_title = unquote(data[len("retrysearch_"):]).strip()
         if not suggested_title:
             return
-        movies = await search_db_resilient(suggested_title, limit=10)
-        if movies is None:
-            await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-            return
+        movies = await run_async(get_movies_from_db, suggested_title, limit=10)
         if not movies:
             await query.answer("This title is not available yet. You can request it below.", show_alert=True)
             return
@@ -6388,16 +5447,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         movie_title = parts[2]
 
         # User ka naam DB se nikalo + mention format banao taaki message personal lage
-        # ⚡ FIX: query event loop par thi
-        res = await db_query(
-            "SELECT first_name, username FROM user_requests WHERE user_id = %s LIMIT 1",
-            (target_user_id,), mode='one'
-        )
+        conn = get_db_connection()
         first_name = "User"
         db_username = None
-        if res:
-            first_name = res[0] or "User"
-            db_username = res[1] if len(res) > 1 else None
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT first_name, username FROM user_requests WHERE user_id = %s LIMIT 1", (target_user_id,))
+                res = cur.fetchone()
+                if res:
+                    first_name = res[0] or "User"
+                    db_username = res[1] if len(res) > 1 else None
+            except: pass
+            finally: close_db_connection(conn)
 
         # 🌟 Premium Mention Format
         if db_username:
@@ -6472,16 +5534,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         movie_id = int(query.data.split("_")[1])
         
         # --- 1. DATABASE SE DATA NIKALNA ---
-        # ⚡ dono queries thread me, parallel — loop block nahi hota aur pool
-        #    busy hone par `None.cursor()` crash bhi nahi hota
-        rows, m_data = await asyncio.gather(
-            db_query("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,), mode='all'),
-            db_query("SELECT title, genre, language, poster_url, category FROM movies WHERE id = %s",
-                     (movie_id,), mode='one'),
-        )
-        if rows is None or m_data is None:
-            await query.edit_message_text("⏳ Server busy hai — thodi der baad dobara try karein.")
-            return
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # क्वालिटी निकालें
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        rows = cur.fetchall()
+        
+        # मूवी की डिटेल्स निकालें (🚀 NAYA: Ab poster_url aur category bhi nikalega)
+        cur.execute("SELECT title, genre, language, poster_url, category FROM movies WHERE id = %s", (movie_id,))
+        m_data = cur.fetchone()
+        cur.close()
+        
+        # Connection close (Tera custom function)
+        try: close_db_connection(conn) 
+        except: db_pool.putconn(conn) 
 
         if not m_data:
             await query.edit_message_text("❌ Error: Movie DB mein nahi mili!")
@@ -6651,15 +5718,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
 
         # ✅ FAST FETCH: Ek hi bar mein sab nikal lo (seasons_data bhi le lo extra DB calls bachane ke liye)
-        # ⚡ FIX: event loop se hata diya + None-safe (pehle pool busy hone par
-        #    `None.cursor()` crash hota tha aur user ko kuch reply nahi milta tha)
-        res = await db_query(
-            "SELECT title, genre, year, language, seasons_data FROM movies WHERE id = %s",
-            (movie_id,), mode='one'
-        )
-        if res is None:
-            await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-            return
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT title, genre, year, language, seasons_data FROM movies WHERE id = %s", (movie_id,))
+        res = cur.fetchone()
+        cur.close()
+        close_db_connection(conn)
 
         if res:
             title, db_genre, db_year, db_lang, db_seasons = res
@@ -6668,11 +5732,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = "Movie"
             pre_fetched_meta = {}
 
-        qualities = await get_qualities_resilient(movie_id)
-        if qualities is None:
-            await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-            return
-
+        qualities = get_all_movie_qualities(movie_id)
+        
         # NAYA: Filter apply karo taaki Send All sirf filter ki hui files bheje
         active_filter = context.user_data.get('active_filter')
         if active_filter:
@@ -6736,14 +5797,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("scan_"):
         m_id = int(data.split("_")[1])
         
-        # Database se details nikalo (⚡ thread me — loop free rahe, None-safe)
-        res = await db_query(
-            "SELECT title, year, genre FROM movies WHERE id = %s",
-            (m_id,), mode='one'
-        )
-        if res is None:
-            await query.answer("⏳ Server busy hai — thodi der baad try karein.", show_alert=True)
-            return
+        # Database se details nikalo
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # Maan lo tumhare DB mein 'language' aur 'subtitle' column hain, ya tum file name se guess karoge
+        cur.execute("SELECT title, year, genre FROM movies WHERE id = %s", (m_id,))
+        res = cur.fetchone()
+        cur.close()
+        close_db_connection(conn)
 
         if res:
             title, year, genre = res
@@ -6771,26 +5832,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         movie_id = int(query.data.split("_")[1])
-
-        # ⚡ FIX: DELETE + commit event loop par tha
-        deleted_count = await run_async(_delete_movie_files_sync, movie_id)
-        if deleted_count is None:
-            await query.answer("⏳ Server busy hai — thodi der baad try karein.", show_alert=True)
-            return
-        try:
-            # 👇 NAYA: BATCH_SESSION ke counter ko bhi zero (0) kar do
-            if BATCH_SESSION.get('movie_id') == movie_id:
-                BATCH_SESSION['file_count'] = 0
-
-            await query.answer(f"✅ {deleted_count} purani files delete ho gayi!", show_alert=True)
-            await query.edit_message_text(
-                f"🗑️ **Deleted {deleted_count} old files.**\n\n"
-                f"✅ **Clean Slate!** Ab nayi files upload karo.",
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logger.error(f"Delete Error: {e}")
-            await query.answer("❌ Error deleting files", show_alert=True)
+        
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM movie_files WHERE movie_id = %s", (movie_id,))
+                deleted_count = cur.rowcount # Kitni delete hui
+                conn.commit()
+                cur.close()
+                close_db_connection(conn)
+                
+                # 👇 NAYA: BATCH_SESSION ke counter ko bhi zero (0) kar do
+                if BATCH_SESSION.get('movie_id') == movie_id:
+                    BATCH_SESSION['file_count'] = 0
+                
+                await query.answer(f"✅ {deleted_count} purani files delete ho gayi!", show_alert=True)
+                await query.edit_message_text(
+                    f"🗑️ **Deleted {deleted_count} old files.**\n\n"
+                    f"✅ **Clean Slate!** Ab nayi files upload karo.",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Delete Error: {e}")
+                await query.answer("❌ Error deleting files", show_alert=True)
         return
     
     
@@ -6804,8 +5869,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 👇 NAYA LOGIC: Agar koi file save nahi hui thi, toh galat naam DB se uda do
         if movie_id:
-            # ⚡ FIX: COUNT + DELETE event loop par thay (ab ek transaction, thread me)
-            await run_async(_cleanup_empty_movie_sync, movie_id)
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                    file_count = cur.fetchone()[0]
+                    
+                    # Agar movie khali hai, toh delete maar do!
+                    if file_count == 0:
+                        cur.execute("DELETE FROM movies WHERE id = %s", (movie_id,))
+                        conn.commit()
+                    cur.close()
+                except Exception as e:
+                    logger.error(f"Cleanup error: {e}")
+                finally:
+                    close_db_connection(conn)
 
         # Session ko off kar do taaki aur files save na hon
         BATCH_SESSION.update({
@@ -6832,8 +5911,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 👇 NAYA LOGIC: 18+ wale kachre ko bhi uda do
         if movie_id:
-            # ⚡ FIX: COUNT + DELETE event loop par thay (ab ek transaction, thread me)
-            await run_async(_cleanup_empty_movie_sync, movie_id)
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                    if cur.fetchone()[0] == 0:
+                        cur.execute("DELETE FROM movies WHERE id = %s", (movie_id,))
+                        conn.commit()
+                    cur.close()
+                except Exception as e:
+                    pass
+                finally:
+                    close_db_connection(conn)
 
         BATCH_18_SESSION.update({
             'active': False, 'movie_id': None, 'movie_title': None,
@@ -6929,43 +6019,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_data_part = re.sub(r'_u\d+$', '', query.data)
             movie_id = int(movie_data_part.replace("movie_", ""))
 
-            # ⚡ FIX: pehle ye SEEDHA event loop par chalta tha aur pool exhaust
-            #    hone par `conn` None aa jaata tha → `None.cursor()` →
-            #    AttributeError → handler crash → USER KO KOI JAWAB NAHI MILTA.
-            #    (Superbatch chalte waqt exactly yahi ho raha tha.)
-            movie = await db_query(
-                "SELECT id, title, category FROM movies WHERE id = %s",
-                (movie_id,), mode='one'
-            )
-            if movie is None:
-                await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-                return
+            conn = get_db_connection()
+            cur = conn.cursor()
+            # 🚀 FIX: Yahan 'category' bhi nikal rahe hain taaki pata chale Web Series hai ya nahi
+            cur.execute("SELECT id, title, category FROM movies WHERE id = %s", (movie_id,))
+            movie = cur.fetchone()
+            cur.close()
+            close_db_connection(conn)
 
             if not movie:
                 await query.edit_message_text("❌ Movie not found in database.")
                 return
 
             movie_id, title, category = movie
-            qualities = await get_qualities_resilient(movie_id)
-            if qualities is None:
-                await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-                return
+            qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
                 await query.answer("❌ No files found!", show_alert=True)
-                return
-
-            # ✅ NEW LOGIC: Check if all qualities are scraped (source='scraped' OR no file_id)
-            is_scraped_only = all(
-                (len(q) > 7 and q[7] == 'scraped') or (q[2] is None and q[1] is not None)
-                for q in qualities
-            )
-            if is_scraped_only:
-                try: await query.message.delete()
-                except: pass
-                sent_msg = await send_premium_scraped_message(update, context, movie_id, title, qualities)
-                if sent_msg:
-                    track_message_for_deletion(context, update.effective_chat.id, sent_msg.message_id, 120)
                 return
 
             # Data context mein save karo aage ke liye
@@ -7207,7 +6277,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # UI Text Banana
             if view_type == "main" or view_type == "seas":
-                text = ""
+                text = f"📁 <b>{title}</b>\n"
                 
                 # 🚀 NAYA FIX: Season ko alag se bada aur highlight dikhane ke liye
                 if 'selected_season' in context.user_data and context.user_data['selected_season']:
@@ -7218,8 +6288,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                 if active_filter:
                     text += f"🔍 Filter: <b>{active_filter['value']}</b>\n"
-                
-                text += f"⚠️ <b>Dhyan Dein: Agar koi link kaam na kare (dead ho), toh usi quality ka agla Download link try karein.</b>\n\n"
+                text += f"\n👇 <b>Your Requested Files Are Here</b>\n\n"
                 
                 if not filtered_qualities:
                     text += "❌ No files found for this filter.\n"
@@ -7227,40 +6296,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     bot_username = context.bot.username
                     
                     for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
-                        q_name = str(file_data[0]) if len(file_data) > 0 and file_data[0] else ""
+                        quality = str(file_data[0])
                         
-                        # Kachra saaf
-                        q_name = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', q_name)
-                        q_name = re.sub(r'\(https?://[^\)]+\)', '', q_name)
-                        q_name = re.sub(r'https?://[^\s]+', '', q_name)
-                        q_name = re.sub(r'(?i)t\.me/[^\s]+', '', q_name)
-                        q_name = re.sub(r'@[a-zA-Z0-9_]+', '', q_name).strip()
+                        # 🚀 NAYA FIX: Doosre Bot (Manvi Bot) ke links ko hamesha ke liye uda do
+                        quality = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', quality)
+                        quality = re.sub(r'\(https?://[^\)]+\)', '', quality)
+                        quality = re.sub(r'https?://[^\s]+', '', quality)
+                        # 👇 Ye 2 lines nayi add karni hain: t.me aur @usernames udane ke liye
+                        quality = re.sub(r'(?i)t\.me/[^\s]+', '', quality)
+                        quality = re.sub(r'@[a-zA-Z0-9_]+', '', quality)
                         
-                        f_size = str(file_data[3]).strip() if len(file_data) > 3 and file_data[3] else ""
+                        file_size = file_data[3] if len(file_data) > 3 else "Unknown"
+                        
+                        # Extra Info (Episodes) se bhi link saaf karo
+                        extra_info = str(file_data[5]) if len(file_data) > 5 else ""
+                        extra_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', extra_info)
+                        extra_info = re.sub(r'\(https?://[^\)]+\)', '', extra_info)
+                        extra_info = re.sub(r'https?://[^\s]+', '', extra_info)
+                        # 👇 Ye 2 lines yahan bhi add karni hain
+                        extra_info = re.sub(r'(?i)t\.me/[^\s]+', '', extra_info)
+                        extra_info = re.sub(r'@[a-zA-Z0-9_]+', '', extra_info)
+                        
                         lang_name = str(file_data[4]).strip() if len(file_data) > 4 and file_data[4] else ""
+                        lang_tag = f"[{lang_name}] " if lang_name else ""
                         
-                        e_info = str(file_data[5]) if len(file_data) > 5 and file_data[5] else ""
-                        e_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', e_info)
-                        e_info = re.sub(r'\(https?://[^\)]+\)', '', e_info)
-                        e_info = re.sub(r'https?://[^\s]+', '', e_info)
-                        e_info = re.sub(r'(?i)t\.me/[^\s]+', '', e_info)
-                        e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info).strip()
-                        
-                        link_parts = []
-                        if f_size and f_size.lower() not in ['n/a', 'unknown', 'none', 'unknown size', '']:
-                            link_parts.append(f_size)
-                        if q_name and q_name.lower() not in ['n/a', 'unknown', 'none']:
-                            link_parts.append(q_name)
-                        link_parts.append(title)
-                        if lang_name and lang_name.lower() not in ['n/a', 'unknown', 'none']:
-                            link_parts.append(lang_name)
-                        if e_info:
-                            link_parts.append(e_info)
-                        
-                        link_label = " | ".join(link_parts) if link_parts else "Download Link"
+                        ep_tag = f"[{extra_info.strip()}] " if extra_info.strip() else ""
                         
                         real_idx = all_qualities.index(file_data)
-                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{link_label}</a></b>\n\n"
+                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {lang_tag}{ep_tag}{quality.strip()}</a></b>\n\n"
 
             elif view_type in ["lang", "qual"]:
                 text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
@@ -7371,19 +6434,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
 
             # 👇 YAHAN disable_web_page_preview=True ADD KAR DIYA HAI 👇
-            if getattr(query.message, 'photo', None):
-                await query.edit_message_caption(
-                    caption=text, 
-                    reply_markup=InlineKeyboardMarkup(keyboard), 
-                    parse_mode='HTML'
-                )
-            else:
-                await query.edit_message_text(
-                    text=text, 
-                    reply_markup=InlineKeyboardMarkup(keyboard), 
-                    parse_mode='HTML',
-                    disable_web_page_preview=True 
-                )
+            await query.edit_message_text(
+                text=text, 
+                reply_markup=InlineKeyboardMarkup(keyboard), 
+                parse_mode='HTML',
+                disable_web_page_preview=True 
+            )
             return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
@@ -7399,19 +6455,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Agar data expire ho gaya ho ya ID match na kare, to DB se nikalo
             if not movie_data or movie_data.get('id') != movie_id:
-                # ⚡ thread me + None-safe (pehle pool busy par crash hota tha)
-                res = await db_query(
-                    "SELECT title FROM movies WHERE id = %s", (movie_id,), mode='one'
-                )
-                if res is None:
-                    await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-                    return
-
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT title FROM movies WHERE id = %s", (movie_id,))
+                res = cur.fetchone()
+                cur.close()
+                close_db_connection(conn)
+                
                 title = res[0] if res else "Movie"
-                qualities = await get_qualities_resilient(movie_id)
-                if qualities is None:
-                    await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-                    return
+                qualities = get_all_movie_qualities(movie_id)
                 
                 # Context update karo
                 context.user_data['selected_movie_data'] = {
@@ -7450,41 +6502,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id = int(parts[2])
             movie_title = parts[3]
 
-            # ⚠️ FIX: pehle yahan connection LEKE `notify_users_for_movie()` ko
-            #    await kiya jaata tha — aur wo function apni DB queries chalata
-            #    hai. Matlab ek connection pakadke doosra maangna: pool busy
-            #    hone par ye deadlock jaisa behave karta tha. Ab pehle query
-            #    khatam, phir notify.
-            movie_data = await db_query(
-                "SELECT id, url, file_id FROM movies WHERE title = %s LIMIT 1",
-                (movie_title,), mode='one'
-            )
-            if movie_data is None:
-                await query.edit_message_text("⏳ Server busy hai — thodi der baad try karein.")
-                return
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                cur.execute("SELECT id, url, file_id FROM movies WHERE title = %s LIMIT 1", (movie_title,))
+                movie_data = cur.fetchone()
 
-            if movie_data:
-                movie_id, url, file_id = movie_data
-                value_to_send = file_id if file_id else url
-                num_notified = await notify_users_for_movie(context, movie_title, value_to_send)
+                if movie_data:
+                    movie_id, url, file_id = movie_data
+                    value_to_send = file_id if file_id else url
+                    num_notified = await notify_users_for_movie(context, movie_title, value_to_send)
 
-                await query.edit_message_text(
-                    f"✅ FULFILLED: Movie '{movie_title}' updated and user (ID: {user_id}) notified ({num_notified} total users).",
-                    parse_mode='Markdown'
-                )
+                    await query.edit_message_text(
+                        f"✅ FULFILLED: Movie '{movie_title}' updated and user (ID: {user_id}) notified ({num_notified} total users).",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in the `movies` table. Please add it first.", parse_mode='Markdown')
+
+                cur.close()
+                close_db_connection(conn)
             else:
-                await query.edit_message_text(f"❌ ERROR: Movie '{movie_title}' not found in the `movies` table. Please add it first.", parse_mode='Markdown')
+                await query.edit_message_text("❌ Database error during fulfillment.")
 
         elif query.data.startswith("admin_delete_"):
             parts = query.data.split('_', 3)
             user_id = int(parts[2])
             movie_title = parts[3]
 
-            ok = await db_query(
-                "DELETE FROM user_requests WHERE user_id = %s AND movie_title = %s",
-                (user_id, movie_title), mode='none'
-            )
-            if ok:
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM user_requests WHERE user_id = %s AND movie_title = %s", (user_id, movie_title))
+                conn.commit()
+                cur.close()
+                close_db_connection(conn)
                 await query.edit_message_text(f"❌ DELETED: Request for '{movie_title}' from User ID {user_id} removed.", parse_mode='Markdown')
             else:
                 await query.edit_message_text("❌ Database error during deletion.")
@@ -7499,10 +6551,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_data = context.user_data.get('selected_movie_data')
 
             if not movie_data or movie_data.get('id') != movie_id:
-                qualities = await get_qualities_resilient(movie_id)   # ⚡ thread me
-                if qualities is None:
-                    await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.", show_alert=True)
-                    return
+                qualities = get_all_movie_qualities(movie_id)
                 movie_data = {'id': movie_id, 'title': 'Movie', 'qualities': qualities}
 
             if not movie_data or 'qualities' not in movie_data:
@@ -7582,15 +6631,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif query.data.startswith("download_"):
             movie_title = query.data.replace("download_", "")
 
-            # ⚡ FIX: user-facing path, query event loop par thi
-            movie = await db_query(
-                "SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1",
-                (f'%{movie_title}%',), mode='one'
-            )
-            if movie is None:
-                await query.answer("⏳ Server busy hai — 2 second baad dobara try karein.",
-                                   show_alert=True)
+            conn = get_db_connection()
+            if not conn:
+                await query.answer("❌ Database connection failed.", show_alert=True)
                 return
+
+            cur = conn.cursor()
+            cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (f'%{movie_title}%',))
+            movie = cur.fetchone()
+            cur.close()
+            close_db_connection(conn)
 
             if movie:
                 movie_id, title, url, file_id = movie
@@ -7967,38 +7017,37 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id_f, 5)
         
         # 3. DB Insertion (All Fields)
-        # 🐛 FIX: pehle `conn.cursor()` bina None check ke tha — pool busy hone
-        #    par AttributeError → batch start hi fail (aur admin ko pata nahi
-        #    chalta ki kyun). Ab db_query None-safe hai + thread me chalti hai.
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 🛑 "cast" quoted and year is integer
+        # 🎯 NAYA LOGIC: Title ki jagah IMDb ID par conflict check karega
         import json
-        row = await db_query("""
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", seasons_data)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (imdb_id) DO UPDATE SET
+        cur.execute("""
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", seasons_data) 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            ON CONFLICT (imdb_id) DO UPDATE SET 
             title = EXCLUDED.title,
-            poster_url = EXCLUDED.poster_url,
+            poster_url = EXCLUDED.poster_url, 
             year = EXCLUDED.year,
-            genre = EXCLUDED.genre,
-            rating = EXCLUDED.rating,
-            description = EXCLUDED.description,
-            category = EXCLUDED.category,
+            genre = EXCLUDED.genre, 
+            rating = EXCLUDED.rating, 
+            description = EXCLUDED.description, 
+            category = EXCLUDED.category, 
             "cast" = EXCLUDED."cast",
             seasons_data = EXCLUDED.seasons_data
             RETURNING id
-        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}'),
-            mode='one_commit')
-
-        if not row:
-            await update.message.reply_text(
-                "⏳ Database busy hai — movie save nahi hui. 2-3 second baad "
-                "`/batch_id` dobara chalao.", parse_mode='Markdown')
-            return
-        movie_id = row[0]
-
+        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}'))
+        
+        movie_id = cur.fetchone()[0]
+        
         # 👇 NAYA: Database se check karein ki kya pehle se files hain
-        cnt = await db_query("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s",
-                             (movie_id,), mode='one')
-        file_count = cnt[0] if cnt else 0
+        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+        file_count = cur.fetchone()[0]
+        
+        conn.commit()
+        cur.close()
+        close_db_connection(conn)
 
         # 4. Start Batch Session
         BATCH_SESSION.update({
@@ -8076,75 +7125,71 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await update.message.reply_text(f"⏳ Saving '{title}' to Database...", parse_mode='Markdown')
 
-    # 🐛 Purana code: `conn = get_db_connection(); if not conn: return` —
-    #    pool busy hote hi CHUP-CHAAP return, admin ko sirf "⏳ Saving..." dikhta
-    #    reh jaata tha. Aur poori INSERT+COUNT event loop par blocking thi, isliye
-    #    is dauran user ka search bhi latak jaata tha. Ab dono theek.
-    row = await db_query(
-        """
-        INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast")
-        VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (title) DO UPDATE
-        SET year = EXCLUDED.year,
-            genre = EXCLUDED.genre,
-            category = EXCLUDED.category,
-            language = EXCLUDED.language,
-            "cast" = COALESCE(EXCLUDED."cast", movies."cast")
-        RETURNING id
-        """,
-        (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str),
-        mode='one_commit'
-    )
-    if not row:
-        # None = DB busy/fail, () = RETURNING kuch nahi laaya — dono me batch start na karo
-        await status_msg.edit_text(
-            "⏳ **Database busy hai** — batch start nahi hua.\n"
-            "Thodi der baad `/batch` dobara chalayein.",
-            parse_mode='Markdown'
-        )
-        return
-
-    movie_id = row[0]
-
-    cnt = await db_query("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s",
-                         (movie_id,), mode='one')
-    file_count = cnt[0] if cnt else 0
-
-    BATCH_SESSION.update({
-        'active': True,
-        'movie_id': movie_id,
-        'movie_title': title,
-        'file_count': 0,
-        'admin_id': user_id,
-        'language': language,
-        'category': category
-    })
-
-    # Show cast in confirmation message (if any)
-    cast_display = f"👥 **Cast:** {cast_str}\n" if cast_str else ""
-    msg_text = (
-        f"✅ **Batch Custom Mode Started!**\n\n"
-        f"🎬 **Title:** {title}\n"
-        f"📅 **Year:** {year}\n"
-        f"🎭 **Genre:** {genre}\n"
-        f"🗣️ **Language:** {language}\n"
-        f"🏷️ **Category:** {category}\n"
-        f"{cast_display}"
-        f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
-        f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
-        f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
-    )
-
-    keyboard = []
-    if file_count > 0:
-        keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
-    keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
-
+    conn = get_db_connection()
+    if not conn: return
+    
     try:
-        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        logger.error(f"Batch status edit failed: {e}")
+        cur = conn.cursor()
+        
+        # ✅ FIXED: Quote "cast" because it's a reserved keyword
+        cur.execute(
+            """
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            ON CONFLICT (title) DO UPDATE 
+            SET year = EXCLUDED.year, 
+                genre = EXCLUDED.genre, 
+                category = EXCLUDED.category, 
+                language = EXCLUDED.language,
+                "cast" = COALESCE(EXCLUDED."cast", movies."cast")
+            RETURNING id
+            """,
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str)
+        )
+        movie_id = cur.fetchone()[0]
+        conn.commit()
 
+        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+        file_count = cur.fetchone()[0]
+        cur.close()
+
+        BATCH_SESSION.update({
+            'active': True,
+            'movie_id': movie_id,
+            'movie_title': title,
+            'file_count': 0,
+            'admin_id': user_id,
+            'language': language,
+            'category': category
+        })
+
+        # Show cast in confirmation message (if any)
+        cast_display = f"👥 **Cast:** {cast_str}\n" if cast_str else ""
+        msg_text = (
+            f"✅ **Batch Custom Mode Started!**\n\n"
+            f"🎬 **Title:** {title}\n"
+            f"📅 **Year:** {year}\n"
+            f"🎭 **Genre:** {genre}\n"
+            f"🗣️ **Language:** {language}\n"
+            f"🏷️ **Category:** {category}\n"
+            f"{cast_display}"
+            f"🚀 **Step 1:** Ab movie/series ki Files (Video/Doc) bhejo.\n"
+            f"🖼️ **Step 2:** Poster ke liye koi bhi ek Image bhej do.\n"
+            f"✅ **Step 3:** Jab sab ho jaye to `/done` bhejo."
+        )
+
+        keyboard = []
+        if file_count > 0:
+            keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
+        
+        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    except Exception as e:
+        logger.error(f"Batch Error: {e}")
+        await status_msg.edit_text(f"❌ DB Error: {e}")
+    finally:
+        if conn: close_db_connection(conn)
 
 # ============================================================================
 # 🚀 SUPER BATCH SYSTEM (Smart Grouping + Auto Post)
@@ -8235,29 +7280,11 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Superbatch — TWO-PHASE PARALLEL PIPELINE.
-
-    ❌ PEHLE KYA HOTA THA:
-       Ek `for` loop me ek-ek movie. Movie #2 ka Gemini call shuru bhi nahi hota tha
-       jab tak movie #1 ka poster upload khatam na ho. Har movie ~15-25s → 150 movies
-       = 40-50 minute. Sab kuch network WAIT tha, CPU khali baitha tha.
-
-    ✅ AB:
-       PHASE A (wide parallel, Telegram ka koi kaam nahi):
-           Gemini reconcile + TMDb/OMDb/IMDb + DB upsert — saari movies EK SAATH
-           (default 8 concurrent). Yahan Telegram flood limit ka koi issue nahi hai,
-           isliye yahan chaudi parallelism safe hai. Wall-clock ka sabse bada hissa
-           yahi tha.
-       PHASE B (bounded parallel, Telegram-bound):
-           File copies + channel posts — limited concurrency (default 4) + rate
-           limiter. Yahan asli limit Telegram ki hai, isliye jaan-boojh kar kam
-           parallelism rakha hai. Zyada karne se FloodWait aayega aur ULTA slow hoga.
-
-    ⚠️ Ek movie ki files aaj bhi SEQUENTIALLY save hoti hain (jaan-boojh kar) —
-       kyunki is_downgrade / auto_upgrade_delete DB state compare karte hain. Same
-       movie ki do files parallel karne se dono ek doosre ko delete kar sakti thin.
-       "Sari movies par ek saath kaam" ka matlab: movies parallel, ek movie ki files
-       apne andar order me.
+    Superbatch ka kaam:
+      1. Files ko movie ke hisaab se group karo
+      2. Har movie ke liye _core_movie_processor (Phase 1) → BATCH_SESSION set karo
+      3. Har file ke liye _pm_save_file (Phase 2) — pm_file_listener ka exact same code
+      4. Post karo channel pe
     """
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
@@ -8270,7 +7297,6 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Koi file nahi mili!")
         return
 
-    started_at = time.time()
     status_msg = await update.message.reply_text(
         f"🔄 **{len(files)} files group ho rahi hain...**", parse_mode='Markdown'
     )
@@ -8279,303 +7305,255 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Gemini grouping ke baad identity reconcile karega. Isliye grouping yahan
     # exact/very-high-confidence aur ambiguity-safe rules se hoti hai.
     grouped_movies = _build_superbatch_groups(files)
+
     total_movies = len(grouped_movies)
+    await status_msg.edit_text(f"✅ **Files grouped into {total_movies} unique movies!**\n\n🚀 Auto-Processing & Posting starts now...", parse_mode='Markdown')
 
-    progress = _ThrottledProgress(status_msg)
-    await progress.force(
-        f"✅ **{len(files)} files → {total_movies} unique movies!**\n\n"
-        f"🧠 Phase 1/2: Metadata (Gemini + TMDb) — {SUPERBATCH_META_CONCURRENCY} parallel..."
-    )
+    success_movies = 0
+    total_files_saved = 0           # 👈 NAYA: Kitni files save hui uski ginti
+    movies_posted_list = []         # 👈 NAYA: Jo movies post hui unki list
+    channels = get_storage_channels()
 
-    # ══════════════════════════════════════════════════════════════════════
-    # PHASE A — METADATA (WIDE PARALLEL, ZERO TELEGRAM CALLS)
-    # ══════════════════════════════════════════════════════════════════════
-    meta_sem = asyncio.Semaphore(SUPERBATCH_META_CONCURRENCY)
-    meta_done = {'n': 0}
-
-    async def _prepare(group_key, movie_files):
-        async with meta_sem:
+    for i, (group_key, movie_files) in enumerate(grouped_movies.items(), 1):
+        try:
             representative = _select_representative_file(movie_files)
             display_name = representative.get('display_title', group_key)
+            await status_msg.edit_text(f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: `{display_name}`")
+
+            image_bytes = None
+            if representative.get('thumb_id'):
+                try:
+                    # Thumbnail multimodal analysis abhi intentionally disabled hai.
+                    image_bytes = None
+                except Exception:
+                    image_bytes = None
+
+            # Exactly ONE Gemini reconciliation per finalized group, using the
+            # most complete same-file caption+filename evidence packet.
+            reconciled_data = await reconcile_evidence_with_gemini(
+                representative.get('caption_evidence', {}),
+                representative.get('filename_evidence', {}),
+                caption_raw=representative.get('caption', ''),
+                filename_raw=representative.get('file_name', ''),
+            )
+
+            result = await _core_movie_processor(
+                representative.get('caption') or representative.get('file_name') or display_name,
+                image_bytes,
+                reconciled_data=reconciled_data,
+            )
+
+            if not result:
+                logger.warning(f"Superbatch: '{display_name}' process nahi ho paya, skip kar raha hoon.")
+                continue
+
+            movie_id   = result['movie_id']
+            title      = result['title']
+            year       = result['year']
+            genre      = result['genre']
+            rating     = result['rating']
+            plot       = result['plot']
+            category   = result['category']
+            movie_lang = result['movie_lang']
+            poster_url = result['poster_url']
+            imdb_id    = result['imdb_id']
+
+            # ── STEP 2: BATCH_SESSION set karo (Phase 1 jaisa) ──────────────────
+            BATCH_SESSION.update({
+                'active':      True,
+                'movie_id':    movie_id,
+                'movie_title': title,
+                'file_count':  0,
+                'admin_id':    ADMIN_USER_ID,
+                'year':        str(year) if year else '',
+                'category':    category,
+                'language':    movie_lang,
+            })
+
+            # ── STEP 3: Har file ke liye unified Phase 2 saver ───────────────
+            saved_labels = []
             try:
-                # Exactly ONE Gemini reconciliation per finalized group, using the
-                # most complete same-file caption+filename evidence packet.
-                reconciled_data = await reconcile_evidence_with_gemini(
-                    representative.get('caption_evidence', {}),
-                    representative.get('filename_evidence', {}),
-                    caption_raw=representative.get('caption', ''),
-                    filename_raw=representative.get('file_name', ''),
-                )
-
-                result = await _core_movie_processor(
-                    representative.get('caption') or representative.get('file_name') or display_name,
-                    None,  # Thumbnail multimodal analysis abhi intentionally disabled hai
-                    reconciled_data=reconciled_data,
-                )
-                if not result:
-                    logger.warning(f"Superbatch: '{display_name}' process nahi ho paya, skip kar raha hoon.")
-                    return None
-
-                # 👇 GLOBAL DUPLICATE CHECK — pehle ye sabse AAKHIR me hota tha, matlab
-                # already-posted movie par bhi poora Gemini+TMDb+poster kaam ho jaata tha.
-                # Ab yahan pata chal jaata hai → poster download/blur bach jaata hai.
-                # (Files phir bhi save hoti hain — sirf channel post skip hota hai,
-                #  purana behaviour exactly same.)
-                already_posted = await run_async(is_movie_posted_recently, result['movie_id'], 7)
-
-                result['display_name'] = display_name
-                result['files'] = movie_files
-                result['already_posted'] = bool(already_posted)
-                return result
-            except Exception as e:
-                logger.error(f"SuperBatch Phase-A error for '{display_name}': {e}")
-                return None
-            finally:
-                meta_done['n'] += 1
-                await progress.maybe(
-                    f"🧠 **Phase 1/2 — Metadata**\n"
-                    f"✅ {meta_done['n']}/{total_movies} movies identify ho gayi\n"
-                    f"🎬 Last: `{display_name}`"
-                )
-
-    prepared_raw = await asyncio.gather(
-        *[_prepare(k, v) for k, v in grouped_movies.items()]
-    )
-
-    # ── DEDUPE BY movie_id (ye barrier zaroori hai) ──────────────────────
-    # Do local groups Gemini ke baad SAME movie nikal sakte hain (same title →
-    # ON CONFLICT se same movie_id). Sequential version me doosra group
-    # is_movie_posted_recently se pakda jaata tha. Parallel me dono ek saath
-    # check karte, aur SAME movie do baar channel pe post ho jaati.
-    # Isliye yahan movie_id pe merge kar dete hain — files bhi ek hi jagah aa
-    # jaati hain, aur same movie ki files ka downgrade-race bhi khatam.
-    merged = {}
-    for item in prepared_raw:
-        if not item:
-            continue
-        mid = item['movie_id']
-        if mid in merged:
-            existing_names = {id(f) for f in merged[mid]['files']}
-            merged[mid]['files'].extend(f for f in item['files'] if id(f) not in existing_names)
-            merged[mid]['already_posted'] = merged[mid]['already_posted'] or item['already_posted']
-            logger.info(f"🔗 Superbatch: '{item['display_name']}' merged into movie_id={mid} (same title)")
-        else:
-            merged[mid] = item
-
-    prepared = list(merged.values())
-    if not prepared:
-        await progress.force("❌ **Koi bhi movie identify nahi ho payi.** Logs check karo.")
-        SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
-        return
-
-    phase_a_secs = int(time.time() - started_at)
-    await progress.force(
-        f"✅ **Phase 1/2 done** ({len(prepared)} movies, {phase_a_secs}s)\n\n"
-        f"📤 Phase 2/2: Files + Channel posts — {SUPERBATCH_POST_CONCURRENCY} parallel..."
-    )
-
-    # ══════════════════════════════════════════════════════════════════════
-    # PHASE B — TELEGRAM (BOUNDED PARALLEL)
-    # ══════════════════════════════════════════════════════════════════════
-    post_sem = asyncio.Semaphore(SUPERBATCH_POST_CONCURRENCY)
-    post_done = {'n': 0}
-    total_prepared = len(prepared)
-
-    async def _commit(item):
-        async with post_sem:
-            title = item['title']
-            movie_id = item['movie_id']
-            try:
-                # 🔑 PER-MOVIE SESSION — global BATCH_SESSION nahi. Isi ki wajah se
-                # movies parallel chal sakti hain bina files galat movie me jaane ke.
-                session = {
-                    'active':      True,
-                    'movie_id':    movie_id,
-                    'movie_title': title,
-                    'file_count':  0,
-                    'admin_id':    ADMIN_USER_ID,
-                    'year':        str(item['year']) if item['year'] else '',
-                    'category':    item['category'],
-                    'language':    item['movie_lang'],
-                }
-
-                # Ek movie ki files SEQUENTIALLY — downgrade/upgrade logic DB state
-                # compare karta hai, isliye ye jaan-boojh kar serial hai.
-                saved_labels = []
-                for f in item['files']:
-                    try:
-                        label = await _pm_save_file(f['message_obj'], context, session=session)
-                    except Exception as fe:
-                        logger.error(f"Superbatch file save error ({title}): {fe}")
-                        label = None
+                for f in movie_files:
+                    label = await _pm_save_file(f['message_obj'], context)
                     if label:
                         saved_labels.append(label)
+                    await asyncio.sleep(0.5)
+            finally:
+                # Koi file error kare tab bhi next movie ke liye session leak na ho.
+                BATCH_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None,
+                                      'file_count': 0, 'admin_id': None, 'year': '',
+                                      'category': '', 'language': ''})
 
-                if not saved_labels:
-                    logger.warning(f"Superbatch: '{title}' — koi file save nahi ho paya")
-                    return {'files_saved': 0, 'posted': False, 'title': title}
+            if not saved_labels:
+                logger.warning(f"Superbatch: '{display_name}' — koi file save nahi ho paya")
+                continue
+            total_files_saved += len(saved_labels)
 
-                if item['already_posted']:
-                    logger.info(f"⏭️ Skipping post for '{title}' (already posted within last 7 days).")
-                    return {'files_saved': len(saved_labels), 'posted': False, 'title': title}
+            # 🚫 AI Alias Generation OFF — Flask Web App mein Google Suggest + pg_trgm handles typos
+            # generate_basic_aliases() bhi hata diya — DB clean rahega
+            aliases = []
+            alias_count = 0
+            
+            # --- POSTER PROCESSING (Landscape Blur Effect) ---
+            raw_photo = poster_url if (poster_url and poster_url != 'N/A' and poster_url.startswith('http')) else None
+            
+            if not raw_photo and image_bytes:
+                raw_photo = image_bytes
+                
+            # 👇 NAYA LOGIC: अगर ओरिजिनल इमेज (poster) नहीं मिली, तो इस मूवी को पोस्ट मत करो
+            if not raw_photo:
+                logger.warning(f"⚠️ Post Skipped: '{title}' के लिए कोई इमेज नहीं मिली।")
+                continue  # 'continue' का मतलब है ये चैनल/फोरम में पोस्ट किए बिना अगली मूवी पर चला जायेगा
+                
+            # अगर असली इमेज है, तभी लैंडस्केप पोस्टर बनाओ
+            photo_to_send = await make_landscape_poster(raw_photo)
 
-                # --- POSTER PROCESSING (Landscape Blur Effect) ---
-                # Jaan-boojh kar Phase B me hai: 150 posters ek saath memory me
-                # rakhne se Render ka RAM blow ho jaata. Yahan sirf
-                # SUPERBATCH_POST_CONCURRENCY jitne posters ek waqt me hote hain.
-                poster_url = item['poster_url']
-                raw_photo = poster_url if (poster_url and poster_url != 'N/A' and str(poster_url).startswith('http')) else None
+            # 🛑 100% SAFE HTML CAPTION + RANDOM STYLES
+            safe_rating = rating if rating else "N/A"
+            safe_genre = genre if genre else "Unknown"
 
-                # 👇 अगर ओरिजिनल इमेज (poster) नहीं मिली, तो इस मूवी को पोस्ट मत करो
-                if not raw_photo:
-                    logger.warning(f"⚠️ Post Skipped: '{title}' के लिए कोई इमेज नहीं मिली।")
-                    return {'files_saved': len(saved_labels), 'posted': False, 'title': title}
-
-                photo_to_send = await make_landscape_poster(raw_photo)
-
-                # 🛑 100% SAFE HTML CAPTION + RANDOM STYLES
-                safe_genre = item['genre'] if item['genre'] else "Unknown"
-                movie_lang = item['movie_lang']
-
-                res_set = set()
-                for lbl in saved_labels:
-                    match = re.search(r'(\d{3,4}p)', lbl)
+            res_set = set()
+            for lbl in saved_labels:
+                match = re.search(r'(\d{3,4}p)', lbl)
+                if match:
+                    res_set.add(match.group(1))
+            # file_names se bhi try karo agar label mein nahi mila
+            if not res_set:
+                for f in movie_files:
+                    match = re.search(r'(\d{3,4}p)', str(f.get('file_name', '')).lower())
                     if match:
                         res_set.add(match.group(1))
-                # file_names se bhi try karo agar label mein nahi mila
-                if not res_set:
-                    for f in item['files']:
-                        match = re.search(r'(\d{3,4}p)', str(f.get('file_name', '')).lower())
-                        if match:
-                            res_set.add(match.group(1))
-                res_list = sorted(list(res_set), key=lambda x: int(x.replace('p', '')), reverse=True)
-                dynamic_res = " | ".join(res_list) if res_list else "HD"
+            res_list = sorted(list(res_set), key=lambda x: int(x.replace('p','')), reverse=True)
+            dynamic_res = " | ".join(res_list) if res_list else "HD"
+            
+            safe_title = title.replace('<', '').replace('>', '')
+            unicode_title = get_safe_font(safe_title)
 
-                safe_title = title.replace('<', '').replace('>', '')
-                unicode_title = get_safe_font(safe_title)
+            # 🎲 2 RANDOM STYLES 🎲 (Box wala hat gaya)
+            style_choice = random.choice([1, 2])
 
-                # 🎲 2 RANDOM STYLES 🎲 (Box wala hat gaya)
-                style_choice = random.choice([1, 2])
+            if style_choice == 1:
+                # 🌟 Style 1: Clean Minimalist Divider (Mobile & PC Friendly)
+                caption = (
+                    f"🎬 <b>{safe_title}</b>\n"
+                    f"➖➖➖➖➖➖➖➖➖➖\n"
+                    f"✨ <b>Genre:</b> {safe_genre}\n"
+                    f"🔊 <b>Language:</b> {movie_lang if movie_lang else 'Hindi'}\n"
+                    f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+                    f"➖➖➖➖➖➖➖➖➖➖\n"
+                    f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
+                    f"👇 <b>Download Below</b> 👇"
+                )
+            else:
+                # Style 2: Tree Line + Premium Font (Pehle ye Style 3 tha)
+                caption = (
+                    f"🔥 <b>{unicode_title}</b>\n"
+                    f" ├ ✨ Genre: {safe_genre}\n"
+                    f" ├ 🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
+                    f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
+                    f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
+                    f"👇 <b>Download Below</b> 👇"
+                )
 
-                if style_choice == 1:
-                    # 🌟 Style 1: Clean Minimalist Divider (Mobile & PC Friendly)
-                    caption = (
-                        f"🎬 <b>{safe_title}</b>\n"
-                        f"➖➖➖➖➖➖➖➖➖➖\n"
-                        f"✨ <b>Genre:</b> {safe_genre}\n"
-                        f"🔊 <b>Language:</b> {movie_lang if movie_lang else 'Hindi'}\n"
-                        f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
-                        f"➖➖➖➖➖➖➖➖➖➖\n"
-                        f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
-                        f"👇 <b>Download Below</b> 👇"
-                    )
-                else:
-                    # Style 2: Tree Line + Premium Font (Pehle ye Style 3 tha)
-                    caption = (
-                        f"🔥 <b>{unicode_title}</b>\n"
-                        f" ├ ✨ Genre: {safe_genre}\n"
-                        f" ├ 🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
-                        f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
-                        f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                        f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
-                        f"👇 <b>Download Below</b> 👇"
-                    )
+            # --- SECURE LINK & BUTTONS (As it was) ---
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
-                # --- SECURE LINK & BUTTONS (As it was) ---
-                secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+            post_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
+                [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
+                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            ])
 
-                post_keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-                    [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-                    [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
-                ])
+            # --- TARGET CHANNEL SELECTION (New System) ---
+            cat_lower = str(category or "").lower()
+            if "anime" in cat_lower or "cartoon" in cat_lower or "animation" in cat_lower:
+                target_channels = [ANIME_CHANNEL_ID]
+            else:
+                target_channels = [ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',') if ch.strip()]
 
-                # --- TARGET CHANNEL SELECTION (New System) ---
-                cat_lower = str(item['category'] or "").lower()
-                if "anime" in cat_lower or "cartoon" in cat_lower or "animation" in cat_lower:
-                    target_channels = [ANIME_CHANNEL_ID]
-                else:
-                    target_channels = [ch.strip() for ch in os.environ.get('BROADCAST_CHANNELS', '').split(',') if ch.strip()]
+            # 👇 YAHAN SE MAIN CHANNEL PAR BHEJNE KA ASLI LOGIC SHURU HOTA HAI 👇
+            
+            # --- THE "NINJA FIX" --- 
+            # Pehle decide karte hain ki photo kya bhejna hai
+            is_bytes = hasattr(photo_to_send, 'read')
+            current_media = photo_to_send
+            
+            uploaded_file_id = None # Isme Telegram ki File ID store hogi
 
-                if not target_channels:
-                    return {'files_saved': len(saved_labels), 'posted': False, 'title': title}
-
-                # --- THE "NINJA FIX" ---
-                # Pehli baar bytes upload hote hain, uske baad Telegram ki file_id
-                # reuse hoti hai (baaki channels me re-upload nahi).
-                is_bytes = hasattr(photo_to_send, 'read')
-                current_media = photo_to_send
-                uploaded_file_id = None
-                posted_any = False
-
-                for chat_id_str in target_channels:
+            # 👇 GLOBAL DUPLICATE CHECK — Agar kisi bhi channel me 7 din me post ho chuki hai to skip 👇
+            if is_movie_posted_recently(movie_id, days=7):
+                logger.info(f"⏭️ Skipping '{title}' (already posted within the last 7 days in some channel).")
+                continue
+            
+            if target_channels:
+                for chat_id_str in target_channels: 
                     try:
                         chat_id = int(chat_id_str)
+
+                        sent_msg = None
+                        
+                        # Agar humare pass pehle se ID hai, toh file upload nahi karni
                         if uploaded_file_id:
                             sent_msg = await context.bot.send_photo(
-                                chat_id=chat_id, photo=uploaded_file_id,
-                                caption=caption, parse_mode='HTML', reply_markup=post_keyboard,
+                                chat_id=chat_id,
+                                photo=uploaded_file_id, # 👈 Direct ID
+                                caption=caption,
+                                parse_mode='HTML',
+                                reply_markup=post_keyboard
                             )
                         else:
+                            # Pehli baar upload karna hai (Bytes se)
                             if is_bytes:
-                                current_media.seek(0)  # File pointer ko shuru me laao
+                                current_media.seek(0) # File pointer ko shuru me laao
+                                
                             sent_msg = await context.bot.send_photo(
-                                chat_id=chat_id, photo=current_media,
-                                caption=caption, parse_mode='HTML', reply_markup=post_keyboard,
+                                chat_id=chat_id,
+                                photo=current_media, # 👈 Actual bytes
+                                caption=caption,
+                                parse_mode='HTML',
+                                reply_markup=post_keyboard
                             )
+                            # Ek baar upload hone ke baad, Telegram se permanent File ID save karlo
                             if sent_msg and sent_msg.photo:
-                                uploaded_file_id = sent_msg.photo[-1].file_id
-
+                                uploaded_file_id = sent_msg.photo[-1].file_id 
+                                
                         # ✅ DB me save karna zaroori hai taaki baad me /restore kaam kare
                         if sent_msg:
-                            posted_any = True
                             ch_name = sent_msg.chat.title if sent_msg.chat else "Unknown"
-                            # 🚀 blocking DB call thread me — event loop free
-                            await run_async(
-                                save_post_to_db,
-                                movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot", caption,
+                            save_post_to_db(
+                                movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot", caption, 
                                 uploaded_file_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies",
-                                movie_name=title, imdb_id=item['imdb_id'], tmdb_id=None, channel_name=ch_name,
+                                movie_name=title, imdb_id=imdb_id, tmdb_id=None, channel_name=ch_name
                             )
+                            await asyncio.sleep(1.5)
+                            
                     except Exception as e:
                         logger.error(f"❌ Failed to post in channel {chat_id_str}: {e}")
 
-                return {'files_saved': len(saved_labels), 'posted': posted_any, 'title': title}
+            success_movies += 1
+            movies_posted_list.append(title) # 👈 NAYA: List me Title add kiya
+            await asyncio.sleep(2) # Flood limit se bachne ke liye delay
 
-            except Exception as e:
-                logger.error(f"SuperBatch Movie Error ({title}): {e}")
-                return {'files_saved': 0, 'posted': False, 'title': title}
-            finally:
-                post_done['n'] += 1
-                await progress.maybe(
-                    f"📤 **Phase 2/2 — Upload & Post**\n"
-                    f"✅ {post_done['n']}/{total_prepared} movies done\n"
-                    f"🎬 Last: `{title}`"
-                )
+        except Exception as e:
+            logger.error(f"SuperBatch Movie Error: {e}")
+            continue
 
-    commit_results = await asyncio.gather(*[_commit(i) for i in prepared])
-
-    # ── FINAL SUMMARY ────────────────────────────────────────────────────
-    total_files_saved = sum(r['files_saved'] for r in commit_results if r)
-    movies_posted_list = [r['title'] for r in commit_results if r and r['posted']]
-
+    # 📝 NAYA: List format banana
     if movies_posted_list:
         posted_names = "\n".join([f"🔹 {name}" for name in movies_posted_list])
     else:
         posted_names = "Koyi nayi movie post nahi hui."
 
-    elapsed = int(time.time() - started_at)
-    mins, secs = divmod(elapsed, 60)
+    # 🎉 NAYA: Final Message (HTML format me)
     final_text = (
         f"🎉 <b>SUPER BATCH COMPLETED!</b>\n\n"
-        f"⏱️ <b>Time Taken:</b> {mins}m {secs}s\n"
         f"💾 <b>Total Files Saved in DB:</b> {total_files_saved}\n"
         f"🚀 <b>Movies/Series Auto-Posted:</b> {len(movies_posted_list)}/{total_movies}\n\n"
         f"<b>📑 Posted List:</b>\n{posted_names}"
     )
 
-    await progress.force(final_text, parse_mode='HTML')
-    logger.info(f"🎉 Superbatch done: {len(files)} files, {total_movies} movies, {elapsed}s")
+    await status_msg.edit_text(final_text, parse_mode='HTML')
 
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
 
@@ -8613,18 +7591,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         return None
 
     # --- STEP 2: TMDB + IMDb METADATA ---
-    # ✅ ACCURACY: need_episodes=True hi rakha hai (episode-level air_date year).
-    # Pehle ye per-season SEQUENTIAL calls karta tha (8-season series = 9 calls,
-    # ~15-25s) — asli slowness wahi thi, episodes wahi nahi. Ab _fetch_seasons_data
-    # saari season calls PARALLEL bhejta hai, isliye poori accuracy ka cost ~1 call
-    # ke barabar hai. Aur pehle seasons_data fetch hokar PHENK diya jaata tha
-    # (DB me save hi nahi hota tha) — ab save hota hai, isliye season/episode-wise
-    # year aur poster accuracy ULTA IMPROVE hui hai.
-    metadata = await run_async(
-        fetch_movie_metadata, movie_name, movie_year, movie_lang, False, gemini_category,
-        need_seasons=True, need_episodes=True,
-    )
-    seasons_data = {}
+    metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, False, gemini_category)
     if metadata:
         title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
     else:
@@ -8652,19 +7619,6 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     if not imdb_id:  # Fix for empty string violating unique constraint
         imdb_id = None
 
-    # 🚀 Poora DB kaam ek thread me — pehle ye blocking psycopg2 call seedha event
-    # loop pe chalti thi, jiske dauran pura bot (saare users) ruk jaata tha.
-    result = await run_async(
-        _core_movie_db_upsert,
-        title, imdb_id, poster_url, year, genre, rating, plot,
-        category, movie_lang, cast_str, seasons_data,
-    )
-    return result
-
-
-def _core_movie_db_upsert(title, imdb_id, poster_url, year, genre, rating, plot,
-                          category, movie_lang, cast_str, seasons_data):
-    """Blocking DB upsert — sirf run_async ke through call hota hai."""
     # imdb_id bhi update hota hai — superbatch mein pehle yeh missing tha!
     conn = get_db_connection()
     if not conn:
@@ -8674,8 +7628,8 @@ def _core_movie_db_upsert(title, imdb_id, poster_url, year, genre, rating, plot,
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast", seasons_data)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast")
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (title) DO UPDATE
             SET imdb_id      = COALESCE(EXCLUDED.imdb_id,      movies.imdb_id),
                 poster_url   = COALESCE(EXCLUDED.poster_url,   movies.poster_url),
@@ -8686,13 +7640,10 @@ def _core_movie_db_upsert(title, imdb_id, poster_url, year, genre, rating, plot,
                 description  = COALESCE(EXCLUDED.description,  movies.description),
                 language     = CASE WHEN EXCLUDED.language   != '' THEN EXCLUDED.language   ELSE movies.language   END,
                 extra_info   = CASE WHEN EXCLUDED.extra_info  != '' THEN EXCLUDED.extra_info  ELSE movies.extra_info  END,
-                "cast"       = COALESCE(EXCLUDED."cast",       movies."cast"),
-                seasons_data = CASE WHEN EXCLUDED.seasons_data::text NOT IN ('{}', 'null')
-                                    THEN EXCLUDED.seasons_data ELSE movies.seasons_data END
+                "cast"       = COALESCE(EXCLUDED."cast",       movies."cast")
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, "",
-             cast_str, json.dumps(seasons_data or {}))
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, "", cast_str)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
@@ -8723,86 +7674,27 @@ def _core_movie_db_upsert(title, imdb_id, poster_url, year, genre, rating, plot,
 # 📤 _pm_save_file — pm_file_listener ka Phase 2 (ek jagah, sab use karein)
 # superbatch_done bhi isko call karta hai — alag/duplicate code nahi
 # ==============================================================================
-def _downgrade_precheck_sync(movie_id, label, f_extra):
-    """Blocking downgrade check — run_async ke through. (True, existing) = reject."""
-    conn = get_db_connection()
-    if not conn:
-        return None, None
-    try:
-        return is_downgrade(movie_id, label, f_extra, conn)
-    except Exception as exc:
-        logger.error("_pm_save_file pre-upload downgrade check failed: %s", exc)
-        return None, None
-    finally:
-        close_db_connection(conn)
-
-
-def _save_file_db_sync(movie_id, label, file_size_str, main_url, backup_map_json,
-                       f_lang, f_extra, file_unique_id):
-    """
-    Blocking file upsert + auto-upgrade delete — run_async ke through.
-    Returns (ok: bool, deleted_count: int).
-    """
-    conn = get_db_connection()
-    if not conn:
-        return False, 0
-    try:
-        upsert_movie_file(
-            conn, movie_id, label, file_size_str, main_url,
-            backup_map_json, f_lang, f_extra, file_unique_id,
-        )
-        deleted = 0
-        try:
-            deleted, deleted_labels = auto_upgrade_delete(movie_id, label, f_extra, conn)
-            if deleted > 0:
-                logger.info("🔄 _pm_save_file: %s old print(s) deleted: %s", deleted, deleted_labels)
-        except Exception as exc:
-            logger.error("Auto-Upgrade error in _pm_save_file: %s", exc)
-        return True, deleted
-    except Exception as exc:
-        logger.error("_pm_save_file DB error: %s", exc)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return False, 0
-    finally:
-        close_db_connection(conn)
-
-
-async def _pm_save_file(message, context, session: dict = None) -> str | None:
+async def _pm_save_file(message, context) -> str | None:
     """
     Unified Phase 2 saver. Gemini bilkul use nahi hota.
     Caption aur raw filename separately parse hote hain, field-wise merge hota hai,
     downgrade upload se PEHLE block hota hai, phir storage copy + DB upsert hota hai.
-
-    🔑 PARALLEL-SAFE FIX:
-      Pehle ye function GLOBAL `BATCH_SESSION` se movie_id padhta tha. Superbatch me
-      do movies parallel karne par dono ek doosre ka movie_id overwrite kar deti thin
-      → files GALAT movie ke neeche save ho jaati thin. Isliye parallel karna hi
-      possible nahi tha.
-      Ab caller apna per-movie `session` dict pass karta hai. `session=None` ka matlab
-      purana behaviour (global BATCH_SESSION) — isliye pm_file_listener bilkul waisa
-      hi chalta hai.
     """
-    if session is None:
-        session = BATCH_SESSION
-
     media = message.document or message.video
     if not media:
         logger.error("_pm_save_file: Unsupported media type")
         return None
 
-    movie_id = session.get('movie_id')
+    movie_id = BATCH_SESSION.get('movie_id')
     if not movie_id:
-        logger.error("_pm_save_file: session movie_id missing")
+        logger.error("_pm_save_file: BATCH_SESSION movie_id missing")
         return None
 
     file_name = getattr(media, 'file_name', None) or "File"
     file_size = getattr(media, 'file_size', 0) or 0
     file_unique_id = getattr(media, 'file_unique_id', None)
     file_size_str = get_readable_file_size(file_size)
-    current_lang = session.get('language', '')
+    current_lang = BATCH_SESSION.get('language', '')
     raw_caption = message.caption or message.text or ""
 
     # Independent local extraction; no Gemini in Phase 2.
@@ -8817,10 +7709,16 @@ async def _pm_save_file(message, context, session: dict = None) -> str | None:
     f_extra = _merge_extra_info(cap_data.get('extra_info'), fn_data.get('extra_info'))
 
     # Downgrade check BEFORE copying to channels, taaki rejected orphan uploads na banein.
-    # 🚀 Ab thread me — blocking DB call event loop ko block nahi karti.
-    rejected, existing = await run_async(_downgrade_precheck_sync, movie_id, label, f_extra)
-    if rejected is None:
+    precheck_conn = get_db_connection()
+    if not precheck_conn:
         return None
+    try:
+        rejected, existing = is_downgrade(movie_id, label, f_extra, precheck_conn)
+    except Exception as exc:
+        logger.error("_pm_save_file pre-upload downgrade check failed: %s", exc)
+        return None
+    finally:
+        close_db_connection(precheck_conn)
 
     if rejected:
         logger.info("🛡️ _pm_save_file: REJECTED '%s' — DB already has better '%s'", label, existing)
@@ -8831,18 +7729,14 @@ async def _pm_save_file(message, context, session: dict = None) -> str | None:
         logger.error("_pm_save_file: No STORAGE_CHANNELS found")
         return None
 
-    # 🚀 Saare storage channels me ek saath copy. Pehle sequential tha + har copy ke
-    # baad blind sleep(0.3). Flood-control ab AIORateLimiter handle karta hai.
-    async def _copy_to(chat_id):
+    backup_map = {}
+    for chat_id in channels:
         try:
             sent = await message.copy(chat_id=chat_id)
-            return str(chat_id), sent.message_id
+            backup_map[str(chat_id)] = sent.message_id
+            await asyncio.sleep(0.3)
         except Exception as exc:
             logger.error("_pm_save_file upload failed for %s: %s", chat_id, exc)
-            return None
-
-    copy_results = await asyncio.gather(*[_copy_to(cid) for cid in channels])
-    backup_map = dict(r for r in copy_results if r)
 
     if not backup_map:
         logger.error("_pm_save_file: All uploads failed")
@@ -8854,15 +7748,10 @@ async def _pm_save_file(message, context, session: dict = None) -> str | None:
 
     thumb = getattr(media, 'thumbnail', None) or getattr(media, 'thumb', None)
     if thumb:
-        session['extracted_thumb'] = getattr(thumb, 'file_id', None)
+        BATCH_SESSION['extracted_thumb'] = getattr(thumb, 'file_id', None)
 
-    ok, deleted = await run_async(
-        _save_file_db_sync, movie_id, label, file_size_str, main_url,
-        json.dumps(backup_map), f_lang, f_extra, file_unique_id,
-    )
-
-    if not ok:
-        # DB fail — orphan uploads clean karo
+    conn = get_db_connection()
+    if not conn:
         for chat_id, message_id in backup_map.items():
             try:
                 await context.bot.delete_message(chat_id=int(chat_id), message_id=message_id)
@@ -8870,46 +7759,38 @@ async def _pm_save_file(message, context, session: dict = None) -> str | None:
                 pass
         return None
 
-    session['file_count'] = max(0, session.get('file_count', 0) + 1 - deleted)
-    logger.info(
-        "_pm_save_file saved: %s — %s [%s]",
-        session.get('movie_title'), label, file_size_str,
-    )
-    return label
-
-
-def _count_movie_files(movie_id) -> int:
-    """Blocking count — sirf run_async ke through."""
-    conn = get_db_connection()
-    if not conn:
-        return 0
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-        count = cur.fetchone()[0]
-        cur.close()
-        return count
-    except Exception as exc:
-        logger.error("_count_movie_files failed: %s", exc)
-        return 0
-    finally:
-        close_db_connection(conn)
+        upsert_movie_file(
+            conn, movie_id, label, file_size_str, main_url,
+            json.dumps(backup_map), f_lang, f_extra, file_unique_id,
+        )
+        BATCH_SESSION['file_count'] = BATCH_SESSION.get('file_count', 0) + 1
+        logger.info(
+            "_pm_save_file saved: %s — %s [%s]",
+            BATCH_SESSION.get('movie_title'), label, file_size_str,
+        )
 
+        try:
+            deleted, deleted_labels = auto_upgrade_delete(movie_id, label, f_extra, conn)
+            if deleted > 0:
+                BATCH_SESSION['file_count'] = max(0, BATCH_SESSION.get('file_count', 0) - deleted)
+                logger.info("🔄 _pm_save_file: %s old print(s) deleted: %s", deleted, deleted_labels)
+        except Exception as exc:
+            logger.error("Auto-Upgrade error in _pm_save_file: %s", exc)
 
-def _update_poster_url_sync(movie_id, public_url) -> bool:
-    """Blocking poster UPDATE — sirf run_async ke through."""
-    conn = get_db_connection()
-    if not conn:
-        return False
-    try:
-        cur = conn.cursor()
-        cur.execute("UPDATE movies SET poster_url = %s WHERE id = %s", (public_url, movie_id))
-        conn.commit()
-        cur.close()
-        return True
+        return label
     except Exception as exc:
-        logger.error(f"Poster Update Error: {exc}")
-        return False
+        logger.error("_pm_save_file DB error: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        for chat_id, message_id in backup_map.items():
+            try:
+                await context.bot.delete_message(chat_id=int(chat_id), message_id=message_id)
+            except Exception:
+                pass
+        return None
     finally:
         close_db_connection(conn)
 
@@ -8987,9 +7868,17 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_poster_update:
             if public_url:
                 movie_id = BATCH_SESSION['movie_id']
-                # ⚡ DB ko thread me bhejo — concurrent_updates(True) ke baad event loop
-                #    par blocking psycopg2 call baaki SAB users ke updates rok deti hai.
-                await run_async(_update_poster_url_sync, movie_id, public_url)
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        cur = conn.cursor()
+                        cur.execute("UPDATE movies SET poster_url = %s WHERE id = %s", (public_url, movie_id))
+                        conn.commit()
+                        cur.close()
+                    except Exception as e:
+                        logger.error(f"Poster Update Error: {e}")
+                    finally:
+                        close_db_connection(conn)
 
                 await status_msg.edit_text("✅ **Poster Successfully Updated!**\nAb aap files bhej sakte hain ya `/done` kar sakte hain.", parse_mode='Markdown')
             else:
@@ -9070,8 +7959,19 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             category   = result['category']
             movie_lang = result['movie_lang']
 
-            # File count check (existing files) — 🚀 thread me, event loop free
-            file_count = await run_async(_count_movie_files, movie_id)
+            # File count check (existing files)
+            file_count = 0
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+                    file_count = cur.fetchone()[0]
+                    cur.close()
+                except Exception:
+                    pass
+                finally:
+                    close_db_connection(conn)
 
             BATCH_SESSION.update({
                 'active': True, 'movie_id': movie_id, 'movie_title': title,
@@ -9127,20 +8027,14 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         movie_category = BATCH_SESSION.get('category', '')
         
         # DB से क्वालिटी और डेटा निकालें
-        # 🐛 FIX: `conn.cursor()` bina None check ke tha → pool busy hone par
-        #    batch_done crash, poster/caption post hi nahi hota. Ab dono query
-        #    parallel + None-safe.
-        minfo, qrows = await asyncio.gather(
-            db_query("SELECT genre, language, \"cast\", poster_url, rating FROM movies WHERE id = %s",
-                     (movie_id,), mode='one'),
-            db_query("SELECT quality FROM movie_files WHERE movie_id = %s",
-                     (movie_id,), mode='all'),
-        )
-        if minfo is None or qrows is None:
-            await update.message.reply_text(
-                "⏳ Database busy hai — caption ke liye data nahi mila. "
-                "2-3 second baad `/batch_done` dobara chalao.", parse_mode='Markdown')
-            return
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT genre, language, \"cast\", poster_url, rating FROM movies WHERE id = %s", (movie_id,))
+        minfo = cur.fetchone()
+        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+        qrows = cur.fetchall()
+        cur.close()
+        close_db_connection(conn)
 
         db_genre = minfo[0] if minfo and minfo[0] else "Unknown"
         db_lang = minfo[1] if minfo and minfo[1] else "Hindi (LiNE) + HC-ESubs"
@@ -9239,44 +8133,24 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     file_id = update.message.photo[-1].file_id
     status_msg = await update.message.reply_text("⏳ Publishing to channels...")
 
-    # 1. Database se caption ka data nikalo (off-loop + parallel)
-    # 🐛🐛 BADA PURANA BUG: neeche caption me `m_genre`, `m_lang` aur `dynamic_res`
-    #    use ho rahe the jo is function me KABHI define hi nahi hote the.
-    #    Matlab har poster upload par yahan NameError aata tha → admin ko sirf
-    #    "⏳ Publishing to channels..." dikhta reh jaata tha aur post kabhi nahi
-    #    hoti thi. Ab batch_done_command jaisa hi data DB se aata hai.
-    # 🐛 Saath hi `if not conn: return` chup-chaap return karta tha, aur SELECT
-    #    event loop par blocking thi (user ka search isi dauran latakta tha).
-    res, qrows = await asyncio.gather(
-        db_query("SELECT title, category, genre, language FROM movies WHERE id = %s",
-                 (movie_id,), mode='one'),
-        db_query("SELECT quality FROM movie_files WHERE movie_id = %s",
-                 (movie_id,), mode='all'),
-    )
-
-    if res is None or qrows is None:
-        await status_msg.edit_text(
-            "⏳ <b>Database busy hai</b> — poster post nahi hua.\n"
-            "Photo thodi der baad dobara bhej dein.", parse_mode='HTML')
-        return  # 'waiting_for_poster' jaan-bujh ke rakha hai — retry ho sake
+    # 1. Database se sirf Title nikalo
+    conn = get_db_connection()
+    if not conn: return
+    cur = conn.cursor()
+    cur.execute("SELECT title, category FROM movies WHERE id = %s", (movie_id,))
+    res = cur.fetchone()
+    cur.close()
+    close_db_connection(conn)
 
     if not res:
         await status_msg.edit_text("❌ Movie not found in DB.")
         context.user_data.pop('waiting_for_poster', None)
         return
-
+    
     m_title = res[0]
     m_category = res[1]
-    m_genre = res[2] if res[2] else "Unknown"
-    m_lang = res[3] if res[3] else "Hindi (LiNE) + HC-ESubs"
 
-    # Quality line — jitni prints DB me hain unhi se banti hai
-    res_list = sorted(
-        {match.group(1) for r in qrows if (match := re.search(r'(\d{3,4}p)', r[0] or ''))},
-        key=lambda x: int(x.replace('p', '')), reverse=True
-    )
-    dynamic_res = " | ".join(res_list) if res_list else "1080p | 720p | 480p"
-
+    # 🎯 FIX: This block must be indented to match the rest of the function
     channel_caption = (
         f"🎬 <b>{m_title}</b>\n"
         f"✨ Genre: {m_genre}\n"
@@ -9314,8 +8188,7 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # 👇 GLOBAL DUPLICATE CHECK — 7 din me kahi bhi post hui ho to skip
-    # 🚀 run_async: ye function blocking DB query karta hai, event loop par nahi chalna chahiye
-    if await run_async(is_movie_posted_recently, movie_id, 7):
+    if is_movie_posted_recently(movie_id, days=7):
         await status_msg.edit_text(f"⏭️ <b>{m_title}</b> pehle se 7 din ke andar post ho chuki hai. Skipping.", parse_mode='HTML')
         context.user_data.pop('waiting_for_poster', None)
         return
@@ -9331,12 +8204,11 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode='HTML',
                 reply_markup=keyboard
             )
-
-            # Restore Feature ke liye DB me save karo (off-loop)
+            
+            # Restore Feature ke liye DB me save karo
             if sent_msg:
-                await run_async(
-                    save_post_to_db,
-                    movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot",
+                save_post_to_db(
+                    movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot",  # ✅ NAYA: bot3 hat gaya!
                     channel_caption, file_id, "photo", keyboard.to_dict(), None, "movies"
                 )
                 sent_count += 1
@@ -9456,24 +8328,27 @@ async def process_post_query_album(mg_id: str, update: Update, context: ContextT
         await caption_msg.reply_text("❌ Movie name missing")
         return
 
-    # Find Movie in DB  (🚀 off-loop — pehle event loop par blocking thi)
+    # Find Movie in DB
     movie_id = None
     movie_category = ""
-    row = await db_query(
-        "SELECT id, category FROM movies WHERE title ILIKE %s LIMIT 1",
-        (f"%{query_text}%",), mode='one'
-    )
-    if row:
-        movie_id = row[0]
-        movie_category = row[1] or ""
-    elif row is None:
-        # None = DB fail (movie nahi mili ye conclusion nahi nikal sakte).
-        # Yahan silently query-link fallback par jaana galat hoga — admin ko batao.
-        await caption_msg.reply_text(
-            "⏳ Database busy hai — movie ka ID confirm nahi ho paaya, isliye post "
-            "nahi ki. Thodi der baad dobara bhejein."
-        )
-        return
+    conn = get_db_connection()
+
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, category FROM movies WHERE title ILIKE %s LIMIT 1",
+                (f"%{query_text}%",)
+            )
+            row = cur.fetchone()
+            if row:
+                movie_id = row[0]
+                movie_category = row[1] or ""
+            cur.close()
+        except Exception as e:
+            logger.error(f"DB Error: {e}")
+        finally:
+            close_db_connection(conn)
 
     # Generate Secure Links
     bot1 = "FlimfyBox_SearchBot"
@@ -9667,22 +8542,27 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("❌ Movie name missing")
             return
 
-        # 4. Find Movie in DB  (🚀 off-loop)
+        # 4. Find Movie in DB
         movie_id = None
         movie_category = ""
-        row = await db_query(
-            "SELECT id, category FROM movies WHERE title ILIKE %s LIMIT 1",
-            (f"%{query_text}%",), mode='one'
-        )
-        if row:
-            movie_id = row[0]
-            movie_category = row[1] or ""
-        elif row is None:
-            await message.reply_text(
-                "⏳ Database busy hai — movie ka ID confirm nahi ho paaya, isliye post "
-                "nahi ki. Thodi der baad dobara bhejein."
-            )
-            return
+        conn = get_db_connection()
+
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, category FROM movies WHERE title ILIKE %s LIMIT 1",
+                    (f"%{query_text}%",)
+                )
+                row = cur.fetchone()
+                if row:
+                    movie_id = row[0]
+                    movie_category = row[1] or ""
+                cur.close()
+            except Exception as e:
+                logger.error(f"DB Error: {e}")
+            finally:
+                close_db_connection(conn)
 
         # 5. Generate Secure Links (Anti-Bot)
         bot1 = "FlimfyBox_SearchBot"
@@ -9860,22 +8740,26 @@ async def admin_post_query_text(update: Update, context: ContextTypes.DEFAULT_TY
             await message.reply_text("❌ Movie name missing. Use: /post_query Custom Movie Name")
             return
 
-        # 1. Database Lookup  (🚀 off-loop)
+        # 1. Database Lookup
         movie_id = None
         movie_category = ""
-        row = await db_query(
-            "SELECT id, category FROM movies WHERE title ILIKE %s LIMIT 1",
-            (f"%{query_text}%",), mode='one'
-        )
-        if row:
-            movie_id = row[0]
-            movie_category = row[1] or ""
-        elif row is None:
-            await message.reply_text(
-                "⏳ Database busy hai — movie ka ID confirm nahi ho paaya, isliye post "
-                "nahi ki. Thodi der baad dobara try karein."
-            )
-            return
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, category FROM movies WHERE title ILIKE %s LIMIT 1",
+                    (f"%{query_text}%",)
+                )
+                row = cur.fetchone()
+                if row:
+                    movie_id = row[0]
+                    movie_category = row[1] or ""
+                cur.close()
+            except Exception as e:
+                logger.error(f"DB Error: {e}")
+            finally:
+                close_db_connection(conn)
 
         # 2. Generate Secure Links
         bot1 = "FlimfyBox_SearchBot"
@@ -10244,25 +9128,14 @@ async def _batch18_ocr_image(url: str) -> str:
         return ''
 
 
-def _batch18_history_sync(title: str) -> list:
-    """
-    Blocking version — run_async ke through chalti hai.
-
-    🐛 DO PURANE BUG yahan the:
-      1. `get_db_connection()` seedha EVENT LOOP par (async def ke andar) → poora
-         bot ruk jaata tha jab tak Supabase jawab na de.
-      2. `finally: conn.close()` — ye POOLED connection ko *destroy* karta hai,
-         pool ko wapas NAHI karta (`putconn` nahi hota). ThreadedConnectionPool
-         phir bhi usse "checked out" maanta rehta hai → har call par pool ka ek
-         slot HAMESHA KE LIYE khatam. Kuch 18+ batch ke baad pool khaali →
-         user ke search ka koi jawab hi nahi jaata tha.
-         Ab `close_db_connection(conn)` (= putconn) use hota hai.
-    """
+async def _batch18_internal_history(title: str, year: str) -> list:
+    """Look for prior locally stored series records; failure must not block the batch."""
     hits = []
-    conn = get_db_connection()
-    if not conn:
-        return hits
+    conn = None
     try:
+        conn = get_db_connection()
+        if not conn:
+            return hits
         cur = conn.cursor()
         cur.execute('SELECT id, title, year, poster_url, extra_info FROM movies WHERE title ILIKE %s LIMIT 10', (f'%{title}%',))
         for row in cur.fetchall() or []:
@@ -10271,13 +9144,12 @@ def _batch18_history_sync(title: str) -> list:
     except Exception as exc:
         logger.info('Batch18 internal history unavailable: %s', exc)
     finally:
-        close_db_connection(conn)
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
     return hits
-
-
-async def _batch18_internal_history(title: str, year: str) -> list:
-    """Look for prior locally stored series records; failure must not block the batch."""
-    return await run_async(_batch18_history_sync, title)
 
 
 async def _batch18_public_evidence(title: str, year: str) -> dict:
@@ -10728,80 +9600,6 @@ Respond ONLY in this exact JSON format (no markdown, no backticks):
     return result
 
 
-def _batch18_upsert_movie_sync(title, imdb_id, poster_url, year, genre, rating,
-                               plot, category, movie_lang, movie_extra, cast_str):
-    """
-    Blocking: 18+ batch ki PEHLI file ka movie row banana/update karna.
-    run_async ke through chalta hai — event loop free rehta hai.
-
-    Return:
-        (movie_id, old_file_count)  = safal
-        (None, 0)                   = DB nahi mila / query fail  → "busy" bolo
-    """
-    conn = get_db_connection()
-    if not conn:
-        return None, 0
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, poster_url, year FROM movies WHERE title ILIKE %s", (title,))
-        existing = cur.fetchone()
-
-        if existing:
-            existing_id, existing_poster, existing_year = existing
-            final_poster = poster_url if poster_url else existing_poster
-            final_year = year if (year and year > 0) else existing_year
-            cur.execute("""
-                UPDATE movies
-                SET poster_url = COALESCE(%s, poster_url),
-                    year = CASE WHEN %s > 0 THEN %s ELSE year END,
-                    genre = COALESCE(%s, genre),
-                    rating = COALESCE(%s, rating),
-                    description = COALESCE(%s, description),
-                    category = %s,
-                    language = COALESCE(NULLIF(%s, ''), language),
-                    extra_info = COALESCE(NULLIF(%s, ''), extra_info),
-                    "cast" = COALESCE(%s, "cast")
-                WHERE id = %s
-                RETURNING id
-            """, (final_poster, final_year, final_year, genre, rating, plot,
-                  category, movie_lang, movie_extra, cast_str, existing_id))
-            row = cur.fetchone()
-            movie_id = row[0] if row else existing_id
-            logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
-        else:
-            cur.execute("""
-                INSERT INTO movies
-                (title, url, imdb_id, poster_url, year, genre, rating,
-                 description, category, language, extra_info, "cast")
-                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            """, (title, imdb_id, poster_url, year, genre, rating,
-                  plot, category, movie_lang, movie_extra, cast_str))
-            row = cur.fetchone()
-            if not row:
-                conn.rollback()
-                return None, 0
-            movie_id = row[0]
-            logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
-
-        conn.commit()
-
-        cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-        cnt = cur.fetchone()
-        old_files = cnt[0] if cnt else 0
-        cur.close()
-        return movie_id, old_files
-    except Exception as exc:
-        logger.error(f"❌ 18+ DB Error: {exc}")
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return None, 0
-    finally:
-        close_db_connection(conn)
-
-
 async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     🔞 18+ BATCH LISTENER: Auto-extracts metadata and saves files.
@@ -10913,72 +9711,119 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        # === DATABASE INSERTION (off the event loop) ===
-        # 🐛 Purana code SELECT + UPDATE/INSERT + COUNT sab event loop par karta tha,
-        #    aur connection haath me rakh ke `await edit_text` bhi karta tha.
-        #    Isi wajah se 18+ batch ki pehli file par bot poora "hang" lagta tha
-        #    aur user ke search ka jawab nahi jaata tha.
-        movie_id, file_count_old = await run_async(
-            _batch18_upsert_movie_sync, title, imdb_id, poster_url, year, genre,
-            rating, plot, category, movie_lang, movie_extra, cast_str
-        )
-        if movie_id is None:
-            await status_msg.edit_text(
-                "⏳ **Database busy hai** — movie entry nahi ban paayi.\n"
-                "Thodi der baad file dobara bhejein.",
-                parse_mode='Markdown'
-            )
+        # === DATABASE INSERTION ===
+        conn = get_db_connection()
+        if not conn:
+            await status_msg.edit_text("❌ Database Connection Failed.")
             return
 
-        # Update session
-        BATCH_18_SESSION.update({
-            'movie_id': movie_id,
-            'movie_title': title,
-            'file_count': 0,
-            'year': str(year) if year else movie_year,
-            'category': category,
-            'language': movie_lang
-        })
-
-        # Build success message
-        cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
-        poster_display = "✅ Found" if poster_url else "❌ Not Found"
-
-        success_msg = (
-            f"✅ **18+ Metadata Ready**\n"
-            f"📡 **Sources:** {', '.join(evidence_sources) if evidence_sources else data_source}\n"
-            f"🧾 **Identity:** {identity_status}\n\n"
-            f"🎬 **Title:** `{title}`\n"
-            f"📅 **Year:** {year if year else 'N/A'}\n"
-            f"🎭 **Genre:** {genre}\n"
-            f"⭐️ **Rating:** {rating}\n"
-            f"🖼️ **Poster:** {poster_display}\n"
-            f"🏷️ **Category:** {category}\n"
-            f"{cast_display}\n"
-            f"🚀 **Ab files bhejein, phir `/done18` likhein.**"
-        )
-
-        # Build keyboard
-        keyboard = []
-        if file_count_old > 0:
-            keyboard.append([InlineKeyboardButton(
-                "🗑️ Delete OLD Files",
-                callback_data=f"clearfiles_{movie_id}"
-            )])
-        keyboard.append([InlineKeyboardButton(
-            "❌ Cancel Batch",
-            callback_data="cancel_batch18"
-        )])
-
         try:
+            cur = conn.cursor()
+            
+            # Check for existing movie
+            cur.execute(
+                "SELECT id, poster_url, year FROM movies WHERE title ILIKE %s",
+                (title,)
+            )
+            existing = cur.fetchone()
+
+            if existing:
+                # Update existing with better data if available
+                existing_id, existing_poster, existing_year = existing
+                final_poster = poster_url if poster_url else existing_poster
+                final_year = year if (year and year > 0) else existing_year
+                
+                cur.execute("""
+                    UPDATE movies 
+                    SET poster_url = COALESCE(%s, poster_url),
+                        year = CASE WHEN %s > 0 THEN %s ELSE year END,
+                        genre = COALESCE(%s, genre),
+                        rating = COALESCE(%s, rating),
+                        description = COALESCE(%s, description),
+                        category = %s,
+                        language = COALESCE(NULLIF(%s, ''), language),
+                        extra_info = COALESCE(NULLIF(%s, ''), extra_info),
+                        "cast" = COALESCE(%s, "cast")
+                    WHERE id = %s
+                    RETURNING id
+                """, (final_poster, final_year, final_year, genre, rating, plot, 
+                      category, movie_lang, movie_extra, cast_str, existing_id))
+                movie_id = cur.fetchone()[0]
+                logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
+                
+            else:
+                # Insert new movie
+                cur.execute("""
+                    INSERT INTO movies 
+                    (title, url, imdb_id, poster_url, year, genre, rating, 
+                     description, category, language, extra_info, "cast") 
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (title, imdb_id, poster_url, year, genre, rating, 
+                      plot, category, movie_lang, movie_extra, cast_str))
+                movie_id = cur.fetchone()[0]
+                logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
+
+            conn.commit()
+
+            # Check for old files
+            cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
+            file_count_old = cur.fetchone()[0]
+            cur.close()
+
+            # Update session
+            BATCH_18_SESSION.update({
+                'movie_id': movie_id,
+                'movie_title': title,
+                'file_count': 0,
+                'year': str(year) if year else movie_year,
+                'category': category,
+                'language': movie_lang
+            })
+
+            # Build success message
+            cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
+            poster_display = "✅ Found" if poster_url else "❌ Not Found"
+            
+            success_msg = (
+                f"✅ **18+ Metadata Ready**\n"
+                f"📡 **Sources:** {', '.join(evidence_sources) if evidence_sources else data_source}\n"
+                f"🧾 **Identity:** {identity_status}\n\n"
+                f"🎬 **Title:** `{title}`\n"
+                f"📅 **Year:** {year if year else 'N/A'}\n"
+                f"🎭 **Genre:** {genre}\n"
+                f"⭐️ **Rating:** {rating}\n"
+                f"🖼️ **Poster:** {poster_display}\n"
+                f"🏷️ **Category:** {category}\n"
+                f"{cast_display}\n"
+                f"🚀 **Ab files bhejein, phir `/done18` likhein.**"
+            )
+
+            # Build keyboard
+            keyboard = []
+            if file_count_old > 0:
+                keyboard.append([InlineKeyboardButton(
+                    "🗑️ Delete OLD Files", 
+                    callback_data=f"clearfiles_{movie_id}"
+                )])
+            keyboard.append([InlineKeyboardButton(
+                "❌ Cancel Batch", 
+                callback_data="cancel_batch18"
+            )])
+
             await status_msg.edit_text(
-                success_msg,
-                parse_mode='Markdown',
+                success_msg, 
+                parse_mode='Markdown', 
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
-        except Exception as e:
-            logger.error(f"18+ status edit failed: {e}")
 
+        except Exception as e:
+            logger.error(f"❌ 18+ DB Error: {e}")
+            if conn: conn.rollback()
+            await status_msg.edit_text(f"❌ Database Error: {e}")
+        finally:
+            close_db_connection(conn)
+        
         return  # First file processed, wait for more
 
     # === PHASE 2: SUBSEQUENT FILES ===
@@ -11025,67 +9870,57 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         main_channel = channels[0]
         main_url = f"https://t.me/c/{str(main_channel).replace('-100', '')}/{backup_map.get(str(main_channel))}"
 
-    # === SAVE TO DATABASE (off the event loop) ===
-    # 🐛 Purana code: `conn = get_db_connection()` + is_downgrade/upsert/auto_upgrade
-    #    sab SEEDHA EVENT LOOP par. 4-5 blocking Supabase query (har ek 100-500ms)
-    #    aur beech me `await edit_text` ke dauran pooled connection haath me pakda hua.
-    #    Nateeja: jab admin 18+ files save kar raha ho, user ka /search ya button
-    #    tap KOI JAWAB NAHI deta tha (ya bahut late) — kyunki poora loop ruka hua tha.
-    # ✅ Ab wahi kaam un thread-helpers se hota hai jo pm_file_listener/superbatch
-    #    use karte hain — loop free rehta hai, accuracy bilkul same (wahi
-    #    is_downgrade + upsert_movie_file + auto_upgrade_delete, wahi order).
-    file_unique_id = (message.document.file_unique_id if message.document
-                      else message.video.file_unique_id if message.video
-                      else message.photo[-1].file_unique_id if message.photo else None)
+    # Save to database
+    conn = get_db_connection()
+    if conn:
+        try:
+            # 🛡️ Anti-Downgrade Shield: Pehle check karo ki DB mein better file toh nahi hai
+            rejected, existing = is_downgrade(BATCH_18_SESSION['movie_id'], label, f_extra, conn)
+            if rejected:
+                logger.info(f"🛡️ Batch18: REJECTED '{label}' — DB already has better '{existing}'")
+                await upload_status.edit_text(
+                    f"🛡️ **Downgrade Blocked!**\n"
+                    f"❌ `{label}` save nahi hua\n"
+                    f"✅ DB mein pehle se better print hai: `{existing}`",
+                    parse_mode='Markdown'
+                )
+                close_db_connection(conn)
+                return
 
-    # 🛡️ Anti-Downgrade Shield: DB mein isse better print pehle se hai kya?
-    rejected, existing = await run_async(
-        _downgrade_precheck_sync, BATCH_18_SESSION['movie_id'], label, f_extra
-    )
-    if rejected is None:
-        # None = DB hi nahi mila (fail), "koi better file nahi hai" NAHI.
-        # Isliye chup-chaap save mat karo — warna galat data ghus jayega.
-        await upload_status.edit_text(
-            "⏳ **Database busy hai** — ye file save nahi hui.\n"
-            "Thodi der baad dobara bhej dein.",
-            parse_mode='Markdown'
-        )
-        return
-    if rejected:
-        logger.info(f"🛡️ Batch18: REJECTED '{label}' — DB already has better '{existing}'")
-        await upload_status.edit_text(
-            f"🛡️ **Downgrade Blocked!**\n"
-            f"❌ `{label}` save nahi hua\n"
-            f"✅ DB mein pehle se better print hai: `{existing}`",
-            parse_mode='Markdown'
-        )
-        return
+            file_unique_id = (message.document.file_unique_id if message.document
+                              else message.video.file_unique_id if message.video
+                              else message.photo[-1].file_unique_id if message.photo else None)
 
-    ok, deleted = await run_async(
-        _save_file_db_sync, BATCH_18_SESSION['movie_id'], label, file_size_str,
-        main_url, json.dumps(backup_map), f_lang, f_extra, file_unique_id
-    )
-    if not ok:
-        await upload_status.edit_text(
-            "❌ **Save Error** — database ne file accept nahi ki.\n"
-            "Dobara bhejein (log me detail hai).",
-            parse_mode='Markdown'
-        )
-        return
+            upsert_movie_file(conn, BATCH_18_SESSION['movie_id'], label, file_size_str, main_url,
+                              json.dumps(backup_map), f_lang, f_extra, file_unique_id)
+            
+            BATCH_18_SESSION['file_count'] += 1
 
-    BATCH_18_SESSION['file_count'] += 1
-
-    # 🔄 Auto-Upgrade: purani ghatiya prints delete ho gayi (helper ke andar)
-    upgrade_msg = ""
-    if deleted > 0:
-        BATCH_18_SESSION['file_count'] = max(0, BATCH_18_SESSION['file_count'] - deleted)
-        upgrade_msg = f"\n🔄 Upgraded! {deleted} पुरानी print(s) auto-deleted"
-
-    await upload_status.edit_text(
-        f"✅ **Saved:** `{BATCH_18_SESSION['movie_title']} {label}` [{file_size_str}]\n"
-        f"📦 Total Files: {BATCH_18_SESSION['file_count']}{upgrade_msg}",
-        parse_mode='Markdown'
-    )
+            # 🔄 Auto-Upgrade: पुरानी घटिया prints delete करो
+            upgrade_msg = ""
+            try:
+                deleted, deleted_labels = auto_upgrade_delete(BATCH_18_SESSION['movie_id'], label, f_extra, conn)
+                if deleted > 0:
+                    BATCH_18_SESSION['file_count'] = max(0, BATCH_18_SESSION['file_count'] - deleted)
+                    upgrade_msg = f"\n🔄 Upgraded! {deleted} पुरानी print(s) auto-deleted"
+                    logger.info(f"🔄 Batch18: {deleted} पुरानी print(s) auto-deleted: {deleted_labels}")
+            except Exception as ue:
+                logger.error(f"Auto-Upgrade error in Batch18: {ue}")
+            
+            await upload_status.edit_text(
+                f"✅ **Saved:** `{BATCH_18_SESSION['movie_title']} {label}` [{file_size_str}]\n"
+                f"📦 Total Files: {BATCH_18_SESSION['file_count']}{upgrade_msg}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            logger.error(f"18+ File Save Error: {e}")
+            if conn: conn.rollback()
+            await upload_status.edit_text(f"❌ Save Error: {e}")
+        finally:
+            close_db_connection(conn)
+    else:
+        await upload_status.edit_text("❌ Database connection failed")
 
 
 # ============================================================================
@@ -11133,27 +9968,39 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔄 **{movie_title}** का 18+ पोस्ट बन रहा है..."
     )
 
-    # Fetch movie data  (🚀 off-loop + dono query PARALLEL)
-    m_data, qrows = await asyncio.gather(
-        db_query("SELECT poster_url, year, genre, rating, language, description "
-                 "FROM movies WHERE id = %s", (movie_id,), mode='one'),
-        db_query("SELECT quality FROM movie_files WHERE movie_id = %s",
-                 (movie_id,), mode='all'),
-    )
+    # Fetch movie data
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ Database error.")
+        return
 
-    # None = DB fail (busy), () / [] = sach me data nahi — dono ka jawab alag hai
-    if m_data is None or qrows is None:
-        await status_msg.edit_text(
-            "⏳ **Database busy hai** — post ka data nahi mila.\n"
-            "`/done18` thodi der baad dobara chalayein.",
-            parse_mode='Markdown'
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT poster_url, year, genre, rating, language, description 
+            FROM movies WHERE id = %s
+        """, (movie_id,))
+        m_data = cur.fetchone()
+        
+        if not m_data:
+            await status_msg.edit_text("❌ Movie DB में नहीं मिली।")
+            return
+            
+        poster_url, year, genre, rating, language, description = m_data
+
+        # Get qualities
+        cur.execute(
+            "SELECT quality FROM movie_files WHERE movie_id = %s", 
+            (movie_id,)
         )
+        qrows = cur.fetchall()
+        cur.close()
+        
+    except Exception as e:
+        await status_msg.edit_text(f"❌ DB Error: {e}")
         return
-    if not m_data:
-        await status_msg.edit_text("❌ Movie DB में नहीं मिली।")
-        return
-
-    poster_url, year, genre, rating, language, description = m_data
+    finally:
+        close_db_connection(conn)
 
     # Build quality string
     res_list = set()
@@ -11408,41 +10255,41 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Adding movie: {title} with value: {value}")
 
-        # 🐛 Purana code: conn manually pakad ke rakha jaata tha aur
-        #    `await notify_users_for_movie(...)` ke dauran bhi haath me hi rehta
-        #    tha (nested acquisition = pool starvation ka risk). Saath hi
-        #    `finally: if conn:` galat format wale early-return par NameError
-        #    deta tha (conn tab define hi nahi hota). Ab sab db_query se.
-        message = None
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
 
         # CASE 1: UNRELEASED MOVIE
         if value.strip().lower() == "unreleased":
             # is_unreleased = TRUE set karenge
-            ok = await db_query(
+            cur.execute(
                 """
-                INSERT INTO movies (title, url, file_id, is_unreleased)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (title) DO UPDATE SET
+                INSERT INTO movies (title, url, file_id, is_unreleased) 
+                VALUES (%s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE SET 
                     is_unreleased = EXCLUDED.is_unreleased,
-                    url = '',
+                    url = '', 
                     file_id = NULL
                 """,
-                (title.strip(), "", None, True), mode='none'
+                (title.strip(), "", None, True)
             )
             message = f"✅ '{title}' ko successfully **Unreleased** mark kar diya gaya hai. (Cute message activate ho gaya ✨)"
 
         # CASE 2: TELEGRAM FILE ID
         elif any(value.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-            ok = await db_query(
+            cur.execute(
                 """
-                INSERT INTO movies (title, url, file_id, is_unreleased)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (title) DO UPDATE SET
-                    url = EXCLUDED.url,
+                INSERT INTO movies (title, url, file_id, is_unreleased) 
+                VALUES (%s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE SET 
+                    url = EXCLUDED.url, 
                     file_id = EXCLUDED.file_id,
                     is_unreleased = FALSE
                 """,
-                (title.strip(), "", value.strip(), False), mode='none'
+                (title.strip(), "", value.strip(), False)
             )
             message = f"✅ '{title}' ko File ID ke sath add kar diya gaya hai."
 
@@ -11453,16 +10300,16 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Invalid URL format. URL must start with http:// or https://")
                 return
 
-            ok = await db_query(
+            cur.execute(
                 """
-                INSERT INTO movies (title, url, file_id, is_unreleased)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (title) DO UPDATE SET
-                    url = EXCLUDED.url,
+                INSERT INTO movies (title, url, file_id, is_unreleased) 
+                VALUES (%s, %s, %s, %s) 
+                ON CONFLICT (title) DO UPDATE SET 
+                    url = EXCLUDED.url, 
                     file_id = NULL,
                     is_unreleased = FALSE
                 """,
-                (title.strip(), normalized_url, None, False), mode='none'
+                (title.strip(), normalized_url, None, False)
             )
             message = f"✅ '{title}' ko URL ke sath add kar diya gaya hai."
 
@@ -11470,17 +10317,13 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid format. Please provide valid File ID, URL, or type 'unreleased'.")
             return
 
-        if not ok:
-            await update.message.reply_text("⏳ Database busy hai — movie add nahi hui. Dobara try karein.")
-            return
-
+        conn.commit()
         await update.message.reply_text(message)
 
         # Notify Users logic (Agar movie sach mein release hui hai to hi notify karein)
         if value.strip().lower() != "unreleased":
-            movie_found = await db_query(
-                "SELECT id, title, url, file_id FROM movies WHERE title = %s",
-                (title.strip(),), mode='one')
+            cur.execute("SELECT id, title, url, file_id FROM movies WHERE title = %s", (title.strip(),))
+            movie_found = cur.fetchone()
 
             if movie_found:
                 movie_id, title, url, file_id = movie_found
@@ -11494,6 +10337,9 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in add_movie command: {e}")
         await update.message.reply_text(f"Ek error aaya: {e}")
+    finally:
+        if conn:
+            close_db_connection(conn)
 
 ASK_MOVIE, ASK_USER = range(20, 22) # Naye states
 
@@ -11524,16 +10370,18 @@ async def notify_ask_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.replace('@', '').strip()
     movie_name = context.user_data.get('notify_movie', 'Movie')
 
-    # Find user ID from DB  (🚀 off-loop)
+    # Find user ID from DB
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ DB Error!")
+        return ConversationHandler.END
+
     try:
+        cur = conn.cursor()
         if user_input.isdigit(): # ID di hai
-            res = await db_query(
-                "SELECT first_name, username FROM user_requests WHERE user_id = %s LIMIT 1",
-                (int(user_input),), mode='one')
-            if res is None:
-                await update.message.reply_text("⏳ Database busy hai — dobara try karein.")
-                return ConversationHandler.END
+            cur.execute("SELECT first_name, username FROM user_requests WHERE user_id = %s LIMIT 1", (int(user_input),))
             target_user_id = int(user_input)
+            res = cur.fetchone()
             if res:
                 first_name = res[0] or "User"
                 username = res[1]
@@ -11541,12 +10389,8 @@ async def notify_ask_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 first_name = "User"
                 username = None
         else: # Username diya hai
-            res = await db_query(
-                "SELECT user_id, first_name, username FROM user_requests WHERE username ILIKE %s LIMIT 1",
-                (user_input,), mode='one')
-            if res is None:
-                await update.message.reply_text("⏳ Database busy hai — dobara try karein.")
-                return ConversationHandler.END
+            cur.execute("SELECT user_id, first_name, username FROM user_requests WHERE username ILIKE %s LIMIT 1", (user_input,))
+            res = cur.fetchone()
             if not res:
                 await update.message.reply_text(f"❌ '{user_input}' database me nahi mila. ID try karein.")
                 return ConversationHandler.END
@@ -11575,9 +10419,8 @@ async def notify_ask_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ <b>Fail!</b> User ne teeno bots ko block kar diya hai.", parse_mode='HTML')
 
-    except Exception as e:
-        logger.error(f"notify_ask_user failed: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+    finally:
+        close_db_connection(conn)
 
     return ConversationHandler.END
 
@@ -11597,15 +10440,17 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
         parse_mode='Markdown'
     )
 
-    # 🐛 BADA BUG: pehle conn poore loop tak pakda rehta tha — aur loop me har
-    #    post par 3 second sleep hai. 500 posts = ~25 MINUTE tak ek pooled
-    #    connection bandi. Utni der tak user ke search ke liye pool tight.
-    posts = await db_query(
-        "SELECT movie_id, channel_id, message_id FROM channel_posts WHERE bot_username = %s",
-        (old_bot,), mode='all')
-    if posts is None:
-        await status_msg.edit_text("⏳ Database busy hai — fixbuttons shuru nahi hua. Dobara try karein.")
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ DB connection failed.")
         return
+
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT movie_id, channel_id, message_id FROM channel_posts WHERE bot_username = %s",
+        (old_bot,)
+    )
+    posts = cur.fetchall()
 
     total = len(posts)
     success = 0
@@ -11636,10 +10481,12 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
             continue
         except TelegramError as e:
             if "Message to edit not found" in str(e):
-                await db_query("DELETE FROM channel_posts WHERE channel_id = %s AND message_id = %s",
-                               (ch_id, msg_id), mode='none')
+                cur.execute("DELETE FROM channel_posts WHERE channel_id = %s AND message_id = %s", (ch_id, msg_id))
+                conn.commit()
             logger.error(f"Error editing {msg_id}: {e}")
 
+    cur.close()
+    close_db_connection(conn)
     await status_msg.edit_text(f"✅ Updated {success}/{total} posts safely.", parse_mode='Markdown')
 
 async def bulk_add_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11682,24 +10529,28 @@ Movie3 file_id_here
             title = ' '.join(parts[:-1])
 
             try:
-                # 🚀 off-loop: pehle har line par event loop par connection lekar
-                #    blocking INSERT hoti thi — 100 lines = 100 × 200ms loop freeze.
+                conn = get_db_connection()
+                if not conn:
+                    failed_count += 1
+                    results.append(f"❌ {title} - Database connection failed")
+                    continue
+
+                cur = conn.cursor()
+
                 if any(url_or_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
-                    ok = await db_query(
+                    cur.execute(
                         "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
-                        (title.strip(), "", url_or_id.strip()), mode='none'
+                        (title.strip(), "", url_or_id.strip())
                     )
                 else:
                     normalized_url = normalize_url(url_or_id)
-                    ok = await db_query(
+                    cur.execute(
                         "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, NULL) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = NULL",
-                        (title.strip(), normalized_url.strip()), mode='none'
+                        (title.strip(), normalized_url.strip())
                     )
 
-                if not ok:
-                    failed_count += 1
-                    results.append(f"❌ {title} - Database busy/error")
-                    continue
+                conn.commit()
+                close_db_connection(conn)
 
                 success_count += 1
                 results.append(f"✅ {title}")
@@ -11731,6 +10582,7 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
+    conn = None
     try:
         if not context.args or len(context.args) < 2:
             await update.message.reply_text("गलत फॉर्मेट! ऐसे इस्तेमाल करें:\n/addalias मूवी_का_असली_नाम alias_name")
@@ -11740,36 +10592,40 @@ async def add_alias(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alias = parts[-1]
         movie_title = " ".join(parts[:-1])
 
-        movie = await db_query("SELECT id FROM movies WHERE title = %s", (movie_title,), mode='one')
-
-        if movie is None:
-            await update.message.reply_text("⏳ Database busy hai — alias add nahi hua. Dobara try karein.")
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
+        movie = cur.fetchone()
+
         if not movie:
             await update.message.reply_text(f"❌ '{movie_title}' डेटाबेस में नहीं मिली। पहले मूवी को add करें।")
             return
 
-        # 🐛 FIX: pehle `movie_id = movie` tha — poora tuple `(5,)`. Us tuple ko
-        #    movie_id column me daalne par INSERT fail hota tha, yaani /addalias
-        #    kabhi kaam hi nahi karta tha. Sahi value `movie[0]` hai.
-        movie_id = movie[0]
+        movie_id = movie
 
-        ok = await db_query(
+        cur.execute(
             "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-            (movie_id, alias.lower()), mode='none'
+            (movie_id, alias.lower())
         )
-        if not ok:
-            await update.message.reply_text("⏳ Database busy hai — alias add nahi hua. Dobara try karein.")
-            return
 
+        conn.commit()
         await update.message.reply_text(f"✅ Alias '{alias}' successfully added for '{movie_title}'")
 
     except Exception as e:
         logger.error(f"Error adding alias: {e}")
         await update.message.reply_text(f"Error: {e}")
+    finally:
+        if conn:
+            close_db_connection(conn)
 
 async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all aliases for a movie"""
+    conn = None
     try:
         if not context.args:
             await update.message.reply_text("कृपया मूवी का नाम दें:\n/aliases मूवी_का_नाम")
@@ -11777,17 +10633,23 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         movie_title = " ".join(context.args)
 
-        result = await db_query("""
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+
+        cur.execute("""
             SELECT m.title, COALESCE(array_agg(ma.alias), '{}'::text[])
             FROM movies m
             LEFT JOIN movie_aliases ma ON m.id = ma.movie_id
             WHERE m.title = %s
             GROUP BY m.title
-        """, (movie_title,), mode='one')
+        """, (movie_title,))
 
-        if result is None:
-            await update.message.reply_text("⏳ Database busy hai — thodi der baad dobara try karein.")
-            return
+        result = cur.fetchone()
+
         if not result:
             await update.message.reply_text(f"'{movie_title}' डेटाबेस में नहीं मिली।")
             return
@@ -11800,60 +10662,16 @@ async def list_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error listing aliases: {e}")
         await update.message.reply_text(f"Error: {e}")
-
-def _bulk_aliases_sync(pairs):
-    """
-    Blocking: (movie_title, [aliases]) ki list ko ek hi connection par process karta
-    hai. run_async ke through chalta hai — event loop free rehta hai.
-    Return: (success, failed) ya None agar DB hi na mile (= "busy" bolo).
-    """
-    conn = get_db_connection()
-    if not conn:
-        return None
-    success = 0
-    failed = 0
-    try:
-        cur = conn.cursor()
-        for movie_title, aliases in pairs:
-            cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
-            movie = cur.fetchone()
-            if not movie:
-                failed += len(aliases)
-                continue
-            # 🐛 FIX: pehle `movie_id = movie` tha — poora tuple `(5,)`. Us tuple ko
-            #    movie_id column me daalne par INSERT fail hota tha, yaani /aliasbulk
-            #    kabhi kaam hi nahi karta tha. Sahi value movie[0] hai.
-            movie_id = movie[0]
-            for alias in aliases:
-                try:
-                    cur.execute(
-                        "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
-                        (movie_id, alias.lower())
-                    )
-                    success += 1
-                except Exception:
-                    conn.rollback()
-                    failed += 1
-        conn.commit()
-        cur.close()
-        return success, failed
-    except Exception as exc:
-        logger.error(f"Error in bulk alias add: {exc}")
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return None
     finally:
-        close_db_connection(conn)
-
-
+        if conn:
+            close_db_connection(conn)
 async def bulk_add_aliases(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add multiple aliases at once"""
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Sorry Darling, सिर्फ एडमिन ही इस कमांड का इस्तेमाल कर सकते हैं।")
         return
 
+    conn = None
     try:
         full_text = update.message.text
         lines = full_text.split('\n')
@@ -11868,30 +10686,49 @@ Movie2: alias4, alias5
 """)
             return
 
-        pairs = []
+        success_count = 0
+        failed_count = 0
+
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+
         for line in lines:
             line = line.strip()
             if not line or line.startswith('/aliasbulk'):
                 continue
+
             if ':' not in line:
                 continue
+
             movie_title, aliases_str = line.split(':', 1)
+            movie_title = movie_title.strip()
             aliases = [alias.strip() for alias in aliases_str.split(',') if alias.strip()]
-            if aliases:
-                pairs.append((movie_title.strip(), aliases))
 
-        if not pairs:
-            await update.message.reply_text("❌ Koi valid line nahi mili. Format: `Movie: alias1, alias2`",
-                                            parse_mode='Markdown')
-            return
+            cur.execute("SELECT id FROM movies WHERE title = %s", (movie_title,))
+            movie = cur.fetchone()
 
-        result = await run_async(_bulk_aliases_sync, pairs)
-        if result is None:
-            await update.message.reply_text("⏳ **Database busy hai** — aliases add nahi ho paaye.\n"
-                                            "Thodi der baad dobara try karein.", parse_mode='Markdown')
-            return
+            if not movie:
+                failed_count += len(aliases)
+                continue
 
-        success_count, failed_count = result
+            movie_id = movie
+
+            for alias in aliases:
+                try:
+                    cur.execute(
+                        "INSERT INTO movie_aliases (movie_id, alias) VALUES (%s, %s) ON CONFLICT (movie_id, alias) DO NOTHING",
+                        (movie_id, alias.lower())
+                    )
+                    success_count += 1
+                except:
+                    failed_count += 1
+
+        conn.commit()
+
         await update.message.reply_text(f"""
 📊 Alias Bulk Add Results:
 
@@ -11902,6 +10739,9 @@ Failed: {failed_count}
     except Exception as e:
         logger.error(f"Error in bulk alias add: {e}")
         await update.message.reply_text(f"Error: {e}")
+    finally:
+        if conn:
+            close_db_connection(conn)
 
 async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually notify users about a movie"""
@@ -11916,14 +10756,16 @@ async def notify_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         movie_title = " ".join(context.args)
 
-        movie_found = await db_query(
-            "SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1",
-            (f'%{movie_title}%',), mode='one')
-
-        if movie_found is None:
-            # None = DB fail. "nahi mili" bolna galat hoga — movie ho bhi sakti hai.
-            await update.message.reply_text("⏳ Database busy hai — thodi der baad dobara try karein.")
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+        cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (f'%{movie_title}%',))
+        movie_found = cur.fetchone()
+        cur.close()
+        close_db_connection(conn)
 
         if movie_found:
             movie_id, title, url, file_id = movie_found
@@ -11951,15 +10793,22 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         target_username = context.args[0].replace('@', '')
         message_text = ' '.join(context.args[1:])
 
-        user = await db_query(
-            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
-            (target_username,), mode='one')
-
-        if user is None:
-            await update.message.reply_text("⏳ Database busy hai — message nahi bheja. Dobara try karein.")
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
+            cur.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -11970,6 +10819,9 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         )
 
         await update.message.reply_text(f"✅ Message sent to `@{target_username}` ({first_name})", parse_mode='Markdown')
+
+        cur.close()
+        close_db_connection(conn)
 
     except telegram.error.Forbidden:
         await update.message.reply_text(f"❌ User blocked the bot.")
@@ -11992,18 +10844,19 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Pure message ko extract karein
         message_text = update.message.text.replace('/broadcast', '').strip()
 
-        # 🐛 BADA BUG: pehle `conn` broadcast ke POORE dauran (hazaaron send +
-        #    0.05s sleep har ek par = kai minute) haath me pakda rehta tha.
-        #    Ek pooled connection utni der ke liye bandi → user ke search ke liye
-        #    pool me jagah kam. Aur agar status_msg.edit_text fail hota to outer
-        #    except close_db_connection skip kar deta → connection LEAK.
-        # ✅ Ab list lete hi connection wapas pool me chala jaata hai.
-        all_users = await db_query("SELECT DISTINCT user_id FROM user_requests", mode='all')
-        if all_users is None:
-            await update.message.reply_text("⏳ Database busy hai — broadcast shuru nahi hua. Dobara try karein.")
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT user_id FROM user_requests")
+        all_users = cur.fetchall()
+
         if not all_users:
             await update.message.reply_text("No users found in database.")
+            cur.close()
+            close_db_connection(conn)
             return
 
         status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(all_users)} users...\n⏳ Please wait...")
@@ -12035,6 +10888,9 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
 
+        cur.close()
+        close_db_connection(conn)
+
     except Exception as e:
         logger.error(f"Error in broadcast_message: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
@@ -12057,17 +10913,22 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
         target_username = context.args[1].replace('@', '')
         message_text = ' '.join(context.args[2:])
 
-        user = await db_query(
-            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
-            (target_username,), mode='one'
-        )
-        if user is None:
-            # None = DB hi nahi mila (fail). "User nahi mila" NAHI.
-            await update.message.reply_text("⏳ **Database busy hai** — user confirm nahi ho paaya.\n"
-                                            "Thodi der baad dobara try karein.", parse_mode='Markdown')
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found.", parse_mode='Markdown')
+            cur.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -12092,6 +10953,9 @@ async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TY
             f"Message: {message_text[:50]}...",
             parse_mode='Markdown'
         )
+
+        cur.close()
+        close_db_connection(conn)
 
     except ValueError:
         await update.message.reply_text("❌ Invalid delay. Please provide number of minutes.")
@@ -12125,17 +10989,22 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         replied_message = update.message.reply_to_message
 
-        # ⚡ FIX: pehle yahan connection lekar POORE function bhar (saare
-        #    Telegram sends ke aar-paar) khula rakha jaata tha.
-        user = await db_query(
-            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
-            (target_username,), mode='one'
-        )
-        if user is None:
-            await update.message.reply_text("⏳ Server busy hai — thodi der baad try karein.")
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id, first_name FROM user_requests WHERE username ILIKE %s LIMIT 1",
+            (target_username,)
+        )
+        user = cur.fetchone()
+
         if not user:
             await update.message.reply_text(f"❌ User `@{target_username}` not found in database.", parse_mode='Markdown')
+            cur.close()
+            close_db_connection(conn)
             return
 
         user_id, first_name = user
@@ -12187,23 +11056,21 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
                 caption=notification_header if notification_header else None,
                 reply_markup=join_keyboard
             )
-        # 🐛🐛 FIX (BADA BUG): yahan pehle ye block tha —
-        #        if sent_msg:
-        #            conn = get_db_connection(); cur = conn.cursor()
-        #            cur.execute("INSERT INTO channel_posts ...", (movie_id, chat_id, ...))
-        #    Do problem theen:
-        #      1. `movie_id` aur `chat_id` is function me EXIST HI NAHI karte
-        #         (ye code channel-post wale code se copy hua tha). Matlab har
-        #         baar NameError — ye INSERT kabhi safal hi nahi hua.
-        #      2. NameError `cur.execute` par aata tha, YAANI `conn` pehle hi
-        #         reassign ho chuka tha aur except me sirf log hota tha →
-        #         connection KABHI CLOSE NAHI HOTA. Har /notifyuserwithmedia
-        #         call do pooled connection permanently kha jaata tha. Kuch
-        #         baar chalane ke baad pool khaali → poora bot "respond nahi
-        #         karta". Ye us shikayat ki asli wajah me se ek hai.
-        #    Ye block hata diya gaya hai: /notifyuserwithmedia ek USER ko file
-        #    bhejta hai, channel post nahi karta — channel_posts me row daalne
-        #    ka koi matlab hi nahi tha.
+        if sent_msg:
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                # Hum save kar rahe hain ki is movie ka post is channel me is ID par hai
+                cur.execute(
+                    "INSERT INTO channel_posts (movie_id, channel_id, message_id, bot_username) VALUES (%s, %s, %s, %s)",
+                    (movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot") # Current Main Bot Username
+                )
+                conn.commit()
+                cur.close()
+                close_db_connection(conn)
+            except Exception as e:
+                logger.error(f"Failed to save post ID: {e}")
+        
         elif replied_message.text:
             media_type = "text"
             text_to_send = replied_message.text
@@ -12215,6 +11082,8 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
             )
         else:
             await update.message.reply_text("❌ Unsupported media type.")
+            cur.close()
+            close_db_connection(conn)
             return
 
         if sent_msg and media_type != "text":
@@ -12232,6 +11101,9 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
         confirmation += f"Media Type: {media_type.capitalize()}"
 
         await update.message.reply_text(confirmation, parse_mode='Markdown')
+
+        cur.close()
+        close_db_connection(conn)
 
     except telegram.error.Forbidden:
         await update.message.reply_text(f"❌ User blocked the bot.")
@@ -12253,15 +11125,19 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         optional_message = ' '.join(context.args) if context.args else None
 
-        # 🐛 Same bug jaisa broadcast_message me tha: conn poore broadcast tak
-        #    (hazaaron send × 0.1s = kai minute) pakda rehta tha. Ab nahi.
-        all_users = await db_query(
-            "SELECT DISTINCT user_id, first_name, username FROM user_requests", mode='all')
-        if all_users is None:
-            await update.message.reply_text("⏳ Database busy hai — broadcast shuru nahi hua. Dobara try karein.")
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
             return
+
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT user_id, first_name, username FROM user_requests")
+        all_users = cur.fetchall()
+
         if not all_users:
             await update.message.reply_text("No users found in database.")
+            cur.close()
+            close_db_connection(conn)
             return
 
         status_msg = await update.message.reply_text(
@@ -12331,6 +11207,9 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📝 Total: {len(all_users)}"
         )
 
+        cur.close()
+        close_db_connection(conn)
+
     except Exception as e:
         logger.error(f"Error in broadcast_with_media: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
@@ -12353,28 +11232,37 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = ' '.join(context.args)
 
-        # 🚀 off-loop + connection sends ke dauran pakda nahi rahega
+        conn = get_db_connection()
+        if not conn:
+            await update.message.reply_text("❌ Database connection failed.")
+            return
+
+        cur = conn.cursor()
+
+        target_users = []
+
         if query.startswith('@'):
             username = query.replace('@', '')
-            target_users = await db_query(
+            cur.execute(
                 "SELECT DISTINCT user_id, first_name, username FROM user_requests WHERE username ILIKE %s",
-                (username,), mode='all')
+                (username,)
+            )
+            target_users = cur.fetchall()
         else:
-            target_users = await db_query(
-                "SELECT DISTINCT user_id, first_name, username FROM user_requests "
-                "WHERE movie_title ILIKE %s AND notified = FALSE",
-                (f'%{query}%',), mode='all')
+            cur.execute(
+                "SELECT DISTINCT user_id, first_name, username FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+                (f'%{query}%',)
+            )
+            target_users = cur.fetchall()
 
-        if target_users is None:
-            await update.message.reply_text("⏳ Database busy hai — kuch bheja nahi gaya. Dobara try karein.")
-            return
         if not target_users:
             await update.message.reply_text(f"❌ No users found for '{query}'")
+            cur.close()
+            close_db_connection(conn)
             return
 
         success_count = 0
         failed_count = 0
-        notified_ids = []
         join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url="https://t.me/FlimfyBoxx")]])
 
         for user_id, first_name, username in target_users:
@@ -12401,7 +11289,13 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     track_message_for_deletion(context, user_id, sent_msg.message_id, 60)
 
                 success_count += 1
-                notified_ids.append(user_id)
+
+                if not query.startswith('@'):
+                    cur.execute(
+                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
+                        (user_id, f'%{query}%')
+                    )
+                    conn.commit()
 
                 await asyncio.sleep(0.1)
 
@@ -12409,19 +11303,14 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 failed_count += 1
                 logger.error(f"Failed to send to {user_id}: {e}")
 
-        # 🚀 pehle har user par alag UPDATE + commit hota tha (aur wahi connection
-        #    poore loop tak pakda rehta tha). Ab ek hi batch UPDATE, loop ke baad.
-        if notified_ids and not query.startswith('@'):
-            await db_query(
-                "UPDATE user_requests SET notified = TRUE "
-                "WHERE user_id = ANY(%s) AND movie_title ILIKE %s",
-                (notified_ids, f'%{query}%'), mode='none')
-
         await update.message.reply_text(
             f"✅ Sent to {success_count} user(s)\n"
             f"❌ Failed for {failed_count} user(s)\n"
             f"Query: {query}"
         )
+
+        cur.close()
+        close_db_connection(conn)
 
     except Exception as e:
         logger.error(f"Error in quick_notify: {e}")
@@ -12727,27 +11616,21 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
 
     status_msg = await update.message.reply_text("⏳ **Scanning Database for incomplete movies...**", parse_mode='Markdown')
 
-    # 🐛 TEEN BUG the yahan:
-    #   1. `conn` poore repair loop tak (N movies × network fetch × 0.5s sleep =
-    #      kai minute) haath me pakda rehta tha → pool ka ek slot bandi.
-    #   2. `fetch_movie_metadata()` ek BLOCKING network call hai jo seedha EVENT
-    #      LOOP par chal rahi thi → jab tak ye command chalti, bot poora jam.
-    #      Isi wajah se "bot busy hai to search ka jawab nahi aata" hota tha.
-    #   3. `finally: if cur:` — agar conn.cursor() hi fail hota to `cur` define
-    #      nahi hota aur wahan NameError aata (asli error chhup jaata tha).
-    movies_to_fix = await db_query(
-        "SELECT title FROM movies WHERE genre IS NULL OR poster_url IS NULL OR year IS NULL",
-        mode='all')
-
-    if movies_to_fix is None:
-        await status_msg.edit_text("⏳ Database busy hai — scan nahi ho paaya. Dobara try karein.")
-        return
-
-    if not movies_to_fix:
-        await status_msg.edit_text("✅ **All Good!** Database mein sabhi movies ka metadata complete hai.")
+    conn = get_db_connection()
+    if not conn:
+        await status_msg.edit_text("❌ Database connection failed.")
         return
 
     try:
+        cur = conn.cursor()
+        # Find movies where ANY key info is missing (Genre, Poster, or Year)
+        cur.execute("SELECT title FROM movies WHERE genre IS NULL OR poster_url IS NULL OR year IS NULL")
+        movies_to_fix = cur.fetchall()
+        
+        if not movies_to_fix:
+            await status_msg.edit_text("✅ **All Good!** Database mein sabhi movies ka metadata complete hai.")
+            return
+
         total = len(movies_to_fix)
         await status_msg.edit_text(f"🧐 Found **{total}** movies to fix. Starting update process... (This may take time)")
 
@@ -12760,35 +11643,38 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
                 if index % 10 == 0:
                     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
-                # ✅ FETCH CORRECT METADATA — run_async se, loop block na ho
-                metadata = await run_async(fetch_movie_metadata, title)
+                # ✅ FETCH CORRECT METADATA (6 Values)
+                metadata = fetch_movie_metadata(title)
                 if metadata:
                     new_title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
 
                     # Only update if we found something useful
                     if genre or poster_url or year > 0:
-                        ok = await db_query("""
-                            UPDATE movies
-                            SET genre = %s,
-                                poster_url = %s,
-                                year = %s,
-                                imdb_id = %s,
+                        # ✅ CORRECT SQL UPDATE QUERY (Order Matters!)
+                        cur.execute("""
+                            UPDATE movies 
+                            SET genre = %s, 
+                                poster_url = %s, 
+                                year = %s, 
+                                imdb_id = %s, 
                                 rating = %s
                             WHERE title = %s
-                        """, (genre, poster_url, year, imdb_id, rating, title), mode='none')
-                        if ok:
-                            success_count += 1
-                        else:
-                            failed_count += 1
+                        """, (genre, poster_url, year, imdb_id, rating, title))
+                        
+                        conn.commit()
+                        success_count += 1
                     else:
                         failed_count += 1
                 else:
                     failed_count += 1
-
+                
                 # Sleep slightly to respect API limits
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5) 
 
             except Exception as e:
+                # 🛑 ROLLBACK IS CRITICAL HERE
+                if conn:
+                    conn.rollback() 
                 logger.error(f"Failed to fix {title}: {e}")
                 failed_count += 1
 
@@ -12805,6 +11691,9 @@ async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Error in fix_metadata: {e}")
         await status_msg.edit_text(f"❌ Error: {e}")
+    finally:
+        if cur: cur.close()
+        if conn: close_db_connection(conn)
 
 async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -12870,29 +11759,35 @@ async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TY
         except ValueError:
             pass
 
-    # --- Database Se Posts Nikalo (🚀 off-loop) ---
+    # --- Database Se Posts Nikalo ---
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text("❌ Database error.")
+        return
+
+    cur = conn.cursor()
+
     if content_type == "all":
-        posts = await db_query("""
+        cur.execute("""
             SELECT id, movie_id, caption, media_file_id,
                    media_type, keyboard_data, topic_id, content_type
             FROM channel_posts
             WHERE is_restored = FALSE OR is_restored IS NULL
             ORDER BY posted_at ASC
-        """, mode='all')
+        """)
     else:
-        posts = await db_query("""
+        cur.execute("""
             SELECT id, movie_id, caption, media_file_id,
                    media_type, keyboard_data, topic_id, content_type
             FROM channel_posts
             WHERE (is_restored = FALSE OR is_restored IS NULL)
               AND content_type = %s
             ORDER BY posted_at ASC
-        """, (content_type,), mode='all')
+        """, (content_type,))
 
-    if posts is None:
-        # None = DB fail. "koi post nahi mili" bolna galat hoga.
-        await update.message.reply_text("⏳ Database busy hai — restore shuru nahi hua. Dobara try karein.")
-        return
+    posts = cur.fetchall()
+    cur.close()
+    close_db_connection(conn)
 
     if not posts:
         type_emoji = {
@@ -12997,17 +11892,27 @@ async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TY
                 skipped += 1
                 continue
 
-            # 3. DB Update (🚀 off-loop)
+            # 3. DB Update
             if sent:
-                await db_query("""
-                    UPDATE channel_posts
-                    SET is_restored  = TRUE,
-                        restored_at  = NOW(),
-                        channel_id   = %s,
-                        message_id   = %s,
-                        bot_username = %s
-                    WHERE id = %s
-                """, (new_channel_id, sent.message_id, new_bot, post_id), mode='none')
+                conn2 = get_db_connection()
+                if conn2:
+                    try:
+                        cur2 = conn2.cursor()
+                        cur2.execute("""
+                            UPDATE channel_posts
+                            SET is_restored  = TRUE,
+                                restored_at  = NOW(),
+                                channel_id   = %s,
+                                message_id   = %s,
+                                bot_username = %s
+                            WHERE id = %s
+                        """, (new_channel_id, sent.message_id, new_bot, post_id))
+                        conn2.commit()
+                        cur2.close()
+                    except Exception as db_e:
+                        logger.error(f"DB update error: {db_e}")
+                    finally:
+                        close_db_connection(conn2)
                 success += 1
 
             # 4. Progress (Har 10 posts pe update)
@@ -13210,9 +12115,7 @@ def run_flask():
                 from waitress import serve
                 logger.info("🌐 Mini App HTTP server listening via Waitress on 0.0.0.0:%s", port)
                 server_started = True
-                # threads ab FLASK_THREADS se bandha hai — DB pool budget wahi
-                # number maan kar reserve calculate karta hai, dono sync rehne chahiye.
-                serve(flask_app, host='0.0.0.0', port=port, threads=FLASK_THREADS)
+                serve(flask_app, host='0.0.0.0', port=port, threads=8)
             except ImportError:
                 # Keep the service reachable if a deployment omitted waitress.
                 logger.warning("⚠️ waitress unavailable; using Flask threaded fallback")
@@ -13412,11 +12315,6 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
         
     user_id = update.effective_user.id
-    # 🐛 FIX: neeche `chat_id` use hota tha lekin kabhi define hi nahi kiya gaya
-    #    tha → har us branch me NameError. Matlab FSub-join prompt, 'Search
-    #    Movies', 'Request Movie', 'My Stats' aur 'Help' — paanchon me handler
-    #    crash ho raha tha (reply chala jaata tha, phir exception log hoti thi).
-    chat_id = update.effective_chat.id
 
     # 👇 VIP Payment UTR Check 👇 (Ab yeh safe hai kyunki channel filter ho chuka hai)
     if context.user_data and context.user_data.get('payment_step') == 'utr':
@@ -13464,25 +12362,24 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     elif query_text == '📊 My Stats':
-        # ⚡ FIX: pehle ye event loop par blocking DB call thi, AUR connection ko
-        #    `reply_text` (Telegram network call) ke dauran bhi pakde rakhti thi —
-        #    superbatch ke waqt ek pool slot bekaar block ho jaata tha.
-        #    Ab dono counts thread me, parallel, aur connection turant free.
-        req, ful = await asyncio.gather(
-            db_query("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,), mode='one'),
-            db_query("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE",
-                     (user_id,), mode='one'),
-        )
-        if req is None or ful is None:
-            msg = await update.message.reply_text("⏳ Server busy hai — thodi der baad try karein.")
-            track_message_for_deletion(context, chat_id, msg.message_id, 60)
-            return
-
-        stats_msg = await update.message.reply_text(
-            f"📊 **Your Stats**\n\n📝 Total Requests: {req[0]}\n✅ Fulfilled: {ful[0]}",
-            parse_mode='Markdown'
-        )
-        track_message_for_deletion(context, chat_id, stats_msg.message_id, 120)
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
+                req = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
+                ful = cur.fetchone()[0]
+                
+                stats_msg = await update.message.reply_text(
+                    f"📊 **Your Stats**\n\n📝 Total Requests: {req}\n✅ Fulfilled: {ful}",
+                    parse_mode='Markdown'
+                )
+                track_message_for_deletion(context, chat_id, stats_msg.message_id, 120)
+            except Exception as e:
+                logger.error(f"Stats Error: {e}")
+            finally:
+                close_db_connection(conn)
         return
 
     elif query_text == '❓ Help':
@@ -13570,56 +12467,48 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def auto_delete_worker(app: Application):
     """
-    Background worker jo har 5 second me DB check karega,
+    Background worker jo har 5 second me DB check karega, 
     messages delete karega aur fir DB se bhi entry uda dega (Self-Cleaning).
-
-    ⚡ FIX — teen problem theen, teeno yahan theek ki gayi hain:
-      1. `conn` ko Telegram ke delete calls ke BEECH pakde rakha jaata tha:
-         ek pooled connection 50 round-trip tak block rehta tha. Superbatch
-         chalte waqt bilkul yahi connection user ki search ko chahiye hota
-         tha — aur na milta tha.
-      2. Har row par alag DELETE + commit = 50 DB round-trip har 5 second.
-         Ab ek hi batch DELETE.
-      3. delete_message calls SEQUENTIAL theen. Ab parallel — rate limiter
-         flood-control khud sambhalta hai.
     """
     try:
-        bot_username = app.bot.username          # cached, koi API call nahi
-    except Exception:
-        try:
-            bot_username = (await app.bot.get_me()).username
-        except Exception as e:
-            logger.error(f"Worker bot info error: {e}")
-            return
+        bot_info = await app.bot.get_me()
+        bot_username = bot_info.username
+    except Exception as e:
+        logger.error(f"Worker bot info error: {e}")
+        return
 
     logger.info(f"🧹 Auto-Delete Worker Started for @{bot_username}")
 
-    async def _del_one(chat_id, msg_id):
-        try:
-            await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception:
-            pass  # File pehle hi delete ho chuki hai ya bot block hai
-
     while True:
         try:
-            # 1️⃣ Jinka time pura ho gaya — worker thread me, event loop free
-            rows = await db_query(
-                "SELECT id, chat_id, message_id FROM auto_delete_queue "
-                "WHERE bot_username = %s AND delete_at <= NOW() LIMIT 50",
-                (bot_username,), mode='all'
-            )
-            if rows:
-                # 2️⃣ Telegram se delete — parallel, aur DB connection chhoda hua
-                await asyncio.gather(*[_del_one(c, m) for _, c, m in rows])
-
-                # 3️⃣ DB se ek hi batch me hatao (TAAKI DB CLEAN RAHE!)
-                await db_query(
-                    "DELETE FROM auto_delete_queue WHERE id = ANY(%s)",
-                    ([r[0] for r in rows],), mode='none'
+            conn = get_db_connection()
+            if conn:
+                cur = conn.cursor()
+                # 1. Wo messages dhoondo jinka time pura ho chuka hai
+                cur.execute(
+                    "SELECT id, chat_id, message_id FROM auto_delete_queue WHERE bot_username = %s AND delete_at <= NOW() LIMIT 50",
+                    (bot_username,)
                 )
+                rows = cur.fetchall()
+                
+                for row in rows:
+                    row_id, chat_id, msg_id = row
+                    
+                    # 2. Telegram se file delete karo
+                    try:
+                        await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                    except Exception:
+                        pass # File pehle hi delete ho chuki hai ya bot block hai
+                        
+                    # 3. DB se turant delete karo (TAAKI DB CLEAN RAHE!)
+                    cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
+                    conn.commit()
+                    
+                cur.close()
+                close_db_connection(conn)
         except Exception as e:
             logger.error(f"Auto-delete worker error: {e}")
-
+            
         # Har 5 second me database check karega
         await asyncio.sleep(5)
 
@@ -13841,21 +12730,6 @@ async def main():
     logger.info("🚀 Starting Multi-Bot System...")
 
     # =================================================================
-    # 0. THREAD POOL — run_async ka engine
-    # =================================================================
-    # `run_in_executor(None, ...)` Python ka DEFAULT executor use karta hai, jo
-    # `min(32, cpu_count + 4)` hota hai → Render ke 1-CPU box par sirf 5 threads.
-    # Superbatch Phase-A 8 movies parallel chalata hai aur har movie DB + TMDb ka
-    # blocking kaam thread me bhejti hai; 5 threads par sab kuch queue ho jaata
-    # aur parallelism ka fayda khatam ho jaata. Isliye explicit bada pool.
-    _executor = concurrent.futures.ThreadPoolExecutor(
-        max_workers=int(os.environ.get('THREAD_POOL_SIZE', '32')),
-        thread_name_prefix='flimfy',
-    )
-    asyncio.get_running_loop().set_default_executor(_executor)
-    logger.info(f"🧵 Thread pool ready ({_executor._max_workers} workers)")
-
-    # =================================================================
     # 1. Flask Server FIRST (Render timeout se bachao)
     # =================================================================
     flask_thread        = threading.Thread(target=run_flask)
@@ -13904,63 +12778,13 @@ async def main():
         try:
             logger.info(f"🔹 Initializing Bot {i+1}...")
 
-            # 🚀 concurrent_updates(True):
-            #    PTB ka default False hai — matlab ek update poora khatam hone tak
-            #    agla update START hi nahi hota. Isliye jab tum ek file forward karte
-            #    the, agla /start ya doosri file 3-5 minute queue me pada rehta tha.
-            #    Ab har update apne task me chalta hai.
-            #    (Race safety: pm_file_listener ka Phase-1 `auto_batch_lock` se aaj bhi
-            #     protected hai, isliye do files ek saath do movie rows nahi banayengi.)
-            # 🚦 AIORateLimiter:
-            #    Pehle code jagah-jagah blind `asyncio.sleep()` maar ke flood-limit se
-            #    bachta tha (500 files pe ~21 minute sirf sone me jaate the). Ab PTB
-            #    khud Telegram ke limits ke hisaab se pace karta hai — sirf zaroorat
-            #    padne par rukta hai, aur RetryAfter aane par khud retry karta hai.
-            #
-            #    ⚠️ per-chat (group) limiter default OFF kyun hai:
-            #    PTB channel aur group me farak nahi kar sakta, isliye group ka
-            #    20/minute wala limit channels par bhi laga deta. Tumhara bot pehle
-            #    se hi storage channels me ~100 file/minute copy kar raha tha (0.3s
-            #    sleep ke saath) aur kabhi ban nahi hua — matlab channels itna
-            #    tolerate karte hain. Agar main 20-30/minute laga deta to file upload
-            #    PEHLE SE SLOW ho jaata, jo ulta problem hai.
-            #    Isliye: global 28/s ka asli limit + max_retries=3. Telegram khud
-            #    bata dega agar zyada ho gaya, aur PTB uske bataye time par retry
-            #    karega (purana code us post/copy ko chhod deta tha).
-            #    Kabhi flood-ban ka message aaye to env me TG_CHAT_RATE_PER_MIN=20
-            #    set kar dena — per-chat pacing on ho jayegi.
-            builder = (
+            app = (
                 Application.builder()
                 .token(token)
                 .read_timeout(30)
                 .write_timeout(30)
-                .concurrent_updates(True)
+                .build()
             )
-            # ⚠️ Note: `from telegram.ext import AIORateLimiter` bina aiolimiter ke bhi
-            #    SUCCEED ho jaata hai — error tab aata hai jab object BANAYA jaaye
-            #    (RuntimeError). Isliye try/except construction ke around hai, warna
-            #    purane environment me bot startup par hi crash ho jaata.
-            _rate_limiter = None
-            if AIORateLimiter is not None:
-                try:
-                    _rate_limiter = AIORateLimiter(
-                        overall_max_rate=float(os.environ.get('TG_OVERALL_RATE', '28')),
-                        overall_time_period=1,      # global limit 30/s hai, thoda neeche
-                        group_max_rate=float(os.environ.get('TG_CHAT_RATE_PER_MIN', '0')),
-                        group_time_period=60,       # 0 = per-chat pacing off
-                        max_retries=3,
-                    )
-                except Exception as rl_e:
-                    logger.warning(f"⚠️ AIORateLimiter setup failed ({rl_e}) — bina rate limiter ke chal raha hai")
-            if _rate_limiter is not None:
-                builder = builder.rate_limiter(_rate_limiter)
-                logger.info("🚦 AIORateLimiter active (overall 28/s, per-chat pacing off)")
-            else:
-                logger.warning(
-                    "⚠️ Rate limiter OFF — `pip install \"python-telegram-bot[rate-limiter]\"` "
-                    "karo warna flood-limit par retry nahi hoga"
-                )
-            app = builder.build()
 
             register_handlers(app)
 
