@@ -6231,6 +6231,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 async def edit_message_text(self, *args, **kwargs):
                     return await query.edit_message_text(*args, **kwargs)
 
+                async def edit_message_caption(self, *args, **kwargs):
+                    return await query.edit_message_caption(*args, **kwargs)
+
             # Ek naya fake query object banaya taki read-only error na aaye
             update._callback_query = FakeQuery(query.from_user, query.message, f"v_main_{movie_id}")
             
@@ -6543,12 +6546,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
 
             # 👇 YAHAN disable_web_page_preview=True ADD KAR DIYA HAI 👇
-            await query.edit_message_text(
-                text=text, 
-                reply_markup=InlineKeyboardMarkup(keyboard), 
-                parse_mode='HTML',
-                disable_web_page_preview=True 
-            )
+            if query.message.photo:
+                try:
+                    await query.edit_message_caption(
+                        caption=text,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    pass
+            else:
+                await query.edit_message_text(
+                    text=text, 
+                    reply_markup=InlineKeyboardMarkup(keyboard), 
+                    parse_mode='HTML',
+                    disable_web_page_preview=True 
+                )
             return
         
         # ==================== QUALITY PAGINATION (NEXT/BACK) ====================
