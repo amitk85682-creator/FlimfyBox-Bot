@@ -4914,6 +4914,78 @@ Just use the buttons below to navigate!
         logger.error(f"Error in main menu: {e}")
         return MAIN_MENU
 
+async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str):
+    qualities = get_all_movie_qualities(movie_id)
+    if not qualities:
+        await update.message.reply_text("No files found!")
+        return
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT category, poster_url FROM movies WHERE id = %s", (movie_id,))
+    res = cur.fetchone()
+    category = res[0] if res else ""
+    poster_url = res[1] if res and len(res) > 1 else None
+    cur.close()
+    close_db_connection(conn)
+
+    context.user_data['selected_movie_data'] = {
+        'id': movie_id,
+        'title': title,
+        'category': category,
+        'qualities': qualities
+    }
+
+    bot_username = context.bot.username
+    file_list_text = f"🎬 <b>{title}</b>\n\n👇 <b>Your Requested Files Are Here</b>\n\n"
+    
+    for idx, file_data in enumerate(qualities[:10], start=1):
+        quality = file_data[0]
+        file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+        extra_info = file_data[5] if len(file_data) > 5 else ""
+        
+        ep_tag = f"[{extra_info}] " if extra_info else ""
+        real_idx = qualities.index(file_data)
+        file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {ep_tag}{quality}</a></b>\n\n"
+
+    limit = 10
+    total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
+    context.user_data['active_filter'] = None
+    
+    current_files = qualities[:limit]
+    keyboard_markup = create_quality_selection_keyboard(
+        movie_id=movie_id, 
+        view="main", 
+        page=1, 
+        total_pages=total_pages, 
+        current_files=current_files
+    )
+    
+    if poster_url:
+        try:
+            msg = await update.message.reply_photo(
+                photo=poster_url,
+                caption=file_list_text,
+                reply_markup=keyboard_markup,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Failed to send photo: {e}")
+            msg = await update.message.reply_text(
+                file_list_text,
+                reply_markup=keyboard_markup,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+    else:
+        msg = await update.message.reply_text(
+            file_list_text,
+            reply_markup=keyboard_markup,
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for movies in the database"""
     try:
@@ -5002,6 +5074,19 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
         # 3. Found
+        normalized_query = _normalize_search_text(query)
+        exact_movies = [
+            movie for movie in movies
+            if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_query
+        ]
+        chosen_movie = exact_movies[0] if len(exact_movies) == 1 else (movies[0] if len(movies) == 1 else None)
+        
+        if chosen_movie:
+            movie_id, title, url, file_id = chosen_movie[:4]
+            # Exact match par qualities menu dikhao
+            await process_movie_exact_match(update, context, movie_id, title)
+            return
+
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = query
 
@@ -6022,7 +6107,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = get_db_connection()
             cur = conn.cursor()
             # 🚀 FIX: Yahan 'category' bhi nikal rahe hain taaki pata chale Web Series hai ya nahi
-            cur.execute("SELECT id, title, category FROM movies WHERE id = %s", (movie_id,))
+            cur.execute("SELECT id, title, category, poster_url FROM movies WHERE id = %s", (movie_id,))
             movie = cur.fetchone()
             cur.close()
             close_db_connection(conn)
@@ -6031,7 +6116,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("❌ Movie not found in database.")
                 return
 
-            movie_id, title, category = movie
+            movie_id, title, category, poster_url = movie
             qualities = get_all_movie_qualities(movie_id)
 
             if not qualities:
@@ -6081,15 +6166,39 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             # Message update aur link preview disable
-            await query.edit_message_text(
-                selection_text,
-                reply_markup=keyboard_markup,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            
-            # Auto-delete timer lagao (return se pehle!)
-            track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
+            if poster_url:
+                try:
+                    await query.message.delete()
+                except:
+                    pass
+                try:
+                    msg = await context.bot.send_photo(
+                        chat_id=update.effective_chat.id,
+                        photo=poster_url,
+                        caption=selection_text,
+                        reply_markup=keyboard_markup,
+                        parse_mode='HTML'
+                    )
+                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+                except Exception as e:
+                    logger.error(f"Failed to send photo: {e}")
+                    # send as text if photo fails
+                    msg = await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=selection_text,
+                        reply_markup=keyboard_markup,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+            else:
+                await query.edit_message_text(
+                    selection_text,
+                    reply_markup=keyboard_markup,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
             
             return
 
@@ -12426,6 +12535,19 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # 4. Results mil gaye, ab show karo
+    normalized_text = _normalize_search_text(text)
+    exact_movies = [
+        movie for movie in movies
+        if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_text
+    ]
+    chosen_movie = exact_movies[0] if len(exact_movies) == 1 else (movies[0] if len(movies) == 1 else None)
+    
+    if chosen_movie:
+        movie_id, title, url, file_id = chosen_movie[:4]
+        # Exact match par qualities menu dikhao
+        await process_movie_exact_match(update, context, movie_id, title)
+        return
+
     context.user_data['search_results'] = movies
     context.user_data['search_query'] = text
 
