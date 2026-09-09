@@ -965,11 +965,20 @@ _EVIDENCE_KEYS = ("title", "year", "language", "extra_info", "category")
 
 def _valid_evidence_title(value):
     value = str(value or "").strip()
-    return bool(
-        value
-        and value.upper() not in {"UNKNOWN", "UNKNOWN_MOVIE", "FILE", "DOCUMENT", "VIDEO"}
-        and len(value) >= 2
+    if not value or len(value) < 2:
+        return False
+    upper_val = value.upper()
+    if upper_val in {"UNKNOWN", "UNKNOWN_MOVIE", "FILE", "DOCUMENT", "VIDEO"}:
+        return False
+
+    junk_pattern = re.compile(
+        r'^(?:\W|episode\s*\W*\s*\d+|ep\s*\W*\s*\d+|e\d+|season\s*\W*\s*\d+|s\d+|quality\s*\W*\s*|1080p|720p|480p|2160p|4k|web-dl|webrip|bluray|hdrip|camrip|language\s*\W*\s*|hindi dub|dub by\s*\W*\s*|@\w+|join now|subscribe|download|powered by|hindi|tamil|telugu|malayalam|kannada|english|dual audio)+$',
+        re.IGNORECASE
     )
+    if junk_pattern.match(value):
+        return False
+
+    return True
 
 
 def _normalize_evidence_dict(data):
@@ -1018,14 +1027,22 @@ def _merge_extra_info(primary, secondary):
     return f"{first} {second}".strip()
 
 
-def _local_evidence_fallback(caption_evidence, filename_evidence):
+def _local_evidence_fallback(caption_evidence, filename_evidence, forward_source=None):
     """Gemini unavailable/invalid ho to deterministic, field-wise safe merge."""
     cap = _normalize_evidence_dict(caption_evidence)
     fn = _normalize_evidence_dict(filename_evidence)
 
     cap_title_ok = _valid_evidence_title(cap.get("title"))
     fn_title_ok = _valid_evidence_title(fn.get("title"))
-    title = cap["title"] if cap_title_ok else fn["title"] if fn_title_ok else "UNKNOWN"
+    
+    fwd_title_ok = False
+    fwd_title = ""
+    if forward_source and forward_source.get("available"):
+        t = forward_source.get("title", "")
+        fwd_title_ok = _valid_evidence_title(t)
+        fwd_title = t
+
+    title = cap["title"] if cap_title_ok else fn["title"] if fn_title_ok else fwd_title if fwd_title_ok else "UNKNOWN"
 
     category = cap.get("category") or fn.get("category") or "Movies"
     for candidate in (cap.get("category", ""), fn.get("category", "")):
@@ -1056,6 +1073,25 @@ async def extract_same_file_evidence(message):
     caption_raw = (getattr(message, "caption", None) or getattr(message, "text", None) or "").strip()
     filename_raw = _get_message_filename(message).strip()
 
+    # EXTRACT FORWARD INFO
+    forward_title = ""
+    forward_username = ""
+    forward_id = ""
+    is_forward = False
+    
+    if getattr(message, "forward_origin", None):
+        is_forward = True
+        origin = message.forward_origin
+        if getattr(origin, "chat", None):
+            forward_title = getattr(origin.chat, "title", "") or ""
+            forward_username = getattr(origin.chat, "username", "") or ""
+            forward_id = str(getattr(origin.chat, "id", "")) or ""
+    elif getattr(message, "forward_from_chat", None):
+        is_forward = True
+        forward_title = getattr(message.forward_from_chat, "title", "") or ""
+        forward_username = getattr(message.forward_from_chat, "username", "") or ""
+        forward_id = str(getattr(message.forward_from_chat, "id", "")) or ""
+
     caption_evidence = await fallback_extraction(caption_raw) if caption_raw else {}
     filename_evidence = await fallback_extraction(filename_raw) if filename_raw else {}
 
@@ -1064,6 +1100,12 @@ async def extract_same_file_evidence(message):
         "filename_raw": filename_raw,
         "caption_evidence": _normalize_evidence_dict(caption_evidence),
         "filename_evidence": _normalize_evidence_dict(filename_evidence),
+        "forward_source": {
+            "title": forward_title,
+            "username": forward_username,
+            "chat_id": forward_id,
+            "available": is_forward
+        }
     }
 
 
@@ -1072,26 +1114,39 @@ async def reconcile_evidence_with_gemini(
     filename_evidence: dict,
     caption_raw: str = "",
     filename_raw: str = "",
+    forward_source: dict = None,
 ) -> dict:
     """
     Caption aur raw Telegram filename SAME file ke do evidence sources hain.
     Gemini sirf identity reconcile karta hai; TMDB/IMDb lookup baad mein code karta hai.
     """
-    fallback = _local_evidence_fallback(caption_evidence, filename_evidence)
+    fallback = _local_evidence_fallback(caption_evidence, filename_evidence, forward_source)
+    
+    fwd_log = (forward_source or {}).get('title', 'UNKNOWN')
+    cap_log = caption_evidence.get('title', 'UNKNOWN')
+    fn_log = filename_evidence.get('title', 'UNKNOWN')
+    logger.info("Evidence: forward_title='%s', caption_title='%s', filename_title='%s'", fwd_log, cap_log, fn_log)
+
     gemini_keys = get_gemini_keys()
     if not gemini_keys:
         return fallback
 
     evidence_bundle = {
         "source_context": (
-            "Caption and Telegram filename below belong to the exact same media file. "
-            "The Telegram filename may be truncated."
+            "You are receiving evidence from a Telegram media file. "
+            "You have forward metadata (if forwarded), the caption, and the filename."
         ),
+        "forward_source": forward_source or {
+            "title": "",
+            "username": "",
+            "chat_id": "",
+            "available": False
+        },
         "caption_source": {
             "raw_text": caption_raw or "",
             "locally_extracted": _normalize_evidence_dict(caption_evidence),
         },
-        "telegram_filename_source": {
+        "filename_source": {
             "raw_text": filename_raw or "",
             "locally_extracted": _normalize_evidence_dict(filename_evidence),
         },
@@ -1099,32 +1154,31 @@ async def reconcile_evidence_with_gemini(
 
     prompt = f"""You are a movie/series identity reconciliation engine.
 
-You are receiving TWO evidence sources from the EXACT SAME Telegram media file:
-1. The message caption and its locally extracted fields.
-2. The raw Telegram filename and its locally extracted fields.
+You are receiving ALL available evidence for a single Telegram media file:
+1. The forwarded source channel metadata (if available).
+2. The raw message caption and its locally extracted fields.
+3. The raw Telegram filename and its locally extracted fields.
 
-The local extraction is only a hint and can be incomplete or wrong. Read the raw strings too.
-The Telegram filename is commonly truncated near the end. The caption can contain promotions.
-Reconcile both sources into ONE identity that will later be searched by application code on TMDB/IMDb.
-Do NOT claim that you searched TMDB/IMDb. Do NOT invent details absent from both sources.
+Your goal is to RECONCILE the evidence into ONE correct movie/series identity.
+Local extraction is only a hint and may incorrectly extract metadata (e.g. 'Episode 12' or 'Hindi Dub') as the title.
+Forwarded channel titles are strong evidence but NOT blind absolute truth (e.g., 'Latest Anime Updates' is generic, not a show name).
 
 Rules:
 - Return ONLY one valid JSON object; no markdown or explanation.
 - Output keys must be exactly: title, year, language, extra_info, category.
-- title: clean official-looking title only; remove quality, codec, group names and file extension.
+- title: determine the most plausible official movie/series title. Reject metadata-only junk ('Episode 12'). Do not assume generic channel names are titles. If conflicts exist, pick the most plausible title.
 - year: four digits only when supported by evidence; otherwise empty string.
-- language: merge supported audio languages; preserve qualifiers such as Hindi (Line).
-- extra_info: only season, episode, part, combined/complete, or edition information.
+- language: merge supported audio languages (e.g. 'Hindi Dub').
+- extra_info: only season, episode, part, combined/complete, or edition information (e.g. 'Episode 12').
 - category: Movies, Web Series, or Anime.
-- If filename is visibly cut and caption is complete, prefer the caption for missing fields.
-- If caption has promotional junk and filename is cleaner, prefer the filename for identity.
-- Never treat these as two different titles.
+- If all sources contain only junk or generic promotional text, return UNKNOWN for title.
+- Never fabricate a title from episode/quality/language metadata.
 
 Same-file evidence bundle:
 {json.dumps(evidence_bundle, ensure_ascii=False, indent=2)}
 
 Required JSON example:
-{{"title":"Movie Name","year":"2026","language":"Hindi (Line), English","extra_info":"","category":"Movies"}}
+{{"title":"Movie Name","year":"2026","language":"Hindi Dub, English","extra_info":"Episode 12","category":"Web Series"}}
 """
 
     last_error = None
@@ -1150,7 +1204,7 @@ Required JSON example:
                 final_data["title"] = fallback.get("title", "UNKNOWN")
 
             logger.info(
-                "✅ Evidence reconciliation success: %s (%s)",
+                "✅ Evidence reconciliation success. Final identity: '%s' (%s)",
                 final_data.get("title"),
                 final_data.get("year") or "no year",
             )
@@ -1175,6 +1229,7 @@ async def process_file_with_evidence_engine(message) -> dict:
         evidence["filename_evidence"],
         caption_raw=evidence["caption_raw"],
         filename_raw=evidence["filename_raw"],
+        forward_source=evidence.get("forward_source"),
     )
 
 
@@ -1207,6 +1262,7 @@ def _best_local_identity(record):
     merged = _local_evidence_fallback(
         record.get("caption_evidence", {}),
         record.get("filename_evidence", {}),
+        forward_source=record.get("forward_source"),
     )
     title = merged.get("title") or "Unknown_Movie"
     year = str(merged.get("year") or "").strip()
@@ -7384,6 +7440,7 @@ async def _collect_superbatch_file(message):
         "message_obj": message,
         "caption_evidence": evidence["caption_evidence"],
         "filename_evidence": evidence["filename_evidence"],
+        "forward_source": evidence.get("forward_source"),
     }
 
 
@@ -7457,6 +7514,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 representative.get('filename_evidence', {}),
                 caption_raw=representative.get('caption', ''),
                 filename_raw=representative.get('file_name', ''),
+                forward_source=representative.get('forward_source'),
             )
 
             result = await _core_movie_processor(
