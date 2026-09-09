@@ -1455,10 +1455,9 @@ async def fallback_extraction(caption_text):
                 words.pop(0)
             title = ' '.join(words)
 
-        # If title is too short after cleaning, fallback to original first line without extension
+        # If title is too short after cleaning, reject it
         if len(title) < 3:
-            title = original.split('.')[0].strip()
-            title = re.sub(r'[\[\(].*?[\]\)]', '', title)
+            title = "UNKNOWN"
 
         # 4. Language extraction (same as original)
         languages = []
@@ -1599,8 +1598,7 @@ async def _extract_web_series(text, original):
 
         # Final check
         if not title or len(title) < 2:
-            title = original.split('.')[0].strip()
-            title = re.sub(r'[\[\(].*?[\]\)]', '', title)
+            title = "UNKNOWN"
 
         logger.info(f"✅ Web Series Fallback: '{title}' | Year: {year} | Lang: {language} | Extra: {extra_info} | Cat: {category}")
         return {
