@@ -1342,7 +1342,8 @@ document.addEventListener('keydown', (e) => {
         window.renderCommunityRating = function(movieId, title) {
                 const container = document.getElementById('communityRating');
                 if (!container) return;
-                container.innerHTML = '<h2 class="community-rating-title"></h2><div class="community-rating-stars"></div><div class="community-rating-summary">Loading rating…</div>';
+                container.innerHTML = '<h2 class="community-rating-title"></h2><div class="community-rating-stars"></div><button type="button" class="community-rating-submit" disabled>Submit rating</button><div class="community-rating-summary">Loading rating…</div>';
+                container.dataset.selectedRating = '';
                 container.querySelector('.community-rating-title').textContent = `Rate ${title}`;
                 const stars = container.querySelector('.community-rating-stars');
                 for (let value = 1; value <= 5; value += 1) {
@@ -1353,10 +1354,14 @@ document.addEventListener('keydown', (e) => {
                     button.setAttribute('aria-label', `Rate ${value} out of 5`);
                     button.textContent = '☆';
                     button.addEventListener('mouseenter', () => previewCommunityStars(container, value));
-                    button.addEventListener('mouseleave', () => previewCommunityStars(container, 0));
-                    button.addEventListener('click', () => submitCommunityRating(movieId, value, container));
+                    button.addEventListener('mouseleave', () => previewCommunityStars(container, Number(container.dataset.selectedRating || 0)));
+                    button.addEventListener('click', () => selectCommunityRating(value, container));
                     stars.appendChild(button);
                 }
+                container.querySelector('.community-rating-submit').addEventListener(
+                    'click',
+                    () => submitCommunityRating(movieId, container)
+                );
                 fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`)
                     .then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
@@ -1374,6 +1379,14 @@ document.addEventListener('keydown', (e) => {
                     button.textContent = selected ? '★' : '☆';
                 });
         }
+        function selectCommunityRating(value, container) {
+                container.dataset.selectedRating = String(value);
+                previewCommunityStars(container, value);
+                const submit = container.querySelector('.community-rating-submit');
+                if (submit) submit.disabled = false;
+                const summary = container.querySelector('.community-rating-summary');
+                if (summary) summary.textContent = `You selected ${value} / 5. Tap Submit rating to save it.`;
+        }
         function updateCommunityRating(container, data) {
                 const own = data.user_rating;
                 container.querySelectorAll('.community-rating-star').forEach((button) => {
@@ -1382,15 +1395,25 @@ document.addEventListener('keydown', (e) => {
                     button.textContent = selected ? '★' : '☆';
                     button.disabled = !data.can_rate;
                 });
+                container.dataset.selectedRating = data.user_rating ? String(data.user_rating) : '';
+                const submit = container.querySelector('.community-rating-submit');
+                if (submit) submit.disabled = !data.can_rate || !data.user_rating;
                 const summary = container.querySelector('.community-rating-summary');
                 summary.innerHTML = data.count
                     ? `<strong>FlimfyBox Rating</strong><br>${Number(data.average).toFixed(1)} / 5 · ${data.count} rating${data.count === 1 ? '' : 's'}${own ? `<br>Your rating: ${own} / 5` : ''}`
                     : '<strong>FlimfyBox Rating</strong><br>No ratings yet';
         }
-        function submitCommunityRating(movieId, value, container) {
+        function submitCommunityRating(movieId, container) {
                 if (container.dataset.submitting === 'true') return;
+                const value = Number(container.dataset.selectedRating || 0);
+                if (!value) {
+                    container.querySelector('.community-rating-summary').textContent = 'Select a star first.';
+                    return;
+                }
                 container.dataset.submitting = 'true';
                 container.querySelectorAll('.community-rating-star').forEach(button => { button.disabled = true; });
+                const submit = container.querySelector('.community-rating-submit');
+                if (submit) submit.disabled = true;
                 container.querySelector('.community-rating-summary').textContent = 'Saving your rating…';
                 fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     method: 'POST',
@@ -1404,6 +1427,8 @@ document.addEventListener('keydown', (e) => {
                     .catch(error => {
                         container.querySelector('.community-rating-summary').textContent = error.message;
                         container.querySelectorAll('.community-rating-star').forEach(button => { button.disabled = false; });
+                        const submit = container.querySelector('.community-rating-submit');
+                        if (submit) submit.disabled = !container.dataset.selectedRating;
                     })
                     .finally(() => { container.dataset.submitting = 'false'; });
         }

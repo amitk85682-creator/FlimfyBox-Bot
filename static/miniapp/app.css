@@ -379,6 +379,8 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 .community-rating-star { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: var(--surface-2); font-size: 19px; line-height: 1; }
 .community-rating-star.selected, .community-rating-star.preview { color: #ffd05b; border-color: rgba(255,208,91,.5); background: rgba(255,208,91,.12); animation: ratingGlow 1.8s ease-in-out infinite; }
 .community-rating-star:disabled { cursor: default; opacity: .86; }
+.community-rating-submit { display: block; width: 100%; min-height: 34px; margin-top: 9px; border: 1px solid var(--primary); border-radius: 9px; color: var(--text); background: var(--primary); font-size: 11px; font-weight: 800; }
+.community-rating-submit:disabled { cursor: not-allowed; opacity: .45; }
 .community-rating-summary { min-height: 15px; margin-top: 8px; color: var(--muted); font-size: 10px; }
 .community-rating-summary strong { color: var(--text); }
 @keyframes ratingGlow { 0%, 100% { box-shadow: 0 0 0 rgba(255,208,91,0); } 50% { box-shadow: 0 0 16px rgba(255,208,91,.24); } }
