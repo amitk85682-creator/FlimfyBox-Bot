@@ -14,6 +14,7 @@ import requests
 import signal
 import sys
 import concurrent.futures
+from html import escape as html_escape
 from PIL import Image, ImageFilter
 from trending_manager import trending_worker_loop
 from telegram import WebAppInfo
@@ -240,7 +241,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     # --- 6. KEYBOARD BUTTONS ---
-    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+    secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
     
     keyboard_data = {
         "inline_keyboard": [
@@ -341,7 +342,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 # still hard-coded in several buttons, so Telegram opened the retired Mini App.
 WEB_APP_URL = os.environ.get(
     'WEB_APP_URL',
-    'https://flimfybox-bot-yht0.onrender.com/webapp'
+    'https://temp-bj8b.onrender.com/webapp'
 ).rstrip('/')
     # 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
@@ -1893,6 +1894,8 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
         return 0
 
 # ==================== DATABASE-BACKED AUTO-DELETE FUNCTIONS ====================
+USER_TEXT_DELETE_SECONDS = 5 * 60
+USER_FILE_DELETE_SECONDS = 2 * 60
 
 async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
     """Messages ko DB me save karta hai taaki restart hone par bhi yaad rahe"""
@@ -1933,6 +1936,13 @@ def track_message_for_deletion(context, chat_id, message_id, delay=60):
     task = asyncio.create_task(add_messages_to_db_queue(context, chat_id, [message_id], delay))
     background_tasks.add(task)
     task.add_done_callback(background_tasks.discard)
+
+def track_user_message_for_deletion(context, chat_id, message, is_file=False):
+    """Use the user-facing retention policy for text and downloadable files."""
+    if not message:
+        return
+    delay = USER_FILE_DELETE_SECONDS if is_file else USER_TEXT_DELETE_SECONDS
+    track_message_for_deletion(context, chat_id, message.message_id, delay)
 
 # ==================== DATABASE FUNCTIONS ====================
 
@@ -1997,6 +2007,29 @@ def setup_database():
                 PRIMARY KEY (user_id, movie_id)
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_ratings (
+                id BIGSERIAL PRIMARY KEY,
+                movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
+                rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (movie_id, user_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_ratings_movie_id ON movie_ratings(movie_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_ratings_user_id ON movie_ratings(user_id)")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS global_chat_messages (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
+                username TEXT,
+                first_name TEXT,
+                message TEXT NOT NULL CHECK (char_length(message) BETWEEN 1 AND 500),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_global_chat_created_at ON global_chat_messages(created_at DESC)")
         
         # 👇👇👇 NAYA TABLE: Auto-Delete Queue ke liye 👇👇👇
         cur.execute("""
@@ -3088,6 +3121,66 @@ def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
         logger.error(f"Failed to fetch cast for {imdb_id}: {e}")
     return ""
 
+
+def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, category: str = "") -> Optional[str]:
+    """Resolve and return a YouTube trailer key while metadata is being saved."""
+    api_key = os.environ.get("TMDB_API_KEY", "9fa44f5e9fbd41415df930ce5b81c4d7")
+    media_type = 'tv' if any(token in str(category).lower() for token in ('tv', 'series', 'web')) else 'movie'
+    candidates = []
+    try:
+        if imdb_id and str(imdb_id).startswith('tt'):
+            find_response = requests.get(
+                f"https://api.themoviedb.org/3/find/{quote(str(imdb_id))}",
+                params={'api_key': api_key, 'external_source': 'imdb_id'},
+                timeout=8
+            ).json()
+            candidates = [
+                (item, 'movie') for item in find_response.get('movie_results', [])
+            ] + [
+                (item, 'tv') for item in find_response.get('tv_results', [])
+            ]
+        if not candidates and title:
+            search_response = requests.get(
+                "https://api.themoviedb.org/3/search/multi",
+                params={'api_key': api_key, 'query': title, 'include_adult': 'true'},
+                timeout=8
+            ).json()
+            candidates = [
+                (item, item.get('media_type'))
+                for item in search_response.get('results', [])
+                if item.get('media_type') in {'movie', 'tv'}
+            ]
+            if year:
+                dated = [
+                    item for item in candidates
+                    if str(item[0].get('release_date') or item[0].get('first_air_date') or '')[:4] == str(year)[:4]
+                ]
+                if dated:
+                    candidates = dated
+            candidates = [item for item in candidates if item[1] == media_type] or candidates
+
+        for candidate, candidate_type in candidates[:3]:
+            videos = requests.get(
+                f"https://api.themoviedb.org/3/{candidate_type}/{candidate['id']}/videos",
+                params={'api_key': api_key, 'language': 'en-US'},
+                timeout=8
+            ).json()
+            youtube_videos = [
+                video for video in videos.get('results', [])
+                if video.get('site') == 'YouTube' and video.get('key')
+            ]
+            preferred = [
+                video for video in youtube_videos
+                if video.get('type') == 'Trailer' and (
+                    video.get('official') or 'official' in (video.get('name') or '').lower()
+                )
+            ] or [video for video in youtube_videos if video.get('type') == 'Trailer']
+            if preferred:
+                return preferred[0]['key']
+    except Exception as exc:
+        logger.warning("TMDb trailer lookup failed for '%s': %s", title, exc)
+    return None
+
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
 def get_tmdb_backdrop(query, search_year=""):
@@ -3647,14 +3740,15 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         reply_markup=join_keyboard
                     ))
 
-                # Auto delete both after 60 seconds
-                ids = []
                 if sent_msg:
-                    ids.append(sent_msg.message_id)
+                    is_file_message = bool(
+                        sent_msg.document or sent_msg.video or sent_msg.audio or sent_msg.photo
+                    )
+                    track_user_message_for_deletion(
+                        context, user_id, sent_msg, is_file=is_file_message
+                    )
                 if warning_msg:
-                    ids.append(warning_msg.message_id)
-                if ids:
-                    asyncio.create_task(delete_messages_after_delay(context, user_id, ids, 60))
+                    track_user_message_for_deletion(context, user_id, warning_msg)
 
                 cur.execute(
                     "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
@@ -4022,15 +4116,15 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
 
         # 3. Send All, Trending (Row 1)
         keyboard.append([
-            InlineKeyboardButton("🔶 Sᴇɴᴅ Aʟʟ 🔶", callback_data=f"sendall_{movie_id}_{page}"),
-            InlineKeyboardButton("⚡ Tʀᴇɴᴅɪɴɢ", url=FILMFYBOX_GROUP_URL)
+            InlineKeyboardButton("◆ SEND ALL", callback_data=f"sendall_{movie_id}_{page}"),
+            InlineKeyboardButton("TRENDING", url=FILMFYBOX_GROUP_URL)
         ])
         
         # 4. Filters (Row 2)
         keyboard.append([
-            InlineKeyboardButton("📍 Qᴜᴀʟɪᴛʏ", callback_data=f"v_qual_{movie_id}"),
-            InlineKeyboardButton("🔊 Lᴀɴɢᴜᴀɢᴇ", callback_data=f"v_lang_{movie_id}"),
-            InlineKeyboardButton("🏷️ Sᴇᴀsᴏɴ", callback_data=f"v_seas_{movie_id}")
+            InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
+            InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
+            InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
         ])
         
         # 5. Pagination (Premium look)
@@ -4066,6 +4160,33 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
         keyboard.append([InlineKeyboardButton("<< BACK TO FILES >>", callback_data=f"v_main_{movie_id}")])
 
     return InlineKeyboardMarkup(keyboard)
+
+def load_movie_selection_data(movie_id):
+    """Reload callback state from the database after a file-link click clears memory."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, title, category FROM movies WHERE id = %s",
+            (movie_id,)
+        )
+        movie = cur.fetchone()
+        cur.close()
+        if not movie:
+            return None
+    except Exception as exc:
+        logger.error(f"Could not reload movie selection {movie_id}: {exc}")
+        return None
+    finally:
+        close_db_connection(conn)
+    return {
+        'id': movie[0],
+        'title': movie[1] or "Requested Movie",
+        'category': movie[2] or "",
+        'qualities': get_all_movie_qualities(movie_id)
+    }
 
 # ==================== HELPER FUNCTION ====================
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, require_exact_file: bool = False):
@@ -4234,7 +4355,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             
             # 👇 YAHAN SE FIX SHURU HOTA HAI (HTML INLINE LINKS KE LIYE) 👇
             bot_username = context.bot.username
-            text = f"<b>━━━━━━ 📁 𝗙𝗶𝗹𝗲 𝗟𝗶𝘀𝘁 ━━━━━━</b>\n✦ <b>{title}</b>\n\n⟐ <b>𝗨𝗼𝘂𝗿 𝗥𝗲𝘄𝘂𝗲𝘀𝘁𝗲𝗱 𝗙𝗶𝗹𝗲𝘀 𝗔𝗿𝗲 𝗗𝗲𝗿𝗲</b> 👇\n\n"
+            text = (
+                f"<b>🎬 {title}</b>\n"
+                "<i>Choose your preferred version</i>\n\n"
+                "<b>◆ AVAILABLE FILES</b>\n"
+                "<i>Tap any blue title to download instantly.</i>\n\n"
+            )
             
             
             for idx, f_data in enumerate(current_files, start=1):
@@ -4262,7 +4388,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 real_idx = all_qualities.index(f_data)
                 text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{f_size} | {title} {ep_tag}{q_name.strip()}</a></b>\n\n"
             
-            text += f"<b>Update Channel:</b> <a href='{UPDATE_CHANNEL_URL}'>Join BackUp</a>\n"
+            text += (
+                f"\n<b>◆ More updates:</b> <a href='{UPDATE_CHANNEL_URL}'>Join BackUp</a>"
+            )
 
             keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
@@ -4280,7 +4408,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             
             if update.callback_query:
                 try:
-                    await update.callback_query.answer("⚠️ Ye message 1 minute baad delete ho jayegi.", show_alert=True)
+                    await update.callback_query.answer("This file menu expires in 1 minute.", show_alert=True)
                 except:
                     pass
             return
@@ -4370,16 +4498,17 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 reply_markup=join_keyboard
             )
 
-        messages_to_delete = []
         if sent_msg:
-            messages_to_delete.append(sent_msg.message_id)
+            # Downloadable media is retained for 2 minutes; link-only replies
+            # are retained for the normal 5-minute user-message window.
+            is_file_message = bool(
+                sent_msg.document or sent_msg.video or sent_msg.audio or sent_msg.photo
+            )
+            track_user_message_for_deletion(
+                context, target_chat_id, sent_msg, is_file=is_file_message
+            )
         if warning_msg:
-            messages_to_delete.append(warning_msg.message_id)
-
-        if messages_to_delete:
-            track_message_for_deletion(context, target_chat_id, messages_to_delete[0], 60) 
-            if len(messages_to_delete) > 1:
-                track_message_for_deletion(context, target_chat_id, messages_to_delete[1], 60)
+            track_user_message_for_deletion(context, target_chat_id, warning_msg)
         elif not sent_msg:
             err_msg = await context.bot.send_message(chat_id=target_chat_id, text="❌ Error: File not found or Bot needs Admin rights in Source Channel.")
             track_message_for_deletion(context, target_chat_id, err_msg.message_id, 30)
@@ -4597,25 +4726,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ✅ FIX 1: Message ko safe tarike se nikalein (Button aur Text dono ke liye)
     message = update.effective_message 
 
-    # === FSub Check (Smart Logic) ===
-    force_check = True if context.args else False
-    
-    check = await is_user_member(context, user_id, force_fresh=force_check)
-    
-    if not check['is_member']:
-        # Agar deep link (args) hain to unhe save kar lo
-        if context.args:
-            context.user_data['pending_start_args'] = context.args
+    is_group_chat = update.effective_chat.type in ("group", "supergroup")
 
-        # ✅ FIX 2: send_message use karein (reply_text fail ho sakta hai button par)
-        msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=get_join_message(check['channel'], check['group']),
-            reply_markup=get_join_keyboard(),
-            parse_mode='Markdown'
-        )
-        track_message_for_deletion(context, chat_id, msg.message_id, 120)
-        return
+    # Membership checks are meaningful for private users only. In groups,
+    # Telegram routes /start@<this bot username> to this same handler
+    # automatically; no bot username is hardcoded here.
+    if not is_group_chat:
+        force_check = True if context.args else False
+        check = await is_user_member(context, user_id, force_fresh=force_check)
+
+        if not check['is_member']:
+            # Agar deep link (args) hain to unhe save kar lo
+            if context.args:
+                context.user_data['pending_start_args'] = context.args
+
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=get_join_message(check['channel'], check['group']),
+                reply_markup=get_join_keyboard(),
+                parse_mode='Markdown'
+            )
+            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            return
     # ==================
 
     logger.info(f"START called by user {user_id} with args: {context.args}")
@@ -4817,6 +4949,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id=chat_id, text="❌ Error processing search link.")
                     return
 
+    # Group commands should not post the private welcome GIF/menu or run
+    # private-user membership UX. Give the group a concise usage response.
+    if is_group_chat:
+        bot_info = await context.bot.get_me()
+        bot_username = html_escape(bot_info.username or "this bot")
+        group_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Open FlimfyBox", url=WEB_APP_URL)]
+        ])
+        msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"👋 <b>{html_escape(bot_info.first_name or 'FlimfyBox')}</b> group me active hai.\n\n"
+                "Movie ya series ka naam isi group me bhejo, "
+                "main matching files dikha dunga.\n\n"
+                f"Bot ko direct start karne ke liye: <code>/start@{bot_username}</code>"
+            ),
+            reply_markup=group_keyboard,
+            parse_mode='HTML'
+        )
+        track_user_message_for_deletion(context, chat_id, msg)
+        return
+
     # --- NORMAL WELCOME MESSAGE (WITH GIF & DYNAMIC GREETING) ---
     user = update.effective_user
     user_name = user.first_name
@@ -4910,7 +5064,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if query == '🔍 Search Movies':
             msg = await update.message.reply_text("Great! Tell me the name of the movie you want to search for.")
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            track_user_message_for_deletion(context, update.effective_chat.id, msg)
             return SEARCHING
 
         elif query == '🙋 Request Movie':
@@ -4991,7 +5145,12 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
     }
 
     bot_username = context.bot.username
-    file_list_text = f"🎬 <b>{title}</b>\n\n👇 <b>Your Requested Files Are Here</b>\n\n"
+    file_list_text = (
+        f"<b>🎬 {title}</b>\n"
+        "<i>Choose your preferred version</i>\n\n"
+        "<b>◆ AVAILABLE FILES</b>\n"
+        "<i>Tap any blue title to download instantly.</i>\n\n"
+    )
     
     for idx, file_data in enumerate(qualities[:10], start=1):
         quality = file_data[0]
@@ -5073,13 +5232,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Google runs on the server (not through a WebView JSONP callback),
             # so a spelling such as "rechar" can be retried from Telegram too.
             suggestions = await run_async(get_google_title_suggestions, search_term, limit=3)
-            if SEARCH_ERROR_GIFS:
-                try:
-                    gif = random.choice(SEARCH_ERROR_GIFS)
-                    msg_gif = await update.message.reply_animation(animation=gif)
-                    track_message_for_deletion(context, update.effective_chat.id, msg_gif.message_id, 60)
-                except:
-                    pass
 
             not_found_text = (
                 "<b>━━━━ ❌ 𝗡𝗼𝘁 𝗙𝗼𝘂𝗻𝗱 ━━━━</b>\n\n"
@@ -5116,15 +5268,29 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📢 Update Channel: Join BackUp", url=UPDATE_CHANNEL_URL)]
             ])
             keyboard = InlineKeyboardMarkup(keyboard_rows)
-            
-            msg = await update.message.reply_text(
-                text=not_found_text,
-                reply_markup=keyboard,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
+
+            msg = None
+            if SEARCH_ERROR_GIFS:
+                try:
+                    gif = random.choice(SEARCH_ERROR_GIFS)
+                    msg = await update.message.reply_animation(
+                        animation=gif,
+                        caption=not_found_text,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                except Exception as exc:
+                    logger.warning(f"Search failure animation could not be sent: {exc}")
+
+            if msg is None:
+                msg = await update.message.reply_text(
+                    text=not_found_text,
+                    reply_markup=keyboard,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
             # Auto Delete Not Found Msg
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            track_user_message_for_deletion(context, update.effective_chat.id, msg)
             return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
         # 3. Found
@@ -5369,6 +5535,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Memory se movie ka naam nikal lo
         movie_data = context.user_data.get('selected_movie_data')
+        if not movie_data or movie_data.get('id') != movie_id:
+            movie_data = load_movie_selection_data(movie_id)
         title = movie_data['title'] if movie_data else "Requested Movie"
 
         try:
@@ -5392,8 +5560,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('active_filter', None)
         context.user_data.pop('selected_season', None)
         movie_data = context.user_data.get('selected_movie_data')
+        if not movie_data or movie_data.get('id') != movie_id:
+            movie_data = load_movie_selection_data(movie_id)
+            if movie_data:
+                context.user_data['selected_movie_data'] = movie_data
         if not movie_data:
-            await query.answer("❌ Session expired.", show_alert=True)
+            await query.answer("❌ Movie data is no longer available.", show_alert=True)
             return
         title = movie_data['title']
         qualities = movie_data['qualities']
@@ -5493,15 +5665,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Bot ko batana ki user ab screenshot bhejega
                 context.user_data['payment_step'] = 'screenshot'
                 
-                # Purana menu delete karke QR bhejna
-                await query.message.delete()
-                await context.bot.send_photo(
+                # Purana menu delete karke QR bhejna. The callback can arrive
+                # after Telegram has already removed the old menu.
+                try:
+                    await query.message.delete()
+                except TelegramError as exc:
+                    logger.info(f"Start menu was already unavailable: {exc}")
+                donation_msg = await context.bot.send_photo(
                     chat_id=query.message.chat_id,
                     photo=bio,
                     caption=text,
                     parse_mode='HTML',
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="start_back")]])
                 )
+                track_user_message_for_deletion(context, chat_id, donation_msg)
             except Exception as e:
                 # Agar qrcode install nahi hai toh normal text bhejega
                 text = f"<b>💰 DONATION</b>\n\nAgar aapko mera kaam pasand aaya, toh aap UPI pe support kar sakte hain: <code>{upi_id}</code>"
@@ -5566,15 +5743,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
         ])
 
-        # Original GIF wapas send karo
-        await context.bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=int(os.environ.get('DUMP_CHANNEL_ID', '-1003893346701')),
-            message_id=6057, 
-            caption=caption_text,
-            parse_mode='HTML',
-            reply_markup=inline_buttons
-        )
+        # Use the same known-good source message as the initial /start menu.
+        try:
+            msg = await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=int(DUMP_CHANNEL_ID),
+                message_id=62,
+                caption=caption_text,
+                parse_mode='HTML',
+                reply_markup=inline_buttons
+            )
+        except TelegramError as exc:
+            logger.error(f"Could not restore start menu media: {exc}")
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=caption_text,
+                parse_mode='HTML',
+                reply_markup=inline_buttons
+            )
+        track_user_message_for_deletion(context, chat_id, msg)
         return
         
     # === ADMIN REQUEST BUTTONS (Add/Not Found) ===
@@ -5759,7 +5946,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         # --- 4. SECURE LINK & BUTTONS ---
-        secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+        secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
         channel_link = os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/your_channel')
 
         post_keyboard = InlineKeyboardMarkup([
@@ -6348,8 +6535,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ==================== NAYA UI VIEWS, FILTERS & PAGINATION ====================
         elif query.data.startswith("v_") or query.data.startswith("fl_") or query.data.startswith("vpage_"):
             movie_data = context.user_data.get('selected_movie_data')
+            callback_parts = query.data.split('_')
+            try:
+                movie_id_from_callback = int(
+                    callback_parts[2] if callback_parts[0] != "vpage" else callback_parts[1]
+                )
+            except (IndexError, ValueError):
+                movie_id_from_callback = None
+            if movie_id_from_callback is not None and (
+                not movie_data or movie_data.get('id') != movie_id_from_callback
+            ):
+                movie_data = load_movie_selection_data(movie_id_from_callback)
+                if movie_data:
+                    context.user_data['selected_movie_data'] = movie_data
             if not movie_data:
-                await query.answer("❌ Session expired. Search again.", show_alert=True)
+                await query.answer("❌ Movie data is no longer available.", show_alert=True)
                 return
 
             movie_id = movie_data['id']
@@ -7199,9 +7399,10 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 🛑 "cast" quoted and year is integer
         # 🎯 NAYA LOGIC: Title ki jagah IMDb ID par conflict check karega
         import json
+        trailer_key = await run_async(fetch_tmdb_trailer_key, title, year, imdb_id_f, category)
         cur.execute("""
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", seasons_data) 
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", seasons_data, trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (imdb_id) DO UPDATE SET 
             title = EXCLUDED.title,
             poster_url = EXCLUDED.poster_url, 
@@ -7211,9 +7412,10 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             description = EXCLUDED.description, 
             category = EXCLUDED.category, 
             "cast" = EXCLUDED."cast",
-            seasons_data = EXCLUDED.seasons_data
+            seasons_data = EXCLUDED.seasons_data,
+            trailer_key = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
-        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}'))
+        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}', trailer_key))
         
         movie_id = cur.fetchone()[0]
         
@@ -7308,19 +7510,23 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
         
         # ✅ FIXED: Quote "cast" because it's a reserved keyword
+        trailer_key = await run_async(
+            fetch_tmdb_trailer_key, title, year, imdb_id, category
+        )
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast") 
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (title) DO UPDATE 
             SET year = EXCLUDED.year, 
                 genre = EXCLUDED.genre, 
                 category = EXCLUDED.category, 
                 language = EXCLUDED.language,
-                "cast" = COALESCE(EXCLUDED."cast", movies."cast")
+                "cast" = COALESCE(EXCLUDED."cast", movies."cast"),
+                trailer_key = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str)
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str, trailer_key)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
@@ -7635,7 +7841,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             # --- SECURE LINK & BUTTONS (As it was) ---
-            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+            secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
 
             post_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
@@ -7792,6 +7998,9 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     cast_str = ""
     if imdb_id:
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
+    trailer_key = await run_async(
+        fetch_tmdb_trailer_key, title, year, imdb_id, category
+    )
 
     # --- STEP 4: DB INSERT (pm_file_listener ka EXACT ON CONFLICT logic) ---
     if not imdb_id:  # Fix for empty string violating unique constraint
@@ -7806,8 +8015,8 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast")
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast", trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (title) DO UPDATE
             SET imdb_id      = COALESCE(EXCLUDED.imdb_id,      movies.imdb_id),
                 poster_url   = COALESCE(EXCLUDED.poster_url,   movies.poster_url),
@@ -7818,10 +8027,11 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                 description  = COALESCE(EXCLUDED.description,  movies.description),
                 language     = CASE WHEN EXCLUDED.language   != '' THEN EXCLUDED.language   ELSE movies.language   END,
                 extra_info   = CASE WHEN EXCLUDED.extra_info  != '' THEN EXCLUDED.extra_info  ELSE movies.extra_info  END,
-                "cast"       = COALESCE(EXCLUDED."cast",       movies."cast")
+                "cast"       = COALESCE(EXCLUDED."cast",       movies."cast"),
+                trailer_key  = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, "", cast_str)
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, "", cast_str, trailer_key)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
@@ -8245,7 +8455,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
 
         # --- SECURE LINK FOR SUPERBATCH POST ---
-        secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+        secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
@@ -8341,7 +8551,7 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     # 3. Download Buttons Banao
-    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+    secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -8534,7 +8744,7 @@ async def process_post_query_album(mg_id: str, update: Update, context: ContextT
     bot3 = "FlimfyBoxBot"
     
     if movie_id:
-        secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+        secure_link = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
         link1 = secure_link
         link2 = secure_link
         link3 = secure_link
@@ -8749,7 +8959,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if movie_id:
             # ✅ FIXED: Web App Secure Link (Exactly like /superdone)
-            secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+            secure_link = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
             link1 = secure_link
             link2 = secure_link
             link3 = secure_link
@@ -8945,7 +9155,7 @@ async def admin_post_query_text(update: Update, context: ContextTypes.DEFAULT_TY
         bot3 = "FlimfyBoxBot"
         
         if movie_id:
-            secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+            secure_link = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
             link1 = secure_link
             link2 = secure_link
             link3 = secure_link
@@ -9881,6 +10091,9 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_source = combo["source"]
         evidence_sources = combo.get("evidence_sources", [])
         identity_status = combo.get("identity_status", "Unverified")
+        trailer_key = await run_async(
+            fetch_tmdb_trailer_key, title, year, imdb_id, category
+        )
 
         # IMDB cast fetch (extra — agar imdb_id mila ho)
         if imdb_id and not cast_str:
@@ -9921,11 +10134,12 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         category = %s,
                         language = COALESCE(NULLIF(%s, ''), language),
                         extra_info = COALESCE(NULLIF(%s, ''), extra_info),
-                        "cast" = COALESCE(%s, "cast")
+                        "cast" = COALESCE(%s, "cast"),
+                        trailer_key = COALESCE(%s, trailer_key)
                     WHERE id = %s
                     RETURNING id
                 """, (final_poster, final_year, final_year, genre, rating, plot, 
-                      category, movie_lang, movie_extra, cast_str, existing_id))
+                      category, movie_lang, movie_extra, cast_str, trailer_key, existing_id))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
                 
@@ -9934,11 +10148,11 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("""
                     INSERT INTO movies 
                     (title, url, imdb_id, poster_url, year, genre, rating, 
-                     description, category, language, extra_info, "cast") 
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     description, category, language, extra_info, "cast", trailer_key)
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (title, imdb_id, poster_url, year, genre, rating, 
-                      plot, category, movie_lang, movie_extra, cast_str))
+                      plot, category, movie_lang, movie_extra, cast_str, trailer_key))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
 
@@ -10226,7 +10440,7 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # Build keyboard
-    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
+    secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
     post_keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Download Now", url=secure_url),
@@ -10636,7 +10850,7 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
     for (m_id, ch_id, msg_id) in posts:
         try:
             # --- SECURE LINK FOR OLD POSTS UPDATE ---
-            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{m_id}"
+            secure_url = f"https://temp-bj8b.onrender.com/watch/{m_id}"
 
             new_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📥 Download Server 1", url=secure_url)],
@@ -11362,12 +11576,15 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
                         reply_markup=join_keyboard
                     )
 
-                # 🛡️ AUTO-DELETE: Copyright Protection — 60 sec baad file delete
-                delete_ids = []
-                if sent_msg: delete_ids.append(sent_msg.message_id)
-                if text_msg: delete_ids.append(text_msg.message_id)
-                if delete_ids:
-                    asyncio.create_task(delete_messages_after_delay(context, user_id, delete_ids, 60))
+                if sent_msg:
+                    is_file_message = bool(
+                        sent_msg.document or sent_msg.video or sent_msg.audio or sent_msg.photo
+                    )
+                    track_user_message_for_deletion(
+                        context, user_id, sent_msg, is_file=is_file_message
+                    )
+                if text_msg:
+                    track_user_message_for_deletion(context, user_id, text_msg)
 
                 success_count += 1
                 await asyncio.sleep(0.1)
@@ -12203,6 +12420,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
     if isinstance(update, Update) and update.effective_message:
         try:
+            if update.callback_query:
+                await update.callback_query.answer(
+                    "Something went wrong while opening this option. Please try again.",
+                    show_alert=True
+                )
+                return
+
             # ✅ IMPROVED: Only send ReplyKeyboardMarkup in Private Chats to prevent Channel crashes
             is_private = update.effective_chat and update.effective_chat.type == "private"
             keyboard_markup = get_main_keyboard() if is_private else None
@@ -12219,10 +12443,16 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=keyboard_markup
                 )
             else:
-                await update.effective_message.reply_text(
+                error_message = await update.effective_message.reply_text(
                     "Sorry, something went wrong. Please try again later.",
                     reply_markup=keyboard_markup
                 )
+                if is_private:
+                    track_user_message_for_deletion(
+                        context,
+                        update.effective_chat.id,
+                        error_message
+                    )
         except Exception as e:
             logger.error(f"Failed to send error message to user: {e}")
 
@@ -12636,6 +12866,66 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Auto-delete (Optional - 2 min)
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
 
+async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a compact, randomized welcome when a human joins a group."""
+    if not update.message or not update.message.new_chat_members:
+        return
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+
+    for member in update.message.new_chat_members:
+        if member.is_bot:
+            continue
+
+        first_name = html_escape((member.first_name or "there").strip())
+        username = (member.username or "").strip()
+        identity = (
+            f"{first_name}(@{html_escape(username)})"
+            if username
+            else first_name
+        )
+        bot_info = await context.bot.get_me()
+        bot_name = html_escape(bot_info.first_name or "FlimfyBox")
+        app_button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Open FlimfyBox", web_app=WebAppInfo(url=WEB_APP_URL))]
+        ])
+        templates = [
+            (
+                f"🎬 <b>Welcome {identity}</b>\n\n"
+                f"{bot_name} group me aapka swagat hai.\n"
+                "Movie, web series, anime ya TV show ka naam bhejiye — "
+                "available files yahin mil jayengi."
+            ),
+            (
+                f"✨ <b>New member joined</b>\n\n"
+                f"Welcome {identity}!\n"
+                "Quality, language aur season ke saath apni favourite title search kijiye.\n"
+                "FlimfyBox aapki help ke liye ready hai."
+            ),
+            (
+                f"🍿 <b>Screening room open</b>\n\n"
+                f"Hey {identity}, welcome to the FlimfyBox community.\n"
+                "Bas movie ya series ka naam type kijiye aur search results me se choose kijiye."
+            ),
+            (
+                f"🚀 <b>Welcome aboard, {identity}</b>\n\n"
+                "Aapka cinematic search assistant active hai.\n"
+                "Movie, anime, web series ya TV show dhoondhne ke liye naam bhejiye."
+            ),
+            (
+                f"🌟 <b>Glad to have you, {identity}</b>\n\n"
+                f"{bot_name} ke saath apni next watch discover kijiye.\n"
+                "Group me title bhejiye, phir quality ya season select kijiye."
+            ),
+        ]
+        welcome_text = random.choice(templates)
+        msg = await update.message.reply_text(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=app_button
+        )
+        track_user_message_for_deletion(context, update.effective_chat.id, msg)
+
 async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Mini App se aane wali movie ID ko receive karega aur movie bhejega"""
     if update.effective_message.web_app_data:
@@ -12892,6 +13182,9 @@ def register_handlers(application: Application):
     # 4. GENRE & GROUP HANDLERS
     # -----------------------------------------------------------
     application.add_handler(CommandHandler("genres", show_genre_selection))
+    application.add_handler(
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, group_member_welcome)
+    )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, handle_group_message))
 
     application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))

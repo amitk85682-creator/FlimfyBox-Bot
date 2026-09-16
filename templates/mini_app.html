@@ -3,17 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FlimfyBox</title>
+    <meta name="theme-color" content="#080a12">
+    <meta name="color-scheme" content="dark">
+    <title>FlimfyBox · Discover your next favorite</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}">
 </head>
 <body>
-    <header class="app-header">
+    <section class="app-loading-screen" id="appLoadingScreen" aria-live="polite" aria-label="Loading FlimfyBox">
+        <div class="app-loading-mark"><i class="fas fa-play"></i></div>
+        <strong>FlimfyBox</strong>
+        <span>Curating your next watch<span class="loading-dots">...</span></span>
+        <div class="app-loading-bar"><span></span></div>
+    </section>
+    <header class="app-header" aria-label="FlimfyBox header">
+        <button class="header-close" type="button" aria-label="Close app" onclick="tg.close()"><i class="fas fa-xmark"></i><span>Close</span></button>
         <div class="brand-mark"><i class="fas fa-play"></i></div>
-        <div class="brand-copy"><div class="logo">FlimfyBox</div><span>YOUR MOVIE SPACE</span></div>
-        <button class="header-action" type="button" aria-label="My list" onclick="showMyList()"><i class="far fa-bookmark"></i></button>
+        <div class="brand-copy"><div class="logo">FlimfyBox</div><span>YOUR NEXT WATCH</span></div>
+        <div class="header-tools">
+            <button class="header-action" type="button" aria-label="Notifications" onclick="showToast('No new notifications')"><i class="far fa-bell"></i></button>
+            <button class="header-action header-profile" type="button" aria-label="My list" onclick="showMyList()"><i class="far fa-bookmark"></i></button>
+            <button class="header-more" type="button" aria-label="More options" onclick="openMorePanel()"><i class="fas fa-ellipsis-vertical"></i></button>
+        </div>
     </header>
     <div class="search-section">
         <div class="search-box">
@@ -24,10 +37,8 @@
             <div id="searchDropdown" class="search-dropdown"></div>
         </div>
     </div>
-    <div class="genre-scroll" id="genreContainer"></div>
-
     <div id="mainContent">
-        <div class="hero-slider" id="heroSlider">
+        <div class="hero-slider" id="heroSlider" aria-label="Featured title">
             <div class="hero-overlay">
                 <div class="hero-info">
                     <span class="eyebrow">FEATURED TODAY</span>
@@ -35,53 +46,78 @@
                     <p id="heroMeta">Premium Collection</p>
                     <div class="hero-actions">
                         <button class="watch-button" type="button" id="heroWatch"><i class="fas fa-play"></i> Watch now</button>
+                        <button class="hero-info-button" type="button" id="heroInfo" aria-label="View details"><i class="fas fa-circle-info"></i> Details</button>
                         <button class="round-button" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
                     </div>
                 </div>
+            </div>
+            <div class="hero-controls" aria-label="Featured title controls">
+                <button type="button" id="heroPrevious" aria-label="Previous featured title" onclick="stepHero(-1)"><i class="fas fa-chevron-left"></i></button>
+                <span id="heroPosition" aria-live="polite">1 / 1</span>
+                <button type="button" id="heroNext" aria-label="Next featured title" onclick="stepHero(1)"><i class="fas fa-chevron-right"></i></button>
             </div>
         </div>
 
         <div class="movie-row" id="rowTrending">
             <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-fire"></i> Trending Now</div>
-                <div class="scroll-buttons">
-                    <div class="scroll-btn" onclick="scrollRow('trendingScroll', -400)"><i class="fas fa-chevron-left"></i></div>
-                    <div class="scroll-btn" onclick="scrollRow('trendingScroll', 400)"><i class="fas fa-chevron-right"></i></div>
-                </div>
+                <div class="row-header-left"><i class="fas fa-fire"></i> Trending now</div>
+                <span class="row-caption">Popular with viewers</span>
             </div>
             <div class="horizontal-scroll" id="trendingScroll"></div>
         </div>
 
-        <div class="movie-row" id="rowBollywood">
+        <div class="movie-row" id="rowActualNewReleases">
             <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-film"></i> Bollywood Gold</div>
-                <div class="scroll-buttons">
-                    <div class="scroll-btn" onclick="scrollRow('bollywoodScroll', -400)"><i class="fas fa-chevron-left"></i></div>
-                    <div class="scroll-btn" onclick="scrollRow('bollywoodScroll', 400)"><i class="fas fa-chevron-right"></i></div>
-                </div>
+                <div class="row-header-left"><i class="fas fa-sparkles"></i> New releases</div>
+                <span class="row-caption">Released in the last 60 days</span>
             </div>
-            <div class="horizontal-scroll" id="bollywoodScroll"></div>
+            <div class="horizontal-scroll" id="actualNewReleasesScroll"></div>
         </div>
 
         <div class="movie-row" id="rowHollywood">
             <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-globe"></i> Hollywood Hits</div>
-                <div class="scroll-buttons">
-                    <div class="scroll-btn" onclick="scrollRow('hollywoodScroll', -400)"><i class="fas fa-chevron-left"></i></div>
-                    <div class="scroll-btn" onclick="scrollRow('hollywoodScroll', 400)"><i class="fas fa-chevron-right"></i></div>
-                </div>
+                <div class="row-header-left"><i class="fas fa-film"></i> Hollywood</div>
+                <span class="row-caption">English movies & shows</span>
             </div>
             <div class="horizontal-scroll" id="hollywoodScroll"></div>
         </div>
 
+        <div class="movie-row" id="rowBollywood">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-star"></i> Bollywood</div>
+                <span class="row-caption">Hindi movies & shows</span>
+            </div>
+            <div class="horizontal-scroll" id="bollywoodScroll"></div>
+        </div>
+
+        <div class="movie-row" id="rowAnime">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-wand-magic-sparkles"></i> Anime</div>
+                <span class="row-caption">Animated worlds & series</span>
+            </div>
+            <div class="horizontal-scroll" id="animeScroll"></div>
+        </div>
+
+        <div class="movie-row" id="rowRecent">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-clock"></i> Recently viewed</div>
+            </div>
+            <div class="horizontal-scroll" id="recentScroll"></div>
+        </div>
+
         <div style="margin-top: 40px;">
-            <div class="row-header"><i class="fas fa-layer-group"></i> Explore All</div>
+            <div class="row-header"><div class="row-header-left"><i class="fas fa-layer-group"></i> Explore all</div><span class="row-caption">Fresh from the catalogue</span></div>
             <div class="movie-grid" id="moreGrid"></div>
         </div>
     </div>
 
     <div id="searchResultsContent" style="display: none;">
         <div class="row-header" id="searchHeader"><i class="fas fa-search"></i> Search Results</div>
+        <div class="search-discover-state">
+            <div class="search-discover-icon"><i class="fas fa-magnifying-glass"></i></div>
+            <strong>Discover Content</strong>
+            <span>Search for a movie or show, then open its details.</span>
+        </div>
         <div class="movie-grid" id="searchGrid"></div>
     </div>
 
@@ -89,6 +125,56 @@
         <div class="row-header"><div class="row-header-left"><i class="far fa-bookmark"></i> My List</div></div>
         <div class="my-list-subtitle">Saved to your Telegram account</div>
         <div class="movie-grid" id="myListGrid"></div>
+    </div>
+
+    <div id="exploreContent" style="display: none;">
+        <section class="browse-intro">
+            <span class="eyebrow">DISCOVER YOUR NEXT WATCH</span>
+            <h1>Browse</h1>
+            <p>Find something worth watching by mood, era, or a little surprise.</p>
+        </section>
+        <section class="browse-surprise-panel">
+            <div>
+                <span class="browse-kicker">CAN'T DECIDE?</span>
+                <h2>Let the catalogue choose.</h2>
+                <p id="surpriseResult">A real title from your current Browse selection.</p>
+            </div>
+            <button class="browse-surprise-button" type="button" onclick="surpriseMe()"><i class="fas fa-shuffle"></i> Surprise me</button>
+        </section>
+        <div class="browse-type-toggle" role="group" aria-label="Browse content type">
+            <button type="button" data-browse-type="all" onclick="setBrowseType('all')">All</button>
+            <button type="button" data-browse-type="movies" onclick="setBrowseType('movies')">Movies</button>
+            <button type="button" data-browse-type="tv" onclick="setBrowseType('tv')">TV Shows</button>
+        </div>
+        <div class="row-header browse-section-heading"><div class="row-header-left"><i class="fas fa-compass"></i> Browse by genre</div></div>
+        <div class="explore-search-wrap">
+            <div class="search-box genre-search-box">
+                <i class="fas fa-search"></i>
+                <input type="text" id="genreSearchInput" placeholder="Search genres, subgenres, mood">
+            </div>
+        </div>
+        <div class="explore-body" id="exploreBody"></div>
+        <div id="browseCollections"></div>
+    </div>
+
+    <div class="details-page genre-detail-page" id="genreDetailPage">
+        <div class="dp-header">
+            <button class="btn-back" onclick="closeGenreDetail()"><i class="fas fa-chevron-left"></i></button>
+            <button class="btn-more" type="button" aria-label="Explore more" onclick="showToast('Browse more genres from the Explore hub')"><i class="fas fa-compass"></i></button>
+        </div>
+        <div class="genre-detail-hero" id="genreDetailHero">
+            <div class="genre-detail-overlay">
+                <div class="genre-hero-copy">
+                    <span class="eyebrow" id="genreDetailEyebrow">Genre</span>
+                    <h2 id="genreDetailTitle">Action</h2>
+                    <p id="genreDetailMeta">0 titles</p>
+                </div>
+            </div>
+        </div>
+        <div class="genre-detail-body">
+            <div class="genre-detail-summary" id="genreDetailSummary"></div>
+            <div class="movie-grid genre-grid" id="genreDetailGrid"></div>
+        </div>
     </div>
 
     <div class="details-page" id="detailsPage">
@@ -111,7 +197,7 @@
                     <div class="info-pill"><i class="fas fa-volume-up"></i> <span>Dual Audio</span></div>
                 </div>
                 <div class="detail-actions">
-                    <button class="detail-play" type="button" onclick="document.querySelector('#dpTrailerBtn .btn-trailer, #dpTrailerBtn .btn-request')?.click()"><i class="fas fa-play"></i> Play trailer</button>
+                    <button class="detail-play" type="button" onclick="playCurrentTrailer()"><i class="fas fa-play"></i> Play trailer</button>
                     <button class="detail-icon-button" id="detailMyListButton" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
                     <button class="detail-icon-button" type="button" aria-label="Share" onclick="showToast('Share link copied')"><i class="fas fa-share-alt"></i></button>
                 </div>
@@ -121,9 +207,14 @@
                 </section>
                 <div id="castSection" class="cast-list"></div>
                 <div id="dpTrailerBtn"></div>
+                <section class="community-rating" id="communityRating" aria-live="polite"></section>
                 <div id="dpSeasons" class="seasons-container"></div>
                 <div class="dl-section" id="dpLinks"></div>
             </div>
+        </div>
+        <div class="detail-bottom-actions">
+            <button type="button" onclick="closeDetails()"><i class="fas fa-arrow-left"></i> Back</button>
+            <button type="button" onclick="toggleCurrentMyList()"><i class="far fa-bookmark"></i> Add to List</button>
         </div>
     </div>
 
@@ -147,10 +238,40 @@
 
     <div class="toast" id="toast">✅ Done!</div>
 
+    <section class="info-modal" id="infoModal" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
+        <div class="info-modal-card">
+            <button class="info-modal-close" type="button" aria-label="Close" onclick="closeInfoModal()"><i class="fas fa-xmark"></i></button>
+            <div class="info-modal-icon" id="infoModalIcon"><i class="fas fa-circle-info"></i></div>
+            <h2 id="infoModalTitle">FlimfyBox</h2>
+            <div class="info-modal-body" id="infoModalBody"></div>
+            <div class="info-modal-actions" id="infoModalActions"></div>
+        </div>
+    </section>
+
+    <section class="more-panel" id="morePanel" aria-label="More options">
+        <div class="more-panel-header">
+            <span>MORE</span>
+            <button type="button" aria-label="Close more options" onclick="closeMorePanel()"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="more-panel-grid">
+            <button type="button" onclick="showHome()"><i class="fas fa-film"></i><span>Movies</span></button>
+            <button type="button" onclick="showTvSeries()"><i class="fas fa-tv"></i><span>TV Series</span></button>
+            <button type="button" onclick="showUpcoming()"><i class="fas fa-calendar-plus"></i><span>Upcoming</span></button>
+            <button type="button" onclick="showGlobalChat()"><i class="far fa-comment"></i><span>Global Chat</span></button>
+            <button type="button" onclick="showInfoPanel('FlimfyBox Blog', '<p>Movie guides, new releases, watchlists and streaming recommendations will appear here.</p><p class=&quot;info-note&quot;>Use Search and Browse to discover the latest catalogue today.</p>', 'newspaper')"><i class="fas fa-newspaper"></i><span>Blog</span></button>
+            <button type="button" onclick="showInfoPanel('Upgrade', '<p>FlimfyBox is currently available with the full catalogue experience.</p><p class=&quot;info-note&quot;>Premium plans will be added when Telegram payments are enabled.</p>', 'gem')"><i class="fas fa-gem"></i><span>Upgrade</span></button>
+            <button type="button" onclick="showSettings()"><i class="fas fa-gear"></i><span>Settings</span></button>
+            <button type="button" onclick="showInfoPanel('DMCA & Copyright', '<p>If you believe content violates your copyright, send the title, source URL and proof of ownership to the FlimfyBox administrator.</p><p class=&quot;info-note&quot;>Requests are reviewed and handled as quickly as possible.</p>', 'circle-info')"><i class="fas fa-circle-info"></i><span>DMCA</span></button>
+            <button type="button" onclick="showMyList()"><i class="far fa-bookmark"></i><span>Watchlist</span></button>
+        </div>
+    </section>
+
     <nav class="bottom-nav" aria-label="Main navigation">
         <button class="nav-item active" type="button" onclick="showHome()"><i class="fas fa-house"></i><span>Home</span></button>
         <button class="nav-item" type="button" onclick="showSearch()"><i class="fas fa-magnifying-glass"></i><span>Search</span></button>
-        <button class="nav-item" type="button" onclick="showMyList()"><i class="far fa-bookmark"></i><span>My List</span></button>
+        <button class="nav-item" type="button" onclick="showExplore()"><i class="fas fa-compass"></i><span>Browse</span></button>
+        <button class="nav-item" type="button" onclick="showMyList()"><i class="far fa-bookmark"></i><span>Books</span></button>
+        <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
     <script src="{{ url_for('static', filename='miniapp/app.js') }}"></script>

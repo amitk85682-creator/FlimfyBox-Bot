@@ -7,6 +7,28 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+# Local development keeps runtime configuration in env.txt rather than a
+# process-level .env file. Load it before reading DATABASE_URL so every
+# backend entry point uses the same database as the Mini App.
+def load_local_env():
+    env_path = os.path.join(os.path.dirname(__file__), 'env.txt')
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, encoding='utf-8') as env_file:
+            for line in env_file:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    os.environ[key] = value
+    except OSError as exc:
+        logger.warning("Could not load local env.txt: %s", type(exc).__name__)
+
+load_local_env()
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 def fix_database_url(url: Optional[str]) -> Optional[str]:

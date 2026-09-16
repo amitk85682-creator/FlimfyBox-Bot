@@ -5,6 +5,26 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+def load_local_env():
+    env_path = os.path.join(os.path.dirname(__file__), 'env.txt')
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, encoding='utf-8') as env_file:
+            for line in env_file:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    os.environ[key] = value
+    except OSError as exc:
+        logger.warning("Could not load local env.txt: %s", type(exc).__name__)
+
+load_local_env()
+
 class Database:
     def __init__(self):
         self.pool = None

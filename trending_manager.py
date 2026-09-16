@@ -517,7 +517,7 @@ async def check_and_alert_trending(app, admin_id):
                 }
                 channel_text = build_channel_post(item, extra, db_metadata=metadata)
                 
-                watch_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{db_id}"
+                watch_link = f"https://temp-bj8b.onrender.com/watch/{db_id}"
 
                 channel_buttons = InlineKeyboardMarkup([
                     [
