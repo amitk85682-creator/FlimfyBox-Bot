@@ -276,10 +276,18 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 .browse-surprise-panel h2 { margin: 5px 0 5px; font-size: 20px; }
 .browse-surprise-button { flex: 0 0 auto; min-height: 42px; padding: 0 15px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 800; cursor: pointer; }
 .browse-surprise-button:hover { filter: brightness(1.08); }
-#surpriseResult { display: flex; flex-direction: column; gap: 3px; }
-#surpriseResult.is-clickable { cursor: pointer; }
-#surpriseResult strong { color: var(--text); }
-#surpriseResult span { font-size: 12px; color: var(--muted); }
+.surprise-recommendation { margin: 0 0 28px; }
+.surprise-recommendation-heading { padding: 0 0 12px; font-size: 15px; }
+.surprise-result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 280px; padding: 0; }
+.surprise-result-grid .grid-card { width: 132px; }
+.surprise-loading, .surprise-empty {
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    color: var(--muted);
+    background: rgba(18, 22, 41, .72);
+    font-size: 12px;
+}
 .browse-type-toggle { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 4px; margin-bottom: 26px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
 .browse-type-toggle button { min-height: 38px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-weight: 700; cursor: pointer; }
 .browse-type-toggle button.active { background: var(--surface-3); color: var(--text); }
@@ -288,6 +296,7 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 @media (max-width: 480px) {
     .browse-surprise-panel { align-items: flex-start; flex-direction: column; }
     .browse-surprise-button { width: 100%; }
+    .surprise-result-grid { grid-template-columns: 132px; }
 }
 .card:hover .card-img, .grid-card:hover .card-img { border-color: rgba(139, 123, 255, .5); box-shadow: 0 15px 30px rgba(0, 0, 0, .42), 0 0 0 1px rgba(139, 123, 255, .12); transform: translateY(-3px); }
 .card.is-revealed { animation: revealUp .5s var(--ease) both; }

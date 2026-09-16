@@ -9,7 +9,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=auth-fix-1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=surprise-card-1">
 </head>
 <body>
     <section class="app-loading-screen" id="appLoadingScreen" aria-live="polite" aria-label="Loading FlimfyBox">
@@ -137,9 +137,15 @@
             <div>
                 <span class="browse-kicker">CAN'T DECIDE?</span>
                 <h2>Let the catalogue choose.</h2>
-                <p id="surpriseResult">A real title from your current Browse selection.</p>
+                <p>A personalised pick from your current Browse selection.</p>
             </div>
             <button class="browse-surprise-button" type="button" onclick="surpriseMe()"><i class="fas fa-shuffle"></i> Surprise me</button>
+        </section>
+        <section class="surprise-recommendation" id="surpriseRecommendation" hidden aria-live="polite">
+            <div class="row-header surprise-recommendation-heading">
+                <div class="row-header-left"><i class="fas fa-wand-magic-sparkles"></i> Your surprise pick</div>
+            </div>
+            <div class="movie-grid surprise-result-grid" id="surpriseResult"></div>
         </section>
         <div class="browse-type-toggle" role="group" aria-label="Browse content type">
             <button type="button" data-browse-type="all" onclick="setBrowseType('all')">All</button>
@@ -274,6 +280,6 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=auth-fix-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=surprise-card-1"></script>
 </body>
 </html>

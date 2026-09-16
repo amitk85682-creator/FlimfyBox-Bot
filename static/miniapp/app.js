@@ -367,26 +367,29 @@ const tg = window.Telegram?.WebApp || {
 
         window.surpriseMe = async function() {
             const result = document.getElementById('surpriseResult');
-            result.textContent = 'Finding a real title in the catalogue…';
+            const recommendation = document.getElementById('surpriseRecommendation');
+            recommendation.hidden = false;
+            result.innerHTML = '<div class="surprise-loading">Finding your next watch…</div>';
             try {
                 const response = await fetch(`/api/browse/surprise?type=${encodeURIComponent(browseType)}`);
                 const data = await response.json();
                 if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not find a title');
                 if (!data.movie) {
-                    result.textContent = data.message || 'No eligible local titles are available.';
+                    result.innerHTML = `<div class="surprise-empty">${data.message || 'No eligible local titles are available.'}</div>`;
                     return;
                 }
                 const movie = data.movie;
                 trackRecommendationEvent('surprise_impression', movie.id, { browse_type: browseType });
                 if (!allMovies.some(item => String(item.id) === String(movie.id))) allMovies.push(movie);
-                result.innerHTML = `<strong>${movie.title}</strong><span>${movie.year || ''} · ${movie.category || ''}</span>`;
-                result.onclick = () => {
-                    trackRecommendationEvent('surprise_click', movie.id, { browse_type: browseType });
-                    openCardDetails(movie, false);
-                };
-                result.classList.add('is-clickable');
+                result.innerHTML = renderCards([movie], 'grid-card', false);
+                const card = result.querySelector('.grid-card, .card');
+                if (card) {
+                    card.addEventListener('click', () => {
+                        trackRecommendationEvent('surprise_click', movie.id, { browse_type: browseType });
+                    }, { once: true });
+                }
             } catch (error) {
-                result.textContent = error.message || 'Could not find a title';
+                result.innerHTML = `<div class="surprise-empty">${error.message || 'Could not find a title'}</div>`;
             }
         };
 
