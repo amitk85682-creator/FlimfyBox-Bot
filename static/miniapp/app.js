@@ -11,6 +11,7 @@ const tg = window.Telegram?.WebApp || {
         let allMovies = [];
         let tmdbMoviesMap = {};
         let activeMovie = null;
+        let activeDetailsMovieId = null;
         let savedMovieIds = new Set();
         let myListToggleInFlight = false;
         let myListRequestId = 0;
@@ -699,7 +700,8 @@ const tg = window.Telegram?.WebApp || {
         };
 
         window.toggleCurrentMyList = async function() {
-            if (!activeMovie || activeMovie.source === 'tmdb' || String(activeMovie.id).startsWith('tmdb_')) {
+            const movieId = activeDetailsMovieId;
+            if (!movieId || !activeMovie || activeMovie.source === 'tmdb' || String(movieId).startsWith('tmdb_')) {
                 showToast('Only available titles can be saved right now.');
                 return;
             }
@@ -710,8 +712,6 @@ const tg = window.Telegram?.WebApp || {
             try {
                 // Snapshot the details-page movie. The home carousel changes in
                 // the background, so never read a mutable global after await.
-                const movieToSave = activeMovie;
-                const movieId = String(movieToSave.id);
                 const statusResponse = await fetch(`/api/my-list/${movieId}/status`, {
                     headers: telegramAuthHeaders()
                 });
@@ -729,6 +729,7 @@ const tg = window.Telegram?.WebApp || {
                 });
                 const data = await response.json();
                 if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not save title');
+                if (String(data.movie_id) !== movieId) throw new Error('The selected title changed. Please try again.');
                 const saved = Boolean(data.saved);
                 if (!saved) {
                     savedMovieIds.delete(movieId);
@@ -986,13 +987,20 @@ const tg = window.Telegram?.WebApp || {
             heroIndex = (index + heroItems.length) % heroItems.length;
             const movie = heroItems[heroIndex];
             const heroSlider = document.getElementById('heroSlider');
-            activeMovie = movie;
             const openHeroDetails = () => {
                 if (!allMovies.some(item => String(item.id) === String(movie.id))) {
                     allMovies.push(movie);
                 }
                 openDetails(String(movie.id), false);
             };
+            const heroListButton = heroSlider.querySelector('.round-button');
+            if (heroListButton) {
+                heroListButton.onclick = () => {
+                    activeMovie = movie;
+                    activeDetailsMovieId = String(movie.id);
+                    toggleCurrentMyList();
+                };
+            }
             heroSlider.style.backgroundImage = `url(${movie.image})`;
             document.getElementById('heroTitle').innerText = movie.title;
             document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
@@ -1241,14 +1249,8 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 else if (!allMovies.some(m => String(m.id) === String(r.id))) allMovies.push(r);
             });
 
-            const suggestionMarkup = Array.isArray(suggestions) && suggestions.length
-                ? `<div class="search-suggestion-group"><div class="search-dropdown-label">Suggestions</div>${suggestions.slice(0, 6).map(item => `
-                    <button class="search-suggestion" type="button" data-suggestion="${escapeHtml(item)}">
-                        <i class="fas fa-magnifying-glass"></i><span>${escapeHtml(item)}</span>
-                    </button>`).join('')}</div>`
-                : '';
-
             if (!results.length) {
+                const suggestionMarkup = renderSuggestionMarkup(suggestions);
                 addRecentSearch(q);
                 dropdown.innerHTML = suggestionMarkup + `<div class="empty-search-state"><strong>No match found</strong><span>“${escapeHtml(q)}” isn't in the catalogue yet.</span><div style="margin-top:12px;"><button class="btn-sm btn-sm-primary" type="button" data-request-search><i class="fas fa-paper-plane"></i> Request this title</button></div></div>`;
                 bindSearchSuggestions(dropdown, q);
@@ -1256,7 +1258,7 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
             }
 
             addRecentSearch(q);
-            dropdown.innerHTML = suggestionMarkup + results.slice(0, 8).map(r => {
+            dropdown.innerHTML = results.slice(0, 8).map(r => {
                 const isTMDB = r.source === 'tmdb';
                 const status = isTMDB ? 'Request' : 'Available';
                 return `<div class="search-item fade-in" data-result-id="${escapeHtml(r.id)}" data-result-tmdb="${isTMDB}">
@@ -1272,6 +1274,14 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
         }
     }, 260);
 });
+
+function renderSuggestionMarkup(suggestions) {
+    if (!Array.isArray(suggestions) || !suggestions.length) return '';
+    return `<div class="search-suggestion-group"><div class="search-dropdown-label">Suggestions</div>${suggestions.slice(0, 6).map(item => `
+        <button class="search-suggestion" type="button" data-suggestion="${escapeHtml(item)}">
+            <i class="fas fa-magnifying-glass"></i><span>${escapeHtml(item)}</span>
+        </button>`).join('')}</div>`;
+}
 
 function bindSearchSuggestions(dropdown, query, results = []) {
     dropdown.querySelectorAll('[data-suggestion]').forEach(button => {
@@ -1315,6 +1325,7 @@ document.addEventListener('keydown', (e) => {
             if (!movie) return;
             if (!isTMDB) trackRecommendationEvent('miniapp_open_details', movie.id);
             activeMovie = movie;
+            activeDetailsMovieId = isTMDB ? String(id) : String(movie.id);
             addRecentlyViewed(movie);
             const requestId = ++detailsRequestId;
             const myListButton = document.getElementById('detailMyListButton');

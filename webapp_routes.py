@@ -1649,7 +1649,7 @@ def register_webapp_routes(
             """, (user['id'], movie_id))
             conn.commit()
             cur.close()
-            return jsonify({'status': 'success', 'saved': True})
+            return jsonify({'status': 'success', 'saved': True, 'movie_id': movie_id})
         except Exception as e:
             logger.error(f"My List add error: {e}")
             conn.rollback()
@@ -1696,7 +1696,7 @@ def register_webapp_routes(
             cur.execute("DELETE FROM user_watchlist WHERE user_id = %s AND movie_id = %s", (user['id'], movie_id))
             conn.commit()
             cur.close()
-            return jsonify({'status': 'success', 'saved': False})
+            return jsonify({'status': 'success', 'saved': False, 'movie_id': movie_id})
         except Exception as e:
             logger.error(f"My List removal error: {e}")
             conn.rollback()
@@ -1719,15 +1719,15 @@ def register_webapp_routes(
             # resp ka format: ["query", ["suggestion1", "suggestion2", ...]]
             suggestions = resp[1] if len(resp) > 1 else []
             
-            # Only return title-like suggestions; Google also returns searches
-            # such as "reacher movie cast" and "reacher movie 2026".
+            # Keep the provider's useful title corrections, while removing
+            # common search-intent suffixes and duplicates.
             clean_suggs = []
             for suggestion in suggestions:
                 title = re.sub(
                     r'\s+(?:movie|film|series|web\s+series)(?:\s+(?:cast|trailer|release\s+date|review|episodes?|season\s*\d+|\d{4}))*\s*$',
                     '', str(suggestion), flags=re.I
                 ).strip()
-                if title and fuzz.WRatio(q, title) >= 60 and title.lower() not in {x.lower() for x in clean_suggs}:
+                if title and title.lower() not in {x.lower() for x in clean_suggs}:
                     clean_suggs.append(title)
             clean_suggs = clean_suggs[:6]
             return jsonify(clean_suggs)
