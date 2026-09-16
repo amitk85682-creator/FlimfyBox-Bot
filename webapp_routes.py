@@ -686,6 +686,56 @@ def register_webapp_routes(
             return None, (jsonify({'status': 'error', 'message': 'Open My List inside Telegram.'}), 401)
         return user, None
 
+    @flask_app.route('/api/recommendation-events', methods=['POST'])
+    def record_recommendation_event_api():
+        user, error = require_telegram_user()
+        if error:
+            return error
+        payload = request.get_json(silent=True) or {}
+        event_type = str(payload.get('event_type') or '').strip()
+        source = str(payload.get('source') or 'miniapp').strip()
+        allowed_event_types = {
+            'miniapp_open_details', 'miniapp_download', 'watchlist_add',
+            'watchlist_remove', 'rating_submitted', 'surprise_impression',
+            'surprise_click', 'surprise_skip',
+        }
+        if event_type not in allowed_event_types:
+            return jsonify({'status': 'error', 'message': 'Unsupported recommendation event.'}), 400
+        movie_id = payload.get('movie_id')
+        if movie_id is not None:
+            try:
+                movie_id = int(movie_id)
+            except (TypeError, ValueError):
+                return jsonify({'status': 'error', 'message': 'Invalid movie.'}), 400
+        metadata = payload.get('metadata') or {}
+        if not isinstance(metadata, dict):
+            return jsonify({'status': 'error', 'message': 'Invalid event metadata.'}), 400
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            upsert_miniapp_user(cur, user)
+            if movie_id is not None:
+                cur.execute("SELECT 1 FROM movies WHERE id = %s", (movie_id,))
+                if not cur.fetchone():
+                    return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            cur.execute("""
+                INSERT INTO user_recommendation_events
+                    (user_id, movie_id, event_type, source, metadata)
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+            """, (user['id'], movie_id, event_type, source[:40],
+                  json.dumps(metadata, ensure_ascii=True)))
+            conn.commit()
+            cur.close()
+            return jsonify({'status': 'success'})
+        except Exception:
+            conn.rollback()
+            logger.exception('Recommendation event API failed')
+            return jsonify({'status': 'error', 'message': 'Could not record activity.'}), 500
+        finally:
+            close_db_connection(conn)
+
     @flask_app.route('/api/global-chat', methods=['GET', 'POST'])
     def global_chat_api():
         user, error = require_telegram_user()
@@ -988,6 +1038,92 @@ def register_webapp_routes(
             cur = conn.cursor()
             classification_sql = "category = 'Web Series' OR (seasons_data IS NOT NULL AND seasons_data <> '{}'::jsonb)"
             where_type = '' if browse_type == 'all' else (f' AND ({classification_sql})' if browse_type == 'tv' else f' AND NOT ({classification_sql})')
+            signed_in_user = telegram_user_from_request()
+            if signed_in_user:
+                cur.execute("""
+                    SELECT m.genre, m.language, m.category, e.event_type, COUNT(*)
+                    FROM user_recommendation_events e
+                    JOIN movies m ON m.id = e.movie_id
+                    WHERE e.user_id = %s
+                      AND e.created_at >= CURRENT_TIMESTAMP - INTERVAL '180 days'
+                    GROUP BY m.genre, m.language, m.category, e.event_type
+                """, (signed_in_user['id'],))
+                profile_rows = cur.fetchall()
+                event_weights = {
+                    'rating_submitted': 5,
+                    'watchlist_add': 4,
+                    'miniapp_download': 4,
+                    'pm_exact_match': 3,
+                    'miniapp_open_details': 2,
+                    'group_selection': 2,
+                    'surprise_click': 2,
+                    'pm_search': 1,
+                    'group_search': 1,
+                }
+                genre_scores = {}
+                language_scores = {}
+                category_scores = {}
+                for genre, language, category, event_type, count in profile_rows:
+                    weight = event_weights.get(event_type, 1) * count
+                    for token in re.split(r'[,/&|]', (genre or '').lower()):
+                        token = token.strip()
+                        if token:
+                            genre_scores[token] = genre_scores.get(token, 0) + weight
+                    language_key = (language or '').strip().lower()
+                    if language_key:
+                        language_scores[language_key] = language_scores.get(language_key, 0) + weight
+                    category_key = (category or '').strip().lower()
+                    if category_key:
+                        category_scores[category_key] = category_scores.get(category_key, 0) + weight
+                cur.execute("""
+                    SELECT movie_id
+                    FROM user_recommendation_events
+                    WHERE user_id = %s
+                      AND event_type IN ('surprise_impression', 'surprise_click')
+                      AND created_at >= CURRENT_TIMESTAMP - INTERVAL '14 days'
+                    ORDER BY created_at DESC
+                    LIMIT 80
+                """, (signed_in_user['id'],))
+                recent_ids = {row[0] for row in cur.fetchall()}
+                cur.execute(f"""
+                    SELECT m.id, m.title, m.year, m.poster_url, m.rating, m.genre, m.category, m.language
+                    FROM movies m
+                    WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
+                      AND (
+                          (m.file_id IS NOT NULL AND m.file_id <> '')
+                          OR EXISTS (SELECT 1 FROM movie_files mf WHERE mf.movie_id = m.id
+                                    AND (mf.file_id IS NOT NULL OR mf.url IS NOT NULL))
+                      ){where_type}
+                    ORDER BY m.id DESC
+                    LIMIT 500
+                """)
+                candidates = []
+                for row in cur.fetchall():
+                    movie_id, title, year, poster, rating, genre, category, language = row
+                    if movie_id in recent_ids:
+                        continue
+                    score = 0
+                    for token in re.split(r'[,/&|]', (genre or '').lower()):
+                        score += genre_scores.get(token.strip(), 0)
+                    score += language_scores.get((language or '').strip().lower(), 0)
+                    score += category_scores.get((category or '').strip().lower(), 0)
+                    rating_score = float(rating) if str(rating or '').replace('.', '', 1).isdigit() else 0
+                    candidates.append((score + rating_score * 0.25, row))
+                if candidates:
+                    candidates.sort(key=lambda item: (item[0], item[1][0]), reverse=True)
+                    top_score = candidates[0][0]
+                    shortlist = [item[1] for item in candidates if item[0] >= top_score - 3][:20]
+                    row = random.choice(shortlist)
+                    movie = {
+                        'id': row[0], 'title': row[1], 'year': row[2] or '',
+                        'image': row[3], 'rating': row[4] or 'N/A', 'genre': row[5] or '',
+                        'category': row[6] or 'Movies', 'language': row[7] or '', 'source': 'local',
+                    }
+                    cur.close()
+                    return jsonify({
+                        'status': 'success', 'type': browse_type, 'movie': movie,
+                        'personalized': bool(profile_rows),
+                    })
             cur.execute(f"""
                 SELECT COUNT(*) FROM movies
                 WHERE poster_url IS NOT NULL AND poster_url <> ''{where_type}

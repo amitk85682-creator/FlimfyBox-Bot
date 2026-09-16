@@ -2049,6 +2049,29 @@ def setup_database():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_ratings_movie_id ON movie_ratings(movie_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_ratings_user_id ON movie_ratings(user_id)")
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_recommendation_events (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
+                movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_recommendation_events_user_created
+            ON user_recommendation_events(user_id, created_at DESC)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_recommendation_events_movie_type
+            ON user_recommendation_events(movie_id, event_type)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_recommendation_events_type_created
+            ON user_recommendation_events(event_type, created_at DESC)
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS global_chat_messages (
                 id BIGSERIAL PRIMARY KEY,
                 user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
@@ -2934,6 +2957,84 @@ def record_telegram_user(user, chat_id=None):
         conn.rollback()
     finally:
         close_db_connection(conn)
+
+
+RECOMMENDATION_EVENT_TYPES = {
+    'pm_search',
+    'pm_exact_match',
+    'pm_file_request',
+    'group_search',
+    'group_selection',
+    'miniapp_open_details',
+    'miniapp_download',
+    'watchlist_add',
+    'watchlist_remove',
+    'rating_submitted',
+    'surprise_impression',
+    'surprise_click',
+    'surprise_skip',
+}
+
+
+def record_recommendation_event(user_id, event_type, source, movie_id=None, metadata=None):
+    """Persist one normalized interaction for recommendation ranking."""
+    if not user_id:
+        raise ValueError("Recommendation events require a user_id")
+    if event_type not in RECOMMENDATION_EVENT_TYPES:
+        raise ValueError(f"Unsupported recommendation event type: {event_type}")
+    if not source:
+        raise ValueError("Recommendation events require a source")
+
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database connection failed while recording recommendation event")
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO miniapp_users (user_id)
+            VALUES (%s)
+            ON CONFLICT (user_id) DO NOTHING
+        """, (user_id,))
+        cur.execute("""
+            INSERT INTO user_recommendation_events
+                (user_id, movie_id, event_type, source, metadata)
+            VALUES (%s, %s, %s, %s, %s::jsonb)
+        """, (
+            user_id,
+            movie_id,
+            event_type,
+            source,
+            json.dumps(metadata or {}, ensure_ascii=True),
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "Failed to record recommendation event user_id=%s event_type=%s",
+            user_id,
+            event_type,
+        )
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def record_recommendation_event_safely(user_id, event_type, source, movie_id=None, metadata=None):
+    """Record telemetry without interrupting the user-facing bot flow."""
+    try:
+        record_recommendation_event(
+            user_id=user_id,
+            event_type=event_type,
+            source=source,
+            movie_id=movie_id,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.exception(
+            "Recommendation telemetry failed user_id=%s event_type=%s",
+            user_id,
+            event_type,
+        )
 
 
 # ==================== METADATA FUNCTIONS ====================
@@ -5260,6 +5361,14 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_query = re.sub(r'(?i)\b(s\d{1,2}|season\s*\d+|ep\s?\d+|e\d{1,2})\b.*', '', query).strip()
         search_term = clean_query if (clean_query and len(clean_query) > 1) else query
 
+        await run_async(
+            record_recommendation_event_safely,
+            update.effective_user.id if update.effective_user else None,
+            'pm_search',
+            'pm',
+            metadata={'query': search_term[:200]},
+        )
+
         # 1. Search DB (Ab bot 'The Great' dhoondhega, 'The Great S03' nahi)
         movies = await run_async(get_movies_from_db, search_term, limit=10)
         
@@ -5339,6 +5448,14 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if chosen_movie:
             movie_id, title, url, file_id = chosen_movie[:4]
+            await run_async(
+                record_recommendation_event_safely,
+                update.effective_user.id if update.effective_user else None,
+                'pm_exact_match',
+                'pm',
+                movie_id=movie_id,
+                metadata={'query': search_term[:200], 'title': title},
+            )
             # Exact match par qualities menu dikhao
             await process_movie_exact_match(update, context, movie_id, title)
             return
@@ -12862,6 +12979,14 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if len(text) < 2:
         return
 
+    await run_async(
+        record_recommendation_event_safely,
+        update.effective_user.id if update.effective_user else None,
+        'group_search',
+        'group',
+        metadata={'query': text[:200], 'chat_id': update.effective_chat.id},
+    )
+
     # 3. 🚀 FAST SEARCH CALL (Sirf SQL Check)
     # Hum 5 results maang rahe hain taaki agar typos ho to best match mile
     movies = await run_async(get_movies_fast_sql, text, limit=5)
@@ -12881,6 +13006,14 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if chosen_movie:
         movie_id, title, url, file_id = chosen_movie[:4]
+        await run_async(
+            record_recommendation_event_safely,
+            update.effective_user.id if update.effective_user else None,
+            'group_selection',
+            'group',
+            movie_id=movie_id,
+            metadata={'query': text[:200], 'title': title, 'chat_id': update.effective_chat.id},
+        )
         # Exact match par qualities menu dikhao
         await process_movie_exact_match(update, context, movie_id, title)
         return

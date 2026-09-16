@@ -377,9 +377,13 @@ const tg = window.Telegram?.WebApp || {
                     return;
                 }
                 const movie = data.movie;
+                trackRecommendationEvent('surprise_impression', movie.id, { browse_type: browseType });
                 if (!allMovies.some(item => String(item.id) === String(movie.id))) allMovies.push(movie);
                 result.innerHTML = `<strong>${movie.title}</strong><span>${movie.year || ''} · ${movie.category || ''}</span>`;
-                result.onclick = () => openCardDetails(movie, false);
+                result.onclick = () => {
+                    trackRecommendationEvent('surprise_click', movie.id, { browse_type: browseType });
+                    openCardDetails(movie, false);
+                };
                 result.classList.add('is-clickable');
             } catch (error) {
                 result.textContent = error.message || 'Could not find a title';
@@ -401,6 +405,15 @@ const tg = window.Telegram?.WebApp || {
 
         function telegramAuthHeaders() {
             return tg.initData ? { 'X-Telegram-Init-Data': tg.initData } : {};
+        }
+
+        function trackRecommendationEvent(eventType, movieId = null, metadata = {}) {
+            if (!tg.initData) return;
+            fetch('/api/recommendation-events', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
+                body: JSON.stringify({ event_type: eventType, movie_id: movieId, metadata })
+            }).catch(error => console.warn('Recommendation event was not recorded:', error));
         }
 
         function setActiveNav(index) {
@@ -645,10 +658,12 @@ const tg = window.Telegram?.WebApp || {
                 if (isSaved) {
                     savedMovieIds.delete(movieId);
                     if (button) button.innerHTML = '<i class="fas fa-plus"></i>';
+                    trackRecommendationEvent('watchlist_remove', movieId);
                     showToast('Removed from My List');
                 } else {
                     savedMovieIds.add(movieId);
                     if (button) button.innerHTML = '<i class="fas fa-check"></i>';
+                    trackRecommendationEvent('watchlist_add', movieId);
                     showToast('Saved to My List');
                 }
             } catch (error) {
@@ -1196,6 +1211,7 @@ document.addEventListener('keydown', (e) => {
         window.openDetails = function(id, isTMDB) {
             const movie = isTMDB ? tmdbMoviesMap[id] : allMovies.find(m => m.id == id);
             if (!movie) return;
+            if (!isTMDB) trackRecommendationEvent('miniapp_open_details', movie.id);
             activeMovie = movie;
             addRecentlyViewed(movie);
             const requestId = ++detailsRequestId;
@@ -1427,6 +1443,7 @@ document.addEventListener('keydown', (e) => {
                 }).then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
                         if (!ok || data.status !== 'success') throw new Error(data.message || 'Could not save rating');
+                        trackRecommendationEvent('rating_submitted', movieId, { rating: value });
                         updateCommunityRating(container, data);
                     })
                     .catch(error => {
@@ -1606,6 +1623,7 @@ document.addEventListener('keydown', (e) => {
 
         window.downloadMovie = function(id, fileId = null) {
             tg.HapticFeedback.impactOccurred('heavy');
+            trackRecommendationEvent('miniapp_download', id, { file_id: fileId });
             const filePath = fileId ? `/file/${fileId}` : '';
             tg.openLink(`${window.location.origin}/watch/${id}${filePath}`);
         };
