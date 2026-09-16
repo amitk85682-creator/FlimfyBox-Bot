@@ -30,18 +30,31 @@ const tg = window.Telegram?.WebApp || {
         let browseRequestId = 0;
         let globalChatTimer = null;
         let initialHomePending = 0;
+        let initialHomeTimeout = null;
 
         function startInitialHomeLoading() {
             initialHomePending = 3;
             document.body.classList.add('app-booting');
             const screen = document.getElementById('appLoadingScreen');
             if (screen) screen.classList.remove('is-complete');
+            if (initialHomeTimeout) clearTimeout(initialHomeTimeout);
+            // Trending/new-release enrichment is optional; never make users
+            // wait indefinitely when one upstream request is slow.
+            initialHomeTimeout = setTimeout(() => {
+                initialHomePending = 0;
+                document.body.classList.remove('app-booting');
+                if (screen) screen.classList.add('is-complete');
+            }, 8000);
         }
 
         function completeInitialHomeLoadingStep() {
             if (initialHomePending <= 0) return;
             initialHomePending -= 1;
             if (initialHomePending > 0) return;
+            if (initialHomeTimeout) {
+                clearTimeout(initialHomeTimeout);
+                initialHomeTimeout = null;
+            }
             document.body.classList.remove('app-booting');
             const screen = document.getElementById('appLoadingScreen');
             if (screen) screen.classList.add('is-complete');

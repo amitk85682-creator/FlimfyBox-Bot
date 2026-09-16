@@ -412,6 +412,8 @@ REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003930961567')
 FILMFYBOX_GROUP_URL = 'https://t.me/+dxaCr_cMmGpkYTFl'
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1003893346701')
+START_GIF_CHANNEL_ID = -1003893346701
+START_GIF_MESSAGE_ID = 62
 DUMP_CHANNEL_IDS = tuple(
     int(value.strip())
     for value in DUMP_CHANNEL_ID.split(',')
@@ -5073,11 +5075,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: 
             pass
 
-        # Send an actual animation. Do not copy dump-channel message 62:
-        # that message can be a movie file and would leak the full media.
-        msg = await context.bot.send_animation(
+        # This exact channel message is the approved Start GIF source.
+        msg = await context.bot.copy_message(
             chat_id=chat_id,
-            animation=random.choice(SEARCH_ERROR_GIFS),
+            from_chat_id=START_GIF_CHANNEL_ID,
+            message_id=START_GIF_MESSAGE_ID,
             caption=caption_text,
             parse_mode='HTML',
             reply_markup=inline_buttons
@@ -5086,7 +5088,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Start Menu Error: {e}")
-        # If the GIF host is unavailable, keep the menu text-only.
+        # If the approved GIF cannot be copied, keep the menu text-only.
         msg = await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='HTML', reply_markup=inline_buttons)
         track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
         
@@ -5777,12 +5779,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
         ])
 
-        # Use a real animation instead of copying a channel message that may
-        # contain a full movie file.
+        # Restore the exact approved GIF from the requested channel message.
         try:
-            msg = await context.bot.send_animation(
+            msg = await context.bot.copy_message(
                 chat_id=chat_id,
-                animation=random.choice(SEARCH_ERROR_GIFS),
+                from_chat_id=START_GIF_CHANNEL_ID,
+                message_id=START_GIF_MESSAGE_ID,
                 caption=caption_text,
                 parse_mode='HTML',
                 reply_markup=inline_buttons
@@ -12916,7 +12918,7 @@ async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYP
         first_name = html_escape((member.first_name or "there").strip())
         username = (member.username or "").strip()
         identity = (
-            f"{first_name}(@{html_escape(username)})"
+            f"<a href='tg://user?id={member.id}'>{first_name}</a>"
             if username
             else first_name
         )
@@ -12929,31 +12931,31 @@ async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYP
         ])
         templates = [
             (
-                f"🎬 <b>Welcome {identity}</b>\n\n"
-                f"{bot_name} group me aapka swagat hai.\n"
-                "Movie, web series, anime ya TV show ka naam bhejiye — "
-                "available files yahin mil jayengi."
+                f"🎬 <b>Welcome to the FlimfyBox screening room</b>\n\n"
+                f"Hey {identity}, your seat is ready.\n"
+                f"{bot_name} is here to help you find movies, series, anime and TV shows.\n\n"
+                "Drop a title below and let the search begin."
             ),
             (
-                f"✨ <b>New member joined</b>\n\n"
-                f"Welcome {identity}!\n"
-                "Quality, language aur season ke saath apni favourite title search kijiye.\n"
-                "FlimfyBox aapki help ke liye ready hai."
+                f"✨ <b>A new story begins here</b>\n\n"
+                f"Welcome, {identity}.\n"
+                "Search by title, then choose your preferred quality, language or season.\n\n"
+                "Your next watch is only one message away."
             ),
             (
                 f"🍿 <b>Screening room open</b>\n\n"
-                f"Hey {identity}, welcome to the FlimfyBox community.\n"
-                "Bas movie ya series ka naam type kijiye aur search results me se choose kijiye."
+                f"Glad to have you, {identity}.\n"
+                "Type a movie or series title and choose your perfect version from the results."
             ),
             (
-                f"🚀 <b>Welcome aboard, {identity}</b>\n\n"
-                "Aapka cinematic search assistant active hai.\n"
-                "Movie, anime, web series ya TV show dhoondhne ke liye naam bhejiye."
+                f"🚀 <b>Welcome aboard</b>\n\n"
+                f"{identity}, your cinematic search assistant is ready.\n"
+                "Send a title whenever you are ready for your next watch."
             ),
             (
-                f"🌟 <b>Glad to have you, {identity}</b>\n\n"
-                f"{bot_name} ke saath apni next watch discover kijiye.\n"
-                "Group me title bhejiye, phir quality ya season select kijiye."
+                f"🌟 <b>Welcome to the inner circle</b>\n\n"
+                f"Make yourself comfortable, {identity}.\n"
+                f"With {bot_name}, discover your next watch and select the quality you want."
             ),
         ]
         welcome_text = random.choice(templates)
