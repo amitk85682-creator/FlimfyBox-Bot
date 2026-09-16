@@ -642,8 +642,28 @@ const tg = window.Telegram?.WebApp || {
             document.getElementById('exploreContent').style.display = 'none';
             document.getElementById('myListContent').style.display = 'none';
             document.getElementById('searchResultsContent').style.display = 'block';
+            renderSearchDiscovery();
             setTimeout(() => document.getElementById('searchInput').focus(), 120);
         };
+
+        function renderSearchDiscovery() {
+            const dropdown = document.getElementById('searchDropdown');
+            const recent = getRecentSearches();
+            dropdown.innerHTML = recent.length
+                ? `<div class="search-empty-state"><strong>Recent searches</strong><div class="search-recent">${recent.map(item => `
+                    <button class="search-recent-chip" type="button" data-recent-search="${escapeHtml(item)}">
+                        <i class="fas fa-clock-rotate-left"></i>${escapeHtml(item)}
+                    </button>`).join('')}</div></div>`
+                : '<div class="search-empty-state"><strong>Search your catalogue</strong><span>Try a title, genre, or keyword.</span></div>';
+            dropdown.querySelectorAll('[data-recent-search]').forEach(button => {
+                button.addEventListener('click', () => {
+                    const input = document.getElementById('searchInput');
+                    input.value = button.dataset.recentSearch || '';
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                });
+            });
+            dropdown.classList.add('active');
+        }
 
         window.showMyList = async function() {
             closeMorePanel();
@@ -1196,11 +1216,7 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
     const dropdown = document.getElementById('searchDropdown');
 
     if (!q) {
-        const recent = getRecentSearches();
-        dropdown.innerHTML = recent.length
-            ? `<div class="search-empty-state"><strong>Recent searches</strong><div class="search-recent">${recent.map(item => `<button class="search-recent-chip" type="button" onclick="document.getElementById('searchInput').value='${item.replace(/'/g, "\\'")}'; document.getElementById('searchInput').dispatchEvent(new Event('input', { bubbles: true }));">${item}</button>`).join('')}</div></div>`
-            : '<div class="search-empty-state"><strong>Search your catalogue</strong><span>Try a title, genre, or keyword.</span></div>';
-        dropdown.classList.add('active');
+        renderSearchDiscovery();
         return;
     }
 
@@ -1211,7 +1227,11 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
         searchRequestId++;
         const currentId = searchRequestId;
         try {
-            const response = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            const [suggestionResponse, response] = await Promise.all([
+                fetch(`/api/suggest?q=${encodeURIComponent(q)}`),
+                fetch(`/api/search?q=${encodeURIComponent(q)}`)
+            ]);
+            const suggestions = suggestionResponse.ok ? await suggestionResponse.json() : [];
             const searchData = await response.json();
             if (currentId !== searchRequestId) return;
             if (!response.ok || searchData.status !== 'success') throw new Error(searchData.message || 'Search failed');
@@ -1221,33 +1241,57 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 else if (!allMovies.some(m => String(m.id) === String(r.id))) allMovies.push(r);
             });
 
+            const suggestionMarkup = Array.isArray(suggestions) && suggestions.length
+                ? `<div class="search-suggestion-group"><div class="search-dropdown-label">Suggestions</div>${suggestions.slice(0, 6).map(item => `
+                    <button class="search-suggestion" type="button" data-suggestion="${escapeHtml(item)}">
+                        <i class="fas fa-magnifying-glass"></i><span>${escapeHtml(item)}</span>
+                    </button>`).join('')}</div>`
+                : '';
+
             if (!results.length) {
                 addRecentSearch(q);
-                const safeQuery = q.replace(/'/g, "\\'");
-                dropdown.innerHTML = `<div class="empty-search-state"><strong>No match found</strong><span>“${q}” isn't in the catalogue yet.</span><div style="margin-top:12px;"><button class="btn-sm btn-sm-primary" onclick="requestSilent('${safeQuery}')"><i class="fas fa-paper-plane"></i> Request this title</button></div></div>`;
+                dropdown.innerHTML = suggestionMarkup + `<div class="empty-search-state"><strong>No match found</strong><span>“${escapeHtml(q)}” isn't in the catalogue yet.</span><div style="margin-top:12px;"><button class="btn-sm btn-sm-primary" type="button" data-request-search><i class="fas fa-paper-plane"></i> Request this title</button></div></div>`;
+                bindSearchSuggestions(dropdown, q);
                 return;
             }
 
             addRecentSearch(q);
-            dropdown.innerHTML = results.slice(0, 8).map(r => {
+            dropdown.innerHTML = suggestionMarkup + results.slice(0, 8).map(r => {
                 const isTMDB = r.source === 'tmdb';
                 const status = isTMDB ? 'Request' : 'Available';
-                const action = isTMDB ? `<button class="btn-sm btn-sm-outline" onclick="requestMovie('${String(r.title || '').replace(/'/g, "\\'")}' )">Request</button>` : '<button class="btn-sm btn-sm-primary">View</button>';
-                const click = isTMDB
-                    ? `onclick="openDetails('${r.id}', true); document.getElementById('searchDropdown').classList.remove('active');"`
-                    : `onclick="openDetails('${r.id}', false); document.getElementById('searchDropdown').classList.remove('active');"`;
-                return `<div class="search-item fade-in" ${click}>
-                    <img src="${r.image}" loading="lazy" onerror="this.src='/static/miniapp/poster-placeholder.svg'">
+                return `<div class="search-item fade-in" data-result-id="${escapeHtml(r.id)}" data-result-tmdb="${isTMDB}">
+                    <img src="${escapeHtml(r.image)}" loading="lazy" onerror="this.src='/static/miniapp/poster-placeholder.svg'">
                     <div class="search-item-info"><div class="search-item-title">${r.title}</div>
                     <div class="search-item-meta"><span>${r.year || '—'}</span><span class="status-pill ${isTMDB ? 'request' : 'available'}">${status}</span></div></div>
-                    <div class="search-actions">${action}</div></div>`;
+                    <div class="search-actions"><button class="btn-sm ${isTMDB ? 'btn-sm-outline' : 'btn-sm-primary'}" type="button">${isTMDB ? 'Request' : 'View'}</button></div></div>`;
             }).join('');
+            bindSearchSuggestions(dropdown, q, results);
         } catch (error) {
             console.error('Search failed:', error);
             dropdown.innerHTML = '<div class="search-empty-state"><strong>Search unavailable</strong><span>Please try again in a moment.</span></div>';
         }
     }, 260);
 });
+
+function bindSearchSuggestions(dropdown, query, results = []) {
+    dropdown.querySelectorAll('[data-suggestion]').forEach(button => {
+        button.addEventListener('click', () => {
+            const input = document.getElementById('searchInput');
+            input.value = button.dataset.suggestion || '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    });
+    dropdown.querySelector('[data-request-search]')?.addEventListener('click', () => requestSilent(query));
+    dropdown.querySelectorAll('[data-result-id]').forEach(item => {
+        item.addEventListener('click', () => {
+            const movie = results.find(result => String(result.id) === String(item.dataset.resultId));
+            if (!movie) return;
+            addRecentSearch(movie.title || query);
+            openDetails(String(movie.id), item.dataset.resultTmdb === 'true');
+            dropdown.classList.remove('active');
+        });
+    });
+}
 
 
 // Hide dropdown if clicked outside
