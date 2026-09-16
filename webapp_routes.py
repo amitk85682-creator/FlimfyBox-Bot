@@ -1294,11 +1294,8 @@ def register_webapp_routes(
 
     @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
     def get_movie_details(movie_id):
-        cache_key = f"api_movie_{movie_id}"
-        cached = api_movies_cache.get(cache_key)
-        if cached:
-            return jsonify(cached)
-    
+        # Details include live movie_files rows. Do not serve a stale cached
+        # response that was generated before files finished being ingested.
         conn = get_db_connection()
         if not conn:
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
@@ -1331,7 +1328,12 @@ def register_webapp_routes(
     
             # Get files
             # Updated to fetch extra_info for Season/Episode parsing
-            cur.execute("SELECT id, quality, file_size, extra_info FROM movie_files WHERE movie_id = %s", (movie_id,))
+            cur.execute("""
+                SELECT id, quality, file_size, COALESCE(extra_info, '')
+                FROM movie_files
+                WHERE movie_id = %s
+                ORDER BY id ASC
+            """, (movie_id,))
             files = [
                 {'id': f[0], 'quality': f[1], 'size': f[2], 'extra_info': f[3] if len(f) > 3 else ''}
                 for f in cur.fetchall()
@@ -1345,9 +1347,8 @@ def register_webapp_routes(
             # block the local detail response. A poster is a reliable backdrop
             # fallback, while saved trailer keys remain available immediately.
             movie['backdrop'] = movie['image']
-    
+
             result = {'status': 'success', 'movie': movie}
-            api_movies_cache.set(cache_key, result)
             return jsonify(result)
         except Exception as e:
             logger.error(f"Error in /api/movie/{movie_id}: {e}")

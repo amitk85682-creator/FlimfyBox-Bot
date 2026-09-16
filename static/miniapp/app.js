@@ -1295,8 +1295,8 @@ document.addEventListener('keydown', (e) => {
             document.getElementById('castSection').innerHTML = '';
             document.getElementById('dpTrailerBtn').innerHTML = '';
             renderCommunityRating(movie.id, movie.title || 'this title');
-            document.getElementById('dpSeasons').innerHTML = '';
-            document.getElementById('dpLinks').innerHTML = '';
+            document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
+            document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
             if (isTMDB) {
                 const backdropImg = movie.image;
@@ -1410,9 +1410,13 @@ document.addEventListener('keydown', (e) => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
                     console.error('Details load failed:', error);
                     detailsDescription.innerText = 'Details are temporarily unavailable. You can go back and try again.';
-                    document.getElementById('dpTrailerBtn').innerHTML = '<button class="btn-request" onclick="showToast(\'Could not load title details\')"><i class="fas fa-triangle-exclamation"></i> Retry later</button>';
+                    document.getElementById('dpLinks').innerHTML = '<button class="btn-request" type="button" onclick="retryActiveDetails()"><i class="fas fa-rotate-right"></i> Retry details</button>';
                     detailsPage.classList.remove('is-loading');
                 });
+        };
+        window.retryActiveDetails = function() {
+            if (!activeMovie) return;
+            openDetails(String(activeMovie.id), false);
         };
         window.renderCommunityRating = function(movieId, title) {
                 const container = document.getElementById('communityRating');
