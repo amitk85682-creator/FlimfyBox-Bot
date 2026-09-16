@@ -2124,6 +2124,11 @@ def setup_database():
                 UNIQUE(user_id)
             )
         """)
+        # Older deployments may have created user_activity before chat
+        # tracking was added. Keep the existing table compatible.
+        cur.execute("ALTER TABLE user_activity ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        cur.execute("ALTER TABLE user_activity ADD COLUMN IF NOT EXISTS chat_id BIGINT")
+        cur.execute("ALTER TABLE user_activity ADD COLUMN IF NOT EXISTS chat_type TEXT")
 
         # Unique constraint for requests
         cur.execute("""
