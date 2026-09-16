@@ -1362,7 +1362,9 @@ document.addEventListener('keydown', (e) => {
                     'click',
                     () => submitCommunityRating(movieId, container)
                 );
-                fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`)
+                fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
+                    headers: telegramAuthHeaders()
+                })
                     .then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
                         if (!ok || data.status !== 'success') throw new Error(data.message || 'Rating unavailable');
@@ -1417,7 +1419,10 @@ document.addEventListener('keydown', (e) => {
                 container.querySelector('.community-rating-summary').textContent = 'Saving your rating…';
                 fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: {
+                        'Content-Type': 'application/json',
+                        ...telegramAuthHeaders()
+                    },
                     body: JSON.stringify({ rating: value })
                 }).then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
