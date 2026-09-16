@@ -5073,11 +5073,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: 
             pass
 
-        # GIF from Dump Channel + Naya Caption & Buttons
-        msg = await context.bot.copy_message(
+        # Send an actual animation. Do not copy dump-channel message 62:
+        # that message can be a movie file and would leak the full media.
+        msg = await context.bot.send_animation(
             chat_id=chat_id,
-            from_chat_id=get_primary_dump_channel_id(),
-            message_id=62, # Tumhari GIF ki Message ID
+            animation=random.choice(SEARCH_ERROR_GIFS),
             caption=caption_text,
             parse_mode='HTML',
             reply_markup=inline_buttons
@@ -5086,7 +5086,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Start Menu Error: {e}")
-        # Agar copy_message fail ho (bot dump channel me admin na ho)
+        # If the GIF host is unavailable, keep the menu text-only.
         msg = await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='HTML', reply_markup=inline_buttons)
         track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
         
@@ -5777,12 +5777,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
         ])
 
-        # Use the same known-good source message as the initial /start menu.
+        # Use a real animation instead of copying a channel message that may
+        # contain a full movie file.
         try:
-            msg = await context.bot.copy_message(
+            msg = await context.bot.send_animation(
                 chat_id=chat_id,
-                from_chat_id=get_primary_dump_channel_id(),
-                message_id=62,
+                animation=random.choice(SEARCH_ERROR_GIFS),
                 caption=caption_text,
                 parse_mode='HTML',
                 reply_markup=inline_buttons
