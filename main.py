@@ -396,6 +396,17 @@ REQUIRED_GROUP_ID = os.environ.get('REQUIRED_GROUP_ID', '-1003930961567')
 FILMFYBOX_GROUP_URL = 'https://t.me/+dxaCr_cMmGpkYTFl'
 REQUEST_CHANNEL_ID = os.environ.get('REQUEST_CHANNEL_ID', '-1003078990647')
 DUMP_CHANNEL_ID = os.environ.get('DUMP_CHANNEL_ID', '-1003893346701')
+DUMP_CHANNEL_IDS = tuple(
+    int(value.strip())
+    for value in DUMP_CHANNEL_ID.split(',')
+    if value.strip().lstrip('-').isdigit()
+)
+
+def get_primary_dump_channel_id() -> int:
+    """Return the first configured dump channel for source-message copies."""
+    if not DUMP_CHANNEL_IDS:
+        raise ValueError("DUMP_CHANNEL_ID must contain at least one numeric Telegram chat ID")
+    return DUMP_CHANNEL_IDS[0]
 FORCE_JOIN_ENABLED = False
 
 # ✅ NEW ENVIRONMENT VARIABLES FOR MULTI-CHANNEL & AI
@@ -3682,7 +3693,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 try:
                     warning_msg = await safe_send(context.bot.copy_message(
                         chat_id=user_id,
-                        from_chat_id=int(DUMP_CHANNEL_ID),
+                        from_chat_id=get_primary_dump_channel_id(),
                         message_id=3384
                     ))
                 except Exception:
@@ -3741,8 +3752,9 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     ))
 
                 if sent_msg:
-                    is_file_message = bool(
-                        sent_msg.document or sent_msg.video or sent_msg.audio or sent_msg.photo
+                    is_file_message = any(
+                        getattr(sent_msg, media_type, None)
+                        for media_type in ('document', 'video', 'audio', 'photo')
                     )
                     track_user_message_for_deletion(
                         context, user_id, sent_msg, is_file=is_file_message
@@ -4501,8 +4513,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if sent_msg:
             # Downloadable media is retained for 2 minutes; link-only replies
             # are retained for the normal 5-minute user-message window.
-            is_file_message = bool(
-                sent_msg.document or sent_msg.video or sent_msg.audio or sent_msg.photo
+            is_file_message = any(
+                getattr(sent_msg, media_type, None)
+                for media_type in ('document', 'video', 'audio', 'photo')
             )
             track_user_message_for_deletion(
                 context, target_chat_id, sent_msg, is_file=is_file_message
@@ -5042,7 +5055,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # GIF from Dump Channel + Naya Caption & Buttons
         msg = await context.bot.copy_message(
             chat_id=chat_id,
-            from_chat_id=int(DUMP_CHANNEL_ID),
+            from_chat_id=get_primary_dump_channel_id(),
             message_id=62, # Tumhari GIF ki Message ID
             caption=caption_text,
             parse_mode='HTML',
@@ -5747,7 +5760,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             msg = await context.bot.copy_message(
                 chat_id=chat_id,
-                from_chat_id=int(DUMP_CHANNEL_ID),
+                from_chat_id=get_primary_dump_channel_id(),
                 message_id=62,
                 caption=caption_text,
                 parse_mode='HTML',
@@ -11577,8 +11590,10 @@ async def broadcast_with_media(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
 
                 if sent_msg:
-                    is_file_message = bool(
-                        sent_msg.document or sent_msg.video or sent_msg.audio or sent_msg.photo
+                    # copy_message returns MessageId, not a full Message object.
+                    is_file_message = any(
+                        getattr(sent_msg, media_type, None)
+                        for media_type in ('document', 'video', 'audio', 'photo')
                     )
                     track_user_message_for_deletion(
                         context, user_id, sent_msg, is_file=is_file_message
