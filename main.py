@@ -12923,7 +12923,9 @@ async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYP
         bot_info = await context.bot.get_me()
         bot_name = html_escape(bot_info.first_name or "FlimfyBox")
         app_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎬 Open FlimfyBox", web_app=WebAppInfo(url=WEB_APP_URL))]
+            # Telegram Web App buttons are not valid in group chats. A normal
+            # HTTPS URL opens the same Mini App safely from a group welcome.
+            [InlineKeyboardButton("🎬 Open FlimfyBox", url=WEB_APP_URL)]
         ])
         templates = [
             (
