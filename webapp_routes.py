@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request, send_file, render_template
+from flask import Blueprint, jsonify, request, send_file, render_template, redirect
 from flask_cors import CORS
 import os
 import logging
@@ -810,7 +810,7 @@ def register_webapp_routes(
     # Root remains useful for a browser or external uptime monitor.
     @flask_app.route('/', methods=['GET', 'HEAD'])
     def home():
-        return "Bot is Alive & Running!", 200
+        return redirect('/webapp', code=302)
 
     @flask_app.route('/api/genres', methods=['GET'])
     def get_genres():

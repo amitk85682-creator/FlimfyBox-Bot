@@ -340,10 +340,26 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get('DATABASE_URL')
 # Keep the Telegram Web App endpoint configurable. The old Render service was
 # still hard-coded in several buttons, so Telegram opened the retired Mini App.
-WEB_APP_URL = os.environ.get(
-    'WEB_APP_URL',
-    'https://temp-bj8b.onrender.com/webapp'
-).rstrip('/')
+def normalize_mini_app_url(value: str) -> str:
+    """Keep Telegram buttons on the current Mini App host and route."""
+    fallback = 'https://temp-bj8b.onrender.com/webapp'
+    candidate = (value or '').strip()
+    if not candidate:
+        return fallback
+    parsed = urlparse(candidate)
+    if not parsed.scheme or not parsed.netloc:
+        return fallback
+    hostname = (parsed.hostname or '').lower()
+    if hostname == 'flimfybox-bot-yht0.onrender.com':
+        parsed = parsed._replace(netloc='temp-bj8b.onrender.com')
+    if not parsed.path or parsed.path == '/':
+        parsed = parsed._replace(path='/webapp')
+    return urlunparse(parsed).rstrip('/')
+
+
+WEB_APP_URL = normalize_mini_app_url(
+    os.environ.get('WEB_APP_URL', 'https://temp-bj8b.onrender.com/webapp')
+)
     # 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
 try:
