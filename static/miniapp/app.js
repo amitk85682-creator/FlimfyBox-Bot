@@ -410,6 +410,23 @@ const tg = window.Telegram?.WebApp || {
             return tg.initData ? { 'X-Telegram-Init-Data': tg.initData } : {};
         }
 
+        function guestChatToken() {
+            const storageKey = 'flimfybox-chat-guest-token';
+            let token = localStorage.getItem(storageKey);
+            if (!token) {
+                token = `${crypto.randomUUID()}-${crypto.randomUUID()}`;
+                localStorage.setItem(storageKey, token);
+            }
+            return token;
+        }
+
+        function globalChatHeaders() {
+            return {
+                ...telegramAuthHeaders(),
+                'X-Guest-Token': guestChatToken()
+            };
+        }
+
         function trackRecommendationEvent(eventType, movieId = null, metadata = {}) {
             if (!tg.initData) return;
             fetch('/api/recommendation-events', {
@@ -501,10 +518,10 @@ const tg = window.Telegram?.WebApp || {
         };
 
         window.loadGlobalChat = function() {
-            fetch('/api/global-chat', { headers: telegramAuthHeaders() })
+            fetch('/api/global-chat', { headers: globalChatHeaders() })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))
                 .then(({ ok, data }) => {
-                    if (!ok) throw new Error(data.message || 'Open this chat inside Telegram.');
+                    if (!ok) throw new Error(data.message || 'Could not load Global Chat.');
                     const messages = document.querySelector('.chat-messages');
                     if (!messages) return;
                     messages.innerHTML = (data.messages || []).map(item => {
@@ -528,7 +545,7 @@ const tg = window.Telegram?.WebApp || {
             input.disabled = true;
             fetch('/api/global-chat', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
+                headers: { 'Content-Type': 'application/json', ...globalChatHeaders() },
                 body: JSON.stringify({ message })
             })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))

@@ -686,6 +686,22 @@ def register_webapp_routes(
             return None, (jsonify({'status': 'error', 'message': 'Open My List inside Telegram.'}), 401)
         return user, None
 
+    def chat_user_from_request():
+        """Return Telegram identity or a stable browser guest identity for public chat."""
+        telegram_user = telegram_user_from_request()
+        if telegram_user:
+            return telegram_user
+        guest_token = request.headers.get('X-Guest-Token', '').strip()
+        if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', guest_token):
+            return None
+        digest = hashlib.sha256(guest_token.encode('utf-8')).digest()
+        guest_id = -max(1, int.from_bytes(digest[:8], byteorder='big', signed=False))
+        return {
+            'id': guest_id,
+            'username': '',
+            'first_name': 'Guest',
+        }
+
     @flask_app.route('/api/recommendation-events', methods=['POST'])
     def record_recommendation_event_api():
         user, error = require_telegram_user()
@@ -738,9 +754,12 @@ def register_webapp_routes(
 
     @flask_app.route('/api/global-chat', methods=['GET', 'POST'])
     def global_chat_api():
-        user, error = require_telegram_user()
-        if error:
-            return error
+        user = chat_user_from_request()
+        if not user:
+            return jsonify({
+                'status': 'error',
+                'message': 'Chat identity is unavailable. Refresh the app and try again.',
+            }), 400
         conn = get_db_connection()
         if not conn:
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
