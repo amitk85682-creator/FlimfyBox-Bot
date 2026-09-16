@@ -12,6 +12,7 @@ const tg = window.Telegram?.WebApp || {
         let tmdbMoviesMap = {};
         let activeMovie = null;
         let savedMovieIds = new Set();
+        let myListToggleInFlight = false;
         let myListRequestId = 0;
         let detailsRequestId = 0;
         let heroTimer = null;
@@ -427,6 +428,27 @@ const tg = window.Telegram?.WebApp || {
             };
         }
 
+        async function refreshMyListButton(movieId, button) {
+            if (!tg.initData || !button) return;
+            try {
+                const response = await fetch(`/api/my-list/${encodeURIComponent(movieId)}/status`, {
+                    headers: telegramAuthHeaders()
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'success') return;
+                if (String(activeMovie?.id) !== String(movieId)) return;
+                if (data.saved) {
+                    savedMovieIds.add(String(movieId));
+                    button.innerHTML = '<i class="fas fa-check"></i>';
+                } else {
+                    savedMovieIds.delete(String(movieId));
+                    button.innerHTML = '<i class="fas fa-plus"></i>';
+                }
+            } catch (error) {
+                console.warn('Could not refresh My List state:', error);
+            }
+        }
+
         function trackRecommendationEvent(eventType, movieId = null, metadata = {}) {
             if (!tg.initData) return;
             fetch('/api/recommendation-events', {
@@ -661,12 +683,25 @@ const tg = window.Telegram?.WebApp || {
                 showToast('Only available titles can be saved right now.');
                 return;
             }
+            if (myListToggleInFlight) return;
+            myListToggleInFlight = true;
+            const button = document.getElementById('detailMyListButton');
+            if (button) button.disabled = true;
             try {
                 // Snapshot the details-page movie. The home carousel changes in
                 // the background, so never read a mutable global after await.
                 const movieToSave = activeMovie;
                 const movieId = String(movieToSave.id);
-                const isSaved = savedMovieIds.has(movieId);
+                const statusResponse = await fetch(`/api/my-list/${movieId}/status`, {
+                    headers: telegramAuthHeaders()
+                });
+                const statusData = await statusResponse.json();
+                if (!statusResponse.ok || statusData.status !== 'success') {
+                    throw new Error(statusData.message || 'Could not check My List');
+                }
+                const isSaved = Boolean(statusData.saved);
+                if (isSaved) savedMovieIds.add(movieId);
+                else savedMovieIds.delete(movieId);
                 const response = await fetch(isSaved ? `/api/my-list/${movieId}` : '/api/my-list', {
                     method: isSaved ? 'DELETE' : 'POST',
                     headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
@@ -674,8 +709,8 @@ const tg = window.Telegram?.WebApp || {
                 });
                 const data = await response.json();
                 if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not save title');
-                const button = document.getElementById('detailMyListButton');
-                if (isSaved) {
+                const saved = Boolean(data.saved);
+                if (!saved) {
                     savedMovieIds.delete(movieId);
                     if (button) button.innerHTML = '<i class="fas fa-plus"></i>';
                     trackRecommendationEvent('watchlist_remove', movieId);
@@ -688,6 +723,9 @@ const tg = window.Telegram?.WebApp || {
                 }
             } catch (error) {
                 showToast(error.message || 'Could not save title');
+            } finally {
+                myListToggleInFlight = false;
+                if (button) button.disabled = false;
             }
         };
 
@@ -1239,6 +1277,7 @@ document.addEventListener('keydown', (e) => {
             if (myListButton) {
                 myListButton.innerHTML = savedMovieIds.has(String(movie.id))
                     ? '<i class="fas fa-check"></i>' : '<i class="fas fa-plus"></i>';
+                refreshMyListButton(movie.id, myListButton);
             }
             const detailsPage = document.getElementById('detailsPage');
             const detailsBackdrop = document.getElementById('dpBackdrop');

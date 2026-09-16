@@ -1656,6 +1656,32 @@ def register_webapp_routes(
         finally:
             close_db_connection(conn)
 
+    @flask_app.route('/api/my-list/<int:movie_id>/status', methods=['GET'])
+    def get_my_list_status(movie_id):
+        user, error = require_telegram_user()
+        if error:
+            return error
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT EXISTS(
+                    SELECT 1 FROM user_watchlist
+                    WHERE user_id = %s AND movie_id = %s
+                )
+            """, (user['id'], movie_id))
+            saved = bool(cur.fetchone()[0])
+            cur.close()
+            return jsonify({'status': 'success', 'saved': saved})
+        except Exception:
+            logger.exception("My List status error for movie %s", movie_id)
+            conn.rollback()
+            return jsonify({'status': 'error', 'message': 'Could not check My List'}), 500
+        finally:
+            close_db_connection(conn)
+
     @flask_app.route('/api/my-list/<int:movie_id>', methods=['DELETE'])
     def remove_from_my_list(movie_id):
         user, error = require_telegram_user()
