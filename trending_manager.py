@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------
 # ENVIRONMENT VARIABLES
 # -------------------------------------------------------------
-TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 CHANNEL_ID = int(os.environ.get('CHANNEL_ID', '-1003916450868'))
 BOT_INSTANCE_ID = os.environ.get('BOT_INSTANCE_ID', socket.gethostname())
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', '8675088364'))

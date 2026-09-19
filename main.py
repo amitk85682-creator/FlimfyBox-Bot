@@ -329,6 +329,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get('DATABASE_URL')
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 # Keep the Telegram Web App endpoint configurable. The old Render service was
 # still hard-coded in several buttons, so Telegram opened the retired Mini App.
 def normalize_mini_app_url(value: str) -> str:
@@ -12316,8 +12317,6 @@ _cors_origins = [
 ]
 CORS(flask_app, resources={r"/*": {"origins": _cors_origins}})
 
-# --- TMDB API Key (for fetching trailers & cast) ---
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 # ==================== DATABASE HELPERS (use existing functions) ====================
 # Make sure these functions are already defined in your main code:
 # get_db_connection(), close_db_connection(), store_user_request()
