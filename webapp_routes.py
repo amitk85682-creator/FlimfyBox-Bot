@@ -657,7 +657,16 @@ def register_webapp_routes(
             return None
         values = dict(parse_qsl(init_data, keep_blank_values=True))
         received_hash = values.pop('hash', '')
-        if not received_hash:
+        auth_date_raw = values.get('auth_date', '')
+        try:
+            auth_date = int(auth_date_raw)
+            max_age = int(os.environ.get('TELEGRAM_AUTH_MAX_AGE_SECONDS', '86400'))
+        except (TypeError, ValueError):
+            return None
+        if not received_hash or max_age <= 0:
+            return None
+        now = time.time()
+        if auth_date > now + 60 or now - auth_date > max_age:
             return None
         data_check_string = '\n'.join(f'{key}={value}' for key, value in sorted(values.items()))
         secret_key = hmac.new(b'WebAppData', bot_token.encode(), hashlib.sha256).digest()
@@ -722,6 +731,8 @@ def register_webapp_routes(
             try:
                 movie_id = int(movie_id)
             except (TypeError, ValueError):
+                return jsonify({'status': 'error', 'message': 'Invalid movie.'}), 400
+            if movie_id <= 0:
                 return jsonify({'status': 'error', 'message': 'Invalid movie.'}), 400
         metadata = payload.get('metadata') or {}
         if not isinstance(metadata, dict):
@@ -1177,9 +1188,19 @@ def register_webapp_routes(
         """
         Return list of movies with pagination (Infinite Scroll).
         """
-        # Pagination Logic
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 40)) # Ek baar mein 40 movies bhejo
+        try:
+            page = int(request.args.get('page', '1'))
+            limit = int(request.args.get('limit', '40'))
+        except (TypeError, ValueError):
+            return jsonify({
+                'status': 'error',
+                'message': 'Page and limit must be integers.'
+            }), 400
+        if page < 1 or limit < 1 or limit > 100:
+            return jsonify({
+                'status': 'error',
+                'message': 'Page must be positive and limit must be between 1 and 100.'
+            }), 400
         
         cache_key = f"api_movies_{page}_{limit}"
         cached = api_movies_cache.get(cache_key)
@@ -1228,7 +1249,7 @@ def register_webapp_routes(
         except Exception as e:
             logger.error(f"Error in /api/movies: {e}")
             close_db_connection(conn)
-            return jsonify({'status': 'error', 'message': str(e)}), 500
+            return jsonify({'status': 'error', 'message': 'Could not load movies'}), 500
     
     
     @flask_app.route('/api/movie/<int:movie_id>/rating', methods=['GET'])
@@ -1294,6 +1315,8 @@ def register_webapp_routes(
 
     @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
     def get_movie_details(movie_id):
+        if movie_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
         # Details include live movie_files rows. Do not serve a stale cached
         # response that was generated before files finished being ingested.
         conn = get_db_connection()
@@ -1353,13 +1376,15 @@ def register_webapp_routes(
         except Exception as e:
             logger.error(f"Error in /api/movie/{movie_id}: {e}")
             close_db_connection(conn)
-            return jsonify({'status': 'error', 'message': str(e)}), 500
+            return jsonify({'status': 'error', 'message': 'Could not load movie details'}), 500
 
     @flask_app.route('/api/search', methods=['GET'])
     def search_movies_api():
         query = request.args.get('q', '').strip()
         if not query:
             return jsonify({'status': 'error', 'message': 'Missing query'}), 400
+        if len(query) > 200:
+            return jsonify({'status': 'error', 'message': 'Query is too long'}), 400
     
         cache_key = f"api_search_{query}"
         cached = search_cache.get(cache_key)
@@ -1534,14 +1559,25 @@ def register_webapp_routes(
         """
         Store a user request from web app AND Notify Admin.
         """
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         if not data or 'title' not in data:
             return jsonify({'status': 'error', 'message': 'Missing movie title'}), 400
         
-        title = data['title'][:200]
-        user_id = data.get('user_id', 0)
-        username = data.get('username', '')
-        first_name = data.get('first_name', 'WebApp User')
+        title = data.get('title')
+        if not isinstance(title, str):
+            return jsonify({'status': 'error', 'message': 'Movie title must be text'}), 400
+        title = title.strip()[:200]
+        if not title:
+            return jsonify({'status': 'error', 'message': 'Missing movie title'}), 400
+        authenticated_user = telegram_user_from_request()
+        if authenticated_user:
+            user_id = authenticated_user['id']
+            username = authenticated_user.get('username', '')
+            first_name = authenticated_user.get('first_name', 'WebApp User')
+        else:
+            user_id = 0
+            username = ''
+            first_name = 'WebApp User'
         
         success = store_user_request(user_id, username, first_name, title, None, None)
         
@@ -1633,6 +1669,8 @@ def register_webapp_routes(
         try:
             movie_id = int(data.get('movie_id'))
         except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Invalid movie'}), 400
+        if movie_id <= 0:
             return jsonify({'status': 'error', 'message': 'Invalid movie'}), 400
         conn = get_db_connection()
         if not conn:
@@ -1876,7 +1914,7 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'No IMDB ID found'}), 404
         except Exception as e:
             logger.error(f"Error fetching IMDB ID for tmdb_{tmdb_id}: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
+            return jsonify({'status': 'error', 'message': 'Could not fetch external movie details'}), 500
     
     # ==================== MAIN WEB APP PAGE (Premium HTML) ====================
     
@@ -1884,6 +1922,8 @@ def register_webapp_routes(
     @flask_app.route('/watch/<int:movie_id>')
     @flask_app.route('/watch/<int:movie_id>/file/<int:movie_file_id>')
     def secure_watch(movie_id, movie_file_id=None):
+        if movie_id <= 0 or (movie_file_id is not None and movie_file_id <= 0):
+            return jsonify({'status': 'error', 'message': 'Invalid movie or file'}), 400
         # Yeh HTML page user ko dikhega. Bots JS run nahi kar pate.
         html = """
         <!DOCTYPE html>
@@ -1928,31 +1968,40 @@ def register_webapp_routes(
     @flask_app.route('/api/gen_link/<int:movie_id>', methods=['POST'])
     @flask_app.route('/api/gen_link/<int:movie_id>/file/<int:movie_file_id>', methods=['POST'])
     def gen_secure_link(movie_id, movie_file_id=None):
+        if movie_id <= 0 or (movie_file_id is not None and movie_file_id <= 0):
+            return jsonify({'status': 'error', 'message': 'Invalid movie or file'}), 400
         token = "tmp_" + secrets.token_hex(6)
         conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                # Delete old tokens (1 minute se purane)
-                cur.execute("DELETE FROM temp_links WHERE created_at < NOW() - INTERVAL '1 minute'")
-                if movie_file_id:
-                    cur.execute(
-                        "SELECT 1 FROM movie_files WHERE id = %s AND movie_id = %s",
-                        (movie_file_id, movie_id)
-                    )
-                    if not cur.fetchone():
-                        return jsonify({'status': 'error', 'message': 'Selected file not found'}), 404
-                # Save a short-lived token for this exact file (if selected).
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            # Delete old tokens (1 minute se purane)
+            cur.execute("DELETE FROM temp_links WHERE created_at < NOW() - INTERVAL '1 minute'")
+            if movie_file_id:
                 cur.execute(
-                    "INSERT INTO temp_links (token, movie_id, movie_file_id) VALUES (%s, %s, %s)",
-                    (token, movie_id, movie_file_id)
+                    "SELECT 1 FROM movie_files WHERE id = %s AND movie_id = %s",
+                    (movie_file_id, movie_id)
                 )
-                conn.commit()
-                cur.close()
-            except Exception as e:
-                logger.error(f"Token Error: {e}")
-            finally:
-                close_db_connection(conn)
+                if not cur.fetchone():
+                    return jsonify({'status': 'error', 'message': 'Selected file not found'}), 404
+            else:
+                cur.execute("SELECT 1 FROM movies WHERE id = %s", (movie_id,))
+                if not cur.fetchone():
+                    return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            # Save a short-lived token for this exact movie/file pair.
+            cur.execute(
+                "INSERT INTO temp_links (token, movie_id, movie_file_id) VALUES (%s, %s, %s)",
+                (token, movie_id, movie_file_id)
+            )
+            conn.commit()
+            cur.close()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Token Error: {e}")
+            return jsonify({'status': 'error', 'message': 'Could not create secure link'}), 500
+        finally:
+            close_db_connection(conn)
                 
         bot_username = os.environ.get('BOT_USERNAME', 'FlimfyBoxBot')
         tg_url = f"tg://resolve?domain={bot_username}&start={token}"

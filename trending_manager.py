@@ -265,77 +265,6 @@ def build_summary_message(new_count, total_checked, skipped_in_db, skipped_alrea
 # -------------------------------------------------------------
 # DATABASE SETUP
 # -------------------------------------------------------------
-def setup_trending_db():
-    if not DATABASE_URL:
-        return False
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return False
-        cur = conn.cursor()
-
-        # Main trending history table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS trending_history (
-                tmdb_id INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
-                media_type TEXT DEFAULT 'movie',
-                popularity REAL DEFAULT 0,
-                vote_average REAL DEFAULT 0,
-                alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                posted_by TEXT DEFAULT NULL,
-                status TEXT DEFAULT 'alerted',
-                imdb_id TEXT DEFAULT NULL
-            )
-        """)
-        
-        # Meta table for lock mechanism
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS trending_meta (
-                id INTEGER PRIMARY KEY,
-                last_check TIMESTAMP,
-                locked_by TEXT DEFAULT NULL,
-                lock_time TIMESTAMP DEFAULT NULL
-            )
-        """)
-
-        # Add missing columns if they don't exist
-        columns_to_add = {
-            'posted_by': 'TEXT DEFAULT NULL',
-            'status': "TEXT DEFAULT 'alerted'",
-            'imdb_id': 'TEXT DEFAULT NULL'
-        }
-        
-        for col_name, col_def in columns_to_add.items():
-            cur.execute(f"""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name='trending_history' AND column_name='{col_name}'
-            """)
-            if not cur.fetchone():
-                cur.execute(f"ALTER TABLE trending_history ADD COLUMN {col_name} {col_def}")
-                logger.info(f"✅ Added column: {col_name}")
-
-        # Add lock columns to meta table
-        for col in ['locked_by', 'lock_time']:
-            cur.execute(f"""
-                SELECT column_name FROM information_schema.columns
-                WHERE table_name='trending_meta' AND column_name='{col}'
-            """)
-            if not cur.fetchone():
-                cur.execute(f"ALTER TABLE trending_meta ADD COLUMN {col} {'TEXT' if col == 'locked_by' else 'TIMESTAMP'} DEFAULT NULL")
-
-        # Initialize meta table
-        cur.execute("INSERT INTO trending_meta (id, last_check) VALUES (1, '2000-01-01') ON CONFLICT (id) DO NOTHING")
-        
-        conn.commit()
-        cur.close()
-        close_db_connection(conn)
-        logger.info("✅ Trending DB ready with IMDb ID + Status Tracking")
-        return True
-    except Exception as e:
-        logger.error(f"setup_trending_db error: {e}")
-        return False
-
 def get_last_check_time():
     try:
         conn = get_db_connection()
@@ -669,9 +598,6 @@ def get_next_run_time_ist(hours=[0, 6, 12, 18]):
 
 async def trending_worker_loop(app, admin_id):
     logger.info("🛠️ TRENDING WORKER STARTED (Fixed Schedule IST)")
-    if not setup_trending_db():
-        logger.error("❌ DB setup failed, worker stopping")
-        return
 
     # Send startup message
     next_run_utc = get_next_run_time_ist()

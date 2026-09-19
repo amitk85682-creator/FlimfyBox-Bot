@@ -31,6 +31,10 @@ const tg = window.Telegram?.WebApp || {
         let browseType = 'all';
         let browseRequestId = 0;
         let globalChatTimer = null;
+        let detailsController = null;
+        let searchController = null;
+        let browseController = null;
+        let genreController = null;
         let initialHomePending = 0;
         let initialHomeTimeout = null;
 
@@ -133,6 +137,8 @@ const tg = window.Telegram?.WebApp || {
             'Classic & Cinematic': { from: '#c084fc', to: '#312e81', glow: 'rgba(192, 132, 252, .24)' },
             'Adult / Mature': { from: '#f87171', to: '#3f3f46', glow: 'rgba(248, 113, 113, .2)' }
         };
+        const POSTER_PLACEHOLDER = '/static/miniapp/poster-placeholder.svg';
+        const IMAGE_FALLBACK_GRADIENT = 'linear-gradient(135deg, #1b2037, #080a12)';
         // Stable curated poster assignment. These fixed, recognizable movie
         // key-art URLs never read catalogue movies, counts, or API results.
         const GENRE_ARTWORK = {
@@ -326,13 +332,14 @@ const tg = window.Telegram?.WebApp || {
 
         async function loadBrowseCollections() {
             const requestId = ++browseRequestId;
+            if (browseController) browseController.abort();
+            browseController = new AbortController();
+            const signal = browseController.signal;
             const container = document.getElementById('browseCollections');
             container.innerHTML = '<div class="genre-loading"><div class="loader"></div><span>Curating decade collections…</span></div>';
             try {
-                const response = await fetch(`/api/browse?type=${encodeURIComponent(browseType)}`);
-                const data = await response.json();
+                const data = await apiRequest(`/api/browse?type=${encodeURIComponent(browseType)}`, { signal });
                 if (requestId !== browseRequestId) return;
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not load collections');
                 const collectionCaption = browseType === 'tv'
                     ? 'Web series & TV shows'
                     : browseType === 'movies'
@@ -345,6 +352,7 @@ const tg = window.Telegram?.WebApp || {
                     </section>
                 `).join('');
             } catch (error) {
+                if (isAbortError(error)) return;
                 if (requestId === browseRequestId) container.innerHTML = `<div class="empty-search-state">${error.message}</div>`;
             }
         }
@@ -412,6 +420,24 @@ const tg = window.Telegram?.WebApp || {
             return tg.initData ? { 'X-Telegram-Init-Data': tg.initData } : {};
         }
 
+        function isAbortError(error) {
+            return error && error.name === 'AbortError';
+        }
+
+        async function apiRequest(url, options = {}) {
+            const response = await fetch(url, options);
+            let data;
+            try {
+                data = await response.json();
+            } catch (_error) {
+                throw new Error(response.ok ? 'The server returned an invalid response.' : 'The server is temporarily unavailable.');
+            }
+            if (!response.ok || (data && data.status === 'error')) {
+                throw new Error(data?.message || 'The request could not be completed.');
+            }
+            return data;
+        }
+
         function guestChatToken() {
             const storageKey = 'flimfybox-chat-guest-token';
             let token = localStorage.getItem(storageKey);
@@ -476,6 +502,7 @@ const tg = window.Telegram?.WebApp || {
 
         window.closeInfoModal = function() {
             document.getElementById('infoModal').classList.remove('open');
+            document.getElementById('infoModal').classList.remove('chat-modal');
             if (globalChatTimer) {
                 clearInterval(globalChatTimer);
                 globalChatTimer = null;
@@ -535,7 +562,22 @@ const tg = window.Telegram?.WebApp || {
         window.showGlobalChat = function() {
             closeMorePanel();
             if (globalChatTimer) clearInterval(globalChatTimer);
-            showInfoPanel('Global Chat', '<div class="chat-shell"><div class="chat-messages"><div class="loader">Loading messages…</div></div><form class="chat-form" onsubmit="sendGlobalChat(event)"><input class="chat-input" maxlength="500" placeholder="Write a message…" required><button class="primary-action" type="submit">Send</button></form></div>', 'comment', '<button type="button" class="primary-action" onclick="closeInfoModal()">Close</button>');
+            showInfoPanel('Global Chat', `
+                <div class="chat-shell">
+                    <div class="chat-room-banner">
+                        <div class="chat-room-icon"><i class="fas fa-earth-americas"></i></div>
+                        <div><strong>FlimfyBox Community</strong><span>Everyone can join the conversation</span></div>
+                        <span class="chat-live"><i></i> Live</span>
+                    </div>
+                    <div class="chat-messages" aria-live="polite"><div class="chat-loading"><i class="fas fa-spinner fa-spin"></i><span>Loading the community…</span></div></div>
+                    <form class="chat-form" onsubmit="sendGlobalChat(event)">
+                        <input class="chat-input" maxlength="500" autocomplete="off" placeholder="Share something with the community…" required>
+                        <button class="chat-send" type="submit" aria-label="Send message"><i class="fas fa-paper-plane"></i></button>
+                    </form>
+                    <div class="chat-hint"><i class="fas fa-shield-halved"></i> Keep it friendly · 500 characters max</div>
+                </div>
+            `, 'comment', '');
+            document.getElementById('infoModal').classList.add('chat-modal');
             loadGlobalChat();
             globalChatTimer = setInterval(loadGlobalChat, 5000);
         };
@@ -548,14 +590,22 @@ const tg = window.Telegram?.WebApp || {
                     const messages = document.querySelector('.chat-messages');
                     if (!messages) return;
                     messages.innerHTML = (data.messages || []).map(item => {
-                        const author = item.username ? `@${item.username}` : item.first_name;
-                        return `<div class="chat-message"><div class="chat-author">${author}</div><div class="chat-text">${escapeHtml(item.message)}</div></div>`;
-                    }).join('') || '<p>No messages yet. Start the conversation.</p>';
+                        const author = item.username ? `@${item.username}` : (item.first_name || 'Community member');
+                        const initials = escapeHtml(author.replace(/^@/, '').slice(0, 1).toUpperCase());
+                        const time = item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+                        return `<article class="chat-message">
+                            <div class="chat-avatar">${initials}</div>
+                            <div class="chat-message-body">
+                                <div class="chat-message-meta"><strong>${escapeHtml(author)}</strong><time>${escapeHtml(time)}</time></div>
+                                <div class="chat-text">${escapeHtml(item.message)}</div>
+                            </div>
+                        </article>`;
+                    }).join('') || '<div class="chat-empty"><i class="fas fa-comments"></i><strong>No messages yet</strong><span>Start the conversation with the community.</span></div>';
                     messages.scrollTop = messages.scrollHeight;
                 })
                 .catch(error => {
                     const messages = document.querySelector('.chat-messages');
-                    if (messages) messages.innerHTML = `<p>${escapeHtml(error.message)}</p>`;
+                    if (messages) messages.innerHTML = `<div class="chat-empty chat-error"><i class="fas fa-cloud-exclamation"></i><strong>Chat is taking a break</strong><span>${escapeHtml(error.message)}</span></div>`;
                 });
         };
 
@@ -701,6 +751,7 @@ const tg = window.Telegram?.WebApp || {
 
         window.toggleCurrentMyList = async function() {
             const movieId = activeDetailsMovieId;
+            const mutationMovieId = String(movieId || '');
             if (!movieId || !activeMovie || activeMovie.source === 'tmdb' || String(movieId).startsWith('tmdb_')) {
                 showToast('Only available titles can be saved right now.');
                 return;
@@ -712,7 +763,7 @@ const tg = window.Telegram?.WebApp || {
             try {
                 // Snapshot the details-page movie. The home carousel changes in
                 // the background, so never read a mutable global after await.
-                const statusResponse = await fetch(`/api/my-list/${movieId}/status`, {
+                const statusResponse = await fetch(`/api/my-list/${encodeURIComponent(mutationMovieId)}/status`, {
                     headers: telegramAuthHeaders()
                 });
                 const statusData = await statusResponse.json();
@@ -729,7 +780,9 @@ const tg = window.Telegram?.WebApp || {
                 });
                 const data = await response.json();
                 if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not save title');
-                if (String(data.movie_id) !== movieId) throw new Error('The selected title changed. Please try again.');
+                if (String(data.movie_id) !== mutationMovieId || String(activeDetailsMovieId) !== mutationMovieId) {
+                    throw new Error('The selected title changed. Please try again.');
+                }
                 const saved = Boolean(data.saved);
                 if (!saved) {
                     savedMovieIds.delete(movieId);
@@ -766,8 +819,7 @@ const tg = window.Telegram?.WebApp || {
                     document.getElementById('moreGrid').insertAdjacentHTML('beforeend', '<div id="scrollLoader" style="grid-column: 1 / -1; text-align: center; padding: 20px;"><div class="loader" style="width:30px;height:30px;border-width:3px;margin:0 auto;"></div></div>');
                 }
 
-                const res = await fetch(`/api/movies?page=${page}&limit=40`);
-                const data = await res.json();
+                const data = await apiRequest(`/api/movies?page=${page}&limit=40`);
                 
                 // Naya data aate hi loader hata do
                 if (page > 1) {
@@ -791,12 +843,9 @@ const tg = window.Telegram?.WebApp || {
                         document.getElementById('moreGrid').insertAdjacentHTML('beforeend', newCardsHTML);
                     }
                     currentPage++; // Agli baar ke liye page badha do
-                } else {
-                    console.error('API error:', data.message);
-                    document.getElementById('moreGrid').innerHTML = '<div class="empty-search-state" style="grid-column:1/-1">Catalogue is temporarily unavailable.<br><span>Please try again in a moment.</span></div>';
-                    if (page === 1) completeInitialHomeLoadingStep();
                 }
             } catch (e) {
+                if (isAbortError(e)) return;
                 console.error('Fetch failed', e);
                 document.getElementById('moreGrid').innerHTML = '<div class="empty-search-state" style="grid-column:1/-1">We could not load the catalogue.<br><span>Check your connection and try again.</span></div>';
                 if (page === 1) completeInitialHomeLoadingStep();
@@ -891,6 +940,8 @@ const tg = window.Telegram?.WebApp || {
 
         window.openGenreDetail = async function(genreId) {
             const requestId = ++genreDetailRequestId;
+            if (genreController) genreController.abort();
+            genreController = new AbortController();
             const genre = findGenreById(genreId);
             genreDetailActiveId = genreId;
             genreDetailVisibleCount = 24;
@@ -898,10 +949,12 @@ const tg = window.Telegram?.WebApp || {
             let data;
             try {
                 await loadGenreCatalog();
-                const response = await fetch(`/api/genre/${encodeURIComponent(genreId)}?type=${encodeURIComponent(browseType)}`);
-                data = await response.json();
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not load this genre');
+                data = await apiRequest(
+                    `/api/genre/${encodeURIComponent(genreId)}?type=${encodeURIComponent(browseType)}`,
+                    { signal: genreController.signal }
+                );
             } catch (error) {
+                if (isAbortError(error)) return;
                 showToast(error.message || 'Could not load this genre');
                 return;
             }
@@ -1001,7 +1054,9 @@ const tg = window.Telegram?.WebApp || {
                     toggleCurrentMyList();
                 };
             }
-            heroSlider.style.backgroundImage = `url(${movie.image})`;
+            heroSlider.style.backgroundImage = movie.image
+                ? `url("${movie.image}"), ${IMAGE_FALLBACK_GRADIENT}`
+                : IMAGE_FALLBACK_GRADIENT;
             document.getElementById('heroTitle').innerText = movie.title;
             document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
             document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
@@ -1202,7 +1257,7 @@ const tg = window.Telegram?.WebApp || {
                     : (rating ? `<div class="card-badge available">${rating}</div>` : '');
                 return `
                     <div class="${cardClass}" tabindex="0" role="button" aria-label="Open ${m.title}" onclick='openCardDetails(${JSON.stringify(m).replace(/'/g, "&#39;")}, ${isTMDB})' onkeydown="if(event.key==='Enter') openCardDetails(${JSON.stringify(m).replace(/'/g, "&#39;")}, ${isTMDB})">
-                        <img src="${m.image}" class="card-img" loading="lazy" onerror="this.onerror=null; this.removeAttribute('src'); this.classList.add('image-fallback')">
+                        <img src="${m.image || POSTER_PLACEHOLDER}" class="card-img" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback')">
                         <div class="card-title">${m.title}</div>
                         <div class="card-meta"><span>${m.year || '—'}</span>${badge}</div>
                     </div>
@@ -1220,6 +1275,7 @@ document.getElementById('genreSearchInput')?.addEventListener('input', (e) => {
 
 document.getElementById('searchInput').addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
+    if (searchController) searchController.abort();
     const q = e.target.value.trim();
     const dropdown = document.getElementById('searchDropdown');
 
@@ -1234,10 +1290,12 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
     searchTimeout = setTimeout(async () => {
         searchRequestId++;
         const currentId = searchRequestId;
+        searchController = new AbortController();
+        const signal = searchController.signal;
         try {
             const [suggestionResponse, response] = await Promise.all([
-                fetch(`/api/suggest?q=${encodeURIComponent(q)}`),
-                fetch(`/api/search?q=${encodeURIComponent(q)}`)
+                fetch(`/api/suggest?q=${encodeURIComponent(q)}`, { signal }),
+                fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal })
             ]);
             const suggestions = suggestionResponse.ok ? await suggestionResponse.json() : [];
             const searchData = await response.json();
@@ -1262,15 +1320,18 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 const isTMDB = r.source === 'tmdb';
                 const status = isTMDB ? 'Request' : 'Available';
                 return `<div class="search-item fade-in" data-result-id="${escapeHtml(r.id)}" data-result-tmdb="${isTMDB}">
-                    <img src="${escapeHtml(r.image)}" loading="lazy" onerror="this.src='/static/miniapp/poster-placeholder.svg'">
+                    <img src="${escapeHtml(r.image || POSTER_PLACEHOLDER)}" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'">
                     <div class="search-item-info"><div class="search-item-title">${r.title}</div>
                     <div class="search-item-meta"><span>${r.year || '—'}</span><span class="status-pill ${isTMDB ? 'request' : 'available'}">${status}</span></div></div>
                     <div class="search-actions"><button class="btn-sm ${isTMDB ? 'btn-sm-outline' : 'btn-sm-primary'}" type="button">${isTMDB ? 'Request' : 'View'}</button></div></div>`;
             }).join('');
             bindSearchSuggestions(dropdown, q, results);
         } catch (error) {
+            if (isAbortError(error)) return;
             console.error('Search failed:', error);
-            dropdown.innerHTML = '<div class="search-empty-state"><strong>Search unavailable</strong><span>Please try again in a moment.</span></div>';
+            if (currentId === searchRequestId) {
+                dropdown.innerHTML = '<div class="search-empty-state"><strong>Search unavailable</strong><span>Please try again in a moment.</span></div>';
+            }
         }
     }, 260);
 });
@@ -1328,6 +1389,8 @@ document.addEventListener('keydown', (e) => {
             activeDetailsMovieId = isTMDB ? String(id) : String(movie.id);
             addRecentlyViewed(movie);
             const requestId = ++detailsRequestId;
+            if (detailsController) detailsController.abort();
+            detailsController = new AbortController();
             const myListButton = document.getElementById('detailMyListButton');
             if (myListButton) {
                 myListButton.innerHTML = savedMovieIds.has(String(movie.id))
@@ -1341,8 +1404,14 @@ document.addEventListener('keydown', (e) => {
             const detailsRating = document.getElementById('dpRating');
             const detailsGenre = document.getElementById('dpGenre');
             const detailsDescription = document.getElementById('dpDesc');
-            detailsBackdrop.style.backgroundImage = movie.image ? `url(${movie.image})` : '';
-            detailsPoster.src = movie.image || '/static/miniapp/poster-placeholder.svg';
+            detailsBackdrop.style.backgroundImage = movie.image
+                ? `url("${movie.image}"), ${IMAGE_FALLBACK_GRADIENT}`
+                : IMAGE_FALLBACK_GRADIENT;
+            detailsPoster.src = movie.image || POSTER_PLACEHOLDER;
+            detailsPoster.onerror = () => {
+                detailsPoster.onerror = null;
+                detailsPoster.src = POSTER_PLACEHOLDER;
+            };
             detailsTitle.innerText = movie.title || 'Loading details…';
             detailsRating.innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
             detailsGenre.innerText = movie.genre || movie.category || 'Catalogue title';
@@ -1355,8 +1424,10 @@ document.addEventListener('keydown', (e) => {
             detailsPage.classList.add('open', 'is-loading');
             if (isTMDB) {
                 const backdropImg = movie.image;
-                document.getElementById('dpBackdrop').style.backgroundImage = `url(${backdropImg})`;
-                document.getElementById('dpFloatPoster').src = movie.image;
+                document.getElementById('dpBackdrop').style.backgroundImage = backdropImg
+                    ? `url("${backdropImg}"), ${IMAGE_FALLBACK_GRADIENT}`
+                    : IMAGE_FALLBACK_GRADIENT;
+                document.getElementById('dpFloatPoster').src = movie.image || POSTER_PLACEHOLDER;
                 document.getElementById('dpTitle').innerText = movie.title;
                 document.getElementById('dpRating').innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
@@ -1368,8 +1439,19 @@ document.addEventListener('keydown', (e) => {
                 return;
             }
 
-            fetch(`/api/movie/${id}`)
-                .then(res => res.json())
+            fetch(`/api/movie/${id}`, { signal: detailsController.signal })
+                .then(async res => {
+                    let data;
+                    try {
+                        data = await res.json();
+                    } catch (_error) {
+                        throw new Error('Details are temporarily unavailable.');
+                    }
+                    if (!res.ok || data.status !== 'success') {
+                        throw new Error(data.message || 'Details are temporarily unavailable.');
+                    }
+                    return data;
+                })
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
                     if (data.status === 'success') {
@@ -1377,8 +1459,10 @@ document.addEventListener('keydown', (e) => {
                         activeMovie = { ...movie, ...m, source: 'local' };
                         addRecentlyViewed(activeMovie);
                         const backdropUrl = m.backdrop ? m.backdrop : m.image;
-                        document.getElementById('dpBackdrop').style.backgroundImage = `url(${backdropUrl})`;
-                        document.getElementById('dpFloatPoster').src = m.image;
+                        document.getElementById('dpBackdrop').style.backgroundImage = backdropUrl
+                            ? `url("${backdropUrl}"), ${IMAGE_FALLBACK_GRADIENT}`
+                            : IMAGE_FALLBACK_GRADIENT;
+                        document.getElementById('dpFloatPoster').src = m.image || POSTER_PLACEHOLDER;
                         document.getElementById('dpTitle').innerText = m.title;
                         document.getElementById('dpRating').innerText = m.rating && m.rating !== 'N/A' ? m.rating : '—';
                         document.getElementById('dpGenre').innerText = m.genre || 'Drama';
@@ -1463,6 +1547,7 @@ document.addEventListener('keydown', (e) => {
                 })
                 .catch(error => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
+                    if (isAbortError(error)) return;
                     console.error('Details load failed:', error);
                     detailsDescription.innerText = 'Details are temporarily unavailable. You can go back and try again.';
                     document.getElementById('dpLinks').innerHTML = '<button class="btn-request" type="button" onclick="retryActiveDetails()"><i class="fas fa-rotate-right"></i> Retry details</button>';

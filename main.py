@@ -15,8 +15,9 @@ import signal
 import sys
 import concurrent.futures
 from html import escape as html_escape
-from PIL import Image, ImageFilter
+from PIL import Image, ImageOps
 from trending_manager import trending_worker_loop
+from db_migrations import run_migrations
 from telegram import WebAppInfo
 from telegram import MenuButtonWebApp, WebAppInfo
 import aiohttp
@@ -94,16 +95,6 @@ from telegram.ext import (
     ConversationHandler,
     CallbackQueryHandler
 )
-
-# Local imports
-import admin_views as admin_views_module
-
-# Try to import db_utils
-try:
-    import db_utils
-    FIXED_DATABASE_URL = getattr(db_utils, "FIXED_DATABASE_URL", None)
-except Exception:
-    FIXED_DATABASE_URL = None
 
 def get_safe_font(text, style=None):
     """
@@ -362,9 +353,11 @@ WEB_APP_URL = normalize_mini_app_url(
 )
     # 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
+_startup_complete = threading.Event()
+_shutdown_requested = threading.Event()
 try:
     # Pool create kar rahe hain taki baar baar connection na banana pade
-    pool_url = FIXED_DATABASE_URL or DATABASE_URL
+    pool_url = DATABASE_URL
     if pool_url:
         db_pool = psycopg2.pool.ThreadedConnectionPool(
             2, 8,  # Supabase Free Tier (60 connections) ke liye optimized
@@ -376,7 +369,23 @@ except Exception as e:
 # 👆👆👆 END COPY HERE 👆👆👆
 BLOGGER_API_KEY = os.environ.get('BLOGGER_API_KEY')
 BLOG_ID = os.environ.get('BLOG_ID')
-UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE', 'default_secret_123')
+UPDATE_SECRET_CODE = os.environ.get('UPDATE_SECRET_CODE')
+
+if not TELEGRAM_BOT_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN environment variable is not set")
+    raise ValueError("TELEGRAM_BOT_TOKEN is not set.")
+
+if not DATABASE_URL:
+    logger.error("DATABASE_URL environment variable is not set")
+    raise ValueError("DATABASE_URL is not set.")
+
+if not TMDB_API_KEY:
+    logger.error("TMDB_API_KEY environment variable is not set")
+    raise ValueError("TMDB_API_KEY is not set.")
+
+if not UPDATE_SECRET_CODE:
+    logger.error("UPDATE_SECRET_CODE environment variable is not set")
+    raise ValueError("UPDATE_SECRET_CODE is not set.")
 _admin_id = os.environ.get('ADMIN_USER_ID', '8675088364')
 ADMIN_USER_ID = int(_admin_id) if _admin_id.isdigit() else 8675088364
 
@@ -661,39 +670,31 @@ def clean_telegram_text(text):
 def _process_poster_sync(image_data):
     """
     🎨 PIL Image Processing (Background Thread me chalega)
-    Portrait poster ko Square 1:1 format me convert karta hai.
+    Poster ko clean Square 1:1 format me convert karta hai.
     """
-    from PIL import Image, ImageFilter
+    from PIL import Image, ImageOps
     img = Image.open(BytesIO(image_data)).convert("RGB")
     target_w, target_h = 800, 800
 
-    bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
-    if bg_img.height > target_h:
-        top = (bg_img.height - target_h) // 2
-        bg_img = bg_img.crop((0, top, target_w, top + target_h))
-    else:
-        bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-
-    bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=40))
-
-    fg_h = int(target_h * 0.95)
-    fg_w = int(img.width * (fg_h / img.height))
-    fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
-
-    paste_x = (target_w - fg_w) // 2
-    paste_y = (target_h - fg_h) // 2
-    bg_img.paste(fg_img, (paste_x, paste_y))
+    # Fill the complete square and crop only the excess edges. This avoids
+    # placing a portrait poster inside a second vertical frame.
+    square_img = ImageOps.fit(
+        img,
+        (target_w, target_h),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.45),
+    )
 
     output = BytesIO()
-    output.name = "cinematic_poster.jpg"
-    bg_img.save(output, format='JPEG', quality=95)
+    output.name = "square_poster.jpg"
+    square_img.save(output, format='JPEG', quality=95)
     output.seek(0)
     return output
 
 
 async def make_landscape_poster(url_or_bytes):
     """
-    Portrait poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
+    Poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
     PIL processing background thread me hoti hai (event loop block nahi hoga).
     """
     try:
@@ -1975,438 +1976,6 @@ def track_user_message_for_deletion(context, chat_id, message, is_file=False):
 
 # ==================== DATABASE FUNCTIONS ====================
 
-def setup_database():
-    """Setup database tables and indexes (UPDATED to match usage in code)"""
-    try:
-        conn_str = FIXED_DATABASE_URL or DATABASE_URL
-        conn = psycopg2.connect(conn_str)
-        cur = conn.cursor()
-
-        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
-
-        # Movies table (now matches the rest of your code)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS movies (
-                id SERIAL PRIMARY KEY,
-                title TEXT NOT NULL UNIQUE,
-                url TEXT NOT NULL DEFAULT '',
-                file_id TEXT,
-                is_unreleased BOOLEAN DEFAULT FALSE,
-
-                imdb_id TEXT,
-                poster_url TEXT,
-                year INTEGER DEFAULT 0,
-                genre TEXT,
-                rating TEXT,
-
-                description TEXT,
-                category TEXT,
-                seasons_data JSONB DEFAULT '{}'::jsonb
-            )
-        """)
-
-        # 👇👇👇 NAYA TABLE: Anti-Bot Temporary Links ke liye 👇👇👇
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS temp_links (
-                token VARCHAR(50) PRIMARY KEY,
-                movie_id INTEGER,
-                movie_file_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Existing deployments already have this table, so migrate it safely.
-        cur.execute("ALTER TABLE temp_links ADD COLUMN IF NOT EXISTS movie_file_id INTEGER")
-
-        # Telegram itself is the account system for the Mini App. These tables
-        # hold only the Telegram identity and its saved titles—no password,
-        # email, or separate sign-up is required.
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS miniapp_users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_watchlist (
-                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
-                movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, movie_id)
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS movie_ratings (
-                id BIGSERIAL PRIMARY KEY,
-                movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
-                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
-                rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (movie_id, user_id)
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_ratings_movie_id ON movie_ratings(movie_id)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_ratings_user_id ON movie_ratings(user_id)")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_recommendation_events (
-                id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
-                movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
-                event_type TEXT NOT NULL,
-                source TEXT NOT NULL,
-                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_recommendation_events_user_created
-            ON user_recommendation_events(user_id, created_at DESC)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_recommendation_events_movie_type
-            ON user_recommendation_events(movie_id, event_type)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_recommendation_events_type_created
-            ON user_recommendation_events(event_type, created_at DESC)
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS global_chat_messages (
-                id BIGSERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
-                username TEXT,
-                first_name TEXT,
-                message TEXT NOT NULL CHECK (char_length(message) BETWEEN 1 AND 500),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_global_chat_created_at ON global_chat_messages(created_at DESC)")
-        
-        # 👇👇👇 NAYA TABLE: Auto-Delete Queue ke liye 👇👇👇
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS auto_delete_queue (
-                id SERIAL PRIMARY KEY,
-                bot_username TEXT NOT NULL,
-                chat_id BIGINT NOT NULL,
-                message_id BIGINT NOT NULL,
-                delete_at TIMESTAMP NOT NULL
-            )
-        """)
-        # Faster search ke liye index (Taki DB slow na ho)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_delete_at ON auto_delete_queue (bot_username, delete_at);")
-        
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS movie_files (
-                id SERIAL PRIMARY KEY,
-                movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
-                quality TEXT NOT NULL,
-                url TEXT,
-                file_id TEXT,
-                file_size TEXT,
-                backup_map JSONB DEFAULT '{}'::jsonb,
-                UNIQUE(movie_id, quality)
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS sync_info (
-                id SERIAL PRIMARY KEY,
-                last_sync TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_requests (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                username TEXT,
-                first_name TEXT,
-                movie_title TEXT NOT NULL,
-                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                notified BOOLEAN DEFAULT FALSE,
-                group_id BIGINT,
-                message_id BIGINT
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS movie_aliases (
-                id SERIAL PRIMARY KEY,
-                movie_id INTEGER REFERENCES movies(id) ON DELETE CASCADE,
-                alias TEXT NOT NULL,
-                UNIQUE(movie_id, alias)
-            )
-        """)
-
-        # Used in update_buttons_command + some admin flows
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS channel_posts (
-                id SERIAL PRIMARY KEY,
-                movie_id INTEGER,
-                channel_id BIGINT NOT NULL,
-                message_id BIGINT NOT NULL,
-                bot_username TEXT,
-                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(channel_id, message_id)
-            )
-        """)
-
-        # Used in list_all_users (your code queries user_activity)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_activity (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                username TEXT,
-                first_name TEXT,
-                chat_id BIGINT,
-                chat_type TEXT,
-                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id)
-            )
-        """)
-        # Older deployments may have created user_activity before chat
-        # tracking was added. Keep the existing table compatible.
-        cur.execute("ALTER TABLE user_activity ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        cur.execute("ALTER TABLE user_activity ADD COLUMN IF NOT EXISTS chat_id BIGINT")
-        cur.execute("ALTER TABLE user_activity ADD COLUMN IF NOT EXISTS chat_type TEXT")
-
-        # Unique constraint for requests
-        cur.execute("""
-            DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'user_requests_unique_constraint') THEN
-                ALTER TABLE user_requests
-                ADD CONSTRAINT user_requests_unique_constraint UNIQUE (user_id, movie_title);
-            END IF;
-            END $$;
-        """)
-
-        # Indexes
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_title_trgm ON movies USING gin (title gin_trgm_ops);")
-        # 🔧 FIX: Normalized (space/hyphen/punctuation-stripped) title par trigram index —
-        # taaki "Spider-Man" / "Spider Man" / "SpiderMan" search DB-index-backed rahe aur fast rahe.
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_movies_title_norm_trgm
-            ON movies USING gin (regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') gin_trgm_ops);
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias ON movie_aliases (alias);")
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias_norm_trgm
-            ON movie_aliases USING gin (regexp_replace(LOWER(alias), '[^a-z0-9]', '', 'g') gin_trgm_ops);
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movie_files_movie_id ON movie_files (movie_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_channel_posts_movie_id ON channel_posts (movie_id);")
-
-        conn.commit()
-        cur.close()
-        close_db_connection(conn)
-        logger.info("✅ Database setup completed successfully")
-
-    except Exception as e:
-        logger.error(f"❌ Error setting up database: {e}", exc_info=True)
-        logger.info("Continuing without database setup...")
-
-
-def migrate_add_imdb_columns():
-    """One-time migration to add missing columns safely (including cast)"""
-    conn = get_db_connection()
-    if not conn: return False
-    try:
-        cur = conn.cursor()
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER DEFAULT 0;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS description TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS language TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS extra_info TEXT;")
-        # Important: quote column name with double quotes in SQL
-        cur.execute('ALTER TABLE movies ADD COLUMN IF NOT EXISTS "cast" TEXT;')
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS trailer_key TEXT;")
-        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS seasons_data JSONB DEFAULT '{}'::jsonb;")
-        
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_imdb_id ON movies (imdb_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year);")
-        conn.commit()
-        cur.close()
-        close_db_connection(conn)
-        return True
-    except Exception as e:
-        logger.error(f"Migration error: {e}")
-        close_db_connection(conn)
-        return False
-
-def migrate_content_type_for_restore():
-    """Channel posts mein content_type column add karo"""
-    conn = get_db_connection()
-    if not conn:
-        return
-    try:
-        cur = conn.cursor()
-        # Ye column batayega ki post kis type ki hai
-        cur.execute("""
-            ALTER TABLE channel_posts 
-            ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT 'movies'
-        """)
-        # content_type ke values honge:
-        # 'movies'  -> Normal Movies
-        # 'adult'   -> 18+ Content  
-        # 'series'  -> Web Series
-        # 'anime'   -> Anime
-        conn.commit()
-        cur.close()
-        close_db_connection(conn)
-        print("✅ content_type column added!")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        if conn:
-            conn.rollback()
-            close_db_connection(conn)
-def fix_channel_posts_constraint():
-    """UNIQUE constraint add karne wala function"""
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_posts_unique_idx') THEN
-                    ALTER TABLE channel_posts ADD CONSTRAINT channel_posts_unique_idx UNIQUE (channel_id, message_id);
-                END IF;
-            END $$;
-        """)
-        conn.commit()
-        cur.close()
-        logger.info("✅ Database UNIQUE Constraint fixed!")
-    except Exception as e:
-        logger.error(f"❌ DB Constraint Fix Error: {e}")
-    finally:
-        close_db_connection(conn)
-
-def fix_movies_title_constraint():
-    """Movies table mein title ko UNIQUE banane ke liye"""
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-        # Title column ko unique banayenge taaki ON CONFLICT kaam kare
-        cur.execute("ALTER TABLE movies ADD CONSTRAINT movies_title_unique UNIQUE (title);")
-        conn.commit()
-        cur.close()
-        logger.info("✅ Movies table UNIQUE constraint added!")
-    except Exception as e:
-        logger.error(f"❌ Movies Constraint Error: {e}")
-        if conn: conn.rollback()
-    finally:
-        close_db_connection(conn)
-        
-def fix_movies_unique_constraint():
-    """Movies table mein title ko UNIQUE banata hai taaki bot crash na ho"""
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-        # Title par UNIQUE constraint add kar rahe hain
-        cur.execute("""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'movies_title_key') THEN
-                    ALTER TABLE movies ADD CONSTRAINT movies_title_key UNIQUE (title);
-                END IF;
-            END $$;
-        """)
-        conn.commit()
-        cur.close()
-        logger.info("✅ Movies table UNIQUE constraint fixed!")
-    except Exception as e:
-        logger.error(f"❌ Movies DB Fix Error: {e}")
-    finally:
-        close_db_connection(conn)
-
-def fix_movie_files_table():
-    """
-    movie_files table migration:
-    1. Missing columns add karta hai (languages, extra_info)
-    2. PURANE restrictive constraints DROP karta hai (movie_id+quality)
-    3. NAYA file_unique_id based constraint ensure karta hai
-    """
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-
-        # Step 1: Missing columns add karo (safe hai)
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS languages TEXT DEFAULT '';")
-        cur.execute("ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS extra_info TEXT DEFAULT '';")
-
-        # Step 2: PURANE restrictive constraints DROP karo
-        # Yeh zaroori hai kyunki ab ek movie ke andar same quality ke multiple files
-        # (episodes, parts, different encodes) store hone chahiye
-        cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS movie_files_movie_id_quality_key;")
-        cur.execute("ALTER TABLE movie_files DROP CONSTRAINT IF EXISTS movie_files_unique_size;")
-        logger.info("✅ Old constraints (movie_id+quality) dropped successfully")
-
-        # Step 3: NAYA file_unique_id constraint ensure karo
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_constraint
-                    WHERE conname = 'movie_files_file_unique_id_key'
-                ) THEN
-                    ALTER TABLE movie_files
-                    ADD CONSTRAINT movie_files_file_unique_id_key UNIQUE (file_unique_id);
-                END IF;
-            END $$;
-        """)
-
-        conn.commit()
-        cur.close()
-        logger.info("✅ movie_files table fixed: file_unique_id constraint + columns OK!")
-    except Exception as e:
-        logger.error(f"❌ fix_movie_files_table Error: {e}")
-        if conn: conn.rollback()
-    finally:
-        close_db_connection(conn)
-
-# 👇 Line 1225 ke baad yahan paste karein
-def migrate_channel_posts_v2():
-    """Ye function channel_posts table mein missing columns add karega"""
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-        # Ek ek karke saare missing columns check aur add karega
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS caption TEXT;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_file_id TEXT;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo';")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS keyboard_data TEXT;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS topic_id INTEGER;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT 'movies';")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS is_restored BOOLEAN DEFAULT FALSE;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS restored_at TIMESTAMP;")
-        
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS movie_name TEXT;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS imdb_id TEXT;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS tmdb_id TEXT;")
-        cur.execute("ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS channel_name TEXT;")
-        
-        conn.commit()
-        cur.close()
-        logger.info("✅ channel_posts table migrated to V2 successfully!")
-    except Exception as e:
-        logger.error(f"❌ Migration V2 Error: {e}")
-    finally:
-        close_db_connection(conn)
-
 def save_post_to_db(
     movie_id, channel_id, message_id, bot_username, caption,
     media_file_id=None, media_type="photo", keyboard_data=None, topic_id=None, content_type="movies",
@@ -2521,12 +2090,24 @@ def close_db_connection(conn):
             db_pool.putconn(conn)
         except Exception:
             pass
+
+
+def close_db_pool():
+    """Close all idle pooled connections during process shutdown."""
+    global db_pool
+    if db_pool:
+        try:
+            db_pool.closeall()
+            logger.info("✅ Database connection pool closed.")
+        except Exception:
+            logger.exception("❌ Failed to close database connection pool.")
+        finally:
+            db_pool = None
 # 👆👆👆 END COPY HERE 👆👆👆
 
 def update_movies_in_db():
     """Update movies from Blogger API"""
     logger.info("Starting movie update process...")
-    setup_database()
 
     conn = None
     cur = None
@@ -2774,8 +2355,6 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             return []
 
         cur = conn.cursor()
-        
-        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
         
         # ✅ Updated to include new columns
         sql = """
@@ -3259,7 +2838,7 @@ def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
 
 def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, category: str = "") -> Optional[str]:
     """Resolve and return a YouTube trailer key while metadata is being saved."""
-    api_key = os.environ.get("TMDB_API_KEY", "9fa44f5e9fbd41415df930ce5b81c4d7")
+    api_key = TMDB_API_KEY
     media_type = 'tv' if any(token in str(category).lower() for token in ('tv', 'series', 'web')) else 'movie'
     candidates = []
     try:
@@ -4297,6 +3876,67 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
 
     return InlineKeyboardMarkup(keyboard)
 
+
+async def deliver_movie_page_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, page: int):
+    """Deliver the requested Send All page after a user starts the bot in PM."""
+    page = max(1, page)
+    conn = get_db_connection()
+    if not conn:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ System is temporarily unavailable. Please try again."
+        )
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT title, genre, year, language, seasons_data FROM movies WHERE id = %s",
+            (movie_id,)
+        )
+        movie = cur.fetchone()
+        cur.close()
+    finally:
+        close_db_connection(conn)
+
+    if not movie:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ Movie not found or deleted."
+        )
+        return
+
+    title, genre, year, language, seasons_data = movie
+    qualities = get_all_movie_qualities(movie_id)
+    start = (page - 1) * 10
+    page_files = qualities[start:start + 10]
+    if not page_files:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ This file page is no longer available."
+        )
+        return
+
+    metadata = {
+        'genre': genre,
+        'year': year,
+        'language': language,
+        'seasons_data': seasons_data,
+    }
+    for file_data in page_files:
+        metadata['extra_info'] = str(file_data[5]).strip() if len(file_data) > 5 and file_data[5] else ""
+        await send_movie_to_user(
+            update,
+            context,
+            movie_id,
+            title,
+            file_data[1],
+            file_data[2],
+            send_warning=False,
+            pre_fetched_meta=dict(metadata),
+        )
+        await asyncio.sleep(0.3)
+
 def load_movie_selection_data(movie_id):
     """Reload callback state from the database after a file-link click clears memory."""
     conn = get_db_connection()
@@ -4674,7 +4314,17 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except telegram.error.Forbidden:
         if update.callback_query:
             try:
-                await update.callback_query.answer("⚠️ Please START the bot in PM first to receive files!", show_alert=True)
+                bot_username = context.bot.username
+                if bot_username and update.effective_chat.type in ("group", "supergroup"):
+                    start_url = f"https://t.me/{bot_username}?start=sendall_{movie_id}_{context.user_data.get('sendall_page', 1)}"
+                    # A callback URL opens the bot PM directly. Do not add a
+                    # second group message just to explain the same action.
+                    await update.callback_query.answer(url=start_url)
+                else:
+                    await update.callback_query.answer(
+                        "⚠️ Please START the bot in PM first to receive files!",
+                        show_alert=True
+                    )
             except:
                 pass
         logger.warning(f"User {target_chat_id} blocked or hasn't started the bot.")
@@ -4910,6 +4560,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # 🔐 NAYA: ANTI-BOT TEMPORARY LINK SYSTEM (BURN ON READ)
             if payload.startswith("tmp_"):
+                if not re.fullmatch(r"tmp_[0-9a-f]{12}", payload):
+                    await context.bot.send_message(chat_id, "❌ Link Expired ya Invalid hai!")
+                    return
                 conn = get_db_connection()
                 if not conn:
                     await context.bot.send_message(chat_id, "❌ System Error.")
@@ -4917,7 +4570,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 try:
                     cur = conn.cursor()
-                    cur.execute("SELECT movie_id, movie_file_id, created_at FROM temp_links WHERE token = %s", (payload,))
+                    cur.execute("""
+                        SELECT movie_id, movie_file_id, created_at
+                        FROM temp_links
+                        WHERE token = %s
+                          AND created_at >= NOW() - INTERVAL '1 minute'
+                    """, (payload,))
                     res = cur.fetchone()
                     
                     # Token TURANT delete kar do (Single Use)
@@ -4931,12 +4589,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return
                     
                     movie_id, movie_file_id, created_at = res
-                    time_diff = (datetime.now() - created_at).total_seconds()
-                    
-                    if time_diff > 60:
-                        msg = await context.bot.send_message(chat_id, "❌ <b>Link Expired!</b>\nYeh link sirf 60 seconds ke liye valid tha.", parse_mode='HTML')
-                        track_message_for_deletion(context, chat_id, msg.message_id, 15)
-                        return
                     
                     # A Mini App quality click includes a concrete movie_files
                     # record, so send only that file rather than the whole list.
@@ -4972,6 +4624,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     close_db_connection(conn)
 
                     
+            # --- SEND ALL FROM GROUP: START PM THEN DELIVER THE REQUESTED PAGE ---
+            if payload.startswith("sendall_"):
+                try:
+                    parts = payload.split('_')
+                    movie_id = int(parts[1])
+                    page = int(parts[2]) if len(parts) > 2 else 1
+                    await deliver_movie_page_on_start(update, context, movie_id, page)
+                except (TypeError, ValueError, IndexError):
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="❌ Invalid file request. Please search again."
+                    )
+                except Exception as e:
+                    logger.error(f"Send All deep-link error: {e}", exc_info=True)
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="❌ Files could not be sent. Please try again."
+                    )
+                return
+
             # --- CASE NAYA: DIRECT FILE CLICK FROM TEXT LINK ---
             if payload.startswith("file_"):
                 try:
@@ -6242,6 +5914,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Is page par koi file nahi hai!", show_alert=True)
             return
 
+        context.user_data['sendall_page'] = current_page
         await query.answer(f"🚀 Sending {len(page_files)} files (Page {current_page})...")
         status_msg = await query.message.reply_text(f"🚀 **Sending {len(page_files)} files (Page {current_page})...**", parse_mode='Markdown')
         
@@ -12632,10 +12305,19 @@ logger = logging.getLogger(__name__)
 
 # Create Flask app
 flask_app = Flask(__name__)
-CORS(flask_app, resources={r"/*": {"origins": "*"}})
+_web_app_origin = urlunparse(urlparse(WEB_APP_URL)._replace(path='', params='', query='', fragment=''))
+_cors_origins = [
+    origin.strip().rstrip('/')
+    for origin in os.environ.get(
+        'CORS_ALLOWED_ORIGINS',
+        f'{_web_app_origin},http://localhost:3000,http://127.0.0.1:3000'
+    ).split(',')
+    if origin.strip()
+]
+CORS(flask_app, resources={r"/*": {"origins": _cors_origins}})
 
 # --- TMDB API Key (for fetching trailers & cast) ---
-TMDB_API_KEY = os.environ.get("TMDB_API_KEY", "9fa44f5e9fbd41415df930ce5b81c4d7")
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 # ==================== DATABASE HELPERS (use existing functions) ====================
 # Make sure these functions are already defined in your main code:
 # get_db_connection(), close_db_connection(), store_user_request()
@@ -12659,9 +12341,19 @@ register_webapp_routes(
 def _miniapp_healthz():
     return jsonify({'status': 'ok', 'service': 'flimfybox-mini-app'}), 200
 
+
+def _miniapp_readyz():
+    if _shutdown_requested.is_set() or not _startup_complete.is_set():
+        return jsonify({'status': 'not_ready', 'service': 'flimfybox-mini-app'}), 503
+    return jsonify({'status': 'ready', 'service': 'flimfybox-mini-app'}), 200
+
 if not any(rule.rule == '/healthz' for rule in flask_app.url_map.iter_rules()):
     flask_app.add_url_rule(
         '/healthz', 'miniapp_healthz', _miniapp_healthz, methods=['GET', 'HEAD']
+    )
+if not any(rule.rule == '/readyz' for rule in flask_app.url_map.iter_rules()):
+    flask_app.add_url_rule(
+        '/readyz', 'miniapp_readyz', _miniapp_readyz, methods=['GET', 'HEAD']
     )
 
 # ==================== RUN FLASK ====================
@@ -12671,7 +12363,7 @@ def run_flask():
     port = int(os.environ.get('PORT', '10000'))
     restart_delay = max(3, int(os.environ.get('MINIAPP_RESTART_DELAY', '5')))
 
-    while True:
+    while not _shutdown_requested.is_set():
         server_started = False
         try:
             try:
@@ -12697,6 +12389,8 @@ def run_flask():
         except Exception:
             logger.exception("❌ Mini App HTTP server failed")
 
+        if _shutdown_requested.is_set():
+            break
         state = 'after start' if server_started else 'before start'
         logger.warning(
             "🔁 Mini App server supervisor restarting %s in %s seconds",
@@ -12704,6 +12398,7 @@ def run_flask():
             restart_delay
         )
         time.sleep(restart_delay)
+    logger.info("🛑 Mini App HTTP server supervisor stopped")
 
 
 # Uncomment the following lines only if you want to run Flask standalone (not recommended inside main)
@@ -13385,6 +13080,18 @@ def register_handlers(application: Application):
 async def main():
     """Main function to run MULTIPLE bots concurrently"""
     logger.info("🚀 Starting Multi-Bot System...")
+    stop_signal = asyncio.Event()
+
+    def request_shutdown(signum, _frame):
+        logger.info("🛑 Shutdown signal received: %s", signal.Signals(signum).name)
+        _shutdown_requested.set()
+        stop_signal.set()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(signum, request_shutdown)
+        except (OSError, ValueError):
+            logger.warning("Signal handler unavailable for %s", signum)
 
     # =================================================================
     # 1. Flask Server FIRST (Render timeout se bachao)
@@ -13398,18 +13105,13 @@ async def main():
     # 2. Database Setup
     # =================================================================
     try:
-        setup_database()
-        migrate_add_imdb_columns()
-        migrate_content_type_for_restore()
-        migrate_channel_posts_v2()
-        fix_channel_posts_constraint()
-        fix_movies_unique_constraint()
-        fix_movies_title_constraint()
-        fix_movie_files_table()  # movie_files UNIQUE constraint + missing columns
+        run_migrations(DATABASE_URL)
     except Exception as e:
-        logger.error(f"❌ DB Setup Error: {e}")  # ← YE LINE ZAROORI HAI
+        logger.exception("❌ Database migrations failed; startup aborted: %s", e)
+        _shutdown_requested.set()
+        close_db_pool()
+        return
 
-    # =================================================================
     # 3. Get Tokens from ENV
     # =================================================================
     tokens = [
@@ -13423,6 +13125,8 @@ async def main():
 
     if not tokens:
         logger.error("❌ No tokens found! Check Environment Variables.")
+        _shutdown_requested.set()
+        close_db_pool()
         return
 
     # =================================================================
@@ -13431,7 +13135,10 @@ async def main():
     apps = []
     logger.info(f"🤖 Found {len(tokens)} tokens. Initializing bots...")
 
+    worker_tasks = []
     for i, token in enumerate(tokens):
+        if _shutdown_requested.is_set():
+            break
         try:
             logger.info(f"🔹 Initializing Bot {i+1}...")
 
@@ -13448,10 +13155,12 @@ async def main():
             await app.initialize()
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
-            asyncio.create_task(auto_delete_worker(app))
+            worker_tasks.append(asyncio.create_task(auto_delete_worker(app)))
             if i == 0:
                 logger.info("🚀 Starting Trending Worker for Main Bot...")
-                asyncio.create_task(trending_worker_loop(app, ADMIN_USER_ID))
+                worker_tasks.append(asyncio.create_task(
+                    trending_worker_loop(app, ADMIN_USER_ID)
+                ))
             
 
 
@@ -13465,25 +13174,44 @@ async def main():
 
     if not apps:
         logger.error("❌ No bots could be started.")
+        _shutdown_requested.set()
+        close_db_pool()
         return
 
     # Keep the Mini App route warm independently of Telegram updates. This is
     # intentionally one task for the process, not one per bot token.
-    asyncio.create_task(keep_miniapp_alive_worker())
+    worker_tasks.append(asyncio.create_task(keep_miniapp_alive_worker()))
+    _startup_complete.set()
+    logger.info("✅ Startup complete; service is ready.")
 
     # =================================================================
     # 5. Keep Script Alive
     # =================================================================
-    stop_signal = asyncio.Event()
     await stop_signal.wait()
 
-    # Cleanup
+    _startup_complete.clear()
+    _shutdown_requested.set()
+    logger.info("🛑 Graceful shutdown started.")
+    for task in worker_tasks:
+        task.cancel()
+    if worker_tasks:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*worker_tasks, return_exceptions=True),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            logger.error("❌ Background workers did not stop within 10 seconds.")
+
     for app in apps:
         try:
-            await app.stop()
-            await app.shutdown()
+            await asyncio.wait_for(app.updater.stop(), timeout=10)
+            await asyncio.wait_for(app.stop(), timeout=10)
+            await asyncio.wait_for(app.shutdown(), timeout=10)
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
+    close_db_pool()
+    logger.info("✅ Graceful shutdown complete.")
 
 
 if __name__ == '__main__':
