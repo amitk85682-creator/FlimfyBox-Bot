@@ -9,7 +9,7 @@ import aiohttp
 import pytz
 import requests
 import psycopg2
-from PIL import Image, ImageFilter
+from PIL import Image, ImageOps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # -------------------------------------------------------------
@@ -54,8 +54,8 @@ def close_db_connection(conn):
 # -------------------------------------------------------------
 async def make_landscape_poster(url_or_bytes):
     """
-    Portrait (vertical) poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
-    Heavily Blurred background aur center me sharp image.
+    Convert posters to a clean square crop without a blurred or portrait
+    foreground frame.
     """
     try:
         image_data = None
@@ -75,30 +75,16 @@ async def make_landscape_poster(url_or_bytes):
 
         img = Image.open(BytesIO(image_data)).convert("RGB")
 
-        target_w, target_h = 800, 800   # Square format
+        square_img = ImageOps.fit(
+            img,
+            (800, 800),
+            method=Image.Resampling.LANCZOS,
+            centering=(0.5, 0.45),
+        )
 
-        # 1. Blurred background (zoomed and heavy blur)
-        bg_img = img.resize((target_w, int(img.height * (target_w / img.width))), Image.Resampling.LANCZOS)
-        if bg_img.height > target_h:
-            top = (bg_img.height - target_h) // 2
-            bg_img = bg_img.crop((0, top, target_w, top + target_h))
-        else:
-            bg_img = bg_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=40))
-
-        # 2. Foreground (original poster) centred and slightly smaller
-        fg_h = int(target_h * 0.95)
-        fg_w = int(img.width * (fg_h / img.height))
-        fg_img = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
-
-        paste_x = (target_w - fg_w) // 2
-        paste_y = (target_h - fg_h) // 2
-        bg_img.paste(fg_img, (paste_x, paste_y))
-
-        # 3. Output as bytes
         output = BytesIO()
-        output.name = "cinematic_poster.jpg"
-        bg_img.save(output, format='JPEG', quality=95)
+        output.name = "square_poster.jpg"
+        square_img.save(output, format='JPEG', quality=95)
         output.seek(0)
         return output
 

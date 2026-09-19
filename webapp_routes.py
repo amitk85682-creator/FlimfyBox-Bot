@@ -186,6 +186,9 @@ def register_webapp_routes(
     release_success_ttl = 7 * 24 * 60 * 60
     release_negative_ttl = 6 * 60 * 60
     release_discovery_ttl = 6 * 60 * 60
+    home_response_cache = {}
+    home_response_cache_lock = threading.Lock()
+    home_response_ttl = int(os.environ.get('MINIAPP_HOME_CACHE_SECONDS', '600'))
 
     def tmdb_cached_request(path, params, cache_key, negative=False, ttl_seconds=None):
         now = datetime.utcnow().timestamp()
@@ -450,6 +453,12 @@ def register_webapp_routes(
         source = request.args.get('source', 'day')
         if source not in {'day', 'week', 'popular'}:
             source = 'day'
+        cache_key = f'home_trending_v2:{source}'
+        now = time.time()
+        with home_response_cache_lock:
+            cached = home_response_cache.get(cache_key)
+            if cached and cached[0] > now:
+                return jsonify(cached[1])
         hero_limit = int(os.environ.get('HOME_TRENDING_HERO_LIMIT', '10'))
         ranking, cache_state, fetched_at = fetch_tmdb_home_ranking(source)
         conn = get_db_connection()
@@ -457,6 +466,8 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
+            normalized_query = re.sub(r"['\u2019]s\b", '', query.lower())
+            normalized_query = re.sub(r'[^a-z0-9]', '', normalized_query)
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category, language, imdb_id
                 FROM movies
@@ -510,7 +521,7 @@ def register_webapp_routes(
             if len(results) >= hero_limit:
                 break
 
-        return jsonify({
+        result = {
             'status': 'success',
             'source': source,
             'fresh': cache_state == 'fresh',
@@ -520,19 +531,27 @@ def register_webapp_routes(
             'cached': cache_state in {'cached', 'stale'},
             'fetched_at': fetched_at,
             'hero_limit': hero_limit,
-        })
+        }
+        with home_response_cache_lock:
+            home_response_cache[cache_key] = (time.time() + home_response_ttl, result)
+        return jsonify(result)
 
     @flask_app.route('/api/home/new-releases', methods=['GET'])
     def get_home_new_releases():
         cache_key = 'home_new_releases_v1'
-        cached = api_movies_cache.get(cache_key)
-        if cached:
-            return jsonify(cached)
+        home_cache_key = 'home_new_releases_v2'
+        now = time.time()
+        with home_response_cache_lock:
+            cached = home_response_cache.get(home_cache_key)
+            if cached and cached[0] > now:
+                return jsonify(cached[1])
 
         with new_releases_refresh_lock:
-            cached = api_movies_cache.get(cache_key)
-            if cached:
-                return jsonify(cached)
+            now = time.time()
+            with home_response_cache_lock:
+                cached = home_response_cache.get(home_cache_key)
+                if cached and cached[0] > now:
+                    return jsonify(cached[1])
 
             today = datetime.utcnow().date()
             windows = [(30, '30-day'), (60, '60-day fallback')]
@@ -646,8 +665,91 @@ def register_webapp_routes(
                           'tmdb_requests': discovery_metrics['discovery_requests'] + detail_metrics['requests'],
                           'cache_hits': discovery_metrics['discovery_cache_hits'] + detail_metrics['cache_hits']}
             }
-            api_movies_cache.set(cache_key, result)
+            with home_response_cache_lock:
+                home_response_cache[home_cache_key] = (
+                    time.time() + home_response_ttl,
+                    result,
+                )
             return jsonify(result)
+
+    @flask_app.route('/api/home/catalogue-rows', methods=['GET'])
+    def get_home_catalogue_rows():
+        """Return independent home collections instead of one paginated slice."""
+        cache_key = 'home_catalogue_rows_v2'
+        now = time.time()
+        with home_response_cache_lock:
+            cached = home_response_cache.get(cache_key)
+            if cached and cached[0] > now:
+                return jsonify(cached[1])
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                WITH classified AS (
+                    SELECT id, title, year, poster_url, rating, genre, category,
+                           COALESCE(language, '') AS language, created_at,
+                           CASE
+                               WHEN LOWER(COALESCE(category, '')) LIKE '%anime%'
+                                    OR LOWER(COALESCE(genre, '')) LIKE '%anime%'
+                                   THEN 'anime'
+                               WHEN LOWER(COALESCE(category, '')) LIKE '%bollywood%'
+                                    OR LOWER(COALESCE(category, '')) = 'hindi'
+                                    OR LOWER(COALESCE(language, '')) LIKE '%hindi%'
+                                   THEN 'bollywood'
+                               WHEN LOWER(COALESCE(category, '')) LIKE '%hollywood%'
+                                    OR LOWER(COALESCE(category, '')) = 'english'
+                                    OR LOWER(COALESCE(language, '')) LIKE '%english%'
+                                   THEN 'hollywood'
+                               ELSE NULL
+                           END AS collection,
+                           CASE
+                               WHEN BTRIM(COALESCE(rating, '')) ~ '^[0-9]+([.][0-9]+)?$'
+                                   THEN BTRIM(rating)::numeric
+                               ELSE -1
+                           END AS rating_value
+                    FROM movies
+                    WHERE poster_url IS NOT NULL AND poster_url <> ''
+                ),
+                ranked AS (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY collection
+                        ORDER BY rating_value DESC, id DESC
+                    ) AS row_number
+                    FROM classified
+                    WHERE collection IS NOT NULL
+                )
+                SELECT id, title, year, poster_url, rating, genre, category,
+                       language, collection
+                FROM ranked
+                WHERE row_number <= 12
+                ORDER BY collection, row_number
+            """)
+            rows = cur.fetchall()
+            collections = {'hollywood': [], 'bollywood': [], 'anime': []}
+            for row in rows:
+                collections[row[8]].append({
+                    'id': row[0],
+                    'title': row[1],
+                    'year': row[2] or '',
+                    'image': row[3] or '/static/miniapp/poster-placeholder.svg',
+                    'rating': row[4] or 'N/A',
+                    'genre': row[5] or 'Unknown',
+                    'category': row[6] or 'Movie',
+                    'language': row[7] or '',
+                    'source': 'local',
+                })
+            result = {'status': 'success', 'collections': collections}
+            with home_response_cache_lock:
+                home_response_cache[cache_key] = (time.time() + home_response_ttl, result)
+            return jsonify(result)
+        except Exception as error:
+            logger.error('Home catalogue rows error: %s', error)
+            return jsonify({'status': 'error', 'message': 'Could not load catalogue rows'}), 500
+        finally:
+            close_db_connection(conn)
 
     def telegram_user_from_request():
         """Validate Telegram WebApp initData and return its signed-in user."""
@@ -898,7 +1000,7 @@ def register_webapp_routes(
         browse_type = request.args.get('type', 'all').lower()
         if browse_type not in {'all', 'movies', 'tv'}:
             return jsonify({'status': 'error', 'message': 'Invalid genre type'}), 400
-        cache_key = f'api_genres_{browse_type}_v1'
+        cache_key = f'api_genres_{browse_type}_v2'
         cached = api_movies_cache.get(cache_key)
         if cached:
             return jsonify(cached)
@@ -908,21 +1010,44 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT genre, category, seasons_data, poster_url
+                SELECT genre, category, seasons_data, poster_url, rating, id
                 FROM movies
                 WHERE genre IS NOT NULL AND genre <> ''
-                ORDER BY id DESC
+                ORDER BY
+                    CASE
+                        WHEN BTRIM(COALESCE(rating, '')) ~ '^[0-9]+([.][0-9]+)?$'
+                            THEN BTRIM(rating)::numeric
+                        ELSE -1
+                    END DESC,
+                    id DESC
             """)
             counts = {genre_id: 0 for genre_id, *_ in CANONICAL_GENRES}
             posters = {genre_id: [] for genre_id, *_ in CANONICAL_GENRES}
-            for raw_genre, category, seasons_data, poster_url in cur.fetchall():
+            poster_candidates = {genre_id: [] for genre_id, *_ in CANONICAL_GENRES}
+            for raw_genre, category, seasons_data, poster_url, _rating, _movie_id in cur.fetchall():
                 if not browse_type_matches(browse_type, category, seasons_data):
                     continue
                 for genre_id in normalize_catalogue_genres(raw_genre):
                     if genre_id in counts:
                         counts[genre_id] += 1
-                        if poster_url and poster_url not in posters[genre_id] and len(posters[genre_id]) < 3:
-                            posters[genre_id].append(poster_url)
+                        if (
+                            poster_url
+                            and poster_url not in poster_candidates[genre_id]
+                            and len(poster_candidates[genre_id]) < 12
+                        ):
+                            poster_candidates[genre_id].append(poster_url)
+
+            # A title can belong to several genres. Reserve the best unique
+            # poster for the first matching genre so the Browse cards do not
+            # visually repeat the same artwork across the grid.
+            used_posters = set()
+            for genre_id, *_ in CANONICAL_GENRES:
+                unique = [
+                    poster for poster in poster_candidates[genre_id]
+                    if poster not in used_posters
+                ][:3]
+                posters[genre_id] = unique
+                used_posters.update(unique)
             genres = [
                 {
                     'id': genre_id,
@@ -1408,9 +1533,18 @@ def register_webapp_routes(
                 cur.execute("""
                     SELECT id, title, year, poster_url, rating, genre, category
                     FROM movies
-                    WHERE title ILIKE %s OR title ILIKE %s
+                    WHERE title ILIKE %s
+                       OR title ILIKE %s
+                       OR regexp_replace(
+                            regexp_replace(LOWER(title), '''s\\y', '', 'g'),
+                            '[^a-z0-9]', '', 'g'
+                          ) LIKE %s
                     LIMIT 20
-                """, (f'%{query}%', f'%{query.replace(" ", "%")}%'))
+                """, (
+                    f'%{query}%',
+                    f'%{query.replace(" ", "%")}%',
+                    f'%{normalized_query}%'
+                ))
                 rows = cur.fetchall()
                 for r in rows:
                     local_results.append({

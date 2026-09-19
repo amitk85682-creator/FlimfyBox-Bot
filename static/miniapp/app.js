@@ -39,7 +39,9 @@ const tg = window.Telegram?.WebApp || {
         let initialHomeTimeout = null;
 
         function startInitialHomeLoading() {
-            initialHomePending = 3;
+            // The catalogue is the critical path. Trending and new releases
+            // enrich the home screen independently and must not block it.
+            initialHomePending = 1;
             document.body.classList.add('app-booting');
             const screen = document.getElementById('appLoadingScreen');
             if (screen) screen.classList.remove('is-complete');
@@ -1170,6 +1172,29 @@ const tg = window.Telegram?.WebApp || {
                     : '';
                 rowElement.style.display = items.length ? '' : 'none';
             });
+
+            // These rows must not depend on the first paginated catalogue page.
+            // Load their own bounded collections so older titles are visible
+            // immediately without forcing users to scroll through the entire
+            // catalogue first.
+            fetch('/api/home/catalogue-rows')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status !== 'success') throw new Error(data.message || 'Could not load catalogue rows');
+                    const collections = data.collections || {};
+                    [
+                        ['rowHollywood', 'hollywoodScroll', collections.hollywood],
+                        ['rowBollywood', 'bollywoodScroll', collections.bollywood],
+                        ['rowAnime', 'animeScroll', collections.anime]
+                    ].forEach(([row, target, items]) => {
+                        const list = Array.isArray(items) ? items : [];
+                        document.getElementById(target).innerHTML = list.length
+                            ? renderCards(list, 'card', false)
+                            : '';
+                        document.getElementById(row).style.display = list.length ? '' : 'none';
+                    });
+                })
+                .catch(error => console.error('Catalogue rows load failed:', error));
 
             const requestId = ++newReleaseRequestId;
             fetch('/api/home/new-releases')

@@ -491,6 +491,20 @@ async def run_async(func, *args, **kwargs):
     """
     func_partial = functools.partial(func, *args, **kwargs)
     return await asyncio.get_running_loop().run_in_executor(None, func_partial)
+
+
+def schedule_recommendation_event(*, user_id, event_type, source, movie_id=None, metadata=None):
+    """Persist search telemetry without delaying the user-facing response."""
+    task = asyncio.create_task(run_async(
+        record_recommendation_event_safely,
+        user_id,
+        event_type,
+        source,
+        movie_id=movie_id,
+        metadata=metadata,
+    ))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 # 👆👆👆 END COPY HERE 👆👆👆
 
 
@@ -2190,7 +2204,8 @@ def _normalize_search_text(text: str) -> str:
     Isse "spider man", "spiderman", "Spider-Man" — teeno ek hi cheez maane jaate hain,
     chahe DB me title kaise bhi likha ho.
     """
-    return re.sub(r'[^a-z0-9]', '', (text or '').lower())
+    normalized = re.sub(r"['\u2019]s\b", '', (text or '').lower())
+    return re.sub(r'[^a-z0-9]', '', normalized)
 
 
 def get_google_title_suggestions(query: str, limit: int = 3):
@@ -2358,16 +2373,21 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
         cur = conn.cursor()
         
         # ✅ Updated to include new columns
+        normalized_query = _normalize_search_text(query)
         sql = """
             SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
                    SIMILARITY(m.title, %s) as sim_score
             FROM movies m
             WHERE SIMILARITY(m.title, %s) > 0.3
+               OR regexp_replace(
+                    regexp_replace(LOWER(m.title), '''s\\y', '', 'g'),
+                    '[^a-z0-9]', '', 'g'
+                  ) LIKE %s
             ORDER BY sim_score DESC
             LIMIT %s
         """
         
-        cur.execute(sql, (query, query, limit))
+        cur.execute(sql, (query, query, f'%{normalized_query}%', limit))
         results = cur.fetchall()
         
         # Format results (remove score from tuple)
@@ -2895,6 +2915,20 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
     except Exception as exc:
         logger.warning("TMDb trailer lookup failed for '%s': %s", title, exc)
     return None
+
+
+def resolve_trailer_key(
+    title: str,
+    year: str = "",
+    imdb_id: str = None,
+    category: str = "",
+    fallback_title: str = "",
+) -> Optional[str]:
+    """Resolve a trailer using canonical metadata, then original file identity."""
+    trailer_key = fetch_tmdb_trailer_key(title, year, imdb_id, category)
+    if trailer_key or not fallback_title or fallback_title.strip().casefold() == str(title or "").strip().casefold():
+        return trailer_key
+    return fetch_tmdb_trailer_key(fallback_title, year, imdb_id, category)
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
@@ -5034,16 +5068,18 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_query = re.sub(r'(?i)\b(s\d{1,2}|season\s*\d+|ep\s?\d+|e\d{1,2})\b.*', '', query).strip()
         search_term = clean_query if (clean_query and len(clean_query) > 1) else query
 
-        await run_async(
-            record_recommendation_event_safely,
-            update.effective_user.id if update.effective_user else None,
-            'pm_search',
-            'pm',
+        schedule_recommendation_event(
+            user_id=update.effective_user.id if update.effective_user else None,
+            event_type='pm_search',
+            source='pm',
             metadata={'query': search_term[:200]},
         )
 
-        # 1. Search DB (Ab bot 'The Great' dhoondhega, 'The Great S03' nahi)
-        movies = await run_async(get_movies_from_db, search_term, limit=10)
+        # 1. Use the indexed similarity query for the common path. The legacy
+        # alias/fuzzy search remains a fallback for titles not covered by SQL.
+        movies = await run_async(get_movies_fast_sql, search_term, limit=10)
+        if not movies:
+            movies = await run_async(get_movies_from_db, search_term, limit=10)
         
         # 2. Not Found
         if not movies:
@@ -5121,11 +5157,10 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if chosen_movie:
             movie_id, title, url, file_id = chosen_movie[:4]
-            await run_async(
-                record_recommendation_event_safely,
-                update.effective_user.id if update.effective_user else None,
-                'pm_exact_match',
-                'pm',
+            schedule_recommendation_event(
+                user_id=update.effective_user.id if update.effective_user else None,
+                event_type='pm_exact_match',
+                source='pm',
                 movie_id=movie_id,
                 metadata={'query': search_term[:200], 'title': title},
             )
@@ -5694,7 +5729,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = cur.fetchall()
         
         # मूवी की डिटेल्स निकालें (🚀 NAYA: Ab poster_url aur category bhi nikalega)
-        cur.execute("SELECT title, genre, language, poster_url, category FROM movies WHERE id = %s", (movie_id,))
+        cur.execute("""
+            SELECT title, genre, language, poster_url, category, year, rating
+            FROM movies WHERE id = %s
+        """, (movie_id,))
         m_data = cur.fetchone()
         cur.close()
         
@@ -5720,6 +5758,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m_lang = m_data[2] if m_data[2] else "Hindi + English"
         m_poster = m_data[3] if len(m_data) > 3 and m_data[3] else None
         m_category = m_data[4] if len(m_data) > 4 and m_data[4] else ""
+        m_year = m_data[5] if len(m_data) > 5 and m_data[5] else "N/A"
+        m_rating = m_data[6] if len(m_data) > 6 and m_data[6] else "N/A"
 
         # --- 2. POSTER PROCESSING (Cinematic Square Effect) ---
         # 🚀 NAYA FIX: Pehle TMDB ka link uthao. Agar TMDB poster nahi hai, tabhi Thumbnail use karo.
@@ -5742,34 +5782,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Default poster agar kuch na mile
             photo_to_send = "https://i.imgur.com/6XK4F6K.png"
 
-        # --- 3. 🎲 RANDOM PREMIUM STYLES 🎲 ---
+        # --- 3. TRENDING-STYLE POST TEMPLATE ---
         safe_title = m_title.replace('<', '').replace('>', '')
-        unicode_title = get_safe_font(safe_title)
-        
-        # 👈 Ab sirf 2 styles bache hain (Box wala hata diya)
-        style_choice = random.choice([1, 2])
-
-        if style_choice == 1:
-            channel_caption = (
-                f"🎬 <b>{safe_title}</b>\n"
-                f"➖➖➖➖➖➖➖➖➖➖\n"
-                f"✨ <b>Genre:</b> {m_genre}\n"
-                f"🔊 <b>Language:</b> {m_lang}\n"
-                f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
-                f"➖➖➖➖➖➖➖➖➖➖\n"
-                f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
-                f"👇 <b>Download Below</b> 👇"
-            )
-        else:
-            channel_caption = (
-                f"🔥 <b>{unicode_title}</b>\n"
-                f" ├ ✨ Genre: {m_genre}\n"
-                f" ├ 🔊 Language: {m_lang}\n"
-                f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
-                f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
-                f"👇 <b>Download Below</b> 👇"
-            )
+        channel_caption = (
+            f"🎬 <b>{safe_title}</b>\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"📅 <b>Date:</b> {m_year}\n"
+            f"⭐ <b>iMDB Rating:</b> {m_rating}/10\n"
+            f"🎭 <b>Genre:</b> {m_genre}\n"
+            f"🔊 <b>Language:</b> {m_lang}\n"
+            f"<b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+            f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
+            f"👇 <b>Download Below</b> 👇"
+        )
 
         # --- 4. SECURE LINK & BUTTONS ---
         secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
@@ -7226,7 +7252,9 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 🛑 "cast" quoted and year is integer
         # 🎯 NAYA LOGIC: Title ki jagah IMDb ID par conflict check karega
         import json
-        trailer_key = await run_async(fetch_tmdb_trailer_key, title, year, imdb_id_f, category)
+        trailer_key = await run_async(
+            resolve_trailer_key, title, year, imdb_id_f, category, title
+        )
         cur.execute("""
             INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", seasons_data, trailer_key)
             VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -7338,7 +7366,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # ✅ FIXED: Quote "cast" because it's a reserved keyword
         trailer_key = await run_async(
-            fetch_tmdb_trailer_key, title, year, imdb_id, category
+            resolve_trailer_key, title, year, imdb_id, category, title
         )
         cur.execute(
             """
@@ -7640,32 +7668,18 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_title = title.replace('<', '').replace('>', '')
             unicode_title = get_safe_font(safe_title)
 
-            # 🎲 2 RANDOM STYLES 🎲 (Box wala hat gaya)
-            style_choice = random.choice([1, 2])
-
-            if style_choice == 1:
-                # 🌟 Style 1: Clean Minimalist Divider (Mobile & PC Friendly)
-                caption = (
-                    f"🎬 <b>{safe_title}</b>\n"
-                    f"➖➖➖➖➖➖➖➖➖➖\n"
-                    f"✨ <b>Genre:</b> {safe_genre}\n"
-                    f"🔊 <b>Language:</b> {movie_lang if movie_lang else 'Hindi'}\n"
-                    f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
-                    f"➖➖➖➖➖➖➖➖➖➖\n"
-                    f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
-                    f"👇 <b>Download Below</b> 👇"
-                )
-            else:
-                # Style 2: Tree Line + Premium Font (Pehle ye Style 3 tha)
-                caption = (
-                    f"🔥 <b>{unicode_title}</b>\n"
-                    f" ├ ✨ Genre: {safe_genre}\n"
-                    f" ├ 🔊 Language: {movie_lang if movie_lang else 'Hindi'}\n"
-                    f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
-                    f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-                    f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
-                    f"👇 <b>Download Below</b> 👇"
-                )
+            caption = (
+                f"🎬 <b>{safe_title}</b>\n"
+                f"➖➖➖➖➖➖➖➖➖➖\n"
+                f"📅 <b>Date:</b> {year or 'N/A'}\n"
+                f"⭐ <b>iMDB Rating:</b> {safe_rating}/10\n"
+                f"🎭 <b>Genre:</b> {safe_genre}\n"
+                f"🔊 <b>Language:</b> {movie_lang if movie_lang else 'Hindi'}\n"
+                f"<b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+                f"➖➖➖➖➖➖➖➖➖➖\n"
+                f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
+                f"👇 <b>Download Below</b> 👇"
+            )
 
             # --- SECURE LINK & BUTTONS (As it was) ---
             secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
@@ -7826,7 +7840,12 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     if imdb_id:
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
     trailer_key = await run_async(
-        fetch_tmdb_trailer_key, title, year, imdb_id, category
+        resolve_trailer_key,
+        title,
+        year,
+        imdb_id,
+        category,
+        movie_name,
     )
 
     # --- STEP 4: DB INSERT (pm_file_listener ka EXACT ON CONFLICT logic) ---
@@ -9919,7 +9938,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         evidence_sources = combo.get("evidence_sources", [])
         identity_status = combo.get("identity_status", "Unverified")
         trailer_key = await run_async(
-            fetch_tmdb_trailer_key, title, year, imdb_id, category
+            resolve_trailer_key, title, year, imdb_id, category, movie_name
         )
 
         # IMDB cast fetch (extra — agar imdb_id mila ho)
@@ -12673,17 +12692,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if len(text) < 2:
         return
 
-    await run_async(
-        record_recommendation_event_safely,
-        update.effective_user.id if update.effective_user else None,
-        'group_search',
-        'group',
-        metadata={'query': text[:200], 'chat_id': update.effective_chat.id},
-    )
-
     # 3. 🚀 FAST SEARCH CALL (Sirf SQL Check)
     # Hum 5 results maang rahe hain taaki agar typos ho to best match mile
     movies = await run_async(get_movies_fast_sql, text, limit=5)
+    schedule_recommendation_event(
+        user_id=update.effective_user.id if update.effective_user else None,
+        event_type='group_search',
+        source='group',
+        metadata={'query': text[:200], 'chat_id': update.effective_chat.id},
+    )
 
     if not movies:
         # 🤫 Agar movie nahi mili, to YAHIN RUK JAO.
@@ -12700,11 +12717,10 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if chosen_movie:
         movie_id, title, url, file_id = chosen_movie[:4]
-        await run_async(
-            record_recommendation_event_safely,
-            update.effective_user.id if update.effective_user else None,
-            'group_selection',
-            'group',
+        schedule_recommendation_event(
+            user_id=update.effective_user.id if update.effective_user else None,
+            event_type='group_selection',
+            source='group',
             movie_id=movie_id,
             metadata={'query': text[:200], 'title': title, 'chat_id': update.effective_chat.id},
         )
