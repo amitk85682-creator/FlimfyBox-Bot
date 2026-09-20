@@ -1796,3 +1796,46 @@ body {
         flex-basis: 138px;
     }
 }
+
+/* Keep More as a compact popover on wide screens, never a full navigation sheet. */
+@media (min-width: 700px) {
+    .more-panel {
+        display: block !important;
+        width: min(420px, calc(100vw - 48px)) !important;
+        max-height: none !important;
+        padding: 14px !important;
+        border-radius: 18px !important;
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(10px);
+    }
+
+    .more-panel.open {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+    }
+
+    .more-panel-grid {
+        display: grid !important;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+        gap: 8px !important;
+    }
+
+    .more-panel-grid button {
+        display: flex !important;
+        min-height: 68px !important;
+        width: auto !important;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        border-radius: 11px;
+        font-size: 10px;
+    }
+
+    .more-panel-grid i {
+        font-size: 17px;
+    }
+}
