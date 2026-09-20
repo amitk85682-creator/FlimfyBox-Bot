@@ -61,6 +61,8 @@ assert.match(styles, /\.bottom-nav \.nav-item\s*\{[\s\S]*flex-direction:\s*colum
 assert.match(styles, /\.bottom-nav\s*\{[\s\S]*max-height:\s*84px !important/);
 assert.match(styles, /\.bottom-nav\s*\{[\s\S]*top:\s*auto !important[\s\S]*bottom:/);
 assert.match(styles, /@media \(min-width: 900px\)[\s\S]*\.hero-slider\s*\{[\s\S]*height:\s*clamp\(360px,\s*34vw,\s*460px\) !important/);
+assert.match(styles, /@media \(min-width: 900px\)[\s\S]*\.hero-slider\s*\{[\s\S]*max-width:\s*none !important/);
+assert.match(styles, /@media \(min-width: 900px\)[\s\S]*\.hero-info\s*\{[\s\S]*width:\s*min\(620px,\s*54%\)/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);

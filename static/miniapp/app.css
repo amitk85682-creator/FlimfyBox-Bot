@@ -1900,9 +1900,30 @@ body {
 
 @media (min-width: 900px) {
     .hero-slider {
+        width: 100% !important;
+        max-width: none !important;
         height: clamp(360px, 34vw, 460px) !important;
         min-height: 360px !important;
         margin-bottom: 28px;
+    }
+
+    .hero-overlay {
+        padding-inline: clamp(42px, 5vw, 78px);
+    }
+
+    .hero-info {
+        width: min(620px, 54%);
+    }
+
+    .hero-controls {
+        right: clamp(28px, 4vw, 64px);
+    }
+}
+
+@media (min-width: 1400px) {
+    .hero-slider {
+        height: clamp(400px, 34vw, 500px) !important;
+        min-height: 400px !important;
     }
 }
 
