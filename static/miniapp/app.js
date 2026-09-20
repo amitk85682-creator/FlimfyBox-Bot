@@ -37,6 +37,59 @@ const tg = window.Telegram?.WebApp || {
         let genreController = null;
         let initialHomePending = 0;
         let initialHomeTimeout = null;
+        const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v2';
+        const HOME_CATALOGUE_CACHE_TTL = 10 * 60 * 1000;
+
+        function readHomeCatalogueCache() {
+            try {
+                const cached = JSON.parse(localStorage.getItem(HOME_CATALOGUE_CACHE_KEY) || 'null');
+                if (!cached || !Array.isArray(cached.movies) || !cached.savedAt) return null;
+                return {
+                    movies: cached.movies,
+                    hasMore: cached.hasMore !== false,
+                    fresh: Date.now() - cached.savedAt < HOME_CATALOGUE_CACHE_TTL
+                };
+            } catch (_error) {
+                localStorage.removeItem(HOME_CATALOGUE_CACHE_KEY);
+                return null;
+            }
+        }
+
+        function writeHomeCatalogueCache(movies, hasMore) {
+            try {
+                localStorage.setItem(HOME_CATALOGUE_CACHE_KEY, JSON.stringify({
+                    movies,
+                    hasMore: hasMore !== false,
+                    savedAt: Date.now()
+                }));
+            } catch (error) {
+                console.warn('Home catalogue cache could not be saved:', error);
+            }
+        }
+
+        async function loadHomeSection(url, cacheKey) {
+            const storageKey = `flimfybox-home-section-${cacheKey}-v2`;
+            try {
+                const cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                if (cached && cached.savedAt && Date.now() - cached.savedAt < HOME_CATALOGUE_CACHE_TTL) {
+                    return cached.data;
+                }
+            } catch (_error) {
+                localStorage.removeItem(storageKey);
+            }
+
+            const response = await fetch(url);
+            const data = await response.json();
+            if (!response.ok || data.status === 'error') {
+                throw new Error(data.message || 'Could not load home section');
+            }
+            try {
+                localStorage.setItem(storageKey, JSON.stringify({ data, savedAt: Date.now() }));
+            } catch (error) {
+                console.warn(`Home section cache could not be saved (${cacheKey}):`, error);
+            }
+            return data;
+        }
 
         function startInitialHomeLoading() {
             // The catalogue is the critical path. Trending and new releases
@@ -45,6 +98,11 @@ const tg = window.Telegram?.WebApp || {
             document.body.classList.add('app-booting');
             const screen = document.getElementById('appLoadingScreen');
             if (screen) screen.classList.remove('is-complete');
+            if (readHomeCatalogueCache()) {
+                initialHomePending = 0;
+                document.body.classList.remove('app-booting');
+                if (screen) screen.classList.add('is-complete');
+            }
             if (initialHomeTimeout) clearTimeout(initialHomeTimeout);
             // Trending/new-release enrichment is optional; never make users
             // wait indefinitely when one upstream request is slow.
@@ -814,8 +872,21 @@ const tg = window.Telegram?.WebApp || {
         async function loadMovies(page = 1) {
             if (isFetching || !hasMoreMovies) return;
             isFetching = true;
+            const cachedHome = page === 1 ? readHomeCatalogueCache() : null;
 
             try {
+                if (cachedHome) {
+                    allMovies = cachedHome.movies;
+                    hasMoreMovies = cachedHome.hasMore;
+                    renderHome(allMovies);
+                    currentPage = 2;
+                    completeInitialHomeLoadingStep();
+                    if (cachedHome.fresh) {
+                        isFetching = false;
+                        return;
+                    }
+                }
+
                 // Agar page 1 se zyada hai, toh neeche ek loading spinner dikhao
                 if (page > 1) {
                     document.getElementById('moreGrid').insertAdjacentHTML('beforeend', '<div id="scrollLoader" style="grid-column: 1 / -1; text-align: center; padding: 20px;"><div class="loader" style="width:30px;height:30px;border-width:3px;margin:0 auto;"></div></div>');
@@ -836,6 +907,7 @@ const tg = window.Telegram?.WebApp || {
                     if (page === 1) {
                         // Pehli baar: Pura UI setup karo
                         allMovies = newMovies;
+                        writeHomeCatalogueCache(newMovies, data.has_more);
                         renderHome(allMovies); 
                         completeInitialHomeLoadingStep();
                     } else {
@@ -1149,19 +1221,36 @@ const tg = window.Telegram?.WebApp || {
                 {
                     row: 'rowHollywood',
                     target: 'hollywoodScroll',
-                    matches: movie => `${movie.category || ''} ${movie.language || ''}`.toLowerCase().includes('hollywood')
-                        || String(movie.category || '').toLowerCase() === 'english'
+                    matches: movie => {
+                        const category = String(movie.category || '').toLowerCase();
+                        const language = String(movie.language || '').toLowerCase();
+                        const genre = String(movie.genre || '').toLowerCase();
+                        if (/(anime|korean|japan|chinese)/.test(`${category} ${genre}`)) return false;
+                        return /(^|[^a-z])hollywood([^a-z]|$)/.test(category)
+                            || (
+                                ['english', 'english movie', 'english movies', 'movie', 'movies', 'film', 'films'].includes(category)
+                                && /(^|[^a-z])english([^a-z]|$)/.test(language)
+                            );
+                    }
                 },
                 {
                     row: 'rowBollywood',
                     target: 'bollywoodScroll',
-                    matches: movie => `${movie.category || ''} ${movie.language || ''}`.toLowerCase().includes('bollywood')
-                        || String(movie.category || '').toLowerCase() === 'hindi'
+                    matches: movie => {
+                        const category = String(movie.category || '').toLowerCase();
+                        const language = String(movie.language || '').toLowerCase();
+                        const genre = String(movie.genre || '').toLowerCase();
+                        if (/anime|korean|japan|chinese/.test(`${category} ${genre}`)) return false;
+                        return /(^|[^a-z])(bollywood|hindi)([^a-z]|$)/.test(category)
+                            || /(^|[^a-z])hindi([^a-z]|$)/.test(language);
+                    }
                 },
                 {
                     row: 'rowAnime',
                     target: 'animeScroll',
-                    matches: movie => `${movie.category || ''} ${movie.genre || ''}`.toLowerCase().includes('anime')
+                    matches: movie => /(^|[^a-z])anime([^a-z]|$)/.test(
+                        `${movie.category || ''} ${movie.genre || ''}`.toLowerCase()
+                    )
                 }
             ];
             catalogueRows.forEach(({ row, target, matches }) => {
@@ -1177,8 +1266,7 @@ const tg = window.Telegram?.WebApp || {
             // Load their own bounded collections so older titles are visible
             // immediately without forcing users to scroll through the entire
             // catalogue first.
-            fetch('/api/home/catalogue-rows')
-                .then(response => response.json())
+            loadHomeSection('/api/home/catalogue-rows', 'catalogue-rows')
                 .then(data => {
                     if (data.status !== 'success') throw new Error(data.message || 'Could not load catalogue rows');
                     const collections = data.collections || {};
@@ -1197,8 +1285,7 @@ const tg = window.Telegram?.WebApp || {
                 .catch(error => console.error('Catalogue rows load failed:', error));
 
             const requestId = ++newReleaseRequestId;
-            fetch('/api/home/new-releases')
-                .then(response => response.json())
+            loadHomeSection('/api/home/new-releases', 'new-releases')
                 .then(data => {
                     if (requestId !== newReleaseRequestId) return;
                     if (data.status !== 'success') throw new Error(data.message || 'Could not load new releases');
@@ -1224,8 +1311,7 @@ const tg = window.Telegram?.WebApp || {
                 .finally(completeInitialHomeLoadingStep);
 
             const trendingRequest = ++trendingRequestId;
-            fetch('/api/home/trending?source=day')
-                .then(response => response.json())
+            loadHomeSection('/api/home/trending?source=day', 'trending')
                 .then(data => {
                     if (trendingRequest !== trendingRequestId) return;
                     if (data.status !== 'success') throw new Error(data.message || 'Could not load trending titles');

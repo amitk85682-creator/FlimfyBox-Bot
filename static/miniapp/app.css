@@ -1304,6 +1304,7 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 
     .details-page {
         background: #050607;
+        padding-bottom: env(safe-area-inset-bottom);
     }
     .details-page .dp-header {
         top: 9px;
@@ -1353,25 +1354,18 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
     .details-page .overview-section { margin-top: 25px; }
     .details-page .overview-section h2 { font-size: 16px; }
     .details-page .rich-desc { font-size: 11px; line-height: 1.55; }
-    .details-page::after {
-        position: fixed;
-        z-index: 7;
-        right: 0;
-        bottom: 0;
-        left: 0;
-        height: 72px;
-        content: '';
-        background: linear-gradient(0deg, rgba(5,6,7,.98), rgba(5,6,7,.72));
-        pointer-events: none;
-    }
     .detail-bottom-actions {
-        position: fixed;
+        position: sticky;
         z-index: 9;
-        right: 11px;
-        bottom: max(8px, env(safe-area-inset-bottom));
-        left: 11px;
+        right: auto;
+        bottom: 8px;
+        left: auto;
         display: flex;
         gap: 8px;
+        padding: 8px 11px;
+        margin: 0;
+        background: linear-gradient(0deg, rgba(5,6,7,.98) 35%, rgba(5,6,7,.84) 75%, transparent);
+        pointer-events: none;
     }
     .detail-bottom-actions button {
         display: flex;
@@ -1385,6 +1379,7 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
         color: #e6e8f0;
         background: rgba(28,31,40,.96);
         font-size: 11px;
+        pointer-events: auto;
     }
     .nav-item {
         min-width: 0;

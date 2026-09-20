@@ -2208,6 +2208,50 @@ def _normalize_search_text(text: str) -> str:
     return re.sub(r'[^a-z0-9]', '', normalized)
 
 
+def _select_single_search_result(query, movies):
+    """Return one confident match; return None when the user should choose."""
+    if not movies:
+        return None
+
+    normalized_query = _normalize_search_text(query)
+    unique_movies = []
+    seen_ids = set()
+    for movie in movies:
+        movie_id = movie[0] if movie else None
+        if movie_id in seen_ids:
+            continue
+        seen_ids.add(movie_id)
+        unique_movies.append(movie)
+
+    exact_matches = [
+        movie for movie in unique_movies
+        if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_query
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        return None
+
+    scored_matches = sorted(
+        (
+            (fuzz.WRatio(normalized_query, _normalize_search_text(movie[1])), movie)
+            for movie in unique_movies
+            if len(movie) > 1 and _normalize_search_text(movie[1])
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    strong_matches = [item for item in scored_matches if item[0] >= 62]
+    if not strong_matches:
+        return None
+    if len(strong_matches) == 1:
+        return strong_matches[0][1]
+
+    top_score, top_movie = strong_matches[0]
+    second_score = strong_matches[1][0]
+    return top_movie if top_score - second_score >= 12 else None
+
+
 def get_google_title_suggestions(query: str, limit: int = 3):
     """Resolve common misspellings server-side so Telegram clients need no JSONP."""
     cache_key = f"google_title_suggestions_{query.lower()}"
@@ -2283,7 +2327,10 @@ def _get_movies_from_db_nocache(user_query, limit=10):
         cur.execute(
             """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
                FROM movies
-               WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s
+               WHERE regexp_replace(
+                         regexp_replace(LOWER(title), '''s\\y', '', 'g'),
+                         '[^a-z0-9]', '', 'g'
+                     ) LIKE %s
                ORDER BY title LIMIT %s""",
             (f'%{norm_query}%', limit)
         )
@@ -5043,8 +5090,42 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
         )
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
 
+
+async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send immediate search feedback and return the temporary message."""
+    if not update.message or not SEARCH_ERROR_GIFS:
+        return None
+    try:
+        progress_message = await update.message.reply_animation(
+            animation=random.choice(SEARCH_ERROR_GIFS),
+            caption="🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
+            parse_mode='HTML',
+        )
+        return progress_message
+    except Exception as exc:
+        logger.warning(f"Search progress animation could not be sent: {exc}")
+        try:
+            return await update.message.reply_text(
+                "🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
+                parse_mode='HTML',
+            )
+        except Exception as fallback_exc:
+            logger.warning(f"Search progress message could not be sent: {fallback_exc}")
+            return None
+
+
+async def remove_search_progress(progress_message):
+    if not progress_message:
+        return
+    try:
+        await progress_message.delete()
+    except Exception as exc:
+        logger.debug(f"Search progress message could not be deleted: {exc}")
+
+
 async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search for movies in the database"""
+    progress_message = None
     try:
         # Agar ye button click se aya hai (cancel/back)
         if update.callback_query:
@@ -5068,6 +5149,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_query = re.sub(r'(?i)\b(s\d{1,2}|season\s*\d+|ep\s?\d+|e\d{1,2})\b.*', '', query).strip()
         search_term = clean_query if (clean_query and len(clean_query) > 1) else query
 
+        progress_message = await send_search_progress(update, context)
         schedule_recommendation_event(
             user_id=update.effective_user.id if update.effective_user else None,
             event_type='pm_search',
@@ -5083,6 +5165,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 2. Not Found
         if not movies:
+            await remove_search_progress(progress_message)
             # Google runs on the server (not through a WebView JSONP callback),
             # so a spelling such as "rechar" can be retried from Telegram too.
             suggestions = await run_async(get_google_title_suggestions, search_term, limit=3)
@@ -5148,12 +5231,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
         # 3. Found
-        normalized_query = _normalize_search_text(query)
-        exact_movies = [
-            movie for movie in movies
-            if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_query
-        ]
-        chosen_movie = exact_movies[0] if len(exact_movies) == 1 else (movies[0] if len(movies) == 1 else None)
+        await remove_search_progress(progress_message)
+        chosen_movie = _select_single_search_result(query, movies)
         
         if chosen_movie:
             movie_id, title, url, file_id = chosen_movie[:4]
@@ -5185,6 +5264,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return # <--- YAHAN SE BHI MAIN_MENU HATA DIYA HAI
 
     except Exception as e:
+        await remove_search_progress(progress_message)
         logger.error(f"Error in search_movies: {e}")
         # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
         return
@@ -5324,12 +5404,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # user's final choice.  When it resolves to one exact local title,
         # open that title's files immediately instead of making the user click
         # the same title a second time in a selection list.
-        normalized_suggestion = _normalize_search_text(suggested_title)
-        exact_movies = [
-            movie for movie in movies
-            if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_suggestion
-        ]
-        chosen_movie = exact_movies[0] if len(exact_movies) == 1 else (movies[0] if len(movies) == 1 else None)
+        chosen_movie = _select_single_search_result(suggested_title, movies)
         if chosen_movie:
             movie_id, title, url, file_id = chosen_movie[:4]
             try:
@@ -12708,12 +12783,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # 4. Results mil gaye, ab show karo
-    normalized_text = _normalize_search_text(text)
-    exact_movies = [
-        movie for movie in movies
-        if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_text
-    ]
-    chosen_movie = exact_movies[0] if len(exact_movies) == 1 else (movies[0] if len(movies) == 1 else None)
+    chosen_movie = _select_single_search_result(text, movies)
     
     if chosen_movie:
         movie_id, title, url, file_id = chosen_movie[:4]

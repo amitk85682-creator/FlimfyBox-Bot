@@ -466,8 +466,6 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            normalized_query = re.sub(r"['\u2019]s\b", '', query.lower())
-            normalized_query = re.sub(r'[^a-z0-9]', '', normalized_query)
             cur.execute("""
                 SELECT id, title, year, poster_url, rating, genre, category, language, imdb_id
                 FROM movies
@@ -675,7 +673,7 @@ def register_webapp_routes(
     @flask_app.route('/api/home/catalogue-rows', methods=['GET'])
     def get_home_catalogue_rows():
         """Return independent home collections instead of one paginated slice."""
-        cache_key = 'home_catalogue_rows_v2'
+        cache_key = 'home_catalogue_rows_v3'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(cache_key)
@@ -692,16 +690,21 @@ def register_webapp_routes(
                     SELECT id, title, year, poster_url, rating, genre, category,
                            COALESCE(language, '') AS language, created_at,
                            CASE
-                               WHEN LOWER(COALESCE(category, '')) LIKE '%anime%'
-                                    OR LOWER(COALESCE(genre, '')) LIKE '%anime%'
+                               WHEN LOWER(COALESCE(category, '')) ~ '(^|[^a-z])anime([^a-z]|$)'
+                                    OR LOWER(COALESCE(genre, '')) ~ '(^|[^a-z])anime([^a-z]|$)'
                                    THEN 'anime'
-                               WHEN LOWER(COALESCE(category, '')) LIKE '%bollywood%'
-                                    OR LOWER(COALESCE(category, '')) = 'hindi'
-                                    OR LOWER(COALESCE(language, '')) LIKE '%hindi%'
+                               WHEN LOWER(COALESCE(category, '')) ~ '(^|[^a-z])(bollywood|hindi)([^a-z]|$)'
+                                    OR (
+                                        LOWER(COALESCE(language, '')) ~ '(^|[^a-z])hindi([^a-z]|$)'
+                                        AND LOWER(CONCAT_WS(' ', COALESCE(category, ''), COALESCE(genre, ''))) !~ '(korean|japan|japanese|china|chinese|anime)'
+                                    )
                                    THEN 'bollywood'
-                               WHEN LOWER(COALESCE(category, '')) LIKE '%hollywood%'
-                                    OR LOWER(COALESCE(category, '')) = 'english'
-                                    OR LOWER(COALESCE(language, '')) LIKE '%english%'
+                               WHEN LOWER(COALESCE(category, '')) ~ '(^|[^a-z])hollywood([^a-z]|$)'
+                                    OR (
+                                        LOWER(COALESCE(category, '')) IN ('english', 'english movie', 'english movies', 'movie', 'movies', 'film', 'films')
+                                        AND LOWER(COALESCE(language, '')) ~ '(^|[^a-z])english([^a-z]|$)'
+                                        AND LOWER(CONCAT_WS(' ', COALESCE(category, ''), COALESCE(genre, ''))) !~ '(korean|japan|japanese|china|chinese|anime)'
+                                    )
                                    THEN 'hollywood'
                                ELSE NULL
                            END AS collection,
