@@ -1513,6 +1513,11 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Missing query'}), 400
         if len(query) > 200:
             return jsonify({'status': 'error', 'message': 'Query is too long'}), 400
+
+        normalized_query = re.sub(
+            r"'s\b|’s\b", "", query.lower()
+        )
+        normalized_query = re.sub(r"[^a-z0-9]", "", normalized_query)
     
         cache_key = f"api_search_{query}"
         cached = search_cache.get(cache_key)
