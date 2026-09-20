@@ -1504,6 +1504,46 @@ document.addEventListener('keydown', (e) => {
         closeWebPlayer();
     }
 });
+        window.shareCurrentMovie = async function() {
+            if (!activeMovie) {
+                showToast('Open a movie first');
+                return;
+            }
+
+            const title = String(activeMovie.title || 'this movie').trim();
+            const movieId = activeMovie.id;
+            const shareUrl = movieId
+                ? `${window.location.origin}/webapp?movie=${encodeURIComponent(movieId)}`
+                : window.location.href;
+            const shareText = `Watch ${title} on FlimfyBox 🎬`;
+
+            try {
+                if (navigator.share) {
+                    await navigator.share({ title: `${title} · FlimfyBox`, text: shareText, url: shareUrl });
+                    return;
+                }
+            } catch (error) {
+                if (error && error.name === 'AbortError') return;
+            }
+
+            const telegramShareUrl = `https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`;
+            try {
+                if (tg && typeof tg.openTelegramLink === 'function') {
+                    tg.openTelegramLink(telegramShareUrl);
+                    return;
+                }
+            } catch (_error) {
+                // Fall through to clipboard for browsers and older Telegram clients.
+            }
+
+            try {
+                await navigator.clipboard.writeText(`${shareText}\n${shareUrl}`);
+                showToast('Share link copied');
+            } catch (_error) {
+                showToast('Copy the movie link from your browser');
+            }
+        };
+
         // Details
         window.openDetails = function(id, isTMDB) {
             const movie = isTMDB ? tmdbMoviesMap[id] : allMovies.find(m => m.id == id);
@@ -1964,6 +2004,7 @@ document.addEventListener('keydown', (e) => {
         setTimeout(() => {
             const urlParams = new URLSearchParams(window.location.search);
             const reqQuery = urlParams.get('req');
+            const sharedMovieId = urlParams.get('movie');
             
             if (reqQuery) {
                 const searchInput = document.getElementById('searchInput');
@@ -1971,5 +2012,21 @@ document.addEventListener('keydown', (e) => {
                 showToast("🔍 Finding correct spelling...");
                 // Search ko trigger karo
                 searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            if (sharedMovieId) {
+                const cachedMovie = allMovies.find(movie => String(movie.id) === String(sharedMovieId));
+                if (cachedMovie) {
+                    openDetails(String(sharedMovieId), false);
+                } else {
+                    fetch(`/api/movie/${encodeURIComponent(sharedMovieId)}`)
+                        .then(response => response.ok ? response.json() : null)
+                        .then(data => {
+                            if (!data || data.status !== 'success' || !data.movie) return;
+                            const sharedMovie = { ...data.movie, source: 'local' };
+                            allMovies = [sharedMovie, ...allMovies.filter(movie => String(movie.id) !== String(sharedMovieId))];
+                            openDetails(String(sharedMovieId), false);
+                        })
+                        .catch(() => showToast('This movie is temporarily unavailable'));
+                }
             }
         }, 500); // Thoda ruk kar karenge taaki app load ho jaye

@@ -30,6 +30,11 @@ assert.match(source, /poster-placeholder\.svg/);
 assert.match(source, /IMAGE_FALLBACK_GRADIENT/);
 assert.match(source, /chat-room-banner/);
 assert.match(source, /chat-send/);
+assert.match(source, /window\.shareCurrentMovie = async function\(\)/);
+assert.match(source, /\/webapp\?movie=/);
+assert.match(source, /navigator\.share/);
+assert.match(source, /https:\/\/t\.me\/share\/url/);
+assert.match(source, /urlParams\.get\('movie'\)/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);

@@ -3749,7 +3749,7 @@ async def show_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=get_join_keyboard(),
                 parse_mode='Markdown'
             )
-            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return
         
         # Show genre selection
@@ -3759,7 +3759,7 @@ async def show_genre_selection(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
-        track_message_for_deletion(context, chat_id, msg.message_id, 180)
+        track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
 
 
 async def handle_genre_selection(update: Update, context:  ContextTypes.DEFAULT_TYPE):
@@ -4372,7 +4372,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             track_user_message_for_deletion(context, target_chat_id, warning_msg)
         elif not sent_msg:
             err_msg = await context.bot.send_message(chat_id=target_chat_id, text="❌ Error: File not found or Bot needs Admin rights in Source Channel.")
-            track_message_for_deletion(context, target_chat_id, err_msg.message_id, 30)
+            track_message_for_deletion(context, target_chat_id, err_msg.message_id, USER_TEXT_DELETE_SECONDS)
 
         if sent_msg and update.callback_query:
             try:
@@ -4391,7 +4391,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     ),
                     parse_mode='HTML'
                 )
-                track_message_for_deletion(context, target_chat_id, warn_text_msg.message_id, 55)
+                track_message_for_deletion(context, target_chat_id, warn_text_msg.message_id, USER_TEXT_DELETE_SECONDS)
             except:
                 pass
 
@@ -4546,7 +4546,7 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
         else:
             # Agar movie nahi mili
             fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
-            track_message_for_deletion(context, chat_id, fail_msg.message_id, 10)
+            track_message_for_deletion(context, chat_id, fail_msg.message_id, USER_TEXT_DELETE_SECONDS)
 
     except Exception as e:
         logger.error(f"Error in deliver_movie: {e}")
@@ -4619,7 +4619,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_join_keyboard(),
                 parse_mode='Markdown'
             )
-            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return
     # ==================
 
@@ -4671,7 +4671,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     if not res:
                         msg = await context.bot.send_message(chat_id, "❌ <b>Link Expired ya Invalid hai!</b>\nKripya app par jaakar dobara click karein.", parse_mode='HTML')
-                        track_message_for_deletion(context, chat_id, msg.message_id, 15)
+                        track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
                         return
                     
                     movie_id, movie_file_id, created_at = res
@@ -4964,7 +4964,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif query == '🙋 Request Movie':
             msg = await update.message.reply_text("Okay, you've chosen to request a new movie. Please tell me the name of the movie you want me to add.")
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return REQUESTING
 
         elif query == '📊 My Stats':
@@ -4986,7 +4986,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - Fulfilled Requests: {fulfilled_count}
 """
                     msg = await update.message.reply_text(stats_text)
-                    track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
+                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
                 else:
                     await update.message.reply_text("Sorry, database connection failed.")
             except Exception as e:
@@ -5008,7 +5008,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Just use the buttons below to navigate!
             """
             msg = await update.message.reply_text(help_text)
-            track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return MAIN_MENU
         else:
             return await search_movies(update, context)
@@ -5268,7 +5268,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         
-        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
         return # <--- YAHAN SE BHI MAIN_MENU HATA DIYA HAI
 
     except Exception as e:
@@ -5293,13 +5293,13 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🛑 तुम बहुत जल्दी-जल्दी requests भेज रहे हो। कुछ देर रोकें (कुछ मिनट) और फिर कोशिश करें।\n"
                 "बार‑बार भेजने से फ़ायदा नहीं होगा।"
             )
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return REQUESTING
 
         intent = await analyze_intent(user_message)
         if not intent["is_request"]:
             msg = await update.message.reply_text("यह एक मूवी/सीरीज़ का नाम नहीं लग रहा है। कृपया सही नाम भेजें।")
-            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+            track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return REQUESTING
 
         movie_title = intent["content_title"] or user_message
@@ -5318,7 +5318,7 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Kripya {minutes_left} minute baad dobara koshish karein. 🙏"
                 )
                 msg = await update.message.reply_text(strict_text)
-                track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+                track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
                 return REQUESTING
 
         stored = await run_async(store_user_request,
@@ -5341,7 +5341,7 @@ async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Got it! Your request for '{movie_title}' has been sent. I'll let you know when it's available.",
             reply_markup=get_main_keyboard()
         )
-        track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
 
         return MAIN_MENU
 
@@ -5382,7 +5382,7 @@ async def request_movie_from_button(update: Update, context: ContextTypes.DEFAUL
             reply_markup=confirm_keyboard,
             parse_mode='HTML'
         )
-        track_message_for_deletion(update.effective_chat.id, msg.message_id, 180)
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
         
         return MAIN_MENU
 
@@ -5551,7 +5551,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await query.message.delete()
             except: pass
             msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
-            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return
 
         elif data == "start_about":
@@ -5569,7 +5569,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await query.message.delete()
             except: pass
             msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
-            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return
             
         elif data == "start_donate":
@@ -6052,7 +6052,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Send All Error: {e}")
 
         await status_msg.edit_text(f"✅ **Sent {count}/{len(page_files)} Files (Page {current_page})!**", parse_mode='Markdown')
-        track_message_for_deletion(context, chat_id, status_msg.message_id, 30)
+        track_message_for_deletion(context, chat_id, status_msg.message_id, USER_TEXT_DELETE_SECONDS)
         return
     
     # === NEW: SCAN INFO POPUP ===
@@ -6246,7 +6246,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Click /start or search any movie.",
                     parse_mode='Markdown'
                 )
-                track_message_for_deletion(context, chat_id, query.message.message_id, 10)
+                track_message_for_deletion(context, chat_id, query.message.message_id, USER_TEXT_DELETE_SECONDS)
         else:
             # Agar abhi bhi join nahi kiya
             try:
@@ -6356,7 +6356,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=keyboard_markup,
                         parse_mode='HTML'
                     )
-                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
                 except Exception as e:
                     logger.error(f"Failed to send photo: {e}")
                     # send as text if photo fails
@@ -6367,7 +6367,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode='HTML',
                         disable_web_page_preview=True
                     )
-                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+                    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             else:
                 await query.edit_message_text(
                     selection_text,
@@ -6375,7 +6375,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='HTML',
                     disable_web_page_preview=True
                 )
-                track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 60)
+                track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, USER_TEXT_DELETE_SECONDS)
             
             return
 
@@ -6970,7 +6970,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel the current operation"""
     msg = await update.message.reply_text("Operation cancelled.", reply_markup=get_main_keyboard())
-    track_message_for_deletion(update.effective_chat.id, msg.message_id, 60)
+    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
     return MAIN_MENU
 
 # ==================== NEW MULTI-CHANNEL BACKUP FUNCTIONS ====================
@@ -12562,7 +12562,7 @@ async def start_request_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     
     # Is instruction message ko bhi delete list me daal dein (2 min baad)
-    track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, 120)
+    track_message_for_deletion(context, update.effective_chat.id, query.message.message_id, USER_TEXT_DELETE_SECONDS)
     
     # State change -> Ab Bot sirf Name ka wait karega
     return WAITING_FOR_NAME
@@ -12573,14 +12573,14 @@ async def handle_request_name_input(update: Update, context: ContextTypes.DEFAUL
     chat_id = update.effective_chat.id
     
     # User ka message delete karne ke liye (Clean Chat)
-    track_message_for_deletion(context, chat_id, update.message.message_id, 120)
+    track_message_for_deletion(context, chat_id, update.message.message_id, USER_TEXT_DELETE_SECONDS)
 
     # ✅ FIXED: Safety Check - Agar user ne koi Menu Button daba diya
     MENU_BUTTONS = ['🔍 Search Movies', '📂 Browse by Genre', '🙋 Request Movie', '📊 My Stats', '❓ Help']
 
     if user_name_input.startswith('/') or user_name_input in MENU_BUTTONS:
         msg = await update.message.reply_text("❌ **Request Process Cancelled.**")
-        track_message_for_deletion(context, chat_id, msg.message_id, 10)
+        track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
         # Us button ka original function chala do
         await main_menu_or_search(update, context)
         return ConversationHandler.END
@@ -12605,7 +12605,7 @@ async def handle_request_name_input(update: Update, context: ContextTypes.DEFAUL
     )
     
     # ⚡ Ye Confirmation message 60 seconds me delete ho jayega
-    track_message_for_deletion(context, chat_id, msg.message_id, 60)
+    track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
     
     return CONFIRMATION
 
@@ -12621,7 +12621,7 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
     if choice == "confirm_no":
         await query.edit_message_text("❌ Request Cancelled. आप दोबारा सर्च या रिक्वेस्ट कर सकते हैं।")
         # Cancel message auto delete in 10 seconds
-        track_message_for_deletion(context, chat_id, query.message.message_id, 10)
+        track_message_for_deletion(context, chat_id, query.message.message_id, USER_TEXT_DELETE_SECONDS)
         context.user_data.pop('temp_request_name', None)
         return ConversationHandler.END
         
@@ -12658,7 +12658,7 @@ async def handle_confirmation_callback(update: Update, context: ContextTypes.DEF
             await query.edit_message_text("❌ Error: Request save नहीं हो पाई। शायद यह पहले से पेंडिंग है।")
             
         # ⚡ Success Message Auto Delete (60 Seconds)
-        track_message_for_deletion(context, chat_id, query.message.message_id, 60)
+        track_message_for_deletion(context, chat_id, query.message.message_id, USER_TEXT_DELETE_SECONDS)
             
         context.user_data.pop('temp_request_name', None)
         return ConversationHandler.END
@@ -12667,7 +12667,7 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """2 Minute Timeout Handler"""
     if update.effective_message:
         msg = await update.effective_message.reply_text("⏳ <b>Session Expired:</b> रिक्वेस्ट का समय समाप्त हो गया।", parse_mode='HTML')
-        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 30)
+        track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
     return ConversationHandler.END
 
 async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12694,7 +12694,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=get_join_keyboard(),
                 parse_mode='Markdown'
             )
-            track_message_for_deletion(context, chat_id, msg.message_id, 120)
+            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
             return
     # ============================================
 
@@ -12706,7 +12706,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     # === 2. Menu Button Logic ===
     if query_text == '🔍 Search Movies':
         msg = await update.message.reply_text("Great! Just type the name of the movie you want to search for.")
-        track_message_for_deletion(context, chat_id, msg.message_id, 60)
+        track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
         return
 
     elif query_text == '🙋 Request Movie':
@@ -12719,7 +12719,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=keyboard, 
             parse_mode='Markdown'
         )
-        track_message_for_deletion(context, chat_id, msg.message_id, 60)
+        track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
         return
 
     elif query_text == '📊 My Stats':
@@ -12736,7 +12736,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"📊 **Your Stats**\n\n📝 Total Requests: {req}\n✅ Fulfilled: {ful}",
                     parse_mode='Markdown'
                 )
-                track_message_for_deletion(context, chat_id, stats_msg.message_id, 120)
+                track_message_for_deletion(context, chat_id, stats_msg.message_id, USER_TEXT_DELETE_SECONDS)
             except Exception as e:
                 logger.error(f"Stats Error: {e}")
             finally:
@@ -12751,7 +12751,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             "3. **Download:** Click the buttons provided."
         )
         msg = await update.message.reply_text(help_text, parse_mode='Markdown')
-        track_message_for_deletion(context, chat_id, msg.message_id, 120)
+        track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
         return
 
     # === 3. If no button matched, Search for the Movie ===
@@ -12825,7 +12825,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     
     # Auto-delete (Optional - 2 min)
-    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 120)
+    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
 
 async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a compact, randomized welcome when a human joins a group."""
