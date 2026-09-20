@@ -1435,6 +1435,17 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
     --glass-shadow: 0 18px 42px rgba(0, 0, 0, .34);
 }
 
+html,
+body {
+    width: 100%;
+    min-width: 100%;
+    min-height: 100%;
+}
+
+body {
+    min-height: 100dvh;
+}
+
 .app-header,
 .search-box,
 .search-dropdown,
@@ -1507,4 +1518,45 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
         background: linear-gradient(135deg, rgba(12, 15, 29, .12), rgba(12, 15, 29, .56));
     }
     .bottom-nav { background: rgba(17, 20, 29, .72); }
+}
+
+/* Use the entire available viewport on tablets and desktops. */
+@media (min-width: 700px) {
+    body {
+        width: 100vw;
+        min-height: 100dvh;
+        padding-left: 0;
+        padding-bottom: 32px;
+    }
+
+    .app-header,
+    .search-section,
+    #mainContent,
+    #searchResultsContent,
+    #myListContent,
+    #exploreContent,
+    #genreDetailPage,
+    #detailsPage {
+        width: 100%;
+        max-width: none;
+        margin-inline: 0;
+    }
+
+    .app-header { padding-inline: clamp(24px, 4vw, 64px); }
+    .search-section { padding-inline: clamp(24px, 4vw, 64px); }
+    #mainContent,
+    #searchResultsContent,
+    #myListContent,
+    #exploreContent,
+    #genreDetailPage,
+    #detailsPage {
+        padding-inline: clamp(24px, 4vw, 64px);
+    }
+}
+
+@media (min-width: 1400px) {
+    .hero-slider { height: min(72vh, 680px); min-height: 520px; }
+    .hero-overlay { min-height: 520px; padding: clamp(48px, 5vw, 96px); }
+    .horizontal-scroll { gap: 16px; }
+    .card { flex-basis: 158px; }
 }

@@ -4,6 +4,19 @@ const tg = window.Telegram?.WebApp || {
             HapticFeedback: { notificationOccurred() {}, impactOccurred() {} }, initDataUnsafe: {}, initData: ''
         };
         tg.expand();
+        if (
+            typeof tg.requestFullscreen === 'function'
+            && (typeof tg.isVersionAtLeast !== 'function' || tg.isVersionAtLeast('8.0'))
+        ) {
+            try {
+                const fullscreenRequest = tg.requestFullscreen();
+                if (fullscreenRequest && typeof fullscreenRequest.catch === 'function') {
+                    fullscreenRequest.catch(() => {});
+                }
+            } catch (error) {
+                console.debug('Telegram fullscreen is not available in this client:', error);
+            }
+        }
         tg.ready();
         const BOT_USERNAME = "FlimfyBoxBot"; // change if needed
 

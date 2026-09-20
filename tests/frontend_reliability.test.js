@@ -17,6 +17,9 @@ function mutationGate(inFlight) {
 }
 
 assert.match(source, /function apiRequest\(url, options = \{\}\)/);
+assert.match(source, /typeof tg\.requestFullscreen === 'function'/);
+assert.match(source, /tg\.requestFullscreen\(\)/);
+assert.match(source, /tg\.isVersionAtLeast\('8\.0'\)/);
 assert.match(source, /if \(!response\.ok \|\| \(data && data\.status === 'error'\)\)/);
 assert.match(source, /detailsController\.abort\(\)/);
 assert.match(source, /searchController\.abort\(\)/);
