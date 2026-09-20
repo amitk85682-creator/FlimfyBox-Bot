@@ -1843,6 +1843,10 @@ body {
 /* Browse desktop follows the reference bento catalogue: fixed artwork,
    cinematic overlays, and a clear Explore treatment. */
 @media (min-width: 700px) {
+    body.screen-explore .search-section {
+        display: none !important;
+    }
+
     body.screen-explore #exploreContent {
         width: min(100% - 64px, 1180px);
         padding-bottom: 120px;
@@ -1872,7 +1876,7 @@ body {
     }
 
     body.screen-explore #exploreContent .browse-surprise-panel {
-        display: none;
+        display: none !important;
     }
 
     body.screen-explore #exploreContent .browse-type-toggle {
@@ -1885,16 +1889,18 @@ body {
     }
 
     body.screen-explore #exploreContent .genre-card-grid {
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        grid-auto-rows: 146px;
-        gap: 14px;
+        display: grid !important;
+        grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+        grid-auto-rows: 146px !important;
+        gap: 14px !important;
     }
 
     body.screen-explore #exploreContent .genre-card,
     body.screen-explore #exploreContent .genre-card:nth-child(1),
     body.screen-explore #exploreContent .genre-card:nth-child(4n) {
-        min-height: 0;
-        height: auto;
+        display: flex !important;
+        min-height: 0 !important;
+        height: auto !important;
         aspect-ratio: auto;
         padding: 20px;
         border-radius: 17px;
