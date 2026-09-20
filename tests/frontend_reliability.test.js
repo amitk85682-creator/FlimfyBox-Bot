@@ -67,10 +67,15 @@ const template = fs.readFileSync(
   path.join(__dirname, '..', 'templates', 'mini_app.html'),
   'utf8'
 );
-assert.doesNotMatch(template, /id="heroTitle"|id="heroMeta"|id="heroWatch"|id="heroInfo"|class="hero-info"/);
+assert.match(template, /id="heroTitle"/);
+assert.match(template, /id="heroMeta"/);
+assert.match(template, /id="heroWatch"/);
+assert.match(template, /id="heroInfo"/);
+assert.match(template, /class="hero-info"/);
 assert.match(source, /heroSlider\.style\.backgroundImage/);
 assert.match(source, /heroTimer = setInterval\(\(\) => stepHero\(1\), 6500\)/);
-assert.doesNotMatch(source, /getElementById\('heroTitle'\)|getElementById\('heroMeta'\)|getElementById\('heroWatch'\)|getElementById\('heroInfo'\)/);
+assert.match(source, /getElementById\('heroTitle'\)/);
+assert.match(styles, /\.hero-info\s*\{[\s\S]*padding:\s*0 !important[\s\S]*border:\s*0 !important[\s\S]*background:\s*transparent !important[\s\S]*box-shadow:\s*none !important/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);

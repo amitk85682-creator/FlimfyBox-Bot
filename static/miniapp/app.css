@@ -1625,6 +1625,25 @@ body {
     .card { flex-basis: 158px; }
 }
 
+/* Keep featured information readable on the artwork without a separate card. */
+.hero-info {
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+.hero-info h2,
+.hero-info p,
+.hero-actions {
+    opacity: 1 !important;
+    transform: none !important;
+    animation: none !important;
+}
+
 @media (min-width: 700px) {
     body {
         overflow-x: hidden;
