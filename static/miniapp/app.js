@@ -25,6 +25,7 @@ const tg = window.Telegram?.WebApp || {
         let tmdbMoviesMap = {};
         let activeMovie = null;
         let activeDetailsMovieId = null;
+        const movieDetailsCache = new Map();
         let savedMovieIds = new Set();
         let myListToggleInFlight = false;
         let myListRequestId = 0;
@@ -1586,6 +1587,10 @@ document.addEventListener('keydown', (e) => {
             document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
+            // The card already contains the title, poster, year, rating and genre.
+            // Show that immediately while files/cast finish loading in the background.
+            detailsDescription.innerText = movie.description || 'Details and availability are loading…';
+            detailsPage.classList.remove('is-loading');
             if (isTMDB) {
                 const backdropImg = movie.image;
                 document.getElementById('dpBackdrop').style.backgroundImage = backdropImg
@@ -1603,7 +1608,10 @@ document.addEventListener('keydown', (e) => {
                 return;
             }
 
-            fetch(`/api/movie/${id}`, { signal: detailsController.signal })
+            const cachedDetails = movieDetailsCache.get(String(id));
+            const detailsRequest = cachedDetails
+                ? Promise.resolve({ status: 'success', movie: cachedDetails })
+                : fetch(`/api/movie/${id}`, { signal: detailsController.signal })
                 .then(async res => {
                     let data;
                     try {
@@ -1615,11 +1623,14 @@ document.addEventListener('keydown', (e) => {
                         throw new Error(data.message || 'Details are temporarily unavailable.');
                     }
                     return data;
-                })
+                });
+
+            detailsRequest
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
                     if (data.status === 'success') {
                         const m = data.movie;
+                        movieDetailsCache.set(String(id), m);
                         activeMovie = { ...movie, ...m, source: 'local' };
                         addRecentlyViewed(activeMovie);
                         const backdropUrl = m.backdrop ? m.backdrop : m.image;
