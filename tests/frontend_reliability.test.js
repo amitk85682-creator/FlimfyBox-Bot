@@ -45,6 +45,8 @@ assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel\s*\{[\s\S]*
 assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel-grid button\s*\{[\s\S]*display:\s*flex/);
 assert.match(source, /const posters = \[GENRE_ARTWORK\[genre\.id\]\];/);
 assert.doesNotMatch(source, /const posters = Array\.isArray\(catalogueGenre\.posters\)/);
+assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.hero-slider\s*\{[\s\S]*border-radius:\s*24px/);
+assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.movie-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(6/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);
