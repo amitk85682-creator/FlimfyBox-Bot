@@ -19,7 +19,7 @@ def test_search_progress_copies_the_approved_loading_media():
 
 def test_approved_loading_media_points_to_the_configured_source_message():
     assert "START_GIF_CHANNEL_ID = -1003893346701" in MAIN_SOURCE
-    assert "START_GIF_MESSAGE_ID = 45005" in MAIN_SOURCE
+    assert "START_GIF_MESSAGE_ID = 62" in MAIN_SOURCE
 
 
 def test_user_message_retention_policy_uses_five_minutes_for_text_and_two_for_files():
