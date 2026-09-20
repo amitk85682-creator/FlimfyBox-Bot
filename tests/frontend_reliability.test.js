@@ -52,6 +52,8 @@ assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.hero-slider\s*\{[\s\S]
 assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.movie-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(6/);
 assert.match(styles, /\.more-panel-grid\s*\{[\s\S]*display:\s*grid\s*!important/);
 assert.match(styles, /\.more-panel-grid button\s*\{[\s\S]*display:\s*flex\s*!important/);
+assert.match(styles, /body\.screen-explore #exploreContent \.genre-card-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(4/);
+assert.match(styles, /body\.screen-explore #exploreContent \.genre-card-name::after\s*\{[\s\S]*content:\s*'Explore →'/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);
