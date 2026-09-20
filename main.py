@@ -5092,18 +5092,20 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
 
 
 async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send immediate search feedback and return the temporary message."""
-    if not update.message or not SEARCH_ERROR_GIFS:
+    """Copy the approved loading media while the catalogue search runs."""
+    if not update.message:
         return None
     try:
-        progress_message = await update.message.reply_animation(
-            animation=random.choice(SEARCH_ERROR_GIFS),
+        progress_message = await context.bot.copy_message(
+            chat_id=update.effective_chat.id,
+            from_chat_id=START_GIF_CHANNEL_ID,
+            message_id=START_GIF_MESSAGE_ID,
             caption="🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
             parse_mode='HTML',
         )
         return progress_message
     except Exception as exc:
-        logger.warning(f"Search progress animation could not be sent: {exc}")
+        logger.warning(f"Approved search loading media could not be copied: {exc}")
         try:
             return await update.message.reply_text(
                 "🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
