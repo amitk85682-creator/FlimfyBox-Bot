@@ -36,6 +36,13 @@ assert.match(source, /navigator\.share/);
 assert.match(source, /https:\/\/t\.me\/share\/url/);
 assert.match(source, /urlParams\.get\('movie'\)/);
 
+const styles = fs.readFileSync(
+  path.join(__dirname, '..', 'static', 'miniapp', 'app.css'),
+  'utf8'
+);
+assert.match(styles, /\.more-panel\.open\s*\{[\s\S]*pointer-events:\s*auto/);
+assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel\s*\{[\s\S]*display:\s*block/);
+
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);
 assert.deepEqual(mutationGate(false), { accepted: true, inFlight: true });

@@ -545,6 +545,28 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
     .genre-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     .hero-slider { max-width: 900px; margin-inline: auto; }
     .bottom-nav { right: auto; left: 50%; width: 360px; transform: translateX(-50%); }
+    .more-panel {
+        position: fixed;
+        z-index: 899;
+        right: max(24px, calc(50% - 180px));
+        bottom: 94px;
+        left: max(24px, calc(50% - 180px));
+        display: block;
+        padding: 14px;
+        border: 1px solid rgba(255,255,255,.13);
+        border-radius: 18px;
+        background: rgba(20, 22, 30, .97);
+        box-shadow: 0 -10px 35px rgba(0,0,0,.42);
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(14px);
+        transition: opacity .2s ease, transform .2s ease;
+    }
+    .more-panel.open {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+    }
 }
 @keyframes genreReveal {
     from { opacity: 0; filter: blur(6px); transform: translateY(18px) scale(.94); }
