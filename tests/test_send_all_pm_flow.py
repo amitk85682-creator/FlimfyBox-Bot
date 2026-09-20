@@ -22,6 +22,14 @@ def test_approved_loading_media_points_to_the_configured_source_message():
     assert "START_GIF_MESSAGE_ID = 45005" in MAIN_SOURCE
 
 
+def test_user_message_retention_policy_uses_five_minutes_for_text_and_two_for_files():
+    assert "USER_TEXT_DELETE_SECONDS = 5 * 60" in MAIN_SOURCE
+    assert "USER_FILE_DELETE_SECONDS = 2 * 60" in MAIN_SOURCE
+    assert "delay = USER_FILE_DELETE_SECONDS if is_file else USER_TEXT_DELETE_SECONDS" in MAIN_SOURCE
+    assert "Copyright Protection — 2 minutes" in MAIN_SOURCE
+    assert "automatically❕️deletes after 2 minutes" in MAIN_SOURCE
+
+
 def test_send_all_has_pm_start_deep_link_for_group_users():
     assert "start=sendall_{movie_id}_" in MAIN_SOURCE
     assert "await update.callback_query.answer(url=start_url)" in MAIN_SOURCE

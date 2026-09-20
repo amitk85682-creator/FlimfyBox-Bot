@@ -1969,11 +1969,11 @@ async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
     except Exception as e:
         logger.error(f"Failed to get bot info for delete queue: {e}")
 
-async def delete_messages_after_delay(context, chat_id, message_ids, delay=60):
+async def delete_messages_after_delay(context, chat_id, message_ids, delay=USER_TEXT_DELETE_SECONDS):
     """Old function ab sidha DB me save karega (No sleep)"""
     await add_messages_to_db_queue(context, chat_id, message_ids, delay)
 
-def track_message_for_deletion(context, chat_id, message_id, delay=60):
+def track_message_for_deletion(context, chat_id, message_id, delay=USER_TEXT_DELETE_SECONDS):
     """Synchronous code se DB me entry dalne ke liye helper"""
     if not message_id: return
     
@@ -4262,11 +4262,13 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
             # 👆 FIX KHATAM 👆
             
-            track_message_for_deletion(context, chat_id, msg.message_id, 60)
+            track_message_for_deletion(
+                context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS
+            )
             
             if update.callback_query:
                 try:
-                    await update.callback_query.answer("This file menu expires in 1 minute.", show_alert=True)
+                    await update.callback_query.answer("This file menu expires in 5 minutes.", show_alert=True)
                 except:
                     pass
             return
@@ -4374,7 +4376,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         if sent_msg and update.callback_query:
             try:
-                await update.callback_query.answer("✅ File Sent!\n⚠️ Ye file aur message 1 minute baad delete ho jayegi.", show_alert=True)
+                await update.callback_query.answer("✅ File Sent!\n⚠️ Ye file aur message 2 minutes baad delete ho jayegi.", show_alert=True)
             except:
                 pass
         elif sent_msg and not update.callback_query:
@@ -4384,7 +4386,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     chat_id=target_chat_id,
                     text=(
                         "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
-                        "◈ ऊपर भेजी गयी file <b>1 minute</b> बाद auto-delete हो जाएगी।\n"
+                        "◈ ऊपर भेजी गयी file <b>2 minutes</b> बाद auto-delete हो जाएगी।\n"
                         "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
                     ),
                     parse_mode='HTML'
@@ -4506,7 +4508,9 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
         status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
         
         # Backup Auto-delete
-        track_message_for_deletion(context, chat_id, status_msg.message_id, 60)
+        track_message_for_deletion(
+            context, chat_id, status_msg.message_id, USER_TEXT_DELETE_SECONDS
+        )
     except:
         pass
 
@@ -5088,7 +5092,9 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
             parse_mode='HTML',
             disable_web_page_preview=True
         )
-    track_message_for_deletion(context, update.effective_chat.id, msg.message_id, 60)
+    track_message_for_deletion(
+        context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS
+    )
 
 
 async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11330,7 +11336,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
 
         warning_msg = await context.bot.send_message(
             chat_id=user_id,
-            text="ᯓ➤This file automatically❕️deletes after 1 minute❕️so please forward it to another chat જ⁀➴",
+            text="ᯓ➤This file automatically❕️deletes after 2 minutes❕️so please forward it to another chat જ⁀➴",
             parse_mode='Markdown'
         )
 
@@ -11407,7 +11413,7 @@ async def notify_user_with_media(update: Update, context: ContextTypes.DEFAULT_T
                     context,
                     user_id,
                     [sent_msg.message_id, warning_msg.message_id],
-                    60
+                    USER_FILE_DELETE_SECONDS
                 )
             )
 
@@ -11604,9 +11610,11 @@ async def quick_notify(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=join_keyboard
                     )
 
-                # 🛡️ AUTO-DELETE: Copyright Protection — 60 sec baad file delete
+                # 🛡️ AUTO-DELETE: Copyright Protection — 2 minutes baad file delete
                 if sent_msg:
-                    track_message_for_deletion(context, user_id, sent_msg.message_id, 60)
+                    track_message_for_deletion(
+                        context, user_id, sent_msg.message_id, USER_FILE_DELETE_SECONDS
+                    )
 
                 success_count += 1
 
