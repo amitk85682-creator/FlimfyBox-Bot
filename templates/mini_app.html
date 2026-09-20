@@ -9,7 +9,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=hero-balanced-1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=hero-clean-1">
 </head>
 <body>
     <section class="app-loading-screen" id="appLoadingScreen" aria-live="polite" aria-label="Loading FlimfyBox">
@@ -39,18 +39,6 @@
     </div>
     <div id="mainContent">
         <div class="hero-slider" id="heroSlider" aria-label="Featured title">
-            <div class="hero-overlay">
-                <div class="hero-info">
-                    <span class="eyebrow">FEATURED TODAY</span>
-                    <h2 id="heroTitle">Loading...</h2>
-                    <p id="heroMeta">Premium Collection</p>
-                    <div class="hero-actions">
-                        <button class="watch-button" type="button" id="heroWatch"><i class="fas fa-play"></i> Watch now</button>
-                        <button class="hero-info-button" type="button" id="heroInfo" aria-label="View details"><i class="fas fa-circle-info"></i> Details</button>
-                        <button class="round-button" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
-                    </div>
-                </div>
-            </div>
             <div class="hero-controls" aria-label="Featured title controls">
                 <button type="button" id="heroPrevious" aria-label="Previous featured title" onclick="stepHero(-1)"><i class="fas fa-chevron-left"></i></button>
                 <span id="heroPosition" aria-live="polite">1 / 1</span>

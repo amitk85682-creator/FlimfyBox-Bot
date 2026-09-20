@@ -1128,28 +1128,9 @@ const tg = window.Telegram?.WebApp || {
             heroIndex = (index + heroItems.length) % heroItems.length;
             const movie = heroItems[heroIndex];
             const heroSlider = document.getElementById('heroSlider');
-            const openHeroDetails = () => {
-                if (!allMovies.some(item => String(item.id) === String(movie.id))) {
-                    allMovies.push(movie);
-                }
-                openDetails(String(movie.id), false);
-            };
-            const heroListButton = heroSlider.querySelector('.round-button');
-            if (heroListButton) {
-                heroListButton.onclick = () => {
-                    activeMovie = movie;
-                    activeDetailsMovieId = String(movie.id);
-                    toggleCurrentMyList();
-                };
-            }
             heroSlider.style.backgroundImage = movie.image
                 ? `url("${movie.image}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
-            document.getElementById('heroTitle').innerText = movie.title;
-            document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
-            document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
-            document.getElementById('heroWatch').onclick = openHeroDetails;
-            document.getElementById('heroInfo').onclick = openHeroDetails;
             heroSlider.querySelectorAll('.hero-progress-dot').forEach((dot, dotIndex) => dot.classList.toggle('active', dotIndex === heroIndex));
             const position = document.getElementById('heroPosition');
             if (position) position.textContent = `${heroIndex + 1} / ${heroItems.length}`;
@@ -1340,9 +1321,6 @@ const tg = window.Telegram?.WebApp || {
                         .filter((movie, index, items) => items.findIndex(item => String(item.id) === String(movie.id)) === index);
                     if (!heroItems.length) {
                         heroSlider.classList.add('is-loading');
-                        document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
-                        document.getElementById('heroTitle').innerText = 'Trending titles aren\'t in the catalogue yet';
-                        document.getElementById('heroMeta').innerText = 'TMDB ranking is available, but local catalogue coverage is empty';
                         return;
                     }
                     heroSlider.classList.remove('is-loading');
@@ -1356,9 +1334,6 @@ const tg = window.Telegram?.WebApp || {
                     console.error('Trending load failed:', error);
                     const heroSlider = document.getElementById('heroSlider');
                     heroSlider.classList.add('is-loading');
-                    document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
-                    document.getElementById('heroTitle').innerText = 'Trending titles are temporarily unavailable';
-                    document.getElementById('heroMeta').innerText = 'Please refresh in a moment';
                 })
                 .finally(completeInitialHomeLoadingStep);
 
