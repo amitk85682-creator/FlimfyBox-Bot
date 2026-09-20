@@ -43,6 +43,8 @@ const styles = fs.readFileSync(
 assert.match(styles, /\.more-panel\.open\s*\{[\s\S]*pointer-events:\s*auto/);
 assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel\s*\{[\s\S]*display:\s*block/);
 assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel-grid button\s*\{[\s\S]*display:\s*flex/);
+assert.match(source, /const posters = \[GENRE_ARTWORK\[genre\.id\]\];/);
+assert.doesNotMatch(source, /const posters = Array\.isArray\(catalogueGenre\.posters\)/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);

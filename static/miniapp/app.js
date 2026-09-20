@@ -999,9 +999,9 @@ const tg = window.Telegram?.WebApp || {
                 const cards = section.items.map(genre => {
                     const catalogueGenre = genreCatalog[genre.id] || {};
                     const count = catalogueGenre.count || 0;
-                    const posters = Array.isArray(catalogueGenre.posters) && catalogueGenre.posters.length
-                        ? catalogueGenre.posters
-                        : [GENRE_ARTWORK[genre.id]];
+                    // Browse tiles use curated, stable artwork. Catalogue posters
+                    // belong to the genre detail results and must not replace these.
+                    const posters = [GENRE_ARTWORK[genre.id]];
                     const palette = getGenreVisualPalette(genre.group);
                     return `
                         <button class="genre-card genre-${genre.id} ${count === 0 ? 'empty' : ''}" type="button" data-genre-group="${genre.group}" onclick="openGenreDetail('${genre.id}')" style="--genre-from: ${palette.from}; --genre-to: ${palette.to}; --genre-glow: ${palette.glow};">
