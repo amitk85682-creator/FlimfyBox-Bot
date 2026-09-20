@@ -56,6 +56,9 @@ assert.match(styles, /body\.screen-explore #exploreContent \.genre-card-grid\s*\
 assert.match(styles, /body\.screen-explore #exploreContent \.genre-card-name::after\s*\{[\s\S]*content:\s*'Explore →'/);
 assert.match(styles, /body\.screen-explore \.search-section\s*\{[\s\S]*display:\s*none !important/);
 assert.match(styles, /body\.screen-explore #exploreContent \.browse-surprise-panel\s*\{[\s\S]*display:\s*none !important/);
+assert.match(styles, /\.bottom-nav\s*\{[\s\S]*flex-direction:\s*row !important/);
+assert.match(styles, /\.bottom-nav \.nav-item\s*\{[\s\S]*flex-direction:\s*column !important/);
+assert.match(styles, /\.bottom-nav\s*\{[\s\S]*max-height:\s*84px !important/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);

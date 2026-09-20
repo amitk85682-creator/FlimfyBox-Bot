@@ -1840,6 +1840,48 @@ body {
     }
 }
 
+/* Defensive navigation contract: the main nav is always a compact bottom row.
+   Keep it independent from the More popover and any inherited flex rules. */
+.bottom-nav {
+    position: fixed !important;
+    z-index: 900 !important;
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: stretch !important;
+    justify-content: space-around !important;
+    height: auto !important;
+    max-height: 84px !important;
+    overflow: visible !important;
+}
+
+.bottom-nav .nav-item {
+    display: flex !important;
+    flex: 1 1 0 !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-width: 0 !important;
+    height: auto !important;
+    max-height: 68px !important;
+    transform: none;
+}
+
+.header-close {
+    display: inline-flex !important;
+    width: auto !important;
+    height: auto !important;
+    min-height: 32px;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 9px !important;
+    border: 1px solid rgba(255,255,255,.12) !important;
+    border-radius: 9px !important;
+    color: #f4f6ff !important;
+    background: rgba(25, 30, 53, .8) !important;
+    line-height: 1;
+}
+
 /* Browse desktop follows the reference bento catalogue: fixed artwork,
    cinematic overlays, and a clear Explore treatment. */
 @media (min-width: 700px) {
