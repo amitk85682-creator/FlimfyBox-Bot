@@ -39,3 +39,20 @@ def test_send_all_has_pm_start_deep_link_for_group_users():
 def test_send_all_deep_link_delivers_only_requested_page():
     assert "page_files = qualities[start:start + 10]" in MAIN_SOURCE
     assert "payload.startswith(\"sendall_\")" in MAIN_SOURCE
+
+
+def test_search_loading_media_is_cleaned_up_on_every_search_exit():
+    search_source = MAIN_SOURCE[
+        MAIN_SOURCE.index("async def search_movies("):
+        MAIN_SOURCE.index("async def request_movie(", MAIN_SOURCE.index("async def search_movies("))
+    ]
+    assert "finally:" in search_source
+    assert "await remove_search_progress(progress_message)" in search_source
+
+
+def test_file_warning_sticker_uses_file_retention_window():
+    assert (
+        "track_user_message_for_deletion(\n"
+        "                        context, user_id, warning_msg, is_file=True"
+        in MAIN_SOURCE
+    )

@@ -3545,7 +3545,9 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         context, user_id, sent_msg, is_file=is_file_message
                     )
                 if warning_msg:
-                    track_user_message_for_deletion(context, user_id, warning_msg)
+                    track_user_message_for_deletion(
+                        context, user_id, warning_msg, is_file=True
+                    )
 
                 cur.execute(
                     "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
@@ -5276,6 +5278,9 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in search_movies: {e}")
         # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
         return
+    finally:
+        # The temporary loading GIF must never remain after the search finishes.
+        await remove_search_progress(progress_message)
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
