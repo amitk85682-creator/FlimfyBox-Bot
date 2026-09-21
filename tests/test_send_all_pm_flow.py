@@ -67,3 +67,16 @@ def test_auto_delete_worker_retries_failed_telegram_deletions():
     worker_source = MAIN_SOURCE[MAIN_SOURCE.index("async def auto_delete_worker("):]
     assert "Auto-delete retry needed" in worker_source
     assert "else:\n                        cur.execute(\"DELETE FROM auto_delete_queue" in worker_source
+
+
+def test_temporary_search_and_file_status_media_are_also_tracked():
+    assert (
+        "track_user_message_for_deletion(\n"
+        "                            context, chat_id, status_msg, is_file=True"
+        in MAIN_SOURCE
+    )
+    search_source = MAIN_SOURCE[
+        MAIN_SOURCE.index("async def send_search_progress("):
+        MAIN_SOURCE.index("async def remove_search_progress(", MAIN_SOURCE.index("async def send_search_progress("))
+    ]
+    assert "track_user_message_for_deletion(" in search_source

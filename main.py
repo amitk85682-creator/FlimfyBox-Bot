@@ -4746,6 +4746,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         from_chat_id=-1003893346701,
                         message_id=8675
                     ))
+                    if status_msg:
+                        track_user_message_for_deletion(
+                            context, chat_id, status_msg, is_file=True
+                        )
                     
                     # File ka data nikalo
                     qualities = get_all_movie_qualities(movie_id)
@@ -5112,6 +5116,9 @@ async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYP
             caption="🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
             parse_mode='HTML',
         )
+        track_user_message_for_deletion(
+            context, update.effective_chat.id, progress_message
+        )
         return progress_message
     except Exception as exc:
         logger.warning(f"Approved search loading media could not be copied: {exc}")
@@ -5120,6 +5127,10 @@ async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYP
                 "🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
                 parse_mode='HTML',
             )
+            track_user_message_for_deletion(
+                context, update.effective_chat.id, msg
+            )
+            return msg
         except Exception as fallback_exc:
             logger.warning(f"Search progress message could not be sent: {fallback_exc}")
             return None
