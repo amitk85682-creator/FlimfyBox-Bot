@@ -25,6 +25,8 @@ assert.match(source, /detailsController\.abort\(\)/);
 assert.match(source, /searchController\.abort\(\)/);
 assert.match(source, /browseController\.abort\(\)/);
 assert.match(source, /if \(isAbortError\(error\)\) return;/);
+assert.match(source, /Search suggestions unavailable/);
+assert.match(source, /const suggestions = Array\.isArray\(suggestionResponse\) \? suggestionResponse : \[\]/);
 assert.match(source, /String\(activeDetailsMovieId\) !== mutationMovieId/);
 assert.match(source, /poster-placeholder\.svg/);
 assert.match(source, /IMAGE_FALLBACK_GRADIENT/);

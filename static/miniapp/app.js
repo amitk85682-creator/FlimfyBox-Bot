@@ -1418,11 +1418,18 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
         searchController = new AbortController();
         const signal = searchController.signal;
         try {
+            const suggestionPromise = fetch(`/api/suggest?q=${encodeURIComponent(q)}`, { signal })
+                .then(response => response.ok ? response.json() : [])
+                .catch(error => {
+                    if (isAbortError(error)) throw error;
+                    console.warn('Search suggestions unavailable:', error);
+                    return [];
+                });
             const [suggestionResponse, response] = await Promise.all([
-                fetch(`/api/suggest?q=${encodeURIComponent(q)}`, { signal }),
+                suggestionPromise,
                 fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal })
             ]);
-            const suggestions = suggestionResponse.ok ? await suggestionResponse.json() : [];
+            const suggestions = Array.isArray(suggestionResponse) ? suggestionResponse : [];
             const searchData = await response.json();
             if (currentId !== searchRequestId) return;
             if (!response.ok || searchData.status !== 'success') throw new Error(searchData.message || 'Search failed');
