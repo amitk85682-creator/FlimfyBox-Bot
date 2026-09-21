@@ -185,6 +185,7 @@ def _migration_2(conn):
         "ALTER TABLE temp_links ADD COLUMN IF NOT EXISTS movie_file_id INTEGER",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS imdb_id TEXT",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS poster_url TEXT",
+        "ALTER TABLE movies ADD COLUMN IF NOT EXISTS backdrop_poster_url TEXT",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS year INTEGER DEFAULT 0",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT",

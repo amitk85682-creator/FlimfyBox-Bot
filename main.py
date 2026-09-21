@@ -3012,6 +3012,75 @@ def resolve_trailer_key(
         return trailer_key
     return fetch_tmdb_trailer_key(fallback_title, year, imdb_id, category)
 
+def fetch_tmdb_artwork(
+    title: str,
+    year: str = "",
+    imdb_id: str = None,
+    category: str = "",
+) -> tuple:
+    """Resolve poster and landscape backdrop URLs for a stored movie."""
+    api_key = TMDB_API_KEY
+    if not api_key or not title:
+        return None, None
+
+    try:
+        candidates = []
+        if imdb_id and str(imdb_id).startswith("tt"):
+            found = requests.get(
+                f"https://api.themoviedb.org/3/find/{quote(str(imdb_id))}",
+                params={"api_key": api_key, "external_source": "imdb_id"},
+                timeout=8,
+            ).json()
+            candidates = [
+                (item, "movie") for item in found.get("movie_results", [])
+            ] + [
+                (item, "tv") for item in found.get("tv_results", [])
+            ]
+
+        if candidates:
+            match = candidates[0][0]
+            media_type = candidates[0][1]
+        else:
+            found = requests.get(
+                "https://api.themoviedb.org/3/search/multi",
+                params={"api_key": api_key, "query": title, "include_adult": "true"},
+                timeout=8,
+            ).json()
+            results = [
+                item for item in found.get("results", [])
+                if item.get("media_type") in {"movie", "tv"}
+            ]
+            match = _find_best_tmdb_match(results, title, str(year or ""))
+            if not match:
+                return None, None
+            media_type = match.get("media_type") or (
+                "tv" if any(token in str(category).lower() for token in ("tv", "series", "web")) else "movie"
+            )
+
+        tmdb_id = match.get("id")
+        if tmdb_id and not match.get("backdrop_path"):
+            details = requests.get(
+                f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}",
+                params={"api_key": api_key},
+                timeout=8,
+            ).json()
+            match = {**match, **details}
+
+        poster_path = match.get("poster_path")
+        backdrop_path = match.get("backdrop_path")
+        poster_url = (
+            f"https://image.tmdb.org/t/p/original{poster_path}"
+            if poster_path else None
+        )
+        backdrop_url = (
+            f"https://image.tmdb.org/t/p/original{backdrop_path}"
+            if backdrop_path else None
+        )
+        return poster_url, backdrop_url
+    except Exception as exc:
+        logger.warning("TMDb artwork lookup failed for '%s': %s", title, exc)
+        return None, None
+
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
 def get_tmdb_backdrop(query, search_year=""):
@@ -7958,6 +8027,15 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         category,
         movie_name,
     )
+    artwork_poster_url, backdrop_poster_url = await run_async(
+        fetch_tmdb_artwork,
+        title,
+        year,
+        imdb_id,
+        category,
+    )
+    if artwork_poster_url and not poster_url:
+        poster_url = artwork_poster_url
 
     # --- STEP 4: DB INSERT (pm_file_listener ka EXACT ON CONFLICT logic) ---
     if not imdb_id:  # Fix for empty string violating unique constraint
@@ -7972,11 +8050,12 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, extra_info, "cast", trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO movies (title, url, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, description, category, language, extra_info, "cast", trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (title) DO UPDATE
             SET imdb_id      = COALESCE(EXCLUDED.imdb_id,      movies.imdb_id),
                 poster_url   = COALESCE(EXCLUDED.poster_url,   movies.poster_url),
+                backdrop_poster_url = COALESCE(EXCLUDED.backdrop_poster_url, movies.backdrop_poster_url),
                 year         = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                 category     = COALESCE(EXCLUDED.category,     movies.category),
                 genre        = COALESCE(EXCLUDED.genre,        movies.genre),
@@ -7988,7 +8067,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                 trailer_key  = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, movie_lang, "", cast_str, trailer_key)
+            (title, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, plot, category, movie_lang, "", cast_str, trailer_key)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
@@ -8004,6 +8083,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
             'category':   category,
             'movie_lang': movie_lang,
             'poster_url': poster_url,
+            'backdrop_poster_url': backdrop_poster_url,
             'imdb_id':    imdb_id,
             'cast_str':   cast_str,
         }
