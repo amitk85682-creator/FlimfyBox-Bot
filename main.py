@@ -1948,17 +1948,18 @@ async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
         bot_info = await context.bot.get_me()
         bot_username = bot_info.username
         
-        # Exact time calculate karo kab delete karna hai
-        delete_time = datetime.now() + timedelta(seconds=delay)
-        
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
                 for msg_id in message_ids:
                     cur.execute(
-                        "INSERT INTO auto_delete_queue (bot_username, chat_id, message_id, delete_at) VALUES (%s, %s, %s, %s)",
-                        (bot_username, chat_id, msg_id, delete_time)
+                        """
+                        INSERT INTO auto_delete_queue
+                            (bot_username, chat_id, message_id, delete_at)
+                        VALUES (%s, %s, %s, NOW() + (%s * INTERVAL '1 second'))
+                        """,
+                        (bot_username, chat_id, msg_id, delay)
                     )
                 conn.commit()
                 cur.close()
@@ -12929,6 +12930,7 @@ async def auto_delete_worker(app: Application):
     logger.info(f"🧹 Auto-Delete Worker Started for @{bot_username}")
 
     while True:
+        conn = None
         try:
             conn = get_db_connection()
             if conn:
@@ -12946,17 +12948,37 @@ async def auto_delete_worker(app: Application):
                     # 2. Telegram se file delete karo
                     try:
                         await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                    except Exception:
-                        pass # File pehle hi delete ho chuki hai ya bot block hai
-                        
-                    # 3. DB se turant delete karo (TAAKI DB CLEAN RAHE!)
-                    cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
-                    conn.commit()
+                    except telegram.error.BadRequest as exc:
+                        # Telegram returns BadRequest for an already deleted
+                        # message. Remove that queue row; retry other failures.
+                        if "not found" in str(exc).lower() or "message to delete not found" in str(exc).lower():
+                            cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
+                            conn.commit()
+                        else:
+                            logger.warning(
+                                "Auto-delete retry needed for chat=%s message=%s: %s",
+                                chat_id, msg_id, exc
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Auto-delete retry needed for chat=%s message=%s: %s",
+                            chat_id, msg_id, exc
+                        )
+                    else:
+                        cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
+                        conn.commit()
                     
                 cur.close()
-                close_db_connection(conn)
         except Exception as e:
             logger.error(f"Auto-delete worker error: {e}")
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        finally:
+            if conn:
+                close_db_connection(conn)
             
         # Har 5 second me database check karega
         await asyncio.sleep(5)

@@ -56,3 +56,14 @@ def test_file_warning_sticker_uses_file_retention_window():
         "                        context, user_id, warning_msg, is_file=True"
         in MAIN_SOURCE
     )
+
+
+def test_delete_queue_uses_database_clock_for_deadlines():
+    assert "NOW() + (%s * INTERVAL '1 second')" in MAIN_SOURCE
+    assert "datetime.now() + timedelta(seconds=delay)" not in MAIN_SOURCE
+
+
+def test_auto_delete_worker_retries_failed_telegram_deletions():
+    worker_source = MAIN_SOURCE[MAIN_SOURCE.index("async def auto_delete_worker("):]
+    assert "Auto-delete retry needed" in worker_source
+    assert "else:\n                        cur.execute(\"DELETE FROM auto_delete_queue" in worker_source
