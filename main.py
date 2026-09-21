@@ -5105,35 +5105,8 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
 
 
 async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Copy the approved loading media while the catalogue search runs."""
-    if not update.message:
-        return None
-    try:
-        progress_message = await context.bot.copy_message(
-            chat_id=update.effective_chat.id,
-            from_chat_id=START_GIF_CHANNEL_ID,
-            message_id=START_GIF_MESSAGE_ID,
-            caption="🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
-            parse_mode='HTML',
-        )
-        track_user_message_for_deletion(
-            context, update.effective_chat.id, progress_message
-        )
-        return progress_message
-    except Exception as exc:
-        logger.warning(f"Approved search loading media could not be copied: {exc}")
-        try:
-            return await update.message.reply_text(
-                "🔎 <b>Searching...</b>\n\nPlease wait while I find your title.",
-                parse_mode='HTML',
-            )
-            track_user_message_for_deletion(
-                context, update.effective_chat.id, msg
-            )
-            return msg
-        except Exception as fallback_exc:
-            logger.warning(f"Search progress message could not be sent: {fallback_exc}")
-            return None
+    """Search runs silently; do not send temporary loading media."""
+    return None
 
 
 async def remove_search_progress(progress_message):

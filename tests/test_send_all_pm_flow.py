@@ -6,15 +6,15 @@ MAIN_SOURCE = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(
 )
 
 
-def test_search_progress_copies_the_approved_loading_media():
+def test_search_progress_does_not_send_loading_media():
     start = MAIN_SOURCE.index("async def send_search_progress")
     end = MAIN_SOURCE.index("async def remove_search_progress", start)
     progress_source = MAIN_SOURCE[start:end]
 
-    assert "context.bot.copy_message" in progress_source
-    assert "from_chat_id=START_GIF_CHANNEL_ID" in progress_source
-    assert "message_id=START_GIF_MESSAGE_ID" in progress_source
-    assert "random.choice(SEARCH_ERROR_GIFS)" not in progress_source
+    assert "return None" in progress_source
+    assert "copy_message" not in progress_source
+    assert "send_animation" not in progress_source
+    assert "reply_text" not in progress_source
 
 
 def test_approved_loading_media_points_to_the_configured_source_message():
@@ -69,14 +69,9 @@ def test_auto_delete_worker_retries_failed_telegram_deletions():
     assert "else:\n                        cur.execute(\"DELETE FROM auto_delete_queue" in worker_source
 
 
-def test_temporary_search_and_file_status_media_are_also_tracked():
+def test_file_status_media_is_tracked_as_a_temporary_file_message():
     assert (
         "track_user_message_for_deletion(\n"
         "                            context, chat_id, status_msg, is_file=True"
         in MAIN_SOURCE
     )
-    search_source = MAIN_SOURCE[
-        MAIN_SOURCE.index("async def send_search_progress("):
-        MAIN_SOURCE.index("async def remove_search_progress(", MAIN_SOURCE.index("async def send_search_progress("))
-    ]
-    assert "track_user_message_for_deletion(" in search_source
