@@ -1971,17 +1971,43 @@ async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
         logger.error(f"Failed to get bot info for delete queue: {e}")
 
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=USER_TEXT_DELETE_SECONDS):
-    """Old function ab sidha DB me save karega (No sleep)"""
+    """Persist messages for deletion after restarts."""
     await add_messages_to_db_queue(context, chat_id, message_ids, delay)
 
+async def delete_message_directly_after_delay(context, chat_id, message_id, delay):
+    """Delete the message in-process as a fast path; the DB queue remains the durable backup."""
+    await asyncio.sleep(delay)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except telegram.error.BadRequest as exc:
+        message = str(exc).lower()
+        if "not found" not in message and "message to delete not found" not in message:
+            logger.warning(
+                "Direct auto-delete failed for chat=%s message=%s: %s",
+                chat_id, message_id, exc
+            )
+    except Exception as exc:
+        logger.warning(
+            "Direct auto-delete failed for chat=%s message=%s: %s",
+            chat_id, message_id, exc
+        )
+
 def track_message_for_deletion(context, chat_id, message_id, delay=USER_TEXT_DELETE_SECONDS):
-    """Synchronous code se DB me entry dalne ke liye helper"""
-    if not message_id: return
+    """Queue a message durably and schedule an in-process deletion fallback."""
+    if not message_id:
+        return
     
-    # Task create karein taaki bot hang na ho
-    task = asyncio.create_task(add_messages_to_db_queue(context, chat_id, [message_id], delay))
-    background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
+    queue_task = asyncio.create_task(
+        add_messages_to_db_queue(context, chat_id, [message_id], delay)
+    )
+    direct_task = asyncio.create_task(
+        delete_message_directly_after_delay(
+            context, chat_id, message_id, delay
+        )
+    )
+    for task in (queue_task, direct_task):
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
 def track_user_message_for_deletion(context, chat_id, message, is_file=False):
     """Use the user-facing retention policy for text and downloadable files."""
@@ -4219,8 +4245,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             text = (
                 f"<b>🎬 {title}</b>\n"
                 "<i>Choose your preferred version</i>\n\n"
-                "<b>◆ AVAILABLE FILES</b>\n"
-                "<i>Tap any blue title to download instantly.</i>\n\n"
             )
             
             

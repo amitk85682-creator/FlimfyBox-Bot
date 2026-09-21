@@ -69,6 +69,16 @@ def test_auto_delete_worker_retries_failed_telegram_deletions():
     assert "else:\n                        cur.execute(\"DELETE FROM auto_delete_queue" in worker_source
 
 
+def test_tracking_schedules_direct_delete_and_durable_queue():
+    tracking_source = MAIN_SOURCE[
+        MAIN_SOURCE.index("def track_message_for_deletion("):
+        MAIN_SOURCE.index("def track_user_message_for_deletion(", MAIN_SOURCE.index("def track_message_for_deletion("))
+    ]
+    assert "add_messages_to_db_queue" in tracking_source
+    assert "delete_message_directly_after_delay" in tracking_source
+    assert "asyncio.create_task" in tracking_source
+
+
 def test_file_status_media_is_tracked_as_a_temporary_file_message():
     assert (
         "track_user_message_for_deletion(\n"
