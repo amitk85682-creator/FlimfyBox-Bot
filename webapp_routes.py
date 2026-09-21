@@ -453,7 +453,7 @@ def register_webapp_routes(
         source = request.args.get('source', 'day')
         if source not in {'day', 'week', 'popular'}:
             source = 'day'
-        cache_key = f'home_trending_v2:{source}'
+        cache_key = f'home_trending_v3:{source}'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(cache_key)
@@ -467,7 +467,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, rating, genre, category, language, imdb_id
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, imdb_id
                 FROM movies
                 WHERE poster_url IS NOT NULL AND poster_url <> ''
             """)
@@ -475,7 +475,7 @@ def register_webapp_routes(
         finally:
             close_db_connection(conn)
 
-        local_by_imdb = {str(row[8]).strip().lower(): row for row in local_rows if row[8]}
+        local_by_imdb = {str(row[9]).strip().lower(): row for row in local_rows if row[9]}
         local_by_title_year = {}
         for row in local_rows:
             key = (normalize_title_lookup(row[1]), str(row[2] or '')[:4])
@@ -505,10 +505,11 @@ def register_webapp_routes(
                 'title': local_row[1],
                 'year': local_row[2] or '',
                 'image': local_row[3] or '/static/miniapp/poster-placeholder.svg',
-                'rating': local_row[4] or 'N/A',
-                'genre': local_row[5] or 'Unknown',
-                'category': local_row[6] or 'Movie',
-                'language': local_row[7] or '',
+                'backdrop': local_row[4] or local_row[3] or '/static/miniapp/poster-placeholder.svg',
+                'rating': local_row[5] or 'N/A',
+                'genre': local_row[6] or 'Unknown',
+                'category': local_row[7] or 'Movie',
+                'language': local_row[8] or '',
                 'source': 'local',
                 'tmdb_id': item.get('id'),
                 'tmdb_rank': len(results) + 1,
@@ -537,7 +538,7 @@ def register_webapp_routes(
     @flask_app.route('/api/home/new-releases', methods=['GET'])
     def get_home_new_releases():
         cache_key = 'home_new_releases_v1'
-        home_cache_key = 'home_new_releases_v2'
+        home_cache_key = 'home_new_releases_v3'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(home_cache_key)
@@ -559,7 +560,7 @@ def register_webapp_routes(
             try:
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT id, title, year, poster_url, rating, genre, category, language, imdb_id
+                    SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, imdb_id
                     FROM movies
                 """)
                 local_rows = cur.fetchall()
@@ -567,7 +568,7 @@ def register_webapp_routes(
             finally:
                 close_db_connection(conn)
 
-            local_by_imdb = {str(row[8]).strip().lower(): row for row in local_rows if row[8]}
+            local_by_imdb = {str(row[9]).strip().lower(): row for row in local_rows if row[9]}
             local_by_title_year = {}
             local_by_title = {}
             for row in local_rows:
@@ -645,8 +646,9 @@ def register_webapp_routes(
                 movies.append({
                     'id': row[0], 'title': row[1], 'year': row[2] or '',
                     'image': row[3] or '/static/miniapp/poster-placeholder.svg',
-                    'rating': row[4] or 'N/A', 'genre': row[5] or 'Unknown',
-                    'category': row[6] or 'Movie', 'language': row[7] or '', 'source': 'local',
+                    'backdrop': row[4] or row[3] or '/static/miniapp/poster-placeholder.svg',
+                    'rating': row[5] or 'N/A', 'genre': row[6] or 'Unknown',
+                    'category': row[7] or 'Movie', 'language': row[8] or '', 'source': 'local',
                     'release_date': release_date.isoformat(), 'release_label': release_label,
                     'release_type': detail['release_type']
                 })
@@ -673,7 +675,7 @@ def register_webapp_routes(
     @flask_app.route('/api/home/catalogue-rows', methods=['GET'])
     def get_home_catalogue_rows():
         """Return independent home collections instead of one paginated slice."""
-        cache_key = 'home_catalogue_rows_v3'
+        cache_key = 'home_catalogue_rows_v4'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(cache_key)
@@ -687,7 +689,7 @@ def register_webapp_routes(
             cur = conn.cursor()
             cur.execute("""
                 WITH classified AS (
-                    SELECT id, title, year, poster_url, rating, genre, category,
+                    SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
                            COALESCE(language, '') AS language, created_at,
                            CASE
                                WHEN LOWER(COALESCE(category, '')) ~ '(^|[^a-z])anime([^a-z]|$)'
@@ -724,7 +726,7 @@ def register_webapp_routes(
                     FROM classified
                     WHERE collection IS NOT NULL
                 )
-                SELECT id, title, year, poster_url, rating, genre, category,
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
                        language, collection
                 FROM ranked
                 WHERE row_number <= 12
@@ -733,15 +735,16 @@ def register_webapp_routes(
             rows = cur.fetchall()
             collections = {'hollywood': [], 'bollywood': [], 'anime': []}
             for row in rows:
-                collections[row[8]].append({
+                collections[row[9]].append({
                     'id': row[0],
                     'title': row[1],
                     'year': row[2] or '',
                     'image': row[3] or '/static/miniapp/poster-placeholder.svg',
-                    'rating': row[4] or 'N/A',
-                    'genre': row[5] or 'Unknown',
-                    'category': row[6] or 'Movie',
-                    'language': row[7] or '',
+                    'backdrop': row[4] or row[3] or '/static/miniapp/poster-placeholder.svg',
+                    'rating': row[5] or 'N/A',
+                    'genre': row[6] or 'Unknown',
+                    'category': row[7] or 'Movie',
+                    'language': row[8] or '',
                     'source': 'local',
                 })
             result = {'status': 'success', 'collections': collections}
@@ -1090,23 +1093,24 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, rating, genre, category, language, seasons_data
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, seasons_data
                 FROM movies
                 ORDER BY id DESC
             """)
             movies = []
             for row in cur.fetchall():
-                if genre_id not in normalize_catalogue_genres(row[5]) or not browse_type_matches(browse_type, row[6], row[8]):
+                if genre_id not in normalize_catalogue_genres(row[6]) or not browse_type_matches(browse_type, row[7], row[9]):
                     continue
                 movies.append({
                     'id': row[0],
                     'title': row[1],
                     'year': row[2] or '',
                     'image': row[3] or '/static/miniapp/poster-placeholder.svg',
-                    'rating': row[4] or 'N/A',
-                    'genre': row[5] or '',
-                    'category': row[6] or 'Movies',
-                    'language': row[7] or '',
+                    'backdrop': row[4] or row[3] or '/static/miniapp/poster-placeholder.svg',
+                    'rating': row[5] or 'N/A',
+                    'genre': row[6] or '',
+                    'category': row[7] or 'Movies',
+                    'language': row[8] or '',
                     'source': 'local'
                 })
             result = {
@@ -1343,7 +1347,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, rating, genre, category,
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
                        COALESCE(language, '') as language, created_at
                 FROM movies
                 WHERE poster_url IS NOT NULL AND poster_url != ''
@@ -1359,11 +1363,12 @@ def register_webapp_routes(
                     'title': r[1],
                     'year': r[2] if r[2] else '',
                     'image': r[3] if r[3] else '/static/miniapp/poster-placeholder.svg',
-                    'rating': r[4] if r[4] else 'N/A',
-                    'genre': r[5] if r[5] else 'Unknown',
-                    'category': r[6] if r[6] else 'Movie',
-                    'language': r[7],
-                    'created_at': r[8].isoformat() if r[8] else None
+                    'backdrop': r[4] or r[3] or '/static/miniapp/poster-placeholder.svg',
+                    'rating': r[5] if r[5] else 'N/A',
+                    'genre': r[6] if r[6] else 'Unknown',
+                    'category': r[7] if r[7] else 'Movie',
+                    'language': r[8],
+                    'created_at': r[9].isoformat() if r[9] else None
                 })
             cur.close()
             close_db_connection(conn)
@@ -1453,7 +1458,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, rating, genre, description, category, language, "cast", trailer_key, seasons_data
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, "cast", trailer_key, seasons_data
                 FROM movies WHERE id = %s
             """, (movie_id,))
             row = cur.fetchone()
@@ -1467,14 +1472,15 @@ def register_webapp_routes(
                 'title': row[1],
                 'year': row[2] if row[2] else '',
                 'image': row[3] if row[3] else '/static/miniapp/poster-placeholder.svg',
-                'rating': row[4] if row[4] else 'N/A',
-                'genre': row[5] if row[5] else 'Unknown',
-                'description': row[6] if row[6] else 'No description available.',
-                'category': row[7] if row[7] else 'Movie',
-                'language': row[8] if row[8] else '',
-                'cast': row[9] if row[9] else '',
-                'trailer_key': row[10] if row[10] else None,
-                'seasons_data': row[11] if len(row) > 11 and row[11] else {}
+                'backdrop': row[4] or row[3] or '/static/miniapp/poster-placeholder.svg',
+                'rating': row[5] if row[5] else 'N/A',
+                'genre': row[6] if row[6] else 'Unknown',
+                'description': row[7] if row[7] else 'No description available.',
+                'category': row[8] if row[8] else 'Movie',
+                'language': row[9] if row[9] else '',
+                'cast': row[10] if row[10] else '',
+                'trailer_key': row[11] if row[11] else None,
+                'seasons_data': row[12] if len(row) > 12 and row[12] else {}
             }
     
             # Get files
@@ -1497,8 +1503,6 @@ def register_webapp_routes(
             # Keep details responsive: remote trailer/backdrop enrichment must not
             # block the local detail response. A poster is a reliable backdrop
             # fallback, while saved trailer keys remain available immediately.
-            movie['backdrop'] = movie['image']
-
             result = {'status': 'success', 'movie': movie}
             return jsonify(result)
         except Exception as e:

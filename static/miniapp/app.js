@@ -82,7 +82,7 @@ const tg = window.Telegram?.WebApp || {
         }
 
         async function loadHomeSection(url, cacheKey) {
-            const storageKey = `flimfybox-home-section-${cacheKey}-v2`;
+            const storageKey = `flimfybox-home-section-${cacheKey}-v3`;
             try {
                 const cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
                 if (cached && cached.savedAt && Date.now() - cached.savedAt < HOME_CATALOGUE_CACHE_TTL) {
@@ -1132,8 +1132,9 @@ const tg = window.Telegram?.WebApp || {
                     toggleCurrentMyList();
                 };
             }
-            heroSlider.style.backgroundImage = movie.image
-                ? `url("${movie.image}"), ${IMAGE_FALLBACK_GRADIENT}`
+            const heroArtwork = movie.backdrop || movie.image;
+            heroSlider.style.backgroundImage = heroArtwork
+                ? `url("${heroArtwork}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
             document.getElementById('heroTitle').innerText = movie.title;
             document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
@@ -1566,8 +1567,9 @@ document.addEventListener('keydown', (e) => {
             const detailsRating = document.getElementById('dpRating');
             const detailsGenre = document.getElementById('dpGenre');
             const detailsDescription = document.getElementById('dpDesc');
-            detailsBackdrop.style.backgroundImage = movie.image
-                ? `url("${movie.image}"), ${IMAGE_FALLBACK_GRADIENT}`
+            const detailsArtwork = movie.backdrop || movie.image;
+            detailsBackdrop.style.backgroundImage = detailsArtwork
+                ? `url("${detailsArtwork}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
             detailsPoster.src = movie.image || POSTER_PLACEHOLDER;
             detailsPoster.onerror = () => {
@@ -1589,7 +1591,7 @@ document.addEventListener('keydown', (e) => {
             detailsDescription.innerText = movie.description || 'Details and availability are loading…';
             detailsPage.classList.remove('is-loading');
             if (isTMDB) {
-                const backdropImg = movie.image;
+                const backdropImg = movie.backdrop || movie.image;
                 document.getElementById('dpBackdrop').style.backgroundImage = backdropImg
                     ? `url("${backdropImg}"), ${IMAGE_FALLBACK_GRADIENT}`
                     : IMAGE_FALLBACK_GRADIENT;
