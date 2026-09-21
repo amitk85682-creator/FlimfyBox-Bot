@@ -4219,8 +4219,6 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             text = (
                 f"<b>🎬 {title}</b>\n"
                 "<i>Choose your preferred version</i>\n\n"
-                "<b>◆ AVAILABLE FILES</b>\n"
-                "<i>Tap any blue title to download instantly.</i>\n\n"
             )
             
             
