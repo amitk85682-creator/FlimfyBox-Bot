@@ -106,25 +106,15 @@ const tg = window.Telegram?.WebApp || {
         }
 
         function startInitialHomeLoading() {
-            // The catalogue is the critical path. Trending and new releases
-            // enrich the home screen independently and must not block it.
-            initialHomePending = 1;
-            document.body.classList.add('app-booting');
+            // Never block the Home shell behind a full-page loader. Cached
+            // catalogue data renders immediately; network refreshes continue
+            // in the background.
+            initialHomePending = 0;
+            document.body.classList.remove('app-booting');
             const screen = document.getElementById('appLoadingScreen');
-            if (screen) screen.classList.remove('is-complete');
-            if (readHomeCatalogueCache()) {
-                initialHomePending = 0;
-                document.body.classList.remove('app-booting');
-                if (screen) screen.classList.add('is-complete');
-            }
+            if (screen) screen.classList.add('is-complete');
             if (initialHomeTimeout) clearTimeout(initialHomeTimeout);
-            // Trending/new-release enrichment is optional; never make users
-            // wait indefinitely when one upstream request is slow.
-            initialHomeTimeout = setTimeout(() => {
-                initialHomePending = 0;
-                document.body.classList.remove('app-booting');
-                if (screen) screen.classList.add('is-complete');
-            }, 8000);
+            initialHomeTimeout = null;
         }
 
         function completeInitialHomeLoadingStep() {

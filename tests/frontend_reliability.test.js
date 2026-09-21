@@ -24,6 +24,9 @@ assert.match(source, /if \(!response\.ok \|\| \(data && data\.status === 'error'
 assert.match(source, /detailsController\.abort\(\)/);
 assert.match(source, /searchController\.abort\(\)/);
 assert.match(source, /browseController\.abort\(\)/);
+assert.match(source, /Never block the Home shell behind a full-page loader/);
+assert.match(source, /document\.body\.classList\.remove\('app-booting'\)/);
+assert.match(source, /screen\.classList\.add\('is-complete'\)/);
 assert.match(source, /if \(isAbortError\(error\)\) return;/);
 assert.match(source, /Search suggestions unavailable/);
 assert.match(source, /const suggestions = Array\.isArray\(suggestionResponse\) \? suggestionResponse : \[\]/);
