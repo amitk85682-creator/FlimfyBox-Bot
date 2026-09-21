@@ -1963,6 +1963,10 @@ async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
                     )
                 conn.commit()
                 cur.close()
+                logger.info(
+                    "Auto-delete queued for chat=%s messages=%s delay=%ss bot=%s",
+                    chat_id, message_ids, delay, bot_username
+                )
             except Exception as e:
                 logger.error(f"Error saving to delete queue: {e}")
             finally:
@@ -1996,6 +2000,10 @@ def track_message_for_deletion(context, chat_id, message_id, delay=USER_TEXT_DEL
     """Queue a message durably and schedule an in-process deletion fallback."""
     if not message_id:
         return
+    logger.info(
+        "Tracking message for auto-delete: chat=%s message=%s delay=%ss",
+        chat_id, message_id, delay
+    )
     
     queue_task = asyncio.create_task(
         add_messages_to_db_queue(context, chat_id, [message_id], delay)
@@ -3564,7 +3572,11 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     ))
 
                 if sent_msg:
-                    is_file_message = any(
+                    # copy_message() returns MessageId rather than a media-bearing
+                    # Message, so infer file retention from the delivery source too.
+                    is_file_message = bool(file_id or (
+                        url and "t.me/" in str(url)
+                    )) or any(
                         getattr(sent_msg, media_type, None)
                         for media_type in ('document', 'video', 'audio', 'photo')
                     )
@@ -4388,7 +4400,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if sent_msg:
             # Downloadable media is retained for 2 minutes; link-only replies
             # are retained for the normal 5-minute user-message window.
-            is_file_message = any(
+            is_file_message = bool(
+                file_id or (url and "t.me/" in str(url))
+            ) or any(
                 getattr(sent_msg, media_type, None)
                 for media_type in ('document', 'video', 'audio', 'photo')
             )
