@@ -83,15 +83,34 @@ const tg = window.Telegram?.WebApp || {
 
         async function loadHomeSection(url, cacheKey) {
             const storageKey = `flimfybox-home-section-${cacheKey}-v3`;
+            let cached = null;
             try {
-                const cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
-                if (cached && cached.savedAt && Date.now() - cached.savedAt < HOME_CATALOGUE_CACHE_TTL) {
+                cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                if (cached && cached.savedAt && cached.data) {
+                    const isFresh = Date.now() - cached.savedAt < HOME_CATALOGUE_CACHE_TTL;
+                    if (!isFresh) {
+                        // Stale-while-refresh: never hide a previously loaded
+                        // Home section just because its refresh window expired.
+                        refreshHomeSection(url, cacheKey, storageKey);
+                    }
                     return cached.data;
                 }
             } catch (_error) {
                 localStorage.removeItem(storageKey);
             }
 
+            return fetchHomeSection(url, cacheKey, storageKey);
+        }
+
+        async function refreshHomeSection(url, cacheKey, storageKey) {
+            try {
+                await fetchHomeSection(url, cacheKey, storageKey);
+            } catch (error) {
+                console.warn(`Home section refresh failed (${cacheKey}):`, error);
+            }
+        }
+
+        async function fetchHomeSection(url, cacheKey, storageKey) {
             const response = await fetch(url);
             const data = await response.json();
             if (!response.ok || data.status === 'error') {
