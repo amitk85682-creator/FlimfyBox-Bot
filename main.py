@@ -5131,7 +5131,7 @@ Just use the buttons below to navigate!
         logger.error(f"Error in main menu: {e}")
         return MAIN_MENU
 
-def _format_requested_files_header(title, qualities, user, bot_name, elapsed_seconds=0):
+def _format_requested_files_header(title, qualities, user, bot_info):
     """Build the compact branded header used above every file list."""
     languages = []
     for file_data in qualities or []:
@@ -5144,17 +5144,29 @@ def _format_requested_files_header(title, qualities, user, bot_name, elapsed_sec
         or getattr(user, "username", None)
         or "User"
     )
-    requester = html_escape(str(requester).lstrip("@"))
+    requester_name = html_escape(str(requester).lstrip("@"))
+    requester_id = getattr(user, "id", None)
+    requester = (
+        f"<a href='tg://user?id={requester_id}'>{requester_name}</a>"
+        if requester_id
+        else requester_name
+    )
     display_title = html_escape(str(title or "Requested Movie").lower())
     language_label = html_escape(language_label)
-    bot_name = html_escape(str(bot_name or "FlimfyBox"))
-    elapsed_label = f"{max(0, float(elapsed_seconds)):.2f} Seconds"
+    bot_name = html_escape(
+        str(getattr(bot_info, "first_name", None) or getattr(bot_info, "username", None) or "FlimfyBox")
+    )
+    bot_id = getattr(bot_info, "id", None)
+    bot_mention = (
+        f"<a href='tg://user?id={bot_id}'>⚡️{bot_name}</a>"
+        if bot_id
+        else f"⚡️{bot_name}"
+    )
     return (
         f"<b>🏷 ᴛɪᴛʟᴇ : </b><code>{display_title}</code>\n"
         f"🧱 𝙻𝚊𝚗𝚐𝚞𝚊𝚐𝚎 : <b><code>{language_label}</code></b>\n"
-        f"⏰ ʀᴇsᴜʟᴛ ɪɴ : <b><code>{elapsed_label}</code></b>\n\n"
         f"📝 ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ : {requester}\n"
-        f"⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : ⚡️{bot_name} 🔍\n\n"
+        f"⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : {bot_mention} 🔍\n\n"
         "Your Requested Files Are Here\n\n"
     )
 
@@ -5181,14 +5193,12 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
     }
 
     bot_username = context.bot.username
-    elapsed = time.perf_counter() - context.user_data.pop("search_started_at", time.perf_counter())
     bot_info = await context.bot.get_me()
     file_list_text = _format_requested_files_header(
         title,
         qualities,
         update.effective_user,
-        bot_info.first_name or bot_info.username or "FlimfyBox",
-        elapsed,
+        bot_info,
     )
     
     for idx, file_data in enumerate(qualities[:10], start=1):
@@ -5281,7 +5291,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_query = re.sub(r'(?i)\b(s\d{1,2}|season\s*\d+|ep\s?\d+|e\d{1,2})\b.*', '', query).strip()
         search_term = clean_query if (clean_query and len(clean_query) > 1) else query
 
-        context.user_data['search_started_at'] = time.perf_counter()
         progress_message = await send_search_progress(update, context)
         schedule_recommendation_event(
             user_id=update.effective_user.id if update.effective_user else None,
@@ -6440,13 +6449,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Agar normal Movie hai (ya Series ka season logic fail hua), toh direct qualities dikhao
             bot_username = context.bot.username
             bot_info = await context.bot.get_me()
-            elapsed = time.perf_counter() - context.user_data.pop("search_started_at", time.perf_counter())
             file_list_text = _format_requested_files_header(
                 title,
                 qualities,
                 query.from_user,
-                bot_info.first_name or bot_info.username or "FlimfyBox",
-                elapsed,
+                bot_info,
             )
             
             for idx, file_data in enumerate(qualities[:10], start=1):
@@ -6570,13 +6577,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Ab sirf is Season ki files list karo
             # Video jaisa Text List format banana
             bot_info = await context.bot.get_me()
-            elapsed = time.perf_counter() - context.user_data.pop("search_started_at", time.perf_counter())
             file_list_text = _format_requested_files_header(
                 f"{title} - {selected_season}",
                 filtered_qualities,
                 query.from_user,
-                bot_info.first_name or bot_info.username or "FlimfyBox",
-                elapsed,
+                bot_info,
             )
             
             for idx, file_data in enumerate(filtered_qualities[:10], start=1):
@@ -6724,13 +6729,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # UI Text Banana
             if view_type == "main" or view_type == "seas":
                 bot_info = await context.bot.get_me()
-                elapsed = time.perf_counter() - context.user_data.pop("search_started_at", time.perf_counter())
                 text = _format_requested_files_header(
                     title,
                     filtered_qualities,
                     query.from_user,
-                    bot_info.first_name or bot_info.username or "FlimfyBox",
-                    elapsed,
+                    bot_info,
                 )
                 
                 # 🚀 NAYA FIX: Season ko alag se bada aur highlight dikhane ke liye

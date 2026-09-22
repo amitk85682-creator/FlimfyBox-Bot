@@ -8,11 +8,13 @@ def test_requested_files_header_has_branded_metadata():
     assert "def _format_requested_files_header(" in MAIN_SOURCE
     assert "ᴛɪᴛʟᴇ" in MAIN_SOURCE
     assert "𝙻𝚊𝚗𝚐𝚞𝚊" in MAIN_SOURCE
-    assert "ʀᴇsᴜʟᴛ ɪɴ" in MAIN_SOURCE
+    assert "ʀᴇsᴜʟᴛ ɪɴ" not in MAIN_SOURCE
     assert "ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ" in MAIN_SOURCE
     assert "ᴘᴏᴡᴇʀᴇᴅ ʙʏ" in MAIN_SOURCE
     assert '"Dynamic Language"' in MAIN_SOURCE
     assert "await context.bot.get_me()" in MAIN_SOURCE
+    assert "tg://user?id={requester_id}" in MAIN_SOURCE
+    assert "tg://user?id={bot_id}" in MAIN_SOURCE
 
 
 def test_requested_files_header_preserves_file_delivery_links():
