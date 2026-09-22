@@ -5542,7 +5542,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         movies = await run_async(get_movies_from_db, suggested_title, limit=10)
         if not movies:
-            await query.answer("This title is not available yet. You can request it below.", show_alert=True)
+            request_title = quote(suggested_title[:35], safe='')
+            keyboard_rows = []
+            if len(f"request_prefill_{request_title}".encode('utf-8')) <= 64:
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        "🙋 Request this title",
+                        callback_data=f"request_prefill_{request_title}",
+                    )
+                ])
+            keyboard_rows.append([
+                InlineKeyboardButton("🌐 Open Request Portal", web_app=WebAppInfo(url=WEB_APP_URL))
+            ])
+            await query.edit_message_text(
+                f"❌ <b>{html_escape(suggested_title)}</b> अभी database में available नहीं है।\n\n"
+                "आप चाहें तो इसी title को request कर सकते हैं:",
+                reply_markup=InlineKeyboardMarkup(keyboard_rows),
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
             return
 
         # A correction button (for example "Dhurandhar") is already the

@@ -21,3 +21,10 @@ def test_requested_files_header_preserves_file_delivery_links():
     assert "start=file_{movie_id}_{real_idx}" in MAIN_SOURCE
     assert "Your Requested Files Are Here" in MAIN_SOURCE
     assert "file_list_text += f" in MAIN_SOURCE
+
+
+def test_unknown_suggestion_offers_request_instead_of_silent_return():
+    assert "This title is not available yet" not in MAIN_SOURCE
+    assert "अभी database में available नहीं है" in MAIN_SOURCE
+    assert 'callback_data=f"request_prefill_{request_title}"' in MAIN_SOURCE
+    assert "Open Request Portal" in MAIN_SOURCE
