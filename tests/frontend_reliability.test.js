@@ -84,6 +84,7 @@ assert.match(source, /flimfybox-home-section-\$\{cacheKey\}-v3/);
 assert.match(source, /heroTimer = setInterval\(\(\) => stepHero\(1\), 6500\)/);
 assert.match(source, /getElementById\('heroTitle'\)/);
 assert.match(styles, /\.hero-info\s*\{[\s\S]*padding:\s*0 !important[\s\S]*border:\s*0 !important[\s\S]*background:\s*transparent !important[\s\S]*box-shadow:\s*none !important/);
+assert.match(styles, /@media \(max-width: 699px\)[\s\S]*\.dp-header[\s\S]*top: max\(34px, calc\(env\(safe-area-inset-top\) \+ 14px\)\)/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);
