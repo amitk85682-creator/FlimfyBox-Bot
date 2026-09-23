@@ -16,7 +16,6 @@ import sys
 import concurrent.futures
 from html import escape as html_escape
 from PIL import Image, ImageOps
-from trending_manager import trending_worker_loop
 from db_migrations import run_migrations
 from telegram import WebAppInfo
 from telegram import MenuButtonWebApp, WebAppInfo
@@ -13564,14 +13563,6 @@ async def main():
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
             worker_tasks.append(asyncio.create_task(auto_delete_worker(app)))
-            if i == 0:
-                logger.info("🚀 Starting Trending Worker for Main Bot...")
-                worker_tasks.append(asyncio.create_task(
-                    trending_worker_loop(app, ADMIN_USER_ID)
-                ))
-            
-
-
             apps.append(app)
 
             bot_info = await app.bot.get_me()

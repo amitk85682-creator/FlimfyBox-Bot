@@ -4,9 +4,6 @@ from pathlib import Path
 MAIN_SOURCE = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(
     encoding="utf-8"
 )
-TRENDING_SOURCE = Path(__file__).resolve().parents[1].joinpath(
-    "trending_manager.py"
-).read_text(encoding="utf-8")
 
 
 def test_tmdb_key_is_defined_before_startup_validation():
@@ -17,4 +14,3 @@ def test_tmdb_key_is_defined_before_startup_validation():
 
 def test_tmdb_key_is_not_hardcoded():
     assert 'TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"' not in MAIN_SOURCE
-    assert 'TMDB_API_KEY = "9fa44f5e9fbd41415df930ce5b81c4d7"' not in TRENDING_SOURCE
