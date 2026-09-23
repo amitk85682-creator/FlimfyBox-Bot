@@ -102,6 +102,7 @@ assert.equal((template.match(/class="btn-back details-back-button"/g) || []).len
 assert.equal((template.match(/onclick="closeDetails\(\)"/g) || []).length, 1);
 assert.match(styles, /\.details-back-button[\s\S]*min-height:\s*44px/);
 assert.match(styles, /\.dp-header[\s\S]*env\(safe-area-inset-top, 0px\)/);
+assert.match(styles, /\.dp-header \.details-back-button[\s\S]*top:\s*58px/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);
