@@ -20,7 +20,7 @@ def test_ingestion_normalizes_region_and_media_type():
     assert 'media_type = "Movie"' in MAIN
     assert 'region = "Bollywood"' in MAIN
     assert 'region = "Hollywood"' in MAIN
-    assert "content_type = EXCLUDED.content_type" in MAIN
+    assert "content_type = COALESCE(%s, content_type)" in MAIN
 
 
 def test_api_exposes_content_type_and_browse_uses_it():

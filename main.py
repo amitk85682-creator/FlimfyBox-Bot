@@ -3218,6 +3218,70 @@ def _find_best_tmdb_match(tmdb_results: list, search_query: str, search_year: st
     logger.info(f"✅ TMDb Best Match: '{best_match.get('title') or best_match.get('name')}' (score: {best_score})")
     return best_match
 
+def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
+    """Resolve the canonical TMDB identity without relying on a display title."""
+    if not imdb_id or not re.match(r"^tt\d{7,8}$", str(imdb_id).strip()):
+        return None
+
+    tmdb_api_key = os.environ.get(
+        "TMDB_API_KEY", "9fa44f5e9fbd41415df930ce5b81c4d7"
+    )
+    try:
+        response = requests.get(
+            f"https://api.themoviedb.org/3/find/{str(imdb_id).strip()}",
+            params={
+                "api_key": tmdb_api_key,
+                "external_source": "imdb_id",
+            },
+            timeout=10,
+        ).json()
+        preferred = (
+            ["tv_results", "movie_results"]
+            if "series" in str(hint_category).lower()
+            else ["movie_results", "tv_results"]
+        )
+        for result_type in preferred:
+            results = response.get(result_type) or []
+            if results and results[0].get("id") is not None:
+                return int(results[0]["id"])
+    except Exception as exc:
+        logger.warning("TMDB identity lookup failed for %s: %s", imdb_id, exc)
+    return None
+
+
+def _find_movie_by_provider_identity(cur, imdb_id=None, tmdb_id=None):
+    """Return the existing movie ID for provider IDs, never for title alone."""
+    imdb_id = str(imdb_id).strip() if imdb_id else None
+    tmdb_id = int(tmdb_id) if tmdb_id is not None else None
+    if not imdb_id and tmdb_id is None:
+        return None
+
+    conditions = []
+    params = []
+    if imdb_id:
+        conditions.append("imdb_id = %s")
+        params.append(imdb_id)
+    if tmdb_id is not None:
+        conditions.append("tmdb_id = %s")
+        params.append(tmdb_id)
+
+    cur.execute(
+        f"SELECT id, imdb_id, tmdb_id FROM movies WHERE {' OR '.join(conditions)}",
+        tuple(params),
+    )
+    matches = cur.fetchall()
+    if not matches:
+        return None
+
+    ids = {row[0] for row in matches}
+    if len(ids) > 1:
+        raise ValueError(
+            f"IMDb/TMDB identities point to different movies: imdb_id={imdb_id!r}, "
+            f"tmdb_id={tmdb_id!r}"
+        )
+    return matches[0][0]
+
+
 def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "", adult_mode: bool = False, hint_category: str = ""):
     """
     IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन
@@ -4009,7 +4073,12 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5, requester
         else:
             movie_id, title = movie[0], movie[1]
 
-        button_text = title if len(title) <= 40 else title[:37] + "..."
+        year_text = ""
+        if len(movie) >= 7 and movie[6]:
+            year_text = str(movie[6])[:4]
+        button_text = f"{title}   {year_text}" if year_text else title
+        if len(button_text) > 40:
+            button_text = button_text[:37] + "..."
         keyboard.append([InlineKeyboardButton(f"🎬 {button_text}", callback_data=f"movie_{movie_id}{u_suffix}")])
 
     total_pages = (len(movies) + movies_per_page - 1) // movies_per_page
@@ -4597,21 +4666,31 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
         # 1. PEHLE EXACT MATCH CHECK KAREIN (Ye FAST hai - 0.1 sec)
         # This saves resources if the user clicked a precise link
         conn = get_db_connection()
-        exact_movie = None
+        exact_movies = []
         if conn:
             try:
                 cur = conn.cursor()
-                # Use ILIKE for case-insensitive exact match
-                cur.execute("SELECT id, title, url, file_id FROM movies WHERE title ILIKE %s LIMIT 1", (query_text.strip(),))
-                exact_movie = cur.fetchone()
+                # Keep every exact-title row so duplicate titles can be
+                # disambiguated by year in the selection keyboard.
+                cur.execute(
+                    """
+                    SELECT id, title, url, file_id, imdb_id, poster_url, year, genre
+                    FROM movies
+                    WHERE title ILIKE %s
+                    ORDER BY year DESC NULLS LAST, id DESC
+                    LIMIT 20
+                    """,
+                    (query_text.strip(),),
+                )
+                exact_movies = cur.fetchall()
             except Exception as db_e:
                 logger.error(f"Database error in exact match: {db_e}")
             finally:
                 if conn: close_db_connection(conn)
 
         movies_found = []
-        if exact_movie:
-            movies_found = [exact_movie] # Exact match found, skip fuzzy search
+        if exact_movies:
+            movies_found = exact_movies
         else:
             # Agar exact nahi mila to hi Fuzzy Search karein (Slower process)
             # Assuming get_movies_from_db is your existing function
@@ -4644,7 +4723,26 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             return
 
         # 3. Movie Mil gayi - Send karein
-        movie_id, title, url, file_id = movies_found[0]
+        if len(movies_found) > 1:
+            context.user_data['search_results'] = movies_found
+            context.user_data['search_query'] = query_text
+            try:
+                await status_msg.delete()
+            except:
+                pass
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🎬 <b>Multiple results found for</b> "
+                    f"<b>{query_text}</b>\n\n"
+                    "👇 Select the correct title and year:"
+                ),
+                reply_markup=create_movie_selection_keyboard(movies_found, page=0),
+                parse_mode="HTML",
+            )
+            return
+
+        movie_id, title, url, file_id = movies_found[0][:4]
         
         # Loading msg delete karein
         try: await status_msg.delete() 
@@ -7560,6 +7658,9 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         title, year, poster, genre, imdb_id_f, rating, plot, category, seasons_data = data
         seasons_data = normalize_seasons_data(seasons_data)
+        tmdb_id = await run_async(
+            resolve_tmdb_id_from_imdb, imdb_id_f, category
+        )
         category, content_type = normalize_catalog_labels(
             category=category,
             language="Hindi",
@@ -7582,40 +7683,31 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resolve_trailer_key, title, year, imdb_id_f, category, title
         )
         movie_values = (
-            title, imdb_id_f, poster, year, genre, rating, plot, category,
+            title, imdb_id_f, tmdb_id, poster, year, genre, rating, plot, category,
             content_type, "Hindi", cast_str,
             json.dumps(seasons_data) if seasons_data else '{}', trailer_key,
         )
-        # IMDb and title are both unique. Resolve an existing row first so a
-        # title collision (for example two different titles named "Obsession")
-        # cannot abort the batch transaction.
-        cur.execute(
-            """
-            SELECT id FROM movies
-            WHERE imdb_id = %s OR title = %s
-            ORDER BY CASE WHEN imdb_id = %s THEN 0 ELSE 1 END
-            LIMIT 1
-            """,
-            (imdb_id_f, title, imdb_id_f),
+        existing_movie_id = _find_movie_by_provider_identity(
+            cur, imdb_id_f, tmdb_id
         )
-        existing_movie = cur.fetchone()
-        if existing_movie:
+        if existing_movie_id:
             cur.execute("""
                 UPDATE movies
-                SET title = %s, imdb_id = %s, poster_url = %s, year = %s,
-                    genre = %s, rating = %s, description = %s, category = %s,
-                    content_type = %s, language = %s, "cast" = %s,
-                    seasons_data = %s, trailer_key = COALESCE(%s, trailer_key)
+                SET title = %s, imdb_id = %s, tmdb_id = %s, poster_url = %s,
+                    year = %s, genre = %s, rating = %s, description = %s,
+                    category = %s, content_type = %s, language = %s,
+                    "cast" = %s, seasons_data = %s,
+                    trailer_key = COALESCE(%s, trailer_key)
                 WHERE id = %s
                 RETURNING id
-            """, (*movie_values, existing_movie[0]))
+            """, (*movie_values, existing_movie_id))
         else:
             cur.execute("""
                 INSERT INTO movies
-                    (title, url, imdb_id, poster_url, year, genre, rating,
+                    (title, url, imdb_id, tmdb_id, poster_url, year, genre, rating,
                      description, category, content_type, language, "cast",
                      seasons_data, trailer_key)
-                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, movie_values)
         
@@ -7722,22 +7814,40 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trailer_key = await run_async(
             resolve_trailer_key, title, year, imdb_id, category, title
         )
-        cur.execute(
-            """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, content_type, language, "cast", trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (title) DO UPDATE 
-            SET year = EXCLUDED.year, 
-                genre = EXCLUDED.genre, 
-                category = EXCLUDED.category, 
-                content_type = EXCLUDED.content_type,
-                language = EXCLUDED.language,
-                "cast" = COALESCE(EXCLUDED."cast", movies."cast"),
-                trailer_key = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
-            RETURNING id
-            """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, content_type, language, cast_str, trailer_key)
+        tmdb_id = await run_async(resolve_tmdb_id_from_imdb, imdb_id, category)
+        existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+        values = (
+            title, imdb_id, tmdb_id, poster_url, year, genre, rating, plot,
+            category, content_type, language, cast_str, trailer_key,
         )
+        if existing_id:
+            cur.execute(
+                """
+                UPDATE movies
+                SET title = %s, imdb_id = COALESCE(%s, movies.imdb_id),
+                    tmdb_id = COALESCE(%s, movies.tmdb_id),
+                    poster_url = COALESCE(%s, poster_url), year = %s,
+                    genre = %s, rating = %s, description = %s,
+                    category = %s, content_type = %s, language = %s,
+                    "cast" = COALESCE(%s, "cast"),
+                    trailer_key = COALESCE(%s, trailer_key)
+                WHERE id = %s
+                RETURNING id
+                """,
+                (*values, existing_id),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO movies
+                    (title, url, imdb_id, tmdb_id, poster_url, year, genre,
+                     rating, description, category, content_type, language,
+                     "cast", trailer_key)
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                values,
+            )
         movie_id = cur.fetchone()[0]
         conn.commit()
 
@@ -8164,6 +8274,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     movie_name = ai_data.get("title", "UNKNOWN")
     movie_year = ai_data.get("year", "")
     movie_lang = ai_data.get("language", "")
+    extra_info = ai_data.get("extra_info", "")
     gemini_category = ai_data.get("category", "")
 
     if movie_name == "UNKNOWN" or len(movie_name) < 2:
@@ -8221,36 +8332,61 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     # --- STEP 4: DB INSERT (pm_file_listener ka EXACT ON CONFLICT logic) ---
     if not imdb_id:  # Fix for empty string violating unique constraint
         imdb_id = None
+    tmdb_id = await run_async(
+        resolve_tmdb_id_from_imdb, imdb_id, category
+    )
 
-    # imdb_id bhi update hota hai — superbatch mein pehle yeh missing tha!
     conn = get_db_connection()
     if not conn:
         return None
 
     try:
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO movies (title, url, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, description, category, content_type, language, extra_info, "cast", trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (title) DO UPDATE
-            SET imdb_id      = COALESCE(EXCLUDED.imdb_id,      movies.imdb_id),
-                poster_url   = COALESCE(EXCLUDED.poster_url,   movies.poster_url),
-                backdrop_poster_url = COALESCE(EXCLUDED.backdrop_poster_url, movies.backdrop_poster_url),
-                year         = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
-                category     = COALESCE(EXCLUDED.category,     movies.category),
-                content_type = COALESCE(EXCLUDED.content_type, movies.content_type),
-                genre        = COALESCE(EXCLUDED.genre,        movies.genre),
-                rating       = COALESCE(EXCLUDED.rating,       movies.rating),
-                description  = COALESCE(EXCLUDED.description,  movies.description),
-                language     = CASE WHEN EXCLUDED.language   != '' THEN EXCLUDED.language   ELSE movies.language   END,
-                extra_info   = CASE WHEN EXCLUDED.extra_info  != '' THEN EXCLUDED.extra_info  ELSE movies.extra_info  END,
-                "cast"       = COALESCE(EXCLUDED."cast",       movies."cast"),
-                trailer_key  = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
-            RETURNING id
-            """,
-            (title, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, plot, category, content_type, movie_lang, "", cast_str, trailer_key)
+        existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+        movie_values = (
+            title, imdb_id, tmdb_id, poster_url, backdrop_poster_url, year,
+            genre, rating, plot, category, content_type, movie_lang,
+            extra_info, cast_str, trailer_key,
         )
+        if existing_id:
+            cur.execute(
+                """
+                UPDATE movies
+                SET title = %s, imdb_id = COALESCE(%s, movies.imdb_id),
+                    tmdb_id = COALESCE(%s, movies.tmdb_id),
+                    poster_url = COALESCE(%s, poster_url),
+                    backdrop_poster_url = COALESCE(%s, backdrop_poster_url),
+                    year = CASE WHEN movies.year = 0 THEN %s ELSE movies.year END,
+                    genre = COALESCE(%s, genre), rating = COALESCE(%s, rating),
+                    description = COALESCE(%s, description),
+                    category = COALESCE(%s, category),
+                    content_type = COALESCE(%s, content_type),
+                    language = CASE WHEN %s <> '' THEN %s ELSE movies.language END,
+                    extra_info = CASE WHEN %s <> '' THEN %s ELSE movies.extra_info END,
+                    "cast" = COALESCE(%s, "cast"),
+                    trailer_key = COALESCE(%s, trailer_key)
+                WHERE id = %s
+                RETURNING id
+                """,
+                (
+                    title, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
+                    year, genre, rating, plot, category, content_type,
+                    movie_lang, movie_lang, extra_info, extra_info, cast_str,
+                    trailer_key, existing_id,
+                ),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO movies
+                    (title, url, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
+                     year, genre, rating, description, category, content_type,
+                     language, extra_info, "cast", trailer_key)
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                movie_values,
+            )
         movie_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
@@ -8267,6 +8403,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
             'poster_url': poster_url,
             'backdrop_poster_url': backdrop_poster_url,
             'imdb_id':    imdb_id,
+            'tmdb_id':    tmdb_id,
             'cast_str':   cast_str,
         }
     except Exception as e:
@@ -10309,12 +10446,17 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             cur = conn.cursor()
             
-            # Check for existing movie
-            cur.execute(
-                "SELECT id, poster_url, year FROM movies WHERE title ILIKE %s",
-                (title,)
+            tmdb_id = await run_async(
+                resolve_tmdb_id_from_imdb, imdb_id, category
             )
-            existing = cur.fetchone()
+            existing = None
+            existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+            if existing_id:
+                cur.execute(
+                    "SELECT id, poster_url, year FROM movies WHERE id = %s",
+                    (existing_id,),
+                )
+                existing = cur.fetchone()
 
             if existing:
                 # Update existing with better data if available
@@ -10331,7 +10473,9 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 cur.execute("""
                     UPDATE movies 
-                    SET poster_url = COALESCE(%s, poster_url),
+                    SET imdb_id = COALESCE(%s, imdb_id),
+                        tmdb_id = COALESCE(%s, tmdb_id),
+                        poster_url = COALESCE(%s, poster_url),
                         year = CASE WHEN %s > 0 THEN %s ELSE year END,
                         genre = COALESCE(%s, genre),
                         rating = COALESCE(%s, rating),
@@ -10344,8 +10488,9 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         trailer_key = COALESCE(%s, trailer_key)
                     WHERE id = %s
                     RETURNING id
-                """, (final_poster, final_year, final_year, genre, rating, plot, 
-                      normalized_category, content_type, movie_lang, movie_extra, cast_str, trailer_key, existing_id))
+                """, (imdb_id, tmdb_id, final_poster, final_year, final_year, genre,
+                      rating, plot, normalized_category, content_type, movie_lang,
+                      movie_extra, cast_str, trailer_key, existing_id))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
                 
@@ -10360,11 +10505,11 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 cur.execute("""
                     INSERT INTO movies 
-                    (title, url, imdb_id, poster_url, year, genre, rating, 
+                    (title, url, imdb_id, tmdb_id, poster_url, year, genre, rating, 
                      description, category, content_type, language, extra_info, "cast", trailer_key)
                     VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (title, imdb_id, poster_url, year, genre, rating, 
+                """, (title, imdb_id, tmdb_id, poster_url, year, genre, rating, 
                       plot, category, content_type, movie_lang, movie_extra, cast_str, trailer_key))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
@@ -10870,10 +11015,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """
                 INSERT INTO movies (title, url, file_id, is_unreleased) 
                 VALUES (%s, %s, %s, %s) 
-                ON CONFLICT (title) DO UPDATE SET 
-                    is_unreleased = EXCLUDED.is_unreleased,
-                    url = '', 
-                    file_id = NULL
                 """,
                 (title.strip(), "", None, True)
             )
@@ -10885,10 +11026,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """
                 INSERT INTO movies (title, url, file_id, is_unreleased) 
                 VALUES (%s, %s, %s, %s) 
-                ON CONFLICT (title) DO UPDATE SET 
-                    url = EXCLUDED.url, 
-                    file_id = EXCLUDED.file_id,
-                    is_unreleased = FALSE
                 """,
                 (title.strip(), "", value.strip(), False)
             )
@@ -10905,10 +11042,6 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """
                 INSERT INTO movies (title, url, file_id, is_unreleased) 
                 VALUES (%s, %s, %s, %s) 
-                ON CONFLICT (title) DO UPDATE SET 
-                    url = EXCLUDED.url, 
-                    file_id = NULL,
-                    is_unreleased = FALSE
                 """,
                 (title.strip(), normalized_url, None, False)
             )
@@ -11140,13 +11273,13 @@ Movie3 file_id_here
 
                 if any(url_or_id.startswith(prefix) for prefix in ["BQAC", "BAAC", "CAAC", "AQAC"]):
                     cur.execute(
-                        "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = EXCLUDED.file_id",
+                        "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, %s)",
                         (title.strip(), "", url_or_id.strip())
                     )
                 else:
                     normalized_url = normalize_url(url_or_id)
                     cur.execute(
-                        "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, NULL) ON CONFLICT (title) DO UPDATE SET url = EXCLUDED.url, file_id = NULL",
+                        "INSERT INTO movies (title, url, file_id) VALUES (%s, %s, NULL)",
                         (title.strip(), normalized_url.strip())
                     )
 

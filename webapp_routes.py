@@ -1725,6 +1725,7 @@ def register_webapp_routes(
                             regexp_replace(LOWER(title), '''s\\y', '', 'g'),
                             '[^a-z0-9]', '', 'g'
                           ) LIKE %s
+                    ORDER BY year DESC NULLS LAST, id DESC
                     LIMIT 20
                 """, (
                     f'%{query}%',
@@ -1858,13 +1859,15 @@ def register_webapp_routes(
         combined = []
         # Local movies first
         for m in local_results:
-            key = normalize_title(m['title'])
+            # Same-title movies are valid distinct catalogue records. Use the
+            # stable movie ID for deduplication, not the display title.
+            key = ('local', m['id'])
             if key not in seen:
                 seen.add(key)
                 combined.append(m)
         # Then TMDB movies (only if not already seen)
         for m in tmdb_results:
-            key = normalize_title(m['title'])
+            key = ('tmdb', m['id'])
             if key not in seen and len(combined) < 30:
                 seen.add(key)
                 combined.append(m)

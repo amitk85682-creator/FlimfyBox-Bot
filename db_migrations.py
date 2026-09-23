@@ -375,6 +375,43 @@ def _migration_8(conn):
         """)
 
 
+def _migration_9(conn):
+    """Allow duplicate display titles while keeping provider identities unique."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS tmdb_id BIGINT")
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'movies_title_key'
+                ) THEN
+                    ALTER TABLE movies DROP CONSTRAINT movies_title_key;
+                END IF;
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'movies_title_unique'
+                ) THEN
+                    ALTER TABLE movies DROP CONSTRAINT movies_title_unique;
+                END IF;
+            END
+            $$;
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS movies_imdb_id_unique_idx
+            ON movies (imdb_id)
+            WHERE imdb_id IS NOT NULL AND BTRIM(imdb_id) <> ''
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS movies_tmdb_id_unique_idx
+            ON movies (tmdb_id)
+            WHERE tmdb_id IS NOT NULL
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_movies_tmdb_id ON movies (tmdb_id)")
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -384,6 +421,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (6, _migration_6),
     (7, _migration_7),
     (8, _migration_8),
+    (9, _migration_9),
 )
 
 
