@@ -4538,7 +4538,14 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     ),
                     parse_mode='HTML'
                 )
-                track_message_for_deletion(context, target_chat_id, warn_text_msg.message_id, USER_TEXT_DELETE_SECONDS)
+                # Keep the notice in the same deletion window as the file it
+                # describes, so no stale warning remains after the file is gone.
+                track_message_for_deletion(
+                    context,
+                    target_chat_id,
+                    warn_text_msg.message_id,
+                    USER_FILE_DELETE_SECONDS,
+                )
             except:
                 pass
 
