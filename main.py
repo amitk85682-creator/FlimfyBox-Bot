@@ -2755,6 +2755,19 @@ def normalize_catalog_labels(category="", content_type=None, language="", extra_
     return region, media_type
 
 
+def normalize_seasons_data(value):
+    """Return seasons metadata as a mapping regardless of DB/API encoding."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
     try:
@@ -7546,10 +7559,11 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         title, year, poster, genre, imdb_id_f, rating, plot, category, seasons_data = data
+        seasons_data = normalize_seasons_data(seasons_data)
         category, content_type = normalize_catalog_labels(
             category=category,
             language="Hindi",
-            extra_info=" ".join(str(seasons_data or {}).keys()),
+            extra_info=" ".join(seasons_data.keys()),
             genre=genre,
             title=title,
         )
