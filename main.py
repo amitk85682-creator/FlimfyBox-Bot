@@ -2528,6 +2528,7 @@ def update_movie_metadata(
     rating: str = None,
     description: str = None,
     category: str = None,
+    content_type: str = None,
     seasons_data: dict = None
 ):
     conn = None
@@ -2550,6 +2551,7 @@ def update_movie_metadata(
         if rating: add("rating", rating)
         if description: add("description", description)
         if category: add("category", category)
+        if content_type: add("content_type", content_type)
         if seasons_data is not None:
             import json
             add("seasons_data", json.dumps(seasons_data))
@@ -2727,6 +2729,35 @@ def is_valid_imdb_id(imdb_id: str) -> bool:
         return False
     return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
 
+
+def normalize_catalog_labels(category="", content_type=None, language="", extra_info="", genre="", title=""):
+    """Return stable regional category and media content type for catalogue rows."""
+    category_text = str(category or "").strip()
+    signal = " ".join(
+        str(value or "").lower()
+        for value in (category_text, content_type, language, extra_info, genre, title)
+    )
+    if any(token in signal for token in ("anime", "cartoon", "animation")):
+        media_type = "Anime"
+    elif any(token in signal for token in ("web series", "tv series", "television", "season", "episode", " s01", " s02")):
+        media_type = "Web Series"
+    else:
+        media_type = "Movie"
+
+    category_lower = category_text.lower()
+    if "bollywood" in category_lower or "hindi" in category_lower or "hindi" in signal:
+        region = "Bollywood"
+    elif "hollywood" in category_lower or "english" in category_lower or "english" in signal:
+        region = "Hollywood"
+    elif any(token in signal for token in ("anime", "cartoon", "animation")):
+        region = "Anime"
+    elif category_text and category_lower not in {"movies", "movie", "web series", "tv series"}:
+        region = category_text
+    else:
+        region = "Hollywood" if media_type == "Movie" else "Bollywood"
+    return region, media_type
+
+
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     """Automatically fetch and update metadata for a movie"""
     try:
@@ -2734,6 +2765,13 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         if metadata:
             # 🔧 FIX: 8 values unpack (pehle 6 thi — CRASH hoti thi!)
             title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
+            category, content_type = normalize_catalog_labels(
+                category=category,
+                language="",
+                extra_info="",
+                genre=genre,
+                title=title,
+            )
             update_movie_metadata(
                 movie_id=movie_id,
                 imdb_id=imdb_id if imdb_id else None,
@@ -2743,6 +2781,7 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
                 rating=rating if rating and rating != 'N/A' else None,
                 description=plot if plot else None,      # 🔧 NAYA: Plot bhi save karo
                 category=category if category else None,
+                content_type=content_type,
                 seasons_data=seasons_data if seasons_data else {}
             )
             logger.info(f"✅ Metadata updated for movie {movie_id}: {title}")
@@ -7495,6 +7534,13 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         title, year, poster, genre, imdb_id_f, rating, plot, category, seasons_data = data
+        category, content_type = normalize_catalog_labels(
+            category=category,
+            language="Hindi",
+            extra_info=" ".join(str(seasons_data or {}).keys()),
+            genre=genre,
+            title=title,
+        )
         
         # 2. Cast/Stars लाना
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id_f, 5)
@@ -7510,8 +7556,8 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resolve_trailer_key, title, year, imdb_id_f, category, title
         )
         cur.execute("""
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", seasons_data, trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, content_type, language, "cast", seasons_data, trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (imdb_id) DO UPDATE SET 
             title = EXCLUDED.title,
             poster_url = EXCLUDED.poster_url, 
@@ -7520,11 +7566,12 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rating = EXCLUDED.rating, 
             description = EXCLUDED.description, 
             category = EXCLUDED.category, 
+            content_type = EXCLUDED.content_type,
             "cast" = EXCLUDED."cast",
             seasons_data = EXCLUDED.seasons_data,
             trailer_key = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
-        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}', trailer_key))
+        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, content_type, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}', trailer_key))
         
         movie_id = cur.fetchone()[0]
         
@@ -7601,6 +7648,13 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     language = parts[2] if len(parts) > 2 else "Hindi"
     genre = parts[3] if len(parts) > 3 else "Adult, Drama"
     category = parts[4] if len(parts) > 4 else "Web Series"
+    category, content_type = normalize_catalog_labels(
+        category=category,
+        language=language,
+        extra_info="",
+        genre=genre,
+        title=title,
+    )
     
     rating = "N/A"
     plot = "Watch exclusive content on FlimfyBox Premium."
@@ -7624,18 +7678,19 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, language, "cast", trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, content_type, language, "cast", trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (title) DO UPDATE 
             SET year = EXCLUDED.year, 
                 genre = EXCLUDED.genre, 
                 category = EXCLUDED.category, 
+                content_type = EXCLUDED.content_type,
                 language = EXCLUDED.language,
                 "cast" = COALESCE(EXCLUDED."cast", movies."cast"),
                 trailer_key = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
             """,
-            (title, imdb_id, poster_url, year, genre, rating, plot, category, language, cast_str, trailer_key)
+            (title, imdb_id, poster_url, year, genre, rating, plot, category, content_type, language, cast_str, trailer_key)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
@@ -8088,6 +8143,13 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     genre_lower = str(genre or "").lower()
     if "anime" in cat_lower or "cartoon" in cat_lower or "animation" in cat_lower or "anime" in genre_lower or "animation" in genre_lower:
         category = "Anime"
+    category, content_type = normalize_catalog_labels(
+        category=category,
+        language=movie_lang,
+        extra_info=extra_info,
+        genre=genre,
+        title=title,
+    )
 
     # --- STEP 3: IMDb CAST ---
     cast_str = ""
@@ -8124,14 +8186,15 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO movies (title, url, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, description, category, language, extra_info, "cast", trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO movies (title, url, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, description, category, content_type, language, extra_info, "cast", trailer_key)
+            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (title) DO UPDATE
             SET imdb_id      = COALESCE(EXCLUDED.imdb_id,      movies.imdb_id),
                 poster_url   = COALESCE(EXCLUDED.poster_url,   movies.poster_url),
                 backdrop_poster_url = COALESCE(EXCLUDED.backdrop_poster_url, movies.backdrop_poster_url),
                 year         = CASE WHEN movies.year = 0 THEN EXCLUDED.year ELSE movies.year END,
                 category     = COALESCE(EXCLUDED.category,     movies.category),
+                content_type = COALESCE(EXCLUDED.content_type, movies.content_type),
                 genre        = COALESCE(EXCLUDED.genre,        movies.genre),
                 rating       = COALESCE(EXCLUDED.rating,       movies.rating),
                 description  = COALESCE(EXCLUDED.description,  movies.description),
@@ -8141,7 +8204,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                 trailer_key  = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
             RETURNING id
             """,
-            (title, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, plot, category, movie_lang, "", cast_str, trailer_key)
+            (title, imdb_id, poster_url, backdrop_poster_url, year, genre, rating, plot, category, content_type, movie_lang, "", cast_str, trailer_key)
         )
         movie_id = cur.fetchone()[0]
         conn.commit()
@@ -10234,6 +10297,13 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 existing_id, existing_poster, existing_year = existing
                 final_poster = poster_url if poster_url else existing_poster
                 final_year = year if (year and year > 0) else existing_year
+                normalized_category, content_type = normalize_catalog_labels(
+                    category=category,
+                    language=movie_lang,
+                    extra_info=movie_extra,
+                    genre=genre,
+                    title=title,
+                )
                 
                 cur.execute("""
                     UPDATE movies 
@@ -10243,6 +10313,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         rating = COALESCE(%s, rating),
                         description = COALESCE(%s, description),
                         category = %s,
+                        content_type = %s,
                         language = COALESCE(NULLIF(%s, ''), language),
                         extra_info = COALESCE(NULLIF(%s, ''), extra_info),
                         "cast" = COALESCE(%s, "cast"),
@@ -10250,20 +10321,27 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE id = %s
                     RETURNING id
                 """, (final_poster, final_year, final_year, genre, rating, plot, 
-                      category, movie_lang, movie_extra, cast_str, trailer_key, existing_id))
+                      normalized_category, content_type, movie_lang, movie_extra, cast_str, trailer_key, existing_id))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
                 
             else:
                 # Insert new movie
+                category, content_type = normalize_catalog_labels(
+                    category=category,
+                    language=movie_lang,
+                    extra_info=movie_extra,
+                    genre=genre,
+                    title=title,
+                )
                 cur.execute("""
                     INSERT INTO movies 
                     (title, url, imdb_id, poster_url, year, genre, rating, 
-                     description, category, language, extra_info, "cast", trailer_key)
-                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     description, category, content_type, language, extra_info, "cast", trailer_key)
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (title, imdb_id, poster_url, year, genre, rating, 
-                      plot, category, movie_lang, movie_extra, cast_str, trailer_key))
+                      plot, category, content_type, movie_lang, movie_extra, cast_str, trailer_key))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"✅ Created new movie: {title} (ID: {movie_id})")
 

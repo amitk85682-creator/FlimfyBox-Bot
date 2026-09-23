@@ -354,10 +354,11 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 .dp-header { display: flex; position: absolute; z-index: 4; top: max(18px, env(safe-area-inset-top)); right: 18px; left: 18px; justify-content: space-between; }
 @media (max-width: 699px) {
     .dp-header {
-        top: max(34px, calc(env(safe-area-inset-top) + 14px));
+        top: max(44px, calc(env(safe-area-inset-top, 0px) + 18px));
     }
 }
 .btn-back, .btn-more { display: grid; width: 43px; height: 43px; place-items: center; border: 1px solid rgba(255, 255, 255, .16); border-radius: 50%; color: var(--text); background: rgba(10, 12, 24, .65); backdrop-filter: blur(14px); }
+.details-back-button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 86px; min-height: 44px; height: 44px; gap: 8px; padding: 0 14px; border-radius: 13px; font-size: 13px; font-weight: 800; }
 .dp-backdrop { position: relative; height: min(58vh, 560px); min-height: 385px; background-color: var(--surface); background-position: center top; background-size: cover; }
 .dp-backdrop::before {
     position: absolute; inset: 0; content: ''; background: rgba(8, 10, 18, .32);

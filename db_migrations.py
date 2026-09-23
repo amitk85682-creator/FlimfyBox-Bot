@@ -191,6 +191,7 @@ def _migration_2(conn):
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS rating TEXT",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS description TEXT",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS category TEXT",
+        "ALTER TABLE movies ADD COLUMN IF NOT EXISTS content_type TEXT DEFAULT 'Movie'",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS language TEXT",
         "ALTER TABLE movies ADD COLUMN IF NOT EXISTS extra_info TEXT",
         'ALTER TABLE movies ADD COLUMN IF NOT EXISTS "cast" TEXT',
@@ -222,8 +223,20 @@ def _migration_2(conn):
 
 def _migration_3(conn):
     statements = (
+        """UPDATE movies
+           SET content_type = CASE
+               WHEN LOWER(COALESCE(content_type, '')) IN ('web series', 'tv series')
+                   OR COALESCE(seasons_data, '{}'::jsonb) <> '{}'::jsonb
+                   OR LOWER(COALESCE(category, '')) IN ('web series', 'tv series', 'tv show')
+                   THEN 'Web Series'
+               WHEN LOWER(CONCAT_WS(' ', category, genre, title)) ~ '(anime|animation|cartoon|manga)'
+                   THEN 'Anime'
+               ELSE 'Movie'
+           END
+           WHERE content_type IS NULL OR BTRIM(content_type) = ''""",
         "CREATE INDEX IF NOT EXISTS idx_movie_ratings_movie_id ON movie_ratings(movie_id)",
         "CREATE INDEX IF NOT EXISTS idx_movie_ratings_user_id ON movie_ratings(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_movies_content_type ON movies(content_type)",
         "CREATE INDEX IF NOT EXISTS idx_global_chat_created_at ON global_chat_messages(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_delete_at ON auto_delete_queue (bot_username, delete_at)",
         "CREATE INDEX IF NOT EXISTS idx_movies_title ON movies (title)",
@@ -329,6 +342,23 @@ def _migration_6(conn):
         cur.execute("CREATE INDEX IF NOT EXISTS idx_upcoming_notifications_user_id ON upcoming_notifications(user_id)")
 
 
+def _migration_7(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE movies
+            SET content_type = CASE
+                WHEN LOWER(COALESCE(content_type, '')) IN ('web series', 'tv series')
+                    OR COALESCE(seasons_data, '{}'::jsonb) <> '{}'::jsonb
+                    OR LOWER(COALESCE(category, '')) IN ('web series', 'tv series', 'tv show')
+                    THEN 'Web Series'
+                WHEN LOWER(CONCAT_WS(' ', category, genre, title)) ~ '(anime|animation|cartoon|manga)'
+                    THEN 'Anime'
+                ELSE 'Movie'
+            END
+            WHERE content_type IS NULL OR BTRIM(content_type) = ''
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -336,6 +366,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (4, _migration_4),
     (5, _migration_5),
     (6, _migration_6),
+    (7, _migration_7),
 )
 
 

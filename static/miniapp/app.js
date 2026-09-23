@@ -1294,9 +1294,10 @@ const tg = window.Telegram?.WebApp || {
                     target: 'hollywoodScroll',
                     matches: movie => {
                         const category = String(movie.category || '').toLowerCase();
+                        const contentType = String(movie.content_type || '').toLowerCase();
                         const language = String(movie.language || '').toLowerCase();
                         const genre = String(movie.genre || '').toLowerCase();
-                        if (/(anime|korean|japan|chinese)/.test(`${category} ${genre}`)) return false;
+                        if (/(anime|korean|japan|chinese)/.test(`${category} ${contentType} ${genre}`)) return false;
                         return /(^|[^a-z])hollywood([^a-z]|$)/.test(category)
                             || (
                                 ['english', 'english movie', 'english movies', 'movie', 'movies', 'film', 'films'].includes(category)
@@ -1309,9 +1310,10 @@ const tg = window.Telegram?.WebApp || {
                     target: 'bollywoodScroll',
                     matches: movie => {
                         const category = String(movie.category || '').toLowerCase();
+                        const contentType = String(movie.content_type || '').toLowerCase();
                         const language = String(movie.language || '').toLowerCase();
                         const genre = String(movie.genre || '').toLowerCase();
-                        if (/anime|korean|japan|chinese/.test(`${category} ${genre}`)) return false;
+                        if (/anime|korean|japan|chinese/.test(`${category} ${contentType} ${genre}`)) return false;
                         return /(^|[^a-z])(bollywood|hindi)([^a-z]|$)/.test(category)
                             || /(^|[^a-z])hindi([^a-z]|$)/.test(language);
                     }
@@ -1320,7 +1322,7 @@ const tg = window.Telegram?.WebApp || {
                     row: 'rowAnime',
                     target: 'animeScroll',
                     matches: movie => /(^|[^a-z])anime([^a-z]|$)/.test(
-                        `${movie.category || ''} ${movie.genre || ''}`.toLowerCase()
+                        `${movie.category || ''} ${movie.content_type || ''} ${movie.genre || ''}`.toLowerCase()
                     )
                 }
             ];

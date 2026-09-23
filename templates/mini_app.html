@@ -193,7 +193,7 @@
 
     <div class="details-page" id="detailsPage">
         <div class="dp-header">
-            <button class="btn-back" onclick="closeDetails()"><i class="fas fa-chevron-left"></i></button>
+            <button class="btn-back details-back-button" type="button" onclick="closeDetails()" aria-label="Back to catalogue"><i class="fas fa-chevron-left"></i><span>Back</span></button>
             <button class="btn-more" type="button" aria-label="More actions" onclick="showToast('More actions coming soon')"><i class="fas fa-ellipsis-h"></i></button>
         </div>
         <div class="dp-layout">
@@ -227,7 +227,6 @@
             </div>
         </div>
         <div class="detail-bottom-actions">
-            <button type="button" onclick="closeDetails()"><i class="fas fa-arrow-left"></i> Back</button>
             <button type="button" onclick="toggleCurrentMyList()"><i class="far fa-bookmark"></i> Add to List</button>
         </div>
     </div>

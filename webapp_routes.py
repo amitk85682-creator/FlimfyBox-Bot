@@ -149,7 +149,7 @@ def normalize_catalogue_genres(raw_value):
             result.add('political-drama')
     return result
 
-def is_catalogue_tv(category, seasons_data):
+def is_catalogue_tv(category, seasons_data, content_type=None):
     """Use the existing episodic signals for Browse media classification."""
     if isinstance(seasons_data, str):
         try:
@@ -157,14 +157,15 @@ def is_catalogue_tv(category, seasons_data):
         except (TypeError, ValueError):
             seasons_data = None
     return (
-        str(category or '').strip().lower() == 'web series'
+        str(content_type or '').strip().lower() in {'web series', 'tv series'}
+        or str(category or '').strip().lower() == 'web series'
         or (isinstance(seasons_data, dict) and bool(seasons_data))
     )
 
-def browse_type_matches(browse_type, category, seasons_data):
+def browse_type_matches(browse_type, category, seasons_data, content_type=None):
     if browse_type == 'all':
         return True
-    is_tv = is_catalogue_tv(category, seasons_data)
+    is_tv = is_catalogue_tv(category, seasons_data, content_type)
     return is_tv if browse_type == 'tv' else not is_tv
 
 GENRE_BY_ID = {item[0]: item for item in CANONICAL_GENRES}
@@ -1110,7 +1111,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT genre, category, seasons_data, poster_url, rating, id
+                SELECT genre, category, content_type, seasons_data, poster_url, rating, id
                 FROM movies
                 WHERE genre IS NOT NULL AND genre <> ''
                 ORDER BY
@@ -1124,8 +1125,8 @@ def register_webapp_routes(
             counts = {genre_id: 0 for genre_id, *_ in CANONICAL_GENRES}
             posters = {genre_id: [] for genre_id, *_ in CANONICAL_GENRES}
             poster_candidates = {genre_id: [] for genre_id, *_ in CANONICAL_GENRES}
-            for raw_genre, category, seasons_data, poster_url, _rating, _movie_id in cur.fetchall():
-                if not browse_type_matches(browse_type, category, seasons_data):
+            for raw_genre, category, content_type, seasons_data, poster_url, _rating, _movie_id in cur.fetchall():
+                if not browse_type_matches(browse_type, category, seasons_data, content_type):
                     continue
                 for genre_id in normalize_catalogue_genres(raw_genre):
                     if genre_id in counts:
@@ -1187,13 +1188,13 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, seasons_data
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, content_type, seasons_data
                 FROM movies
                 ORDER BY id DESC
             """)
             movies = []
             for row in cur.fetchall():
-                if genre_id not in normalize_catalogue_genres(row[6]) or not browse_type_matches(browse_type, row[7], row[9]):
+                if genre_id not in normalize_catalogue_genres(row[6]) or not browse_type_matches(browse_type, row[7], row[10], row[9]):
                     continue
                 movies.append({
                     'id': row[0],
@@ -1205,6 +1206,7 @@ def register_webapp_routes(
                     'genre': row[6] or '',
                     'category': row[7] or 'Movies',
                     'language': row[8] or '',
+                    'content_type': row[9] or 'Movie',
                     'source': 'local'
                 })
             result = {
@@ -1243,7 +1245,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, rating, genre, category, language, seasons_data
+                SELECT id, title, year, poster_url, rating, genre, category, language, content_type, seasons_data
                 FROM movies
                 WHERE poster_url IS NOT NULL AND poster_url <> '' AND year IS NOT NULL
                 ORDER BY year DESC NULLS LAST, id DESC
@@ -1262,13 +1264,13 @@ def register_webapp_routes(
                     year = int(row[2] or 0)
                     if (start_year is not None and not (start_year <= year <= end_year)) or (start_year is None and year > end_year):
                         continue
-                    if not browse_type_matches(browse_type, row[6], row[8]):
+                    if not browse_type_matches(browse_type, row[6], row[9], row[8]):
                         continue
                     items.append({
                         'id': row[0], 'title': row[1], 'year': year,
                         'image': row[3], 'rating': row[4] or 'N/A',
                         'genre': row[5] or '', 'category': row[6] or 'Movies',
-                        'language': row[7] or '', 'source': 'local'
+                        'language': row[7] or '', 'content_type': row[8] or 'Movie', 'source': 'local'
                     })
                 items.sort(key=lambda item: (float(item['rating']) if str(item['rating']).replace('.', '', 1).isdigit() else -1, item['year'], item['id']), reverse=True)
                 collections.append({'id': decade_id, 'label': label, 'movies': items[:12]})
@@ -1442,7 +1444,7 @@ def register_webapp_routes(
             cur = conn.cursor()
             cur.execute("""
                 SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
-                       COALESCE(language, '') as language, created_at
+                       COALESCE(language, '') as language, COALESCE(content_type, 'Movie') as content_type, created_at
                 FROM movies
                 WHERE poster_url IS NOT NULL AND poster_url != ''
                 ORDER BY created_at DESC NULLS LAST, id DESC
@@ -1462,7 +1464,8 @@ def register_webapp_routes(
                     'genre': r[6] if r[6] else 'Unknown',
                     'category': r[7] if r[7] else 'Movie',
                     'language': r[8],
-                    'created_at': r[9].isoformat() if r[9] else None
+                    'content_type': r[9],
+                    'created_at': r[10].isoformat() if r[10] else None
                 })
             cur.close()
             close_db_connection(conn)
@@ -1559,7 +1562,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, "cast", trailer_key, seasons_data, is_unreleased
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, content_type, "cast", trailer_key, seasons_data, is_unreleased
                 FROM movies WHERE id = %s
             """, (movie_id,))
             row = cur.fetchone()
@@ -1579,12 +1582,13 @@ def register_webapp_routes(
                 'description': row[7] if row[7] else 'No description available.',
                 'category': row[8] if row[8] else 'Movie',
                 'language': row[9] if row[9] else '',
-                'cast': row[10] if row[10] else '',
-                'trailer_key': row[11] if row[11] else None,
-                'seasons_data': row[12] if len(row) > 12 and row[12] else {}
+                'content_type': row[10] if row[10] else 'Movie',
+                'cast': row[11] if row[11] else '',
+                'trailer_key': row[12] if row[12] else None,
+                'seasons_data': row[13] if len(row) > 13 and row[13] else {}
             }
-            movie['is_upcoming'] = bool(row[13])
-            movie['is_released'] = not bool(row[13])
+            movie['is_upcoming'] = bool(row[14])
+            movie['is_released'] = not bool(row[14])
             movie['is_available'] = True
             movie['availability_state'] = 'available'
     

@@ -27,7 +27,7 @@ def test_upcoming_rating_is_locked_and_post_is_rejected():
     assert "if movie_row[0]:" in ROUTES
     assert "'rating_locked': True" in ROUTES
     assert "Rating is available after release." in ROUTES
-    assert "movie['is_upcoming'] = bool(row[13])" in ROUTES
+    assert "movie['is_upcoming'] = bool(row[14])" in ROUTES
 
 
 def test_upcoming_details_use_notify_and_locked_rating_not_request():
