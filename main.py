@@ -237,22 +237,20 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard_data = {
         "inline_keyboard": [
             [
-                {"text": "📥 Download Now", "url": secure_url},
-                {"text": "📥 Download Now", "url": secure_url}
+                {"text": "Get Now", "url": secure_url}
             ],
             [
-                {"text": "⚡ Download Now", "url": secure_url}
+                {"text": "Join Channel", "url": FILMFYBOX_CHANNEL_URL}
             ]
         ]
     }
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📥 Download Now", url=secure_url),
-            InlineKeyboardButton("📥 Download Now", url=secure_url)
+            InlineKeyboardButton("Get Now", url=secure_url)
         ],
         [
-            InlineKeyboardButton("⚡ Download Now", url=secure_url)
+            InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)
         ]
     ])
 
@@ -6079,9 +6077,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_link = os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/your_channel')
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-            [InlineKeyboardButton("📢 Join Channel", url=channel_link)]
+            [InlineKeyboardButton("Get Now", url=secure_url)],
+            [InlineKeyboardButton("Join Channel", url=channel_link)]
         ])
 
         # --- 5. BROADCASTING TO CHANNELS ---
@@ -7994,9 +7991,8 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
 
             post_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-                [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+                [InlineKeyboardButton("Get Now", url=secure_url)],
+                [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
 
             # --- TARGET CHANNEL SELECTION (New System) ---
@@ -8632,9 +8628,8 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Download Now", url=secure_url), InlineKeyboardButton("Download Now", url=secure_url)],
-            [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-            [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            [InlineKeyboardButton("Get Now", url=secure_url)],
+            [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
         
         photo_to_send = m_poster if (m_poster and m_poster != 'N/A' and m_poster.startswith('http')) else None
@@ -8728,12 +8723,8 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
 
     keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Download Now", url=secure_url),
-            InlineKeyboardButton("Download Now", url=secure_url)
-        ],
-        [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-        [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+        [InlineKeyboardButton("Get Now", url=secure_url)],
+        [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
     ])
 
     # 4. Channels me Post karo
@@ -8933,12 +8924,8 @@ async def process_post_query_album(mg_id: str, update: Update, context: ContextT
 
     # Build Keyboard
     keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Download Now", url=link1),
-            InlineKeyboardButton("Download Now", url=link2),
-        ],
-        [InlineKeyboardButton("Download Now", url=link3)],
-        [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+        [InlineKeyboardButton("Get Now", url=link1)],
+        [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
     ])
 
     # Build Caption
@@ -9152,22 +9139,14 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if movie_id:
             # ✅ Yahan se web_app= hata diya hai, ab direct tumhara /watch/ wala link khulega
             keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Download Now", url=link1),
-                    InlineKeyboardButton("Download Now", url=link2),
-                ],
-                [InlineKeyboardButton("Download Now", url=link3)],
-                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+                [InlineKeyboardButton("Get Now", url=link1)],
+                [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
         else:
             # Agar fallback tg:// link hai, toh normal URL rehne do
             keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("Download Now", url=link1),
-                    InlineKeyboardButton("Download Now", url=link2),
-                ],
-                [InlineKeyboardButton("Download Now", url=link3)],
-                [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+                [InlineKeyboardButton("Get Now", url=link1)],
+                [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
             ])
         # 7. Build Caption
         channel_caption = f"🎬 <b>{query_text}</b>\n"
@@ -9343,12 +9322,8 @@ async def admin_post_query_text(update: Update, context: ContextTypes.DEFAULT_TY
 
         # 3. Build Keyboard
         keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Download Now", url=link1),
-                InlineKeyboardButton("Download Now", url=link2),
-            ],
-            [InlineKeyboardButton("Download Now", url=link3)],
-            [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+            [InlineKeyboardButton("Get Now", url=link1)],
+            [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
         ])
 
         # 4. Target Channels
@@ -10631,12 +10606,8 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Build keyboard
     secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
     post_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Download Now", url=secure_url),
-            InlineKeyboardButton("Download Now", url=secure_url)
-        ],
-        [InlineKeyboardButton("⚡ Download Now", url=secure_url)],
-        [InlineKeyboardButton("📢 Join Channel", url=FILMFYBOX_CHANNEL_URL)]
+        [InlineKeyboardButton("Get Now", url=secure_url)],
+        [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
     ])
 
     # Send to adult channel
