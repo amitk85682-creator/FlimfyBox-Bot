@@ -7581,23 +7581,43 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trailer_key = await run_async(
             resolve_trailer_key, title, year, imdb_id_f, category, title
         )
-        cur.execute("""
-            INSERT INTO movies (title, url, imdb_id, poster_url, year, genre, rating, description, category, content_type, language, "cast", seasons_data, trailer_key)
-            VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (imdb_id) DO UPDATE SET 
-            title = EXCLUDED.title,
-            poster_url = EXCLUDED.poster_url, 
-            year = EXCLUDED.year,
-            genre = EXCLUDED.genre, 
-            rating = EXCLUDED.rating, 
-            description = EXCLUDED.description, 
-            category = EXCLUDED.category, 
-            content_type = EXCLUDED.content_type,
-            "cast" = EXCLUDED."cast",
-            seasons_data = EXCLUDED.seasons_data,
-            trailer_key = COALESCE(EXCLUDED.trailer_key, movies.trailer_key)
-            RETURNING id
-        """, (title, imdb_id_f, poster, year, genre, rating, plot, category, content_type, "Hindi", cast_str, json.dumps(seasons_data) if seasons_data else '{}', trailer_key))
+        movie_values = (
+            title, imdb_id_f, poster, year, genre, rating, plot, category,
+            content_type, "Hindi", cast_str,
+            json.dumps(seasons_data) if seasons_data else '{}', trailer_key,
+        )
+        # IMDb and title are both unique. Resolve an existing row first so a
+        # title collision (for example two different titles named "Obsession")
+        # cannot abort the batch transaction.
+        cur.execute(
+            """
+            SELECT id FROM movies
+            WHERE imdb_id = %s OR title = %s
+            ORDER BY CASE WHEN imdb_id = %s THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (imdb_id_f, title, imdb_id_f),
+        )
+        existing_movie = cur.fetchone()
+        if existing_movie:
+            cur.execute("""
+                UPDATE movies
+                SET title = %s, imdb_id = %s, poster_url = %s, year = %s,
+                    genre = %s, rating = %s, description = %s, category = %s,
+                    content_type = %s, language = %s, "cast" = %s,
+                    seasons_data = %s, trailer_key = COALESCE(%s, trailer_key)
+                WHERE id = %s
+                RETURNING id
+            """, (*movie_values, existing_movie[0]))
+        else:
+            cur.execute("""
+                INSERT INTO movies
+                    (title, url, imdb_id, poster_url, year, genre, rating,
+                     description, category, content_type, language, "cast",
+                     seasons_data, trailer_key)
+                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, movie_values)
         
         movie_id = cur.fetchone()[0]
         
