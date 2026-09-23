@@ -625,6 +625,16 @@ const tg = window.Telegram?.WebApp || {
             window.setBrowseType('tv');
         };
 
+        window.showUpcoming = function() {
+            closeMorePanel();
+            showHome();
+            const row = document.getElementById('rowUpcoming');
+            if (row) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                document.getElementById('upcomingScroll')?.focus({ preventScroll: true });
+            }
+        };
+
         window.showGlobalChat = function() {
             closeMorePanel();
             if (globalChatTimer) clearInterval(globalChatTimer);
