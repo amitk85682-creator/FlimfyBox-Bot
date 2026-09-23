@@ -13088,7 +13088,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
 
 async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a compact, randomized welcome when a human joins a group."""
+    """Welcome new human members with a clickable display-name mention."""
     if not update.message or not update.message.new_chat_members:
         return
     if update.effective_chat.type not in ("group", "supergroup"):
@@ -13099,49 +13099,18 @@ async def group_member_welcome(update: Update, context: ContextTypes.DEFAULT_TYP
             continue
 
         first_name = html_escape((member.first_name or "there").strip())
-        username = (member.username or "").strip()
-        identity = (
-            f"<a href='tg://user?id={member.id}'>{first_name}</a>"
-            if username
-            else first_name
+        identity = f"<a href='tg://user?id={member.id}'>{first_name}</a>"
+        group_name = html_escape(
+            (update.effective_chat.title or "this group").strip()
         )
-        bot_info = await context.bot.get_me()
-        bot_name = html_escape(bot_info.first_name or "FlimfyBox")
         app_button = InlineKeyboardMarkup([
             # Telegram Web App buttons are not valid in group chats. A normal
             # HTTPS URL opens the same Mini App safely from a group welcome.
             [InlineKeyboardButton("🎬 Open FlimfyBox", url=WEB_APP_URL)]
         ])
-        templates = [
-            (
-                f"🎬 <b>Welcome to the FlimfyBox screening room</b>\n\n"
-                f"Hey {identity}, your seat is ready.\n"
-                f"{bot_name} is here to help you find movies, series, anime and TV shows.\n\n"
-                "Drop a title below and let the search begin."
-            ),
-            (
-                f"✨ <b>A new story begins here</b>\n\n"
-                f"Welcome, {identity}.\n"
-                "Search by title, then choose your preferred quality, language or season.\n\n"
-                "Your next watch is only one message away."
-            ),
-            (
-                f"🍿 <b>Screening room open</b>\n\n"
-                f"Glad to have you, {identity}.\n"
-                "Type a movie or series title and choose your perfect version from the results."
-            ),
-            (
-                f"🚀 <b>Welcome aboard</b>\n\n"
-                f"{identity}, your cinematic search assistant is ready.\n"
-                "Send a title whenever you are ready for your next watch."
-            ),
-            (
-                f"🌟 <b>Welcome to the inner circle</b>\n\n"
-                f"Make yourself comfortable, {identity}.\n"
-                f"With {bot_name}, discover your next watch and select the quality you want."
-            ),
-        ]
-        welcome_text = random.choice(templates)
+        welcome_text = (
+            f"<b>Hey ♥️ {identity}, Welcome to {group_name}...</b>"
+        )
         msg = await update.message.reply_text(
             welcome_text,
             parse_mode="HTML",
