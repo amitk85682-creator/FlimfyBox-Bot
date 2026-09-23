@@ -311,12 +311,31 @@ def _migration_5(conn):
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_upcoming_reminders_tmdb_id ON user_upcoming_reminders(tmdb_id)")
 
 
+def _migration_6(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS upcoming_notifications (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                tmdb_id TEXT NOT NULL,
+                movie_title TEXT NOT NULL,
+                release_date DATE NOT NULL,
+                notified_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, tmdb_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_upcoming_notifications_release_date ON upcoming_notifications(release_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_upcoming_notifications_user_id ON upcoming_notifications(user_id)")
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
     (3, _migration_3),
     (4, _migration_4),
     (5, _migration_5),
+    (6, _migration_6),
 )
 
 

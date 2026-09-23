@@ -1435,7 +1435,7 @@ const tg = window.Telegram?.WebApp || {
                 const isTMDB = forceTMDB || m.source === 'tmdb';
                 const rating = m.rating && m.rating !== 'N/A' ? `⭐ ${m.rating}` : '';
                 const badge = isTMDB
-                    ? '<div class="card-badge request">Request</div>'
+                    ? `<div class="card-badge request">${m.is_upcoming ? 'Upcoming' : 'Request'}</div>`
                     : (rating ? `<div class="card-badge available">${rating}</div>` : '');
                 return `
                     <div class="${cardClass}" tabindex="0" role="button" aria-label="Open ${m.title}" onclick='openCardDetails(${JSON.stringify(m).replace(/'/g, "&#39;")}, ${isTMDB})' onkeydown="if(event.key==='Enter') openCardDetails(${JSON.stringify(m).replace(/'/g, "&#39;")}, ${isTMDB})">
@@ -1648,7 +1648,11 @@ document.addEventListener('keydown', (e) => {
             detailsDescription.innerText = 'Loading story and availability…';
             document.getElementById('castSection').innerHTML = '';
             document.getElementById('dpTrailerBtn').innerHTML = '';
-            renderCommunityRating(movie.id, movie.title || 'this title');
+            if (movie.is_upcoming) {
+                renderLockedCommunityRating(movie.title || 'this title');
+            } else {
+                renderCommunityRating(movie.id, movie.title || 'this title');
+            }
             document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
@@ -1667,8 +1671,7 @@ document.addEventListener('keydown', (e) => {
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
                 document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
                 document.getElementById('castSection').innerHTML = '';
-                document.getElementById('dpTrailerBtn').innerHTML = `<button class="btn-request" onclick="requestMovie('${String(movie.title || '').replace(/'/g, "\\'")}' )"><i class="fas fa-hand-paper"></i> Request this title</button>`;
-                document.getElementById('dpLinks').innerHTML = '';
+                renderUpcomingActions(movie);
                 detailsPage.classList.remove('is-loading');
                 return;
             }
@@ -1720,14 +1723,20 @@ document.addEventListener('keydown', (e) => {
                             document.getElementById('castSection').innerHTML = '';
                         }
                         document.getElementById('dpTrailerBtn').innerHTML = '';
-                        renderCommunityRating(m.id, m.title || movie.title || 'this title');
+                        if (m.is_upcoming) {
+                            renderLockedCommunityRating(m.title || movie.title || 'this title');
+                        } else {
+                            renderCommunityRating(m.id, m.title || movie.title || 'this title');
+                        }
 
                         const seasonsContainer = document.getElementById('dpSeasons');
                         const linksContainer = document.getElementById('dpLinks');
                         seasonsContainer.innerHTML = '';
                         linksContainer.innerHTML = '';
 
-                        if (m.files && m.files.length) {
+                        if (m.is_upcoming) {
+                            renderUpcomingActions(m);
+                        } else if (m.files && m.files.length) {
                             let hasSeasons = false;
                             const seasonsMap = {};
                             const movieFiles = [];
@@ -1798,6 +1807,77 @@ document.addEventListener('keydown', (e) => {
             if (!activeMovie) return;
             openDetails(String(activeMovie.id), false);
         };
+        function renderUpcomingActions(movie) {
+            const actionContainer = document.getElementById('dpTrailerBtn');
+            const linksContainer = document.getElementById('dpLinks');
+            if (!actionContainer) return;
+            const tmdbId = String(movie.tmdb_id || movie.id || '').replace(/^tmdb_/, '');
+            const releaseDate = movie.release_date || '';
+            actionContainer.innerHTML = `
+                <button class="btn-request upcoming-notify-button" type="button" data-tmdb-id="${escapeHtml(tmdbId)}" data-release-date="${escapeHtml(releaseDate)}" data-title="${escapeHtml(movie.title || '')}" onclick="toggleUpcomingNotification(this)">
+                    <i class="fas fa-bell"></i> <span>Notify Me</span>
+                </button>
+            `;
+            if (linksContainer) {
+                linksContainer.innerHTML = releaseDate
+                    ? `<div class="pre-release-note"><i class="fas fa-calendar"></i> Expected release: ${escapeHtml(releaseDate)}</div>`
+                    : '<div class="pre-release-note"><i class="fas fa-calendar"></i> Release date is not available yet.</div>';
+            }
+            const button = actionContainer.querySelector('.upcoming-notify-button');
+            if (!button || !tmdbId || !releaseDate) return;
+            fetch(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}`, {
+                headers: telegramAuthHeaders()
+            })
+                .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                .then(({ ok, data }) => {
+                    if (!ok || data.status !== 'success') throw new Error(data.message || 'Notification status unavailable');
+                    setUpcomingNotificationButton(button, Boolean(data.reminder));
+                })
+                .catch(error => console.warn('Upcoming notification status unavailable:', error));
+        }
+        function setUpcomingNotificationButton(button, enabled) {
+            if (!button) return;
+            button.classList.toggle('is-enabled', enabled);
+            button.innerHTML = enabled
+                ? '<i class="fas fa-check"></i> <span>Notification Set</span>'
+                : '<i class="fas fa-bell"></i> <span>Notify Me</span>';
+        }
+        window.toggleUpcomingNotification = function(button) {
+            if (!button || button.disabled) return;
+            button.disabled = true;
+            const body = {
+                tmdb_id: button.dataset.tmdbId,
+                title: button.dataset.title,
+                release_date: button.dataset.releaseDate
+            };
+            fetch('/api/upcoming/reminder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
+                body: JSON.stringify(body)
+            })
+                .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                .then(({ ok, data }) => {
+                    if (!ok || data.status !== 'success') throw new Error(data.message || 'Could not enable notification');
+                    setUpcomingNotificationButton(button, true);
+                    showToast(data.already_enabled ? '✓ Notification already set' : '✓ Notification set');
+                })
+                .catch(error => showToast(error.message))
+                .finally(() => { button.disabled = false; });
+        };
+        function renderLockedCommunityRating(title) {
+            const container = document.getElementById('communityRating');
+            if (!container) return;
+            container.dataset.selectedRating = '';
+            container.dataset.submitting = 'false';
+            container.innerHTML = `
+                <h2 class="community-rating-title">Rate ${escapeHtml(title)}</h2>
+                <div class="community-rating-stars is-locked" aria-label="Rating locked">
+                    <span class="rating-lock"><i class="fas fa-lock"></i></span>
+                    <span class="community-rating-locked-copy">Rating available after release</span>
+                </div>
+                <div class="community-rating-summary"><strong>Community Rating</strong><br>Rating available after release.</div>
+            `;
+        }
         window.renderCommunityRating = function(movieId, title) {
                 const container = document.getElementById('communityRating');
                 if (!container) return;

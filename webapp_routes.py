@@ -852,9 +852,17 @@ def register_webapp_routes(
             cur = conn.cursor()
             upsert_miniapp_user(cur, user)
             if movie_id is not None:
-                cur.execute("SELECT 1 FROM movies WHERE id = %s", (movie_id,))
-                if not cur.fetchone():
+                cur.execute("SELECT is_unreleased FROM movies WHERE id = %s", (movie_id,))
+                movie_row = cur.fetchone()
+                if not movie_row:
                     return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+                if movie_row[0]:
+                    conn.rollback()
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Rating is available after release.',
+                        'rating_locked': True
+                    }), 409
             cur.execute("""
                 INSERT INTO user_recommendation_events
                     (user_id, movie_id, event_type, source, metadata)
@@ -919,7 +927,7 @@ def register_webapp_routes(
     def get_upcoming_titles():
         limit = min(max(request.args.get('limit', 18, type=int), 1), 30)
         today = datetime.utcnow().date()
-        cache_key = f'api-upcoming:{today.isoformat()}'
+        cache_key = f'api-upcoming:v2:{today.isoformat()}'
         cached = api_movies_cache.get(cache_key)
         if cached:
             return jsonify(cached)
@@ -932,13 +940,13 @@ def register_webapp_routes(
                 'sort_by': 'primary_release_date.asc' if media_type == 'movie' else 'first_air_date.asc',
                 'vote_count.gte': 1,
                 'with_release_type': '2|3|4',
-                'primary_release_date.gte': today.isoformat(),
+                'primary_release_date.gte': (today + timedelta(days=1)).isoformat(),
                 'primary_release_date.lte': end_date.isoformat(),
             } if media_type == 'movie' else {
                 'page': 1,
                 'sort_by': 'first_air_date.asc',
                 'vote_count.gte': 1,
-                'first_air_date.gte': today.isoformat(),
+                'first_air_date.gte': (today + timedelta(days=1)).isoformat(),
                 'first_air_date.lte': end_date.isoformat(),
             }
             data, _ = tmdb_cached_request(
@@ -955,7 +963,7 @@ def register_webapp_routes(
                 is_unreleased = True
                 try:
                     if release_date:
-                        is_unreleased = datetime.strptime(release_date, '%Y-%m-%d').date() >= today
+                        is_unreleased = datetime.strptime(release_date, '%Y-%m-%d').date() > today
                 except ValueError:
                     is_unreleased = True
                 results.append({
@@ -972,6 +980,10 @@ def register_webapp_routes(
                     'source': 'tmdb',
                     'description': item.get('overview') or '',
                     'is_unreleased': is_unreleased,
+                    'is_upcoming': is_unreleased,
+                    'is_released': not is_unreleased,
+                    'is_available': False,
+                    'availability_state': 'upcoming' if is_unreleased else 'released',
                     'release_state': 'released' if not is_unreleased else 'upcoming'
                 })
         results.sort(key=lambda item: item['release_date'])
@@ -979,13 +991,16 @@ def register_webapp_routes(
         api_movies_cache.set(cache_key, response)
         return jsonify(response)
 
-    @flask_app.route('/api/upcoming/reminder', methods=['POST'])
+    @flask_app.route('/api/upcoming/reminder', methods=['GET', 'POST'])
     def toggle_upcoming_reminder():
+        user, error = require_telegram_user()
+        if error:
+            return error
         payload = request.get_json(silent=True) or {}
         raw_tmdb_id = payload.get('tmdb_id') or payload.get('id') or request.args.get('tmdb_id')
         action = (payload.get('action') or 'set').lower()
         title = payload.get('title') or 'Upcoming title'
-        user_id = payload.get('user_id') or request.args.get('user_id')
+        user_id = user['id']
 
         if raw_tmdb_id is None:
             return jsonify({'status': 'error', 'message': 'Missing release id.'}), 400
@@ -994,48 +1009,51 @@ def register_webapp_routes(
         if not tmdb_id or not re.fullmatch(r'\d+', tmdb_id):
             return jsonify({'status': 'error', 'message': 'Invalid release id.'}), 400
 
+        release_date_raw = payload.get('release_date') or request.args.get('release_date')
+        release_date = None
+        if request.method == 'POST':
+            try:
+                release_date = datetime.strptime(str(release_date_raw), '%Y-%m-%d').date()
+            except (TypeError, ValueError):
+                return jsonify({'status': 'error', 'message': 'A valid release date is required.'}), 400
+
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS user_upcoming_reminders (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        tmdb_id TEXT NOT NULL,
-                        title TEXT NOT NULL,
-                        reminder_state TEXT NOT NULL DEFAULT 'set',
-                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE (user_id, tmdb_id)
-                    )
-                """)
                 if action == 'remove':
-                    if user_id is not None:
-                        cur.execute(
-                            'DELETE FROM user_upcoming_reminders WHERE user_id = %s AND tmdb_id = %s',
-                            (int(user_id), tmdb_id),
-                        )
-                    else:
-                        cur.execute(
-                            'DELETE FROM user_upcoming_reminders WHERE tmdb_id = %s',
-                            (tmdb_id,),
-                        )
+                    cur.execute('DELETE FROM upcoming_notifications WHERE user_id = %s AND tmdb_id = %s', (user_id, tmdb_id))
                     conn.commit()
                     return jsonify({'status': 'success', 'message': 'Reminder removed', 'reminder': False, 'tmdb_id': tmdb_id})
 
-                if user_id is None:
-                    user_id = 0
+                cur.execute(
+                    'SELECT notified_at FROM upcoming_notifications WHERE user_id = %s AND tmdb_id = %s',
+                    (user_id, tmdb_id),
+                )
+                existing = cur.fetchone()
+                if request.method == 'GET':
+                    return jsonify({
+                        'status': 'success',
+                        'reminder': bool(existing and existing[0] is None),
+                        'notified': bool(existing and existing[0] is not None),
+                        'tmdb_id': tmdb_id
+                    })
                 cur.execute(
                     """
-                    INSERT INTO user_upcoming_reminders (user_id, tmdb_id, title, reminder_state)
+                    INSERT INTO upcoming_notifications (user_id, tmdb_id, movie_title, release_date)
                     VALUES (%s, %s, %s, %s)
                     ON CONFLICT (user_id, tmdb_id)
-                    DO UPDATE SET title = EXCLUDED.title, reminder_state = EXCLUDED.reminder_state, created_at = CURRENT_TIMESTAMP
+                    DO UPDATE SET movie_title = EXCLUDED.movie_title, release_date = EXCLUDED.release_date
                     """,
-                    (int(user_id), tmdb_id, title, 'set'),
+                    (user_id, tmdb_id, title, release_date),
                 )
                 conn.commit()
-                return jsonify({'status': 'success', 'message': 'Reminder set', 'reminder': True, 'tmdb_id': tmdb_id})
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Notification already enabled.' if existing else 'Notification set.',
+                    'reminder': True, 'already_enabled': bool(existing),
+                    'tmdb_id': tmdb_id
+                })
             except Exception:
                 conn.rollback()
                 logger.exception('Upcoming reminder update failed')
@@ -1043,7 +1061,7 @@ def register_webapp_routes(
             finally:
                 close_db_connection(conn)
 
-        return jsonify({'status': 'success', 'message': 'Reminder saved on this device', 'reminder': action != 'remove', 'tmdb_id': tmdb_id})
+        return jsonify({'status': 'error', 'message': 'Notification service is temporarily unavailable.'}), 503
 
     def rating_summary(cur, movie_id, user_id):
         cur.execute("""
@@ -1471,9 +1489,16 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("SELECT 1 FROM movies WHERE id = %s", (movie_id,))
-            if not cur.fetchone():
+            cur.execute("SELECT is_unreleased FROM movies WHERE id = %s", (movie_id,))
+            movie_row = cur.fetchone()
+            if not movie_row:
                 return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            if movie_row[0]:
+                return jsonify({
+                    'status': 'success', 'average': 0, 'count': 0,
+                    'user_rating': None, 'can_rate': False,
+                    'is_upcoming': True, 'rating_locked': True
+                })
             result = rating_summary(cur, movie_id, user['id'])
             conn.commit()
             cur.close()
@@ -1534,7 +1559,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, "cast", trailer_key, seasons_data
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, "cast", trailer_key, seasons_data, is_unreleased
                 FROM movies WHERE id = %s
             """, (movie_id,))
             row = cur.fetchone()
@@ -1558,6 +1583,10 @@ def register_webapp_routes(
                 'trailer_key': row[11] if row[11] else None,
                 'seasons_data': row[12] if len(row) > 12 and row[12] else {}
             }
+            movie['is_upcoming'] = bool(row[13])
+            movie['is_released'] = not bool(row[13])
+            movie['is_available'] = True
+            movie['availability_state'] = 'available'
     
             # Get files
             # Updated to fetch extra_info for Season/Episode parsing
