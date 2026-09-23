@@ -512,12 +512,6 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 .chat-send:disabled { opacity: .55; }
 .chat-hint { color: #69738f; font-size: 9px; text-align: center; }
 .chat-hint i { margin-right: 4px; color: #77a2ff; }
-.upcoming-list { display: flex; max-height: 360px; flex-direction: column; gap: 8px; overflow-y: auto; }
-.upcoming-item { display: flex; align-items: center; gap: 9px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,.04); }
-.upcoming-item img { width: 40px; height: 56px; flex: none; object-fit: cover; border-radius: 6px; }
-.upcoming-item strong, .upcoming-item span { display: block; }
-.upcoming-item strong { color: #fff; font-size: 12px; }
-.upcoming-item span { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .primary-action { min-height: 38px; padding: 0 16px; border-radius: 10px; color: #fff; background: linear-gradient(135deg, #347bff, #1746d4); font-size: 12px; font-weight: 800; }
 .settings-toggle { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,.08); color: #eef0ff; font-size: 13px; font-weight: 700; }
 .settings-toggle input { width: 38px; height: 21px; accent-color: #347bff; }

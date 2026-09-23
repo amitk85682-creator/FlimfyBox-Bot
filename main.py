@@ -13091,6 +13091,103 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             except:
                 pass
 
+async def upcoming_reminder_worker(app: Application):
+    """Send release notifications to any user who saved an upcoming reminder."""
+    try:
+        bot_info = await app.bot.get_me()
+        logger.info(f"📣 Upcoming reminder worker started for @{bot_info.username}")
+    except Exception as exc:
+        logger.error(f"Upcoming reminder worker startup failed: {exc}")
+        return
+
+    while True:
+        conn = None
+        try:
+            conn = get_db_connection()
+            if conn is None:
+                await asyncio.sleep(60)
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, tmdb_id, title
+                    FROM user_upcoming_reminders
+                    WHERE reminder_state = 'set'
+                    ORDER BY created_at ASC
+                    LIMIT 50
+                    """
+                )
+                rows = cur.fetchall()
+
+            if not rows:
+                await asyncio.sleep(60)
+                continue
+
+            for user_id, tmdb_id, title in rows:
+                try:
+                    normalized_tmdb_id = str(tmdb_id).replace('tmdb_', '').strip()
+                    if not normalized_tmdb_id or not normalized_tmdb_id.isdigit():
+                        raise ValueError(f'Invalid tmdb_id for reminder: {tmdb_id!r}')
+
+                    media_type = 'movie'
+                    detail_url = f"https://api.themoviedb.org/3/movie/{normalized_tmdb_id}?api_key={os.environ.get('TMDB_API_KEY', '')}"
+                    try:
+                        resp = requests.get(detail_url, timeout=8)
+                        if resp.status_code == 404:
+                            media_type = 'tv'
+                            detail_url = f"https://api.themoviedb.org/3/tv/{normalized_tmdb_id}?api_key={os.environ.get('TMDB_API_KEY', '')}"
+                            resp = requests.get(detail_url, timeout=8)
+                        if resp.ok:
+                            detail = resp.json()
+                            release_date = detail.get('release_date') or detail.get('first_air_date') or ''
+                            if release_date and datetime.strptime(release_date, '%Y-%m-%d').date() <= datetime.utcnow().date():
+                                await safe_send(app.bot.send_message(
+                                    chat_id=int(user_id),
+                                    text=(
+                                        f"🎉 <b>{html_escape(title or 'This title')}</b> is now available!\n\n"
+                                        "Open FlimfyBox and download it now."
+                                    ),
+                                    parse_mode='HTML'
+                                ))
+                                with conn.cursor() as cur:
+                                    cur.execute(
+                                        "UPDATE user_upcoming_reminders SET reminder_state = 'sent' WHERE user_id = %s AND tmdb_id = %s",
+                                        (int(user_id), normalized_tmdb_id),
+                                    )
+                                conn.commit()
+                                continue
+                    except Exception as exc:
+                        logger.warning('Upcoming reminder lookup failed for tmdb_id=%s: %s', normalized_tmdb_id, exc)
+
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM user_upcoming_reminders WHERE user_id = %s AND tmdb_id = %s",
+                            (int(user_id), normalized_tmdb_id),
+                        )
+                    conn.commit()
+                except Exception as exc:
+                    logger.warning('Upcoming reminder processing failed for user_id=%s: %s', user_id, exc)
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "DELETE FROM user_upcoming_reminders WHERE user_id = %s AND tmdb_id = %s",
+                                (int(user_id), str(tmdb_id).replace('tmdb_', '').strip()),
+                            )
+                        conn.commit()
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception('Upcoming reminder worker error: %s', exc)
+        finally:
+            if conn:
+                close_db_connection(conn)
+        await asyncio.sleep(45)
+
+
 async def auto_delete_worker(app: Application):
     """
     Background worker jo har 5 second me DB check karega, 
@@ -13478,6 +13575,8 @@ async def main():
 
     # Keep the Mini App route warm independently of Telegram updates. This is
     # intentionally one task for the process, not one per bot token.
+    if apps:
+        worker_tasks.append(asyncio.create_task(upcoming_reminder_worker(apps[0])))
     worker_tasks.append(asyncio.create_task(keep_miniapp_alive_worker()))
     _startup_complete.set()
     logger.info("✅ Startup complete; service is ready.")

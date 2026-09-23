@@ -294,11 +294,29 @@ def _migration_4(conn):
         cur.execute("INSERT INTO trending_meta (id, last_check) VALUES (1, '2000-01-01') ON CONFLICT (id) DO NOTHING")
 
 
+def _migration_5(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_upcoming_reminders (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                tmdb_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                reminder_state TEXT NOT NULL DEFAULT 'set',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (user_id, tmdb_id)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_upcoming_reminders_user_id ON user_upcoming_reminders(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_upcoming_reminders_tmdb_id ON user_upcoming_reminders(tmdb_id)")
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
     (3, _migration_3),
     (4, _migration_4),
+    (5, _migration_5),
 )
 
 

@@ -625,23 +625,6 @@ const tg = window.Telegram?.WebApp || {
             window.setBrowseType('tv');
         };
 
-        window.showUpcoming = function() {
-            closeMorePanel();
-            showInfoPanel('Upcoming titles', '<div class="upcoming-list"><div class="loader">Loading TMDB releases…</div></div>', 'calendar-plus', '<button type="button" class="primary-action" onclick="closeInfoModal()">Close</button>');
-            fetch('/api/upcoming?limit=18')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status !== 'success') throw new Error(data.message || 'Could not load upcoming titles');
-                    const list = data.movies || [];
-                    document.querySelector('.upcoming-list').innerHTML = list.length
-                        ? list.map(item => `<div class="upcoming-item"><img src="${escapeHtml(item.image)}" alt=""><div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.category)} · ${escapeHtml(item.release_date)}</span></div></div>`).join('')
-                        : '<p>No upcoming titles found right now.</p>';
-                })
-                .catch(error => {
-                    document.querySelector('.upcoming-list').innerHTML = `<p>${error.message}</p>`;
-                });
-        };
-
         window.showGlobalChat = function() {
             closeMorePanel();
             if (globalChatTimer) clearInterval(globalChatTimer);
@@ -1224,6 +1207,34 @@ const tg = window.Telegram?.WebApp || {
             saveRecentlyViewed(items);
         }
 
+        function ensureHomeSectionRow(rowId, title, icon, caption) {
+            let row = document.getElementById(rowId);
+            if (row) return row;
+
+            const mainContent = document.getElementById('mainContent');
+            if (!mainContent) return null;
+
+            const anchor = document.getElementById('rowHollywood') || document.getElementById('rowBollywood') || document.getElementById('rowAnime') || document.getElementById('rowActualNewReleases') || document.getElementById('rowTrending');
+            const fallback = document.createElement('div');
+            fallback.className = 'movie-row';
+            fallback.id = rowId;
+            fallback.innerHTML = `
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-${icon}"></i> ${title}</div>
+                    <span class="row-caption">${caption}</span>
+                </div>
+                <div class="horizontal-scroll" id="${rowId === 'rowUpcoming' ? 'upcomingScroll' : rowId + 'Scroll'}"></div>
+            `;
+
+            if (anchor) {
+                mainContent.insertBefore(fallback, anchor);
+            } else {
+                mainContent.appendChild(fallback);
+            }
+
+            return fallback;
+        }
+
         function renderHome(movies) {
             if (heroTimer) {
                 clearInterval(heroTimer);
@@ -1239,6 +1250,32 @@ const tg = window.Telegram?.WebApp || {
             } else {
                 recentRow.style.display = 'none';
                 recentScroll.innerHTML = '';
+            }
+
+            const upcomingRow = ensureHomeSectionRow('rowUpcoming', 'Upcoming', 'calendar-plus', 'Coming soon');
+            const upcomingScroll = upcomingRow ? upcomingRow.querySelector('#upcomingScroll') : document.getElementById('upcomingScroll');
+            if (upcomingRow && upcomingScroll) {
+                upcomingRow.style.display = '';
+                upcomingScroll.innerHTML = '<div class="loader">Loading upcoming…</div>';
+                loadHomeSection('/api/upcoming?limit=18', 'upcoming')
+                    .then(data => {
+                        if (data.status !== 'success') throw new Error(data.message || 'Could not load upcoming');
+                        const upcoming = Array.isArray(data.movies) ? data.movies : [];
+                        upcoming.forEach(item => {
+                            if (item && item.id) {
+                                tmdbMoviesMap[item.id] = { ...item, source: 'tmdb', id: item.id };
+                            }
+                        });
+                        upcomingScroll.innerHTML = upcoming.length
+                            ? renderCards(upcoming, 'card', true)
+                            : '<div class="search-empty-state">No upcoming titles right now.<br><span>Check back soon.</span></div>';
+                        upcomingRow.style.display = upcoming.length ? '' : 'none';
+                    })
+                    .catch(error => {
+                        console.error('Upcoming load failed:', error);
+                        upcomingScroll.innerHTML = '<div class="search-empty-state">Upcoming is temporarily unavailable.</div>';
+                        upcomingRow.style.display = '';
+                    });
             }
 
             const catalogueRows = [

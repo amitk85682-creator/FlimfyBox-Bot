@@ -952,22 +952,98 @@ def register_webapp_routes(
                 if not tmdb_id or not release_date or (media_type, tmdb_id) in seen:
                     continue
                 seen.add((media_type, tmdb_id))
+                is_unreleased = True
+                try:
+                    if release_date:
+                        is_unreleased = datetime.strptime(release_date, '%Y-%m-%d').date() >= today
+                except ValueError:
+                    is_unreleased = True
                 results.append({
-                    'id': f'tmdb_{media_type}_{tmdb_id}',
+                    'id': f'tmdb_{tmdb_id}',
                     'tmdb_id': tmdb_id,
+                    'media_type': media_type,
                     'title': item.get('title') or item.get('name') or 'Unknown',
                     'year': release_date[:4],
                     'release_date': release_date,
                     'image': f"https://image.tmdb.org/t/p/w500{item['poster_path']}" if item.get('poster_path') else '/static/miniapp/poster-placeholder.svg',
+                    'backdrop': f"https://image.tmdb.org/t/p/original{item['backdrop_path']}" if item.get('backdrop_path') else None,
                     'rating': round(float(item.get('vote_average') or 0), 1),
                     'category': 'Movie' if media_type == 'movie' else 'TV Series',
                     'source': 'tmdb',
-                    'description': item.get('overview') or ''
+                    'description': item.get('overview') or '',
+                    'is_unreleased': is_unreleased,
+                    'release_state': 'released' if not is_unreleased else 'upcoming'
                 })
         results.sort(key=lambda item: item['release_date'])
         response = {'status': 'success', 'movies': results[:limit], 'updated_at': datetime.utcnow().isoformat()}
         api_movies_cache.set(cache_key, response)
         return jsonify(response)
+
+    @flask_app.route('/api/upcoming/reminder', methods=['POST'])
+    def toggle_upcoming_reminder():
+        payload = request.get_json(silent=True) or {}
+        raw_tmdb_id = payload.get('tmdb_id') or payload.get('id') or request.args.get('tmdb_id')
+        action = (payload.get('action') or 'set').lower()
+        title = payload.get('title') or 'Upcoming title'
+        user_id = payload.get('user_id') or request.args.get('user_id')
+
+        if raw_tmdb_id is None:
+            return jsonify({'status': 'error', 'message': 'Missing release id.'}), 400
+
+        tmdb_id = str(raw_tmdb_id).replace('tmdb_', '').strip()
+        if not tmdb_id or not re.fullmatch(r'\d+', tmdb_id):
+            return jsonify({'status': 'error', 'message': 'Invalid release id.'}), 400
+
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS user_upcoming_reminders (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        tmdb_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        reminder_state TEXT NOT NULL DEFAULT 'set',
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE (user_id, tmdb_id)
+                    )
+                """)
+                if action == 'remove':
+                    if user_id is not None:
+                        cur.execute(
+                            'DELETE FROM user_upcoming_reminders WHERE user_id = %s AND tmdb_id = %s',
+                            (int(user_id), tmdb_id),
+                        )
+                    else:
+                        cur.execute(
+                            'DELETE FROM user_upcoming_reminders WHERE tmdb_id = %s',
+                            (tmdb_id,),
+                        )
+                    conn.commit()
+                    return jsonify({'status': 'success', 'message': 'Reminder removed', 'reminder': False, 'tmdb_id': tmdb_id})
+
+                if user_id is None:
+                    user_id = 0
+                cur.execute(
+                    """
+                    INSERT INTO user_upcoming_reminders (user_id, tmdb_id, title, reminder_state)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (user_id, tmdb_id)
+                    DO UPDATE SET title = EXCLUDED.title, reminder_state = EXCLUDED.reminder_state, created_at = CURRENT_TIMESTAMP
+                    """,
+                    (int(user_id), tmdb_id, title, 'set'),
+                )
+                conn.commit()
+                return jsonify({'status': 'success', 'message': 'Reminder set', 'reminder': True, 'tmdb_id': tmdb_id})
+            except Exception:
+                conn.rollback()
+                logger.exception('Upcoming reminder update failed')
+                return jsonify({'status': 'error', 'message': 'Could not update reminder.'}), 500
+            finally:
+                close_db_connection(conn)
+
+        return jsonify({'status': 'success', 'message': 'Reminder saved on this device', 'reminder': action != 'remove', 'tmdb_id': tmdb_id})
 
     def rating_summary(cur, movie_id, user_id):
         cur.execute("""

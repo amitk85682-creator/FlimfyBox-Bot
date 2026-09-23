@@ -9,7 +9,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=mobile-back-control-1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=upcoming-home-shelf-2">
 </head>
 <body>
     <section class="app-loading-screen" id="appLoadingScreen" aria-live="polite" aria-label="Loading FlimfyBox">
@@ -72,6 +72,14 @@
                 <span class="row-caption">Released in the last 60 days</span>
             </div>
             <div class="horizontal-scroll" id="actualNewReleasesScroll"></div>
+        </div>
+
+        <div class="movie-row" id="rowUpcoming">
+            <div class="row-header">
+                <div class="row-header-left"><i class="fas fa-calendar-plus"></i> Upcoming</div>
+                <span class="row-caption">Coming soon</span>
+            </div>
+            <div class="horizontal-scroll" id="upcomingScroll"></div>
         </div>
 
         <div class="movie-row" id="rowHollywood">
@@ -262,7 +270,6 @@
         <div class="more-panel-grid">
             <button type="button" onclick="showHome()"><i class="fas fa-film"></i><span>Movies</span></button>
             <button type="button" onclick="showTvSeries()"><i class="fas fa-tv"></i><span>TV Series</span></button>
-            <button type="button" onclick="showUpcoming()"><i class="fas fa-calendar-plus"></i><span>Upcoming</span></button>
             <button type="button" onclick="showGlobalChat()"><i class="far fa-comment"></i><span>Global Chat</span></button>
             <button type="button" onclick="showInfoPanel('FlimfyBox Blog', '<p>Movie guides, new releases, watchlists and streaming recommendations will appear here.</p><p class=&quot;info-note&quot;>Use Search and Browse to discover the latest catalogue today.</p>', 'newspaper')"><i class="fas fa-newspaper"></i><span>Blog</span></button>
             <button type="button" onclick="showInfoPanel('Upgrade', '<p>FlimfyBox is currently available with the full catalogue experience.</p><p class=&quot;info-note&quot;>Premium plans will be added when Telegram payments are enabled.</p>', 'gem')"><i class="fas fa-gem"></i><span>Upgrade</span></button>
@@ -280,6 +287,6 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=backdrop-artwork-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=upcoming-home-shelf-2"></script>
 </body>
 </html>
