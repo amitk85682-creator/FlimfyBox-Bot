@@ -1979,11 +1979,50 @@ document.addEventListener('keydown', (e) => {
                     })
                     .finally(() => { container.dataset.submitting = 'false'; });
         }
-        window.playCurrentTrailer = function() {
+        function normalizeTrailerKey(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            const match = raw.match(
+                /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
+            );
+            return match ? match[1] : raw;
+        }
+
+        window.playCurrentTrailer = async function() {
             if (!activeMovie) return;
-            if (activeMovie.trailer_key) {
-                playTrailer(activeMovie.trailer_key);
+            const trailerKey = normalizeTrailerKey(activeMovie.trailer_key);
+            if (trailerKey) {
+                playTrailer(trailerKey);
                 return;
+            }
+            const movieId = activeMovie.id;
+            if (!movieId || String(movieId).startsWith('tmdb_')) {
+                showToast('Trailer is not available for this title');
+                return;
+            }
+            const button = document.querySelector('.detail-play');
+            if (button) {
+                button.disabled = true;
+                button.classList.add('is-loading');
+            }
+            try {
+                const response = await fetch(`/api/movie/${encodeURIComponent(movieId)}`);
+                const data = await response.json();
+                if (String(activeMovie?.id) !== String(movieId)) return;
+                const details = data && data.status === 'success' ? data.movie : null;
+                activeMovie = details ? { ...activeMovie, ...details } : activeMovie;
+                const fetchedKey = normalizeTrailerKey(details?.trailer_key);
+                if (fetchedKey) {
+                    playTrailer(fetchedKey);
+                    return;
+                }
+            } catch (error) {
+                console.error('Trailer lookup failed:', error);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.classList.remove('is-loading');
+                }
             }
             showToast('Trailer is not available for this title');
         };
