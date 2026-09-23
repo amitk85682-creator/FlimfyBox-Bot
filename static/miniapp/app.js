@@ -1815,11 +1815,17 @@ document.addEventListener('keydown', (e) => {
             if (!actionContainer) return;
             const tmdbId = String(movie.tmdb_id || movie.id || '').replace(/^tmdb_/, '');
             const releaseDate = movie.release_date || '';
-            actionContainer.innerHTML = `
-                <button class="btn-request upcoming-notify-button" type="button" data-tmdb-id="${escapeHtml(tmdbId)}" data-release-date="${escapeHtml(releaseDate)}" data-title="${escapeHtml(movie.title || '')}" onclick="toggleUpcomingNotification(this)">
-                    <i class="fas fa-bell"></i> <span>Notify Me</span>
-                </button>
-            `;
+            const renderNotificationButton = (stage, enabled) => {
+                const availableStage = stage === 'availability';
+                const label = availableStage
+                    ? (enabled ? 'Download notification set' : 'Notify when available for download')
+                    : (enabled ? 'Notification Set' : 'Notify when released');
+                const icon = enabled ? 'fa-check' : 'fa-bell';
+                return `<button class="btn-request upcoming-notify-button" type="button" data-stage="${stage}" data-tmdb-id="${escapeHtml(tmdbId)}" data-release-date="${escapeHtml(releaseDate)}" data-title="${escapeHtml(movie.title || '')}" onclick="toggleUpcomingNotification(this)">
+                    <i class="fas ${icon}"></i> <span>${label}</span>
+                </button>`;
+            };
+            actionContainer.innerHTML = renderNotificationButton('release', false);
             if (linksContainer) {
                 linksContainer.innerHTML = releaseDate
                     ? `<div class="pre-release-note"><i class="fas fa-calendar"></i> Expected release: ${escapeHtml(releaseDate)}</div>`
@@ -1827,28 +1833,40 @@ document.addEventListener('keydown', (e) => {
             }
             const button = actionContainer.querySelector('.upcoming-notify-button');
             if (!button || !tmdbId || !releaseDate) return;
-            fetch(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}`, {
+            fetch(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
                 headers: telegramAuthHeaders()
             })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))
                 .then(({ ok, data }) => {
                     if (!ok || data.status !== 'success') throw new Error(data.message || 'Notification status unavailable');
-                    setUpcomingNotificationButton(button, Boolean(data.reminder));
+                    const stage = data.availability_state === 'upcoming' ? 'release' : 'availability';
+                    button.dataset.stage = stage;
+                    setUpcomingNotificationButton(
+                        button,
+                        stage === 'release'
+                            ? Boolean(data.release_notification_set)
+                            : Boolean(data.availability_notification_set),
+                    );
                 })
                 .catch(error => console.warn('Upcoming notification status unavailable:', error));
         }
         function setUpcomingNotificationButton(button, enabled) {
             if (!button) return;
             button.classList.toggle('is-enabled', enabled);
+            const availableStage = button.dataset.stage === 'availability';
+            const label = availableStage
+                ? (enabled ? 'Download notification set' : 'Notify when available for download')
+                : (enabled ? 'Notification Set' : 'Notify when released');
             button.innerHTML = enabled
-                ? '<i class="fas fa-check"></i> <span>Notification Set</span>'
-                : '<i class="fas fa-bell"></i> <span>Notify Me</span>';
+                ? `<i class="fas fa-check"></i> <span>${label}</span>`
+                : `<i class="fas fa-bell"></i> <span>${label}</span>`;
         }
         window.toggleUpcomingNotification = function(button) {
             if (!button || button.disabled) return;
             button.disabled = true;
             const body = {
                 tmdb_id: button.dataset.tmdbId,
+                stage: button.dataset.stage || 'release',
                 title: button.dataset.title,
                 release_date: button.dataset.releaseDate
             };

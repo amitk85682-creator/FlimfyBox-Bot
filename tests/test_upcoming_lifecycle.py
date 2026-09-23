@@ -44,12 +44,13 @@ def test_upcoming_cards_keep_the_shared_horizontal_card_renderer():
     assert "ensureHomeSectionRow('rowUpcoming'" in FRONTEND
 
 
-def test_worker_marks_notification_before_sending_to_prevent_duplicates():
+def test_worker_tracks_notification_stages_separately():
     worker = MAIN[MAIN.index("async def upcoming_reminder_worker") :]
     assert "FROM upcoming_notifications" in worker
-    assert "WHERE notified_at IS NULL" in worker
-    assert "SET notified_at = CURRENT_TIMESTAMP" in worker
-    assert "RETURNING id" in worker
+    assert "release_notified_at IS NULL" in worker
+    assert "availability_notified_at IS NULL" in worker
+    assert "SET release_notified_at = CURRENT_TIMESTAMP" in worker
+    assert "SET availability_notified_at = CURRENT_TIMESTAMP" in worker
     assert "is now released!" in worker
 
 

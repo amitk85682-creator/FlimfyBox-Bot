@@ -13125,7 +13125,7 @@ async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 pass
 
 async def upcoming_reminder_worker(app: Application):
-    """Send each subscribed release notification once when its date arrives."""
+    """Process release and local-availability notifications independently."""
     try:
         bot_info = await app.bot.get_me()
         logger.info(f"📣 Upcoming reminder worker started for @{bot_info.username}")
@@ -13144,9 +13144,14 @@ async def upcoming_reminder_worker(app: Application):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, tmdb_id, movie_title, release_date
+                    SELECT id, user_id, tmdb_id, movie_title, release_date,
+                           release_notification_requested,
+                           availability_notification_requested
                     FROM upcoming_notifications
-                    WHERE notified_at IS NULL AND release_date <= CURRENT_DATE
+                    WHERE (release_notification_requested AND release_notified_at IS NULL
+                           AND release_date <= CURRENT_DATE)
+                       OR (availability_notification_requested
+                           AND availability_notified_at IS NULL)
                     ORDER BY created_at ASC
                     LIMIT 50
                     """
@@ -13157,36 +13162,58 @@ async def upcoming_reminder_worker(app: Application):
                 await asyncio.sleep(60)
                 continue
 
-            for notification_id, user_id, tmdb_id, title, release_date in rows:
+            for notification_id, user_id, tmdb_id, title, release_date, release_requested, availability_requested in rows:
                 try:
                     normalized_tmdb_id = str(tmdb_id).replace('tmdb_', '').strip()
                     if not normalized_tmdb_id or not normalized_tmdb_id.isdigit():
                         raise ValueError(f'Invalid tmdb_id for reminder: {tmdb_id!r}')
 
-                    # Reserve the row before sending so concurrent workers can
-                    # never deliver the same notification twice.
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            UPDATE upcoming_notifications
-                            SET notified_at = CURRENT_TIMESTAMP
-                            WHERE id = %s AND notified_at IS NULL
-                            RETURNING id
-                            """,
-                            (notification_id,),
+                    cur = conn.cursor()
+                    cur.execute("""
+                        SELECT EXISTS(
+                            SELECT 1 FROM movies m
+                            JOIN movie_files mf ON mf.movie_id = m.id
+                            WHERE LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
+                                = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
                         )
-                        reserved = cur.fetchone()
-                    conn.commit()
-                    if not reserved:
-                        continue
-                    await safe_send(app.bot.send_message(
-                        chat_id=int(user_id),
-                        text=(
-                            f"🔔 <b>{html_escape(title or 'This title')}</b> is now released!\n\n"
-                            f"You can check it out in FlimfyBox: {WEB_APP_URL}?req={quote(str(title or ''))}"
-                        ),
-                        parse_mode='HTML'
-                    ))
+                    """, (title,))
+                    local_available = bool(cur.fetchone()[0])
+                    cur.close()
+                    today = datetime.utcnow().date()
+                    if release_requested and release_date <= today:
+                        await safe_send(app.bot.send_message(
+                            chat_id=int(user_id),
+                            text=(
+                                f"🔔 <b>{html_escape(title or 'This title')}</b> is now released!\n\n"
+                                f"You can now rate this title. Download will be available separately.\n"
+                                f"Open FlimfyBox: {WEB_APP_URL}?req={quote(str(title or ''))}"
+                            ),
+                            parse_mode='HTML'
+                        ))
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                UPDATE upcoming_notifications
+                                SET release_notified_at = CURRENT_TIMESTAMP,
+                                    notified_at = COALESCE(notified_at, CURRENT_TIMESTAMP)
+                                WHERE id = %s AND release_notified_at IS NULL
+                            """, (notification_id,))
+                        conn.commit()
+                    if availability_requested and local_available:
+                        await safe_send(app.bot.send_message(
+                            chat_id=int(user_id),
+                            text=(
+                                f"📥 <b>{html_escape(title or 'This title')}</b> is now available for download!\n\n"
+                                f"Open FlimfyBox to watch/download it: {WEB_APP_URL}?req={quote(str(title or ''))}"
+                            ),
+                            parse_mode='HTML'
+                        ))
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                UPDATE upcoming_notifications
+                                SET availability_notified_at = CURRENT_TIMESTAMP
+                                WHERE id = %s AND availability_notified_at IS NULL
+                            """, (notification_id,))
+                        conn.commit()
                 except Exception as exc:
                     logger.warning('Upcoming reminder processing failed for user_id=%s: %s', user_id, exc)
                 await asyncio.sleep(0.2)

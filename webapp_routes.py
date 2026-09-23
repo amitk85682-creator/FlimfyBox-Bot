@@ -1000,7 +1000,10 @@ def register_webapp_routes(
         payload = request.get_json(silent=True) or {}
         raw_tmdb_id = payload.get('tmdb_id') or payload.get('id') or request.args.get('tmdb_id')
         action = (payload.get('action') or 'set').lower()
-        title = payload.get('title') or 'Upcoming title'
+        stage = (payload.get('stage') or request.args.get('stage') or 'release').lower()
+        if stage not in {'release', 'availability'}:
+            return jsonify({'status': 'error', 'message': 'Invalid notification stage.'}), 400
+        title = payload.get('title') or request.args.get('title') or 'Upcoming title'
         user_id = user['id']
 
         if raw_tmdb_id is None:
@@ -1012,47 +1015,109 @@ def register_webapp_routes(
 
         release_date_raw = payload.get('release_date') or request.args.get('release_date')
         release_date = None
-        if request.method == 'POST':
+        if release_date_raw:
             try:
                 release_date = datetime.strptime(str(release_date_raw), '%Y-%m-%d').date()
             except (TypeError, ValueError):
                 return jsonify({'status': 'error', 'message': 'A valid release date is required.'}), 400
+        elif request.method == 'POST':
+            return jsonify({'status': 'error', 'message': 'A valid release date is required.'}), 400
 
         conn = get_db_connection()
         if conn:
             try:
                 cur = conn.cursor()
-                if action == 'remove':
-                    cur.execute('DELETE FROM upcoming_notifications WHERE user_id = %s AND tmdb_id = %s', (user_id, tmdb_id))
-                    conn.commit()
-                    return jsonify({'status': 'success', 'message': 'Reminder removed', 'reminder': False, 'tmdb_id': tmdb_id})
-
                 cur.execute(
-                    'SELECT notified_at FROM upcoming_notifications WHERE user_id = %s AND tmdb_id = %s',
+                    """
+                    SELECT movie_title, release_date, release_notification_requested,
+                           availability_notification_requested, release_notified_at,
+                           availability_notified_at
+                    FROM upcoming_notifications
+                    WHERE user_id = %s AND tmdb_id = %s
+                    """,
                     (user_id, tmdb_id),
                 )
                 existing = cur.fetchone()
+                if action == 'remove':
+                    if stage == 'release':
+                        cur.execute("""
+                            UPDATE upcoming_notifications
+                            SET release_notification_requested = FALSE
+                            WHERE user_id = %s AND tmdb_id = %s
+                        """, (user_id, tmdb_id))
+                    else:
+                        cur.execute("""
+                            UPDATE upcoming_notifications
+                            SET availability_notification_requested = FALSE
+                            WHERE user_id = %s AND tmdb_id = %s
+                        """, (user_id, tmdb_id))
+                    conn.commit()
+                    return jsonify({'status': 'success', 'message': 'Notification removed', 'reminder': False, 'tmdb_id': tmdb_id})
+
                 if request.method == 'GET':
+                    release_date_value = existing[1] if existing else release_date
+                    today = datetime.utcnow().date()
+                    is_released = bool(release_date_value and release_date_value <= today)
+                    local_available = False
+                    if existing or title:
+                        cur.execute("""
+                            SELECT EXISTS(
+                                SELECT 1
+                                FROM movies m
+                                JOIN movie_files mf ON mf.movie_id = m.id
+                                WHERE LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
+                                    = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                            )
+                        """, (existing[0] if existing else title,))
+                        local_available = bool(cur.fetchone()[0])
+                    state = 'available' if local_available else ('released' if is_released else 'upcoming')
                     return jsonify({
                         'status': 'success',
-                        'reminder': bool(existing and existing[0] is None),
-                        'notified': bool(existing and existing[0] is not None),
+                        'reminder': bool(existing and (existing[2] if stage == 'release' else existing[3])),
+                        'release_notification_set': bool(existing and existing[2]),
+                        'availability_notification_set': bool(existing and existing[3]),
+                        'release_notified': bool(existing and existing[4]),
+                        'availability_notified': bool(existing and existing[5]),
+                        'availability_state': state,
+                        'is_available': local_available,
                         'tmdb_id': tmdb_id
                     })
+                if stage == 'availability':
+                    if not release_date or release_date > datetime.utcnow().date():
+                        return jsonify({'status': 'error', 'message': 'Availability notification starts after release.'}), 409
+                    cur.execute("""
+                        SELECT EXISTS(
+                            SELECT 1 FROM movies m
+                            JOIN movie_files mf ON mf.movie_id = m.id
+                            WHERE LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
+                                = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                        )
+                    """, (title,))
+                    if cur.fetchone()[0]:
+                        return jsonify({'status': 'error', 'message': 'This title is already available.'}), 409
                 cur.execute(
                     """
-                    INSERT INTO upcoming_notifications (user_id, tmdb_id, movie_title, release_date)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO upcoming_notifications
+                        (user_id, tmdb_id, movie_title, release_date,
+                         release_notification_requested, availability_notification_requested)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (user_id, tmdb_id)
-                    DO UPDATE SET movie_title = EXCLUDED.movie_title, release_date = EXCLUDED.release_date
+                    DO UPDATE SET movie_title = EXCLUDED.movie_title,
+                                  release_date = EXCLUDED.release_date,
+                                  release_notification_requested = CASE
+                                      WHEN %s THEN TRUE ELSE upcoming_notifications.release_notification_requested END,
+                                  availability_notification_requested = CASE
+                                      WHEN %s THEN TRUE ELSE upcoming_notifications.availability_notification_requested END
                     """,
-                    (user_id, tmdb_id, title, release_date),
+                    (user_id, tmdb_id, title, release_date, stage == 'release', stage == 'availability',
+                     stage == 'release', stage == 'availability'),
                 )
                 conn.commit()
                 return jsonify({
                     'status': 'success',
-                    'message': 'Notification already enabled.' if existing else 'Notification set.',
+                    'message': 'Notification already enabled.' if existing and (existing[2] if stage == 'release' else existing[3]) else 'Notification set.',
                     'reminder': True, 'already_enabled': bool(existing),
+                    'stage': stage,
                     'tmdb_id': tmdb_id
                 })
             except Exception:

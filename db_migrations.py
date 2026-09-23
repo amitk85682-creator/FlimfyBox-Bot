@@ -359,6 +359,22 @@ def _migration_7(conn):
         """)
 
 
+def _migration_8(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE upcoming_notifications
+                ADD COLUMN IF NOT EXISTS release_notification_requested BOOLEAN NOT NULL DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS availability_notification_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS release_notified_at TIMESTAMP NULL,
+                ADD COLUMN IF NOT EXISTS availability_notified_at TIMESTAMP NULL
+        """)
+        cur.execute("""
+            UPDATE upcoming_notifications
+            SET release_notified_at = notified_at
+            WHERE release_notified_at IS NULL AND notified_at IS NOT NULL
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -367,6 +383,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (5, _migration_5),
     (6, _migration_6),
     (7, _migration_7),
+    (8, _migration_8),
 )
 
 
