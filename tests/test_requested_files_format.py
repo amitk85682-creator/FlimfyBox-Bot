@@ -15,6 +15,9 @@ def test_requested_files_header_has_branded_metadata():
     assert "await context.bot.get_me()" in MAIN_SOURCE
     assert "tg://user?id={requester_id}" in MAIN_SOURCE
     assert "tg://user?id={bot_id}" in MAIN_SOURCE
+    assert ".strip().title()" in MAIN_SOURCE
+    assert "re.split(r\"[,/|]+\"" in MAIN_SOURCE
+    assert "<b>🧱 𝙻𝚊𝚗𝚐𝚞𝚊ɢᴇ </b><code>{language_label}</code>\\n\\n" in MAIN_SOURCE
 
 
 def test_requested_files_header_preserves_file_delivery_links():

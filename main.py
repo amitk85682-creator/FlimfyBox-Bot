@@ -5172,9 +5172,11 @@ def _format_requested_files_header(title, qualities, user, bot_info):
     """Build the compact branded header used above every file list."""
     languages = []
     for file_data in qualities or []:
-        language = str(file_data[4]).strip() if len(file_data) > 4 and file_data[4] else ""
-        if language and language.casefold() not in {item.casefold() for item in languages}:
-            languages.append(language)
+        raw_language = str(file_data[4]).strip() if len(file_data) > 4 and file_data[4] else ""
+        for language in re.split(r"[,/|]+", raw_language):
+            language = re.sub(r"\s+", " ", language).strip()
+            if language and language.casefold() not in {item.casefold() for item in languages}:
+                languages.append(language)
     language_label = ", ".join(languages) if languages else "Dynamic Language"
     requester = (
         getattr(user, "first_name", None)
@@ -5188,7 +5190,7 @@ def _format_requested_files_header(title, qualities, user, bot_info):
         if requester_id
         else requester_name
     )
-    display_title = html_escape(str(title or "Requested Movie").lower())
+    display_title = html_escape(str(title or "Requested Movie").strip().title())
     language_label = html_escape(language_label)
     bot_name = html_escape(
         str(getattr(bot_info, "first_name", None) or getattr(bot_info, "username", None) or "FlimfyBox")
@@ -5198,6 +5200,13 @@ def _format_requested_files_header(title, qualities, user, bot_info):
         f"<a href='tg://user?id={bot_id}'>⚡️{bot_name}</a>"
         if bot_id
         else f"⚡️{bot_name}"
+    )
+    return (
+        f"<b>🏷 ᴛɪᴛʟᴇ : </b><code>{display_title}</code>\n"
+        f"<b>🧱 𝙻𝚊𝚗𝚐𝚞𝚊ɢᴇ </b><code>{language_label}</code>\n\n"
+        f"📝 ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ : {requester}\n"
+        f"⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : {bot_mention} 🔍\n\n"
+        "Your Requested Files Are Here\n\n"
     )
     return (
         f"<b>🏷 ᴛɪᴛʟᴇ : </b><code>{display_title}</code>\n"
