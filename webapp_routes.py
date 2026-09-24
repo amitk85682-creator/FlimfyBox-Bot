@@ -1738,7 +1738,8 @@ def register_webapp_routes(
             # TMDB is also the discovery source, so a temporary catalogue
             # outage must not block title discovery or request submission.
             logger.warning('Local catalogue unavailable during search; continuing with TMDB')
-        try:
+        else:
+            try:
                 cur = conn.cursor()
                 cur.execute("""
                     SELECT id, title, year, poster_url, rating, genre, category,
@@ -1827,12 +1828,12 @@ def register_webapp_routes(
                             'availability_state': 'available' if is_available else ('upcoming' if r[9] else 'unavailable'),
                         })
                 cur.close()
-        except Exception as e:
-            # A local schema/connection failure should not hide a valid TMDB
-            # result. The title can still be shown as request-only.
-            logger.error(f"Local search error; continuing with TMDB: {e}")
-        finally:
-            close_db_connection(conn)
+            except Exception as e:
+                # A local schema/connection failure should not hide a valid TMDB
+                # result. The title can still be shown as request-only.
+                logger.error(f"Local search error; continuing with TMDB: {e}")
+            finally:
+                close_db_connection(conn)
     
         tmdb_results = []
         # TMDB is the discovery source as well as the local-enrichment source.
@@ -1869,16 +1870,18 @@ def register_webapp_routes(
                     tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(search_term)}"
                     resp = requests.get(tmdb_url, timeout=5).json()
                     for item in resp.get('results', [])[:8]:
-                        img_path = item.get('poster_path') or item.get('backdrop_path')
-                        if not img_path:
+                        # Skip non-movie/TV results (e.g. person)
+                        if item.get('media_type') not in ('movie', 'tv', None):
                             continue
+                        img_path = item.get('poster_path') or item.get('backdrop_path')
+                        poster_url = f"https://image.tmdb.org/t/p/w500{img_path}" if img_path else '/static/miniapp/poster-placeholder.svg'
                         tmdb_results.append({
                             'id': 'tmdb_' + str(item['id']),
                             'tmdb_id': item.get('id'),
                             'title': item.get('title') or item.get('name') or 'Unknown',
                             'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
                             'release_date': item.get('release_date') or item.get('first_air_date') or '',
-                            'image': f"https://image.tmdb.org/t/p/w500{img_path}",
+                            'image': poster_url,
                             'rating': round(item.get('vote_average', 0), 1),
                             'genre': 'Action, Drama',
                             'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
