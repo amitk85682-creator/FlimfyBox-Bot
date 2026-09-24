@@ -1684,6 +1684,22 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
     result = {'is_member': False, 'channel': False, 'group': False, 'error': None}
     VALID_STATUSES = ['member', 'administrator', 'creator']
     
+    # Start both membership checks together. Telegram API round trips are
+    # independent, so waiting for the channel check before starting the group
+    # check needlessly adds both network latencies to every uncached message.
+    async def check_required_group():
+        try:
+            member = await context.bot.get_chat_member(
+                chat_id=REQUIRED_GROUP_ID,
+                user_id=user_id,
+            )
+            return member.status in VALID_STATUSES
+        except Exception as e:
+            logger.error(f"Group Check Error: {e}")
+            return False
+
+    group_check_task = asyncio.create_task(check_required_group())
+
     # --- 1. SMART CHANNEL CHECK (WITH AUTO-SWITCH) ---
     try:
         channel_member = await context.bot.get_chat_member(chat_id=ACTIVE_FSUB['id'], user_id=user_id)
@@ -1708,6 +1724,8 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
             except: pass
             
             # Naye channel ke sath wapas check karo
+            if not group_check_task.done():
+                group_check_task.cancel()
             return await is_user_member(context, user_id, force_fresh)
         else:
             result['channel'] = True # Agar saare backup khatam, toh FSub bypass kar do taaki bot chalta rahe
@@ -1729,6 +1747,8 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
                     )
                 except: pass
                 
+                if not group_check_task.done():
+                    group_check_task.cancel()
                 return await is_user_member(context, user_id, force_fresh)
             else:
                 result['channel'] = True
@@ -1742,13 +1762,7 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
         result['channel'] = False 
 
     # --- 2. GROUP CHECK ---
-    try:
-        group_member = await context.bot.get_chat_member(chat_id=REQUIRED_GROUP_ID, user_id=user_id)
-        if group_member.status in VALID_STATUSES:
-            result['group'] = True
-    except Exception as e:
-        logger.error(f"Group Check Error: {e}")
-        result['group'] = False
+    result['group'] = await group_check_task
 
     result['is_member'] = result['channel'] and result['group']
     verified_users[user_id] = (current_time, result)
@@ -4140,6 +4154,31 @@ def get_all_movie_qualities(movie_id):
         if conn:
             close_db_connection(conn)
 
+
+def get_movie_delivery_meta(movie_id):
+    """Load the small metadata row needed before rendering a file menu."""
+    conn = get_db_connection()
+    if not conn:
+        return "", None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT category, poster_url FROM movies WHERE id = %s",
+            (movie_id,),
+        )
+        result = cur.fetchone()
+        cur.close()
+        return (
+            result[0] if result else "",
+            result[1] if result and len(result) > 1 else None,
+        )
+    except Exception as e:
+        logger.error(f"Error fetching movie metadata for {movie_id}: {e}")
+        return "", None
+    finally:
+        close_db_connection(conn)
+
+
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1, current_files=None, season_view=False):
@@ -5367,19 +5406,13 @@ def _format_requested_files_header(title, qualities, user, bot_info):
     )
 
 async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str):
-    qualities = get_all_movie_qualities(movie_id)
+    qualities, (category, poster_url) = await asyncio.gather(
+        run_async(get_all_movie_qualities, movie_id),
+        run_async(get_movie_delivery_meta, movie_id),
+    )
     if not qualities:
         await update.message.reply_text("No files found!")
         return
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT category, poster_url FROM movies WHERE id = %s", (movie_id,))
-    res = cur.fetchone()
-    category = res[0] if res else ""
-    poster_url = res[1] if res and len(res) > 1 else None
-    cur.close()
-    close_db_connection(conn)
 
     context.user_data['selected_movie_data'] = {
         'id': movie_id,
