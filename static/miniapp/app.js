@@ -1734,7 +1734,12 @@ document.addEventListener('keydown', (e) => {
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
                 document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
                 document.getElementById('castSection').innerHTML = '';
-                if (isTMDB || movie.is_upcoming) {
+                // Only show "upcoming" UI if the movie is genuinely pre-release.
+                // A TMDB result that has already released should show the Request flow.
+                const isGenuinelyUpcoming = movie.is_upcoming === true
+                    || movie.availability_state === 'upcoming'
+                    || (movie.release_date && movie.release_date > new Date().toISOString().slice(0, 10));
+                if (isGenuinelyUpcoming) {
                     renderUpcomingActions(movie);
                 } else {
                     renderUnavailableAction(movie);
