@@ -6747,9 +6747,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
                 try:
+                    processed_poster = await make_landscape_poster(poster_url)
                     msg = await context.bot.send_photo(
                         chat_id=update.effective_chat.id,
-                        photo=poster_url,
+                        photo=processed_poster,
                         caption=selection_text,
                         reply_markup=keyboard_markup,
                         parse_mode='HTML'
