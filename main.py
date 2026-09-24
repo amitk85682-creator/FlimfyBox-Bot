@@ -13338,12 +13338,25 @@ async def upcoming_reminder_worker(app: Application):
                     cur = conn.cursor()
                     cur.execute("""
                         SELECT EXISTS(
-                            SELECT 1 FROM movies m
-                            JOIN movie_files mf ON mf.movie_id = m.id
-                            WHERE LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
-                                = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                            SELECT 1
+                            FROM movies m
+                            LEFT JOIN movie_files mf ON mf.movie_id = m.id
+                            WHERE (
+                                m.tmdb_id = %s
+                                OR (
+                                    m.tmdb_id IS NULL
+                                    AND LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
+                                        = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                                )
+                            )
+                            AND (
+                                NULLIF(m.url, '') IS NOT NULL
+                                OR NULLIF(m.file_id, '') IS NOT NULL
+                                OR NULLIF(mf.url, '') IS NOT NULL
+                                OR NULLIF(mf.file_id, '') IS NOT NULL
+                            )
                         )
-                    """, (title,))
+                    """, (int(normalized_tmdb_id), title))
                     local_available = bool(cur.fetchone()[0])
                     cur.close()
                     today = datetime.utcnow().date()
@@ -13352,8 +13365,8 @@ async def upcoming_reminder_worker(app: Application):
                             chat_id=int(user_id),
                             text=(
                                 f"🔔 <b>{html_escape(title or 'This title')}</b> is now released!\n\n"
-                                f"You can now rate this title. Download will be available separately.\n"
-                                f"Open FlimfyBox: {WEB_APP_URL}?req={quote(str(title or ''))}"
+                                f"You can now rate this title.\n"
+                                f"Download will be available separately."
                             ),
                             parse_mode='HTML'
                         ))
@@ -13370,7 +13383,7 @@ async def upcoming_reminder_worker(app: Application):
                             chat_id=int(user_id),
                             text=(
                                 f"📥 <b>{html_escape(title or 'This title')}</b> is now available for download!\n\n"
-                                f"Open FlimfyBox to watch/download it: {WEB_APP_URL}?req={quote(str(title or ''))}"
+                                f"The download is now ready on FlimfyBox."
                             ),
                             parse_mode='HTML'
                         ))

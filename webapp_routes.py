@@ -1065,10 +1065,20 @@ def register_webapp_routes(
                                 SELECT 1
                                 FROM movies m
                                 JOIN movie_files mf ON mf.movie_id = m.id
-                                WHERE LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
-                                    = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                                WHERE (
+                                    m.tmdb_id = %s
+                                    OR (
+                                        m.tmdb_id IS NULL
+                                        AND LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
+                                            = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                                    )
+                                )
+                                AND (
+                                    NULLIF(mf.url, '') IS NOT NULL
+                                    OR NULLIF(mf.file_id, '') IS NOT NULL
+                                )
                             )
-                        """, (existing[0] if existing else title,))
+                        """, (int(tmdb_id), existing[0] if existing else title))
                         local_available = bool(cur.fetchone()[0])
                     state = 'available' if local_available else ('released' if is_released else 'upcoming')
                     return jsonify({
@@ -1083,16 +1093,24 @@ def register_webapp_routes(
                         'tmdb_id': tmdb_id
                     })
                 if stage == 'availability':
-                    if not release_date or release_date > datetime.utcnow().date():
-                        return jsonify({'status': 'error', 'message': 'Availability notification starts after release.'}), 409
                     cur.execute("""
                         SELECT EXISTS(
                             SELECT 1 FROM movies m
                             JOIN movie_files mf ON mf.movie_id = m.id
-                            WHERE LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
-                                = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                            WHERE (
+                                m.tmdb_id = %s
+                                OR (
+                                    m.tmdb_id IS NULL
+                                    AND LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
+                                        = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
+                                )
+                            )
+                            AND (
+                                NULLIF(mf.url, '') IS NOT NULL
+                                OR NULLIF(mf.file_id, '') IS NOT NULL
+                            )
                         )
-                    """, (title,))
+                    """, (int(tmdb_id), title))
                     if cur.fetchone()[0]:
                         return jsonify({'status': 'error', 'message': 'This title is already available.'}), 409
                 cur.execute(
@@ -1627,7 +1645,7 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, content_type, "cast", trailer_key, seasons_data, is_unreleased
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, description, category, language, content_type, "cast", trailer_key, seasons_data, is_unreleased, url, file_id
                 FROM movies WHERE id = %s
             """, (movie_id,))
             row = cur.fetchone()
@@ -1652,17 +1670,16 @@ def register_webapp_routes(
                 'trailer_key': row[12] if row[12] else None,
                 'seasons_data': row[13] if len(row) > 13 and row[13] else {}
             }
-            movie['is_upcoming'] = bool(row[14])
-            movie['is_released'] = not bool(row[14])
-            movie['is_available'] = True
-            movie['availability_state'] = 'available'
-    
             # Get files
             # Updated to fetch extra_info for Season/Episode parsing
             cur.execute("""
                 SELECT id, quality, file_size, COALESCE(extra_info, '')
                 FROM movie_files
                 WHERE movie_id = %s
+                  AND (
+                      NULLIF(url, '') IS NOT NULL
+                      OR NULLIF(file_id, '') IS NOT NULL
+                  )
                 ORDER BY id ASC
             """, (movie_id,))
             files = [
@@ -1670,6 +1687,16 @@ def register_webapp_routes(
                 for f in cur.fetchall()
             ]
             movie['files'] = files
+            has_root_file = bool(row[15] or row[16])
+            movie['is_available'] = has_root_file or any(
+                file_item.get('id') is not None for file_item in files
+            )
+            movie['is_upcoming'] = bool(row[14]) and not movie['is_available']
+            movie['is_released'] = not movie['is_upcoming']
+            movie['availability_state'] = (
+                'available' if movie['is_available']
+                else ('upcoming' if movie['is_upcoming'] else 'unavailable')
+            )
     
             cur.close()
             close_db_connection(conn)
@@ -1717,7 +1744,20 @@ def register_webapp_routes(
         try:
                 cur = conn.cursor()
                 cur.execute("""
-                    SELECT id, title, year, poster_url, rating, genre, category
+                    SELECT id, title, year, poster_url, rating, genre, category,
+                           tmdb_id, content_type, is_unreleased,
+                           (
+                               COALESCE(NULLIF(url, ''), NULLIF(file_id, '')) IS NOT NULL
+                               OR EXISTS (
+                                   SELECT 1
+                                   FROM movie_files mf
+                                   WHERE mf.movie_id = movies.id
+                                     AND (
+                                         NULLIF(mf.url, '') IS NOT NULL
+                                         OR NULLIF(mf.file_id, '') IS NOT NULL
+                                     )
+                               )
+                           ) AS is_available
                     FROM movies
                     WHERE title ILIKE %s
                        OR title ILIKE %s
@@ -1734,6 +1774,7 @@ def register_webapp_routes(
                 ))
                 rows = cur.fetchall()
                 for r in rows:
+                    is_available = bool(r[10])
                     local_results.append({
                         'id': r[0],
                         'title': r[1],
@@ -1742,13 +1783,31 @@ def register_webapp_routes(
                         'rating': r[4] if r[4] else 'N/A',
                         'genre': r[5] if r[5] else 'Unknown',
                         'category': r[6] if r[6] else 'Movie',
-                        'source': 'local'
+                        'source': 'local',
+                        'tmdb_id': r[7],
+                        'media_type': 'tv' if str(r[8] or '').lower() in {'web series', 'tv series'} else 'movie',
+                        'is_available': is_available,
+                        'is_upcoming': bool(r[9]) and not is_available,
+                        'availability_state': 'available' if is_available else ('upcoming' if r[9] else 'unavailable'),
                     })
                 # A typo such as "rechar" has no ILIKE match, so score the
                 # local titles before declaring it unavailable.
                 if not local_results:
                     cur.execute("""
-                        SELECT id, title, year, poster_url, rating, genre, category
+                        SELECT id, title, year, poster_url, rating, genre, category,
+                               tmdb_id, content_type, is_unreleased,
+                               (
+                                   COALESCE(NULLIF(url, ''), NULLIF(file_id, '')) IS NOT NULL
+                                   OR EXISTS (
+                                       SELECT 1
+                                       FROM movie_files mf
+                                       WHERE mf.movie_id = movies.id
+                                         AND (
+                                             NULLIF(mf.url, '') IS NOT NULL
+                                             OR NULLIF(mf.file_id, '') IS NOT NULL
+                                         )
+                               )
+                               ) AS is_available
                         FROM movies WHERE title IS NOT NULL
                     """)
                     candidates = cur.fetchall()
@@ -1758,11 +1817,17 @@ def register_webapp_routes(
                         if score < 58:
                             continue
                         r = candidates[index]
+                        is_available = bool(r[10])
                         local_results.append({
                             'id': r[0], 'title': r[1], 'year': r[2] if r[2] else '',
                             'image': r[3] if r[3] else '/static/miniapp/poster-placeholder.svg',
                             'rating': r[4] if r[4] else 'N/A', 'genre': r[5] if r[5] else 'Unknown',
-                            'category': r[6] if r[6] else 'Movie', 'source': 'local'
+                            'category': r[6] if r[6] else 'Movie', 'source': 'local',
+                            'tmdb_id': r[7],
+                            'media_type': 'tv' if str(r[8] or '').lower() in {'web series', 'tv series'} else 'movie',
+                            'is_available': is_available,
+                            'is_upcoming': bool(r[9]) and not is_available,
+                            'availability_state': 'available' if is_available else ('upcoming' if r[9] else 'unavailable'),
                         })
                 cur.close()
         except Exception as e:
@@ -1775,7 +1840,10 @@ def register_webapp_routes(
             close_db_connection(conn)
     
         tmdb_results = []
-        if len(local_results) < 15:
+        # TMDB is the discovery source as well as the local-enrichment source.
+        # Query it even when local results exist so TMDB-only titles are not
+        # hidden behind the local result count.
+        if TMDB_API_KEY:
             try:
                 # Retry TMDB with server-side Google suggestions. This works in
                 # Telegram WebView too, unlike a browser-side JSONP callback.
@@ -1811,14 +1879,26 @@ def register_webapp_routes(
                             continue
                         tmdb_results.append({
                             'id': 'tmdb_' + str(item['id']),
+                            'tmdb_id': item.get('id'),
                             'title': item.get('title') or item.get('name') or 'Unknown',
                             'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
+                            'release_date': item.get('release_date') or item.get('first_air_date') or '',
                             'image': f"https://image.tmdb.org/t/p/w500{img_path}",
                             'rating': round(item.get('vote_average', 0), 1),
                             'genre': 'Action, Drama',
                             'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
+                            'media_type': item.get('media_type') or 'movie',
                             'source': 'tmdb',
-                            'description': item.get('overview', '')
+                            'description': item.get('overview', ''),
+                            'is_available': False,
+                            'is_upcoming': bool(
+                                item.get('release_date') or item.get('first_air_date')
+                            ) and (
+                                item.get('release_date') or item.get('first_air_date')
+                            )[:10] > datetime.utcnow().date().isoformat(),
+                            'availability_state': 'upcoming' if (
+                                item.get('release_date') or item.get('first_air_date') or ''
+                            )[:10] > datetime.utcnow().date().isoformat() else 'unavailable',
                         })
             except Exception as e:
                 logger.error(f"TMDB search error: {e}")
@@ -1846,15 +1926,61 @@ def register_webapp_routes(
                 if local_year.isdigit() and tmdb_year.isdigit() and abs(int(local_year) - int(tmdb_year)) > 1:
                     continue
                 if row[0] not in already_local_ids:
+                    is_available = bool(row[10]) if len(row) > 10 else False
                     local_results.append({
                         'id': row[0], 'title': row[1], 'year': row[2] if row[2] else '',
                         'image': row[3] or tmdb_movie['image'],
                         'rating': row[4] if row[4] else 'N/A',
                         'genre': row[5] if row[5] else 'Unknown',
-                        'category': row[6] if row[6] else 'Movie', 'source': 'local'
+                        'category': row[6] if row[6] else 'Movie', 'source': 'local',
+                        'tmdb_id': row[7] if len(row) > 7 else None,
+                        'media_type': tmdb_movie.get('media_type', 'movie'),
+                        'is_available': is_available,
+                        'is_upcoming': False,
+                        'availability_state': 'available' if is_available else 'unavailable',
                     })
                     already_local_ids.add(row[0])
     
+        # Prefer the local row when the provider identity is the same. A title
+        # match alone is never enough to collapse two TMDB records.
+        local_by_tmdb = {
+            str(movie.get('tmdb_id')): movie
+            for movie in local_results
+            if movie.get('tmdb_id') is not None
+        }
+        local_by_title_year_type = {}
+        for movie in local_results:
+            title_key = normalize_title(movie.get('title', ''))
+            year_key = str(movie.get('year') or '')[:4]
+            type_key = movie.get('media_type') or 'movie'
+            if title_key and year_key.isdigit():
+                local_by_title_year_type.setdefault(
+                    (title_key, year_key, type_key), []
+                ).append(movie)
+        merged_tmdb_results = []
+        for tmdb_movie in tmdb_results:
+            local_movie = local_by_tmdb.get(str(tmdb_movie.get('tmdb_id')))
+            if not local_movie:
+                candidates = local_by_title_year_type.get(
+                    (
+                        normalize_title(tmdb_movie.get('title', '')),
+                        str(tmdb_movie.get('year') or '')[:4],
+                        tmdb_movie.get('media_type') or 'movie',
+                    ),
+                    [],
+                )
+                # Title/year/type is only safe when it identifies one local row.
+                if len(candidates) == 1:
+                    local_movie = candidates[0]
+            if local_movie:
+                local_movie.update({
+                    key: value for key, value in tmdb_movie.items()
+                    if key in {'release_date', 'description', 'media_type'}
+                    and value
+                })
+                continue
+            merged_tmdb_results.append(tmdb_movie)
+
         seen = set()
         combined = []
         # Local movies first
@@ -1866,7 +1992,7 @@ def register_webapp_routes(
                 seen.add(key)
                 combined.append(m)
         # Then TMDB movies (only if not already seen)
-        for m in tmdb_results:
+        for m in merged_tmdb_results:
             key = ('tmdb', m['id'])
             if key not in seen and len(combined) < 30:
                 seen.add(key)

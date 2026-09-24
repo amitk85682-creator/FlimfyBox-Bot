@@ -62,4 +62,4 @@ def test_upcoming_endpoint_excludes_titles_releasing_today():
 
 def test_existing_local_rating_path_remains_available():
     assert "result = rating_summary(cur, movie_id, user['id'])" in ROUTES
-    assert "movie['is_available'] = True" in ROUTES
+    assert "movie['is_available'] = has_root_file or any(" in ROUTES

@@ -1509,12 +1509,15 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
             addRecentSearch(q);
             dropdown.innerHTML = results.slice(0, 8).map(r => {
                 const isTMDB = r.source === 'tmdb';
-                const status = isTMDB ? 'Request' : 'Available';
+                const isUpcoming = Boolean(r.is_upcoming);
+                const isAvailable = Boolean(r.is_available);
+                const status = isUpcoming ? 'Upcoming' : (isAvailable ? 'Available' : 'Unavailable');
+                const actionLabel = isUpcoming ? 'Notify' : (isAvailable ? 'View' : 'Request');
                 return `<div class="search-item fade-in" data-result-id="${escapeHtml(r.id)}" data-result-tmdb="${isTMDB}">
                     <img src="${escapeHtml(r.image || POSTER_PLACEHOLDER)}" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'">
-                    <div class="search-item-info"><div class="search-item-title">${r.title}</div>
-                    <div class="search-item-meta"><span>${r.year || '—'}</span><span class="status-pill ${isTMDB ? 'request' : 'available'}">${status}</span></div></div>
-                    <div class="search-actions"><button class="btn-sm ${isTMDB ? 'btn-sm-outline' : 'btn-sm-primary'}" type="button">${isTMDB ? 'Request' : 'View'}</button></div></div>`;
+                    <div class="search-item-info"><div class="search-item-title">${escapeHtml(r.title)}</div>
+                    <div class="search-item-meta"><span>${escapeHtml(r.year || '—')}</span><span class="status-pill ${isAvailable ? 'available' : 'request'}">${status}</span></div></div>
+                    <div class="search-actions"><button class="btn-sm ${isAvailable ? 'btn-sm-primary' : 'btn-sm-outline'}" type="button">${actionLabel}</button></div></div>`;
             }).join('');
             bindSearchSuggestions(dropdown, q, results);
         } catch (error) {
@@ -1662,7 +1665,7 @@ document.addEventListener('keydown', (e) => {
             // Show that immediately while files/cast finish loading in the background.
             detailsDescription.innerText = movie.description || 'Details and availability are loading…';
             detailsPage.classList.remove('is-loading');
-            if (isTMDB) {
+            if (isTMDB || movie.is_upcoming || movie.is_available === false) {
                 const backdropImg = movie.backdrop || movie.image;
                 document.getElementById('dpBackdrop').style.backgroundImage = backdropImg
                     ? `url("${backdropImg}"), ${IMAGE_FALLBACK_GRADIENT}`
@@ -1673,7 +1676,11 @@ document.addEventListener('keydown', (e) => {
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
                 document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
                 document.getElementById('castSection').innerHTML = '';
-                renderUpcomingActions(movie);
+                if (isTMDB || movie.is_upcoming) {
+                    renderUpcomingActions(movie);
+                } else {
+                    renderUnavailableAction(movie);
+                }
                 detailsPage.classList.remove('is-loading');
                 return;
             }
@@ -1849,6 +1856,18 @@ document.addEventListener('keydown', (e) => {
                     );
                 })
                 .catch(error => console.warn('Upcoming notification status unavailable:', error));
+        }
+        function renderUnavailableAction(movie) {
+            const actionContainer = document.getElementById('dpTrailerBtn');
+            const linksContainer = document.getElementById('dpLinks');
+            if (actionContainer) {
+                actionContainer.innerHTML = `<button class="btn-request" type="button" onclick="requestSilent('${String(movie.title || '').replace(/'/g, "\\'")}')">
+                    <i class="fas fa-paper-plane"></i> Request this title
+                </button>`;
+            }
+            if (linksContainer) {
+                linksContainer.innerHTML = '<div class="pre-release-note"><i class="fas fa-circle-info"></i> This title is currently unavailable on FlimfyBox.</div>';
+            }
         }
         function setUpcomingNotificationButton(button, enabled) {
             if (!button) return;
