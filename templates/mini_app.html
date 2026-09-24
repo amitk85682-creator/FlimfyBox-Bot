@@ -9,7 +9,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=upcoming-home-shelf-2-back-position-2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/app.css') }}?v=upcoming-home-shelf-2-back-position-3">
 </head>
 <body>
     <section class="app-loading-screen" id="appLoadingScreen" aria-live="polite" aria-label="Loading FlimfyBox">
@@ -172,7 +172,7 @@
 
     <div class="details-page genre-detail-page" id="genreDetailPage">
         <div class="dp-header">
-            <button class="btn-back" onclick="closeGenreDetail()"><i class="fas fa-chevron-left"></i></button>
+            <button class="btn-back details-back-button" type="button" onclick="closeGenreDetail()" aria-label="Back to browse"><i class="fas fa-chevron-left"></i><span>Back</span></button>
             <button class="btn-more" type="button" aria-label="Explore more" onclick="showToast('Browse more genres from the Explore hub')"><i class="fas fa-compass"></i></button>
         </div>
         <div class="genre-detail-hero" id="genreDetailHero">
@@ -286,6 +286,6 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=upcoming-home-shelf-2"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=upcoming-home-shelf-2-back-button"></script>
 </body>
 </html>

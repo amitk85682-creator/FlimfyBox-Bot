@@ -1,6 +1,7 @@
 document.body.classList.add('app-booting');
 const tg = window.Telegram?.WebApp || {
             expand() {}, ready() {}, close() {}, openLink(url) { window.open(url, '_blank'); },
+            BackButton: { show() {}, hide() {}, onClick() {}, offClick() {} },
             HapticFeedback: { notificationOccurred() {}, impactOccurred() {} }, initDataUnsafe: {}, initData: ''
         };
         tg.expand();
@@ -51,8 +52,32 @@ const tg = window.Telegram?.WebApp || {
         let genreController = null;
         let initialHomePending = 0;
         let initialHomeTimeout = null;
+        let telegramBackButtonHandler = null;
         const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v2';
         const HOME_CATALOGUE_CACHE_TTL = 10 * 60 * 1000;
+
+        function syncTelegramBackButton() {
+            const backButton = tg.BackButton;
+            if (!backButton || typeof backButton.show !== 'function') return;
+            if (telegramBackButtonHandler && typeof backButton.offClick === 'function') {
+                backButton.offClick(telegramBackButtonHandler);
+            }
+            telegramBackButtonHandler = () => {
+                const detailsPage = document.getElementById('detailsPage');
+                const genreDetailPage = document.getElementById('genreDetailPage');
+                if (detailsPage?.classList.contains('open')) {
+                    window.closeDetails();
+                } else if (genreDetailPage?.classList.contains('open')) {
+                    window.closeGenreDetail();
+                } else if (!document.body.classList.contains('screen-home')) {
+                    window.showHome();
+                } else {
+                    tg.close();
+                }
+            };
+            if (typeof backButton.onClick === 'function') backButton.onClick(telegramBackButtonHandler);
+            backButton.show();
+        }
 
         function readHomeCatalogueCache() {
             try {
@@ -2230,6 +2255,7 @@ document.addEventListener('keydown', (e) => {
         };
 
         // Start
+        syncTelegramBackButton();
         setupMotionEffects();
         startInitialHomeLoading();
         loadMovies();

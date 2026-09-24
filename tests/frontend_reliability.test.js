@@ -98,11 +98,15 @@ assert.match(source, /getElementById\('heroTitle'\)/);
 assert.match(styles, /\.hero-info\s*\{[\s\S]*padding:\s*0 !important[\s\S]*border:\s*0 !important[\s\S]*background:\s*transparent !important[\s\S]*box-shadow:\s*none !important/);
 assert.match(styles, /@media \(max-width: 699px\)[\s\S]*\.dp-header[\s\S]*top: max\(44px, calc\(env\(safe-area-inset-top, 0px\) \+ 18px\)\)/);
 assert.match(template, /class="btn-back details-back-button"[^>]*onclick="closeDetails\(\)"[^>]*>[\s\S]*<span>Back<\/span>/);
-assert.equal((template.match(/class="btn-back details-back-button"/g) || []).length, 1);
+assert.equal((template.match(/class="btn-back details-back-button"/g) || []).length, 2);
 assert.equal((template.match(/onclick="closeDetails\(\)"/g) || []).length, 1);
 assert.match(styles, /\.details-back-button[\s\S]*min-height:\s*44px/);
 assert.match(styles, /\.dp-header[\s\S]*env\(safe-area-inset-top, 0px\)/);
 assert.doesNotMatch(template, /class="header-close"[^>]*onclick="tg\.close\(\)"/);
+assert.match(source, /tg\.BackButton/);
+assert.match(source, /backButton\.show\(\)/);
+assert.match(source, /backButton\.onClick\(telegramBackButtonHandler\)/);
+assert.match(source, /if \(detailsPage\?\.classList\.contains\('open'\)\)/);
 
 assert.equal(latestResponseGuard(2, 1), false);
 assert.equal(latestResponseGuard(2, 2), true);

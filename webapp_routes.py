@@ -1735,12 +1735,9 @@ def register_webapp_routes(
         # back to their available local record after a misspelled search.
         catalog_candidates = []
         if not conn:
-            # Do not label TMDB titles as request-only just because the local
-            # catalogue connection is temporarily unavailable.
-            return jsonify({
-                'status': 'error',
-                'message': 'Catalogue is temporarily unavailable. Please try again.'
-            }), 503
+            # TMDB is also the discovery source, so a temporary catalogue
+            # outage must not block title discovery or request submission.
+            logger.warning('Local catalogue unavailable during search; continuing with TMDB')
         try:
                 cur = conn.cursor()
                 cur.execute("""
@@ -1831,11 +1828,9 @@ def register_webapp_routes(
                         })
                 cur.close()
         except Exception as e:
-            logger.error(f"Local search error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Catalogue search failed. Please try again.'
-            }), 500
+            # A local schema/connection failure should not hide a valid TMDB
+            # result. The title can still be shown as request-only.
+            logger.error(f"Local search error; continuing with TMDB: {e}")
         finally:
             close_db_connection(conn)
     

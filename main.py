@@ -6295,6 +6295,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_page = int(parts[2]) if len(parts) > 2 else 1
         chat_id = update.effective_chat.id
 
+        # Send All must always be delivered in PM. A group callback cannot
+        # reliably tell whether this user has started or blocked the bot
+        # without attempting a private Telegram action, so hand the request
+        # to /start first. The deep-link handler then delivers the page only
+        # after Telegram has accepted the user's PM update.
+        if update.effective_chat.type in ("group", "supergroup"):
+            bot_username = context.bot.username
+            if not bot_username:
+                bot_username = (await context.bot.get_me()).username
+            if bot_username:
+                start_url = (
+                    f"https://t.me/{bot_username}"
+                    f"?start=sendall_{movie_id}_{current_page}"
+                )
+                await query.answer(url=start_url)
+            else:
+                await query.answer(
+                    "⚠️ Please START the bot in PM first to receive files!",
+                    show_alert=True,
+                )
+            return
+
         # ✅ FAST FETCH: Ek hi bar mein sab nikal lo (seasons_data bhi le lo extra DB calls bachane ke liye)
         conn = get_db_connection()
         cur = conn.cursor()

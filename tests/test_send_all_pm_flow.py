@@ -36,6 +36,18 @@ def test_send_all_has_pm_start_deep_link_for_group_users():
     assert "deliver_movie_page_on_start" in MAIN_SOURCE
 
 
+def test_send_all_redirects_group_callbacks_before_sending_group_status():
+    send_all_source = MAIN_SOURCE[
+        MAIN_SOURCE.index('if query.data.startswith("sendall_"):'):
+        MAIN_SOURCE.index("    # === NEW: SCAN INFO POPUP ===")
+    ]
+    assert 'update.effective_chat.type in ("group", "supergroup")' in send_all_source
+    assert "await query.answer(url=start_url)" in send_all_source
+    assert send_all_source.index("await query.answer(url=start_url)") < send_all_source.index(
+        "status_msg = await query.message.reply_text"
+    )
+
+
 def test_send_all_deep_link_delivers_only_requested_page():
     assert "page_files = qualities[start:start + 10]" in MAIN_SOURCE
     assert "payload.startswith(\"sendall_\")" in MAIN_SOURCE
