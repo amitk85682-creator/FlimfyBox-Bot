@@ -5421,8 +5421,9 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
     
     if poster_url:
         try:
+            processed_poster = await make_landscape_poster(poster_url)
             msg = await update.message.reply_photo(
-                photo=poster_url,
+                photo=processed_poster,
                 caption=file_list_text,
                 reply_markup=keyboard_markup,
                 parse_mode='HTML'
