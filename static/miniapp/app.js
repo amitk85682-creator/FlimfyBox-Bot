@@ -1482,11 +1482,44 @@ document.getElementById('genreSearchInput')?.addEventListener('input', (e) => {
     renderExploreScreen();
 });
 
+window.triggerSearchAgain = function() {
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput && searchInput.value.trim() !== '') {
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+};
+
+window.clearSearchInput = function() {
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) {
+        searchInput.value = '';
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        searchInput.focus();
+    }
+};
+
+document.getElementById('searchInput').addEventListener('click', function(e) {
+    if (this.value.trim() !== '') {
+        this.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+});
+
+document.getElementById('searchInput').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+        this.blur(); // Collapse keyboard on mobile after pressing Enter
+    }
+});
+
 document.getElementById('searchInput').addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
     if (searchController) searchController.abort();
     const q = e.target.value.trim();
     const dropdown = document.getElementById('searchDropdown');
+    const clearBtn = document.getElementById('clearSearchBtn');
+
+    if (clearBtn) {
+        clearBtn.style.display = e.target.value.length > 0 ? 'block' : 'none';
+    }
 
     if (!q) {
         renderSearchDiscovery();
@@ -1885,10 +1918,40 @@ document.addEventListener('keydown', (e) => {
         function renderUnavailableAction(movie) {
             const actionContainer = document.getElementById('dpTrailerBtn');
             const linksContainer = document.getElementById('dpLinks');
-            if (actionContainer) {
-                actionContainer.innerHTML = `<button class="btn-request" type="button" onclick="requestSilent('${String(movie.title || '').replace(/'/g, "\\'")}')">
-                    <i class="fas fa-paper-plane"></i> Request this title
+            
+            const tmdbId = String(movie.tmdb_id || movie.id || '').replace(/^tmdb_/, '');
+            const releaseDate = movie.release_date || '';
+            
+            const renderNotificationButton = (stage, enabled) => {
+                const availableStage = stage === 'availability';
+                const label = availableStage
+                    ? (enabled ? 'Download notification set' : 'Notify when available for download')
+                    : (enabled ? 'Notification Set' : 'Notify when released');
+                const icon = enabled ? 'fa-check' : 'fa-bell';
+                return `<button class="btn-request upcoming-notify-button" style="margin-top: 10px;" type="button" data-stage="${stage}" data-tmdb-id="${escapeHtml(tmdbId)}" data-release-date="${escapeHtml(releaseDate)}" data-title="${escapeHtml(movie.title || '')}" onclick="toggleUpcomingNotification(this)">
+                    <i class="fas ${icon}"></i> <span>${label}</span>
                 </button>`;
+            };
+
+            if (actionContainer) {
+                const requestBtnHtml = `<button class="btn-request" type="button" onclick="requestSilent('${String(movie.title || '').replace(/'/g, "\\'")}')">
+                    <i class="fas fa-paper-plane"></i> Request ${escapeHtml(movie.title || 'this title')}
+                </button>`;
+                
+                actionContainer.innerHTML = requestBtnHtml + renderNotificationButton('availability', false);
+                
+                const button = actionContainer.querySelector('.upcoming-notify-button');
+                if (button && tmdbId) {
+                    fetch(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
+                        headers: telegramAuthHeaders()
+                    })
+                        .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                        .then(({ ok, data }) => {
+                            if (!ok || data.status !== 'success') throw new Error(data.message || 'Notification status unavailable');
+                            setUpcomingNotificationButton(button, Boolean(data.availability_notification_set));
+                        })
+                        .catch(error => console.warn('Upcoming notification status unavailable:', error));
+                }
             }
             if (linksContainer) {
                 linksContainer.innerHTML = '<div class="pre-release-note"><i class="fas fa-circle-info"></i> This title is currently unavailable on FlimfyBox.</div>';

@@ -2063,3 +2063,22 @@ body {
         letter-spacing: .02em;
     }
 }
+
+/* Mobile Touch Feedback */
+@media (hover: none) {
+    .card:active,
+    .genre-card:active,
+    .btn-request:active,
+    .watch-button:active,
+    .detail-play:active,
+    .dl-btn:active,
+    .ep-dl-btn:active,
+    .header-action:active,
+    .search-suggestion:active,
+    .bottom-nav button:active,
+    .search-box i:active {
+        transform: scale(0.96) !important;
+        opacity: 0.8;
+        transition: transform 0.1s ease, opacity 0.1s ease !important;
+    }
+}

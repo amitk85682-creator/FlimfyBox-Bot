@@ -684,22 +684,35 @@ def _process_poster_sync(image_data):
     🎨 PIL Image Processing (Background Thread me chalega)
     Poster ko clean Square 1:1 format me convert karta hai.
     """
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageOps, ImageFilter, ImageEnhance
     img = Image.open(BytesIO(image_data)).convert("RGB")
     target_w, target_h = 800, 800
 
-    # Fill the complete square and crop only the excess edges. This avoids
-    # placing a portrait poster inside a second vertical frame.
-    square_img = ImageOps.fit(
+    # 1. Background image (blurred and darkened)
+    bg = ImageOps.fit(
         img,
         (target_w, target_h),
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.45),
     )
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=25))
+    bg = ImageEnhance.Brightness(bg).enhance(0.5)
+
+    # 2. Foreground image (un-cropped, fitted to target size)
+    img_w, img_h = img.size
+    ratio = min(target_w / img_w, target_h / img_h)
+    new_w, new_h = int(img_w * ratio), int(img_h * ratio)
+    
+    fg = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    
+    # 3. Paste foreground onto background
+    offset_x = (target_w - new_w) // 2
+    offset_y = (target_h - new_h) // 2
+    bg.paste(fg, (offset_x, offset_y))
 
     output = BytesIO()
     output.name = "square_poster.jpg"
-    square_img.save(output, format='JPEG', quality=95)
+    bg.save(output, format='JPEG', quality=95)
     output.seek(0)
     return output
 
@@ -4244,8 +4257,27 @@ async def deliver_movie_page_on_start(update: Update, context: ContextTypes.DEFA
             file_data[2],
             send_warning=False,
             pre_fetched_meta=dict(metadata),
+            suppress_delete_notice=True,
         )
         await asyncio.sleep(0.3)
+
+    # Send auto-delete notice only once after all files are delivered
+    try:
+        target_chat_id = update.effective_user.id
+        warn_text_msg = await context.bot.send_message(
+            chat_id=target_chat_id,
+            text=(
+                "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
+                "◈ ऊपर भेजी गयी file <b>2 minutes</b> बाद auto-delete हो जाएगी।\n"
+                "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
+            ),
+            parse_mode='HTML'
+        )
+        track_message_for_deletion(
+            context, target_chat_id, warn_text_msg.message_id, USER_FILE_DELETE_SECONDS,
+        )
+    except:
+        pass
 
 def load_movie_selection_data(movie_id):
     """Reload callback state from the database after a file-link click clears memory."""
@@ -4275,7 +4307,7 @@ def load_movie_selection_data(movie_id):
     }
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, require_exact_file: bool = False):
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, require_exact_file: bool = False, suppress_delete_notice: bool = False):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
 
@@ -4607,8 +4639,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 await update.callback_query.answer("✅ File Sent!\n⚠️ Ye file aur message 2 minutes baad delete ho jayegi.", show_alert=True)
             except:
                 pass
-        elif sent_msg and not update.callback_query:
+        elif sent_msg and not update.callback_query and not suppress_delete_notice:
             # 🛡️ PM search / Deep link — no callback popup available, so text warning bhejo
+            # Send All flow suppresses this and sends one notice after the loop.
             try:
                 warn_text_msg = await context.bot.send_message(
                     chat_id=target_chat_id,
@@ -6383,12 +6416,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
                     send_warning=False,
-                    pre_fetched_meta=file_meta
+                    pre_fetched_meta=file_meta,
+                    suppress_delete_notice=True,
                 )
                 await asyncio.sleep(0.3)  # ⚡ 1.2s → 0.3s (safe_send mein flood protection already hai)
                 count += 1
             except Exception as e:
                 logger.error(f"Send All Error: {e}")
+
+        # Send auto-delete notice only once after all files are delivered
+        if count > 0:
+            try:
+                warn_text_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
+                        "◈ ऊपर भेजी गयी file <b>2 minutes</b> बाद auto-delete हो जाएगी।\n"
+                        "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
+                    ),
+                    parse_mode='HTML'
+                )
+                track_message_for_deletion(
+                    context, chat_id, warn_text_msg.message_id, USER_FILE_DELETE_SECONDS,
+                )
+            except:
+                pass
 
         await status_msg.edit_text(f"✅ **Sent {count}/{len(page_files)} Files (Page {current_page})!**", parse_mode='Markdown')
         track_message_for_deletion(context, chat_id, status_msg.message_id, USER_TEXT_DELETE_SECONDS)

@@ -29,8 +29,9 @@
     </header>
     <div class="search-section">
         <div class="search-box">
-            <i class="fas fa-search"></i>
+            <i class="fas fa-search" onclick="triggerSearchAgain()" style="cursor: pointer;" title="Search Again"></i>
             <input type="text" id="searchInput" placeholder="Search movies, web series...">
+            <i class="fas fa-times clear-search" id="clearSearchBtn" style="display: none; cursor: pointer; color: var(--text-muted, #8e95a5); padding: 0 12px; transition: color 0.2s ease;" onclick="clearSearchInput()" title="Clear Search"></i>
         </div>
         <div class="search-dropdown-container">
             <div id="searchDropdown" class="search-dropdown"></div>
