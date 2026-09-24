@@ -682,11 +682,11 @@ def clean_telegram_text(text):
 def _process_poster_sync(image_data):
     """
     🎨 PIL Image Processing (Background Thread me chalega)
-    Poster ko clean Square 1:1 format me convert karta hai.
+    Poster ko clean Landscape 16:9 format (1280x720) me convert karta hai.
     """
     from PIL import Image, ImageOps, ImageFilter, ImageEnhance
     img = Image.open(BytesIO(image_data)).convert("RGB")
-    target_w, target_h = 800, 800
+    target_w, target_h = 1280, 720
 
     # 1. Background image (blurred and darkened)
     bg = ImageOps.fit(
