@@ -4180,78 +4180,6 @@ def get_movie_delivery_meta(movie_id):
         close_db_connection(conn)
 
 
-def get_movie_delivery_data(movie_id):
-    """Load file menu rows and movie presentation metadata in one DB round-trip."""
-    conn = get_db_connection()
-    if not conn:
-        return [], ("", None)
-
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT m.category, m.poster_url,
-                   mf.quality, mf.url, mf.file_id, mf.file_size,
-                   mf.languages, mf.extra_info
-            FROM movies m
-            LEFT JOIN movie_files mf
-              ON mf.movie_id = m.id
-             AND (mf.url IS NOT NULL OR mf.file_id IS NOT NULL)
-            WHERE m.id = %s
-            ORDER BY CASE mf.quality
-                WHEN '4K' THEN 1
-                WHEN 'HD Quality' THEN 2
-                WHEN 'Standart Quality' THEN 3
-                WHEN 'Low Quality' THEN 4
-                ELSE 5
-            END DESC
-            """,
-            (movie_id,),
-        )
-        rows = cur.fetchall()
-        cur.close()
-        if not rows:
-            return [], ("", None)
-
-        category, poster_url = rows[0][0], rows[0][1]
-        qualities = [
-            (row[2], row[3], row[4], row[5], row[6], row[7])
-            for row in rows
-            if row[2] is not None
-        ]
-        return qualities, (category or "", poster_url)
-    except Exception as e:
-        logger.error(f"Error fetching delivery data for {movie_id}: {e}")
-        return [], ("", None)
-    finally:
-        close_db_connection(conn)
-
-
-def create_file_button_rows(movie_id, files, all_files=None):
-    """Create one full-width download button for each visible file."""
-    all_files = all_files or files
-    rows = []
-    for file_data in files:
-        try:
-            file_index = all_files.index(file_data)
-        except ValueError:
-            continue
-        file_size = str(file_data[3] or "Unknown Size").strip()
-        title_part = str(file_data[5] or "").strip() if len(file_data) > 5 else ""
-        quality = str(file_data[0] or "").strip()
-        label = " ".join(part for part in (file_size, title_part, quality) if part)
-        label = re.sub(r"\s+", " ", label).strip()
-        if len(label) > 58:
-            label = label[:55].rstrip() + "..."
-        rows.append([
-            InlineKeyboardButton(
-                f"🎬 {label}",
-                callback_data=f"download_{movie_id}_{file_index}",
-            )
-        ])
-    return rows
-
-
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1, current_files=None, season_view=False):
@@ -4259,8 +4187,6 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
     keyboard = []
     
     if view == "main":
-        if current_files:
-            keyboard.extend(create_file_button_rows(movie_id, current_files))
 
         # 2. अगर सीजन के अंदर हैं, तो बैक बटन दिखाओ
         if season_view:
@@ -5488,8 +5414,9 @@ def _format_requested_files_header(title, qualities, user, bot_info):
     )
 
 async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str):
-    qualities, (category, poster_url) = await run_async(
-        get_movie_delivery_data, movie_id
+    qualities, (category, poster_url) = await asyncio.gather(
+        run_async(get_all_movie_qualities, movie_id),
+        run_async(get_movie_delivery_meta, movie_id),
     )
     if not qualities:
         await update.message.reply_text("No files found!")
@@ -5505,12 +5432,22 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
     bot_info = context.bot
     if not bot_info.username:
         bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
     file_list_text = _format_requested_files_header(
         title,
         qualities,
         update.effective_user,
         bot_info,
     )
+    
+    for idx, file_data in enumerate(qualities[:10], start=1):
+        quality = file_data[0]
+        file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
+        extra_info = file_data[5] if len(file_data) > 5 else ""
+        
+        ep_tag = f"[{extra_info}] " if extra_info else ""
+        real_idx = qualities.index(file_data)
+        file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {ep_tag}{quality}</a></b>\n\n"
 
     limit = 10
     total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
@@ -5918,47 +5855,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ✅ NAYA: Video wala Pages Button Popup
     if data == "ignore":
         await query.answer("THIS IS PAGES BUTTON 🔴", show_alert=False)
-        return
-
-    if data.startswith("download_"):
-        try:
-            _, movie_id_text, file_index_text = data.split("_", 2)
-            movie_id = int(movie_id_text)
-            file_index = int(file_index_text)
-        except (TypeError, ValueError):
-            await query.answer("❌ Invalid file button.", show_alert=True)
-            return
-
-        movie_data = context.user_data.get("selected_movie_data")
-        if not movie_data or movie_data.get("id") != movie_id:
-            movie_data = await run_async(load_movie_selection_data, movie_id)
-        if not movie_data:
-            await query.answer("❌ Movie data is no longer available.", show_alert=True)
-            return
-
-        qualities = movie_data.get("qualities") or []
-        if file_index < 0 or file_index >= len(qualities):
-            await query.answer("❌ This file is no longer available.", show_alert=True)
-            return
-
-        file_data = qualities[file_index]
-        url = file_data[1] if len(file_data) > 1 else None
-        file_id = file_data[2] if len(file_data) > 2 else None
-        if not url and not file_id:
-            await query.answer("❌ This file is no longer available.", show_alert=True)
-            return
-
-        await query.answer("⏳ File is being fetched...")
-        await send_movie_to_user(
-            update,
-            context,
-            movie_id,
-            movie_data["title"],
-            url,
-            file_id,
-            send_warning=True,
-            require_exact_file=True,
-        )
         return
 
     if data.startswith("fl_") or data.startswith("v_"):
@@ -7150,6 +7046,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text += f"🔍 Filter: <b>{active_filter['value']}</b>\n"
                 if not filtered_qualities:
                     text += "❌ No files found for this filter.\n"
+                else:
+                    bot_username = context.bot.username
+                    
+                    for idx, file_data in enumerate(current_page_files, start=start_idx + 1):
+                        quality = str(file_data[0])
+                        
+                        # 🚀 NAYA FIX: Doosre Bot (Manvi Bot) ke links ko hamesha ke liye uda do
+                        quality = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', quality)
+                        quality = re.sub(r'\(https?://[^\)]+\)', '', quality)
+                        quality = re.sub(r'https?://[^\s]+', '', quality)
+                        # 👇 Ye 2 lines nayi add karni hain: t.me aur @usernames udane ke liye
+                        quality = re.sub(r'(?i)t\.me/[^\s]+', '', quality)
+                        quality = re.sub(r'@[a-zA-Z0-9_]+', '', quality)
+                        
+                        file_size = file_data[3] if len(file_data) > 3 else "Unknown"
+                        
+                        # Extra Info (Episodes) se bhi link saaf karo
+                        extra_info = str(file_data[5]) if len(file_data) > 5 else ""
+                        extra_info = re.sub(r'\[([^\]]+)\]\(https?://[^\)]+\)', r'\1', extra_info)
+                        extra_info = re.sub(r'\(https?://[^\)]+\)', '', extra_info)
+                        extra_info = re.sub(r'https?://[^\s]+', '', extra_info)
+                        # 👇 Ye 2 lines yahan bhi add karni hain
+                        extra_info = re.sub(r'(?i)t\.me/[^\s]+', '', extra_info)
+                        extra_info = re.sub(r'@[a-zA-Z0-9_]+', '', extra_info)
+                        
+                        lang_name = str(file_data[4]).strip() if len(file_data) > 4 and file_data[4] else ""
+                        lang_tag = f"[{lang_name}] " if lang_name else ""
+                        
+                        ep_tag = f"[{extra_info.strip()}] " if extra_info.strip() else ""
+                        
+                        real_idx = all_qualities.index(file_data)
+                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {lang_tag}{ep_tag}{quality.strip()}</a></b>\n\n"
 
             elif view_type in ["lang", "qual"]:
                 text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"
@@ -7159,13 +7087,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # 1. MAIN MENU: Yahan normal buttons dikhenge
             if view_type == "main":
-                keyboard.extend(
-                    create_file_button_rows(
-                        movie_id,
-                        current_page_files,
-                        all_qualities,
-                    )
-                )
                 if filtered_qualities:
                     keyboard.append([
                         InlineKeyboardButton("🔶 Sᴇɴᴅ Aʟʟ 🔶", callback_data=f"sendall_{movie_id}_{page}"),
