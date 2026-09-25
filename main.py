@@ -4915,10 +4915,17 @@ user_processing_locks = defaultdict(Lock)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    try:
-        await run_async(record_telegram_user, update.effective_user, chat_id)
-    except Exception as e:
-        logger.warning(f"Telegram profile setup failed for {user_id}: {e}")
+    # User registration is bookkeeping and must not delay deep-link delivery
+    # or the welcome response. Keep failures visible in the background task.
+    async def record_user():
+        try:
+            await run_async(record_telegram_user, update.effective_user, chat_id)
+        except Exception as e:
+            logger.warning(f"Telegram profile setup failed for {user_id}: {e}")
+
+    task = asyncio.create_task(record_user())
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
     
     # ✅ FIX 1: Message ko safe tarike se nikalein (Button aur Text dono ke liye)
     message = update.effective_message 
@@ -5409,8 +5416,10 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
         'qualities': qualities
     }
 
-    bot_username = context.bot.username
-    bot_info = await context.bot.get_me()
+    bot_info = context.bot
+    if not bot_info.username:
+        bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
     file_list_text = _format_requested_files_header(
         title,
         qualities,
@@ -13856,6 +13865,9 @@ async def main():
             app = (
                 Application.builder()
                 .token(token)
+                # A slow file/metadata operation must not hold every other
+                # user's update in the polling queue.
+                .concurrent_updates(32)
                 .read_timeout(30)
                 .write_timeout(30)
                 .build()
