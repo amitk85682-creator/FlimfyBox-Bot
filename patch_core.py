@@ -209,7 +209,7 @@ def patch_app_js():
         new_func = """
         window.downloadFile = function(fileId) {
             tg.HapticFeedback.impactOccurred('heavy');
-            tg.openLink(`https://temp-bj8b.onrender.com/watch/file/${fileId}`);
+            tg.openLink(`https://flimfybox-bot-yht0.onrender.com/watch/file/${fileId}`);
         };
 """
         content = content.replace("window.downloadMovie = function(id) {", new_func + "        window.downloadMovie = function(id) {")

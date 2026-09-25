@@ -236,7 +236,7 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     # --- 6. KEYBOARD BUTTONS ---
-    secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
     
     keyboard_data = {
         "inline_keyboard": [
@@ -337,7 +337,7 @@ TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
 # still hard-coded in several buttons, so Telegram opened the retired Mini App.
 def normalize_mini_app_url(value: str) -> str:
     """Keep Telegram buttons on the current Mini App host and route."""
-    fallback = 'https://temp-bj8b.onrender.com/webapp'
+    fallback = 'https://flimfybox-bot-yht0.onrender.com/webapp'
     candidate = (value or '').strip()
     if not candidate:
         return fallback
@@ -346,14 +346,14 @@ def normalize_mini_app_url(value: str) -> str:
         return fallback
     hostname = (parsed.hostname or '').lower()
     if hostname == 'flimfybox-bot-yht0.onrender.com':
-        parsed = parsed._replace(netloc='temp-bj8b.onrender.com')
+        parsed = parsed._replace(netloc='flimfybox-bot-yht0.onrender.com')
     if not parsed.path or parsed.path == '/':
         parsed = parsed._replace(path='/webapp')
     return urlunparse(parsed).rstrip('/')
 
 
 WEB_APP_URL = normalize_mini_app_url(
-    os.environ.get('WEB_APP_URL', 'https://temp-bj8b.onrender.com/webapp')
+    os.environ.get('WEB_APP_URL', 'https://flimfybox-bot-yht0.onrender.com/webapp')
 )
     # 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
@@ -6432,7 +6432,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # --- 4. SECURE LINK & BUTTONS ---
-        secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+        secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
         channel_link = os.environ.get('FILMFYBOX_CHANNEL_URL', 'https://t.me/your_channel')
 
         post_keyboard = InlineKeyboardMarkup([
@@ -8422,7 +8422,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             # --- SECURE LINK & BUTTONS (As it was) ---
-            secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
             post_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Get Now", url=secure_url)],
@@ -9086,7 +9086,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
 
         # --- SECURE LINK FOR SUPERBATCH POST ---
-        secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+        secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Get Now", url=secure_url)],
@@ -9181,7 +9181,7 @@ async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     # 3. Download Buttons Banao
-    secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Get Now", url=secure_url)],
@@ -9370,7 +9370,7 @@ async def process_post_query_album(mg_id: str, update: Update, context: ContextT
     bot3 = "FlimfyBoxBot"
     
     if movie_id:
-        secure_link = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+        secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
         link1 = secure_link
         link2 = secure_link
         link3 = secure_link
@@ -9581,7 +9581,7 @@ async def admin_post_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if movie_id:
             # ✅ FIXED: Web App Secure Link (Exactly like /superdone)
-            secure_link = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+            secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
             link1 = secure_link
             link2 = secure_link
             link3 = secure_link
@@ -9769,7 +9769,7 @@ async def admin_post_query_text(update: Update, context: ContextTypes.DEFAULT_TY
         bot3 = "FlimfyBoxBot"
         
         if movie_id:
-            secure_link = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+            secure_link = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
             link1 = secure_link
             link2 = secure_link
             link3 = secure_link
@@ -11073,7 +11073,7 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # Build keyboard
-    secure_url = f"https://temp-bj8b.onrender.com/watch/{movie_id}"
+    secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{movie_id}"
     post_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Get Now", url=secure_url)],
         [InlineKeyboardButton("Join Channel", url=FILMFYBOX_CHANNEL_URL)]
@@ -11477,7 +11477,7 @@ async def update_buttons_command(update: Update, context: ContextTypes.DEFAULT_T
     for (m_id, ch_id, msg_id) in posts:
         try:
             # --- SECURE LINK FOR OLD POSTS UPDATE ---
-            secure_url = f"https://temp-bj8b.onrender.com/watch/{m_id}"
+            secure_url = f"https://flimfybox-bot-yht0.onrender.com/watch/{m_id}"
 
             new_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📥 Download Server 1", url=secure_url)],
