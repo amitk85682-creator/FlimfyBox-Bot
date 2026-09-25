@@ -2458,22 +2458,31 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
 
         cur = conn.cursor()
         
-        # ✅ Updated to include new columns
-        normalized_query = _normalize_search_text(query)
-        # SPEED FIX: Removed regexp_replace from WHERE clause because it forces a full table scan 
-        # and regex execution on every row, causing 3-5 seconds of delay per message.
-        sql = """
+        # Keep the common title lookup independent from fuzzy matching. An OR
+        # with SIMILARITY forces PostgreSQL to score every row even when the
+        # indexed ILIKE branch already has an exact/partial match.
+        exact_sql = """
             SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
-                   SIMILARITY(m.title, %s) as sim_score
+                   0.0 as sim_score
             FROM movies m
             WHERE m.title ILIKE %s
-               OR SIMILARITY(m.title, %s) > 0.3
-            ORDER BY sim_score DESC
+            ORDER BY m.title
             LIMIT %s
         """
-        
-        cur.execute(sql, (query, f'%{query}%', query, limit))
+        cur.execute(exact_sql, (f'%{query}%', limit))
         results = cur.fetchall()
+
+        if not results:
+            fuzzy_sql = """
+                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
+                       SIMILARITY(m.title, %s) as sim_score
+                FROM movies m
+                WHERE SIMILARITY(m.title, %s) > 0.3
+                ORDER BY sim_score DESC
+                LIMIT %s
+            """
+            cur.execute(fuzzy_sql, (query, query, limit))
+            results = cur.fetchall()
         
         # Format results (remove score from tuple)
         final_results = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in results]
