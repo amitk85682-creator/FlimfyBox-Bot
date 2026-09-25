@@ -63,6 +63,10 @@ search_cache = FastCache(ttl_seconds=30)  # 30 Seconds cache for SQL/Fuzzy searc
 api_movies_cache = FastCache(ttl_seconds=30) # 30 Seconds cache for Web App Home
 poster_cache = FastCache(ttl_seconds=3600)
 
+# Toggle lightweight search-stage timing instrumentation with env var SEARCH_TIMING=1
+SEARCH_TIMING_ENABLED = os.environ.get('SEARCH_TIMING', '0') == '1'
+GOOGLE_SUGGESTION_TIMEOUT_SECONDS = 1.5
+
 # ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
     from imdb import Cinemagoer
@@ -2314,7 +2318,8 @@ def get_google_title_suggestions(query: str, limit: int = 3):
         response = requests.get(
             'https://suggestqueries.google.com/complete/search',
             params={'client': 'firefox', 'q': f'{query} movie'},
-            headers={'User-Agent': 'Mozilla/5.0'}, timeout=3
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=GOOGLE_SUGGESTION_TIMEOUT_SECONDS,
         )
         data = response.json()
         suggestions = data[1] if isinstance(data, list) and len(data) > 1 else []
@@ -2339,6 +2344,18 @@ def get_google_title_suggestions(query: str, limit: int = 3):
         result = []
     search_cache.set(cache_key, result)
     return result
+
+
+async def get_google_title_suggestions_with_timeout(query: str, limit: int = 3):
+    """Run the optional Google fallback without holding the search response open."""
+    try:
+        return await asyncio.wait_for(
+            run_async(get_google_title_suggestions, query, limit=limit),
+            timeout=GOOGLE_SUGGESTION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.info("Google suggestion lookup timed out")
+        return []
 
 
 def get_movies_from_db(user_query, limit=10):
@@ -4180,6 +4197,53 @@ def get_movie_delivery_meta(movie_id):
         close_db_connection(conn)
 
 
+def get_movie_delivery_data(movie_id):
+    """Fetch file qualities and rendering metadata in one database round-trip."""
+    conn = get_db_connection()
+    if not conn:
+        return [], ("", None)
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT m.category, m.poster_url,
+                   mf.quality, mf.url, mf.file_id, mf.file_size,
+                   mf.languages, mf.extra_info
+            FROM movies AS m
+            LEFT JOIN movie_files AS mf
+              ON mf.movie_id = m.id
+             AND (mf.url IS NOT NULL OR mf.file_id IS NOT NULL)
+            WHERE m.id = %s
+            ORDER BY CASE mf.quality
+                WHEN '4K' THEN 1
+                WHEN 'HD Quality' THEN 2
+                WHEN 'Standart Quality' THEN 3
+                WHEN 'Low Quality' THEN 4
+                ELSE 5
+            END DESC
+        """, (movie_id,))
+        rows = cur.fetchall()
+        cur.close()
+
+        if not rows:
+            return [], ("", None)
+
+        category = rows[0][0] or ""
+        poster_url = rows[0][1]
+        qualities = [
+            (row[2], row[3], row[4], row[5], row[6], row[7])
+            for row in rows
+            if row[2] is not None
+        ]
+        return qualities, (category, poster_url)
+    except Exception as e:
+        logger.error(f"Error fetching delivery data for {movie_id}: {e}")
+        return [], ("", None)
+    finally:
+        if conn:
+            close_db_connection(conn)
+
+
 # create_quality_selection_keyboard function ko isse replace karein ya modify karein:
 
 def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=1, current_files=None, season_view=False):
@@ -5413,11 +5477,19 @@ def _format_requested_files_header(title, qualities, user, bot_info):
         "Your Requested Files Are Here\n\n"
     )
 
-async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str):
-    qualities, (category, poster_url) = await asyncio.gather(
-        run_async(get_all_movie_qualities, movie_id),
-        run_async(get_movie_delivery_meta, movie_id),
+async def process_movie_exact_match(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    movie_id: int,
+    title: str,
+    timing: Optional[dict] = None,
+):
+    delivery_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
+    qualities, (category, poster_url) = await run_async(
+        get_movie_delivery_data, movie_id
     )
+    if timing is not None and delivery_start is not None:
+        timing['delivery_data_ms'] = int((time.perf_counter() - delivery_start) * 1000)
     if not qualities:
         await update.message.reply_text("No files found!")
         return
@@ -5464,36 +5536,64 @@ async def process_movie_exact_match(update: Update, context: ContextTypes.DEFAUL
     
     if poster_url:
         try:
+            poster_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
             processed_poster = await make_landscape_poster(poster_url)
+            if timing is not None and poster_start is not None:
+                timing['poster_ms'] = int((time.perf_counter() - poster_start) * 1000)
+            response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
             msg = await update.message.reply_photo(
                 photo=processed_poster,
                 caption=file_list_text,
                 reply_markup=keyboard_markup,
                 parse_mode='HTML'
             )
+            if timing is not None and response_start is not None:
+                timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
         except Exception as e:
             logger.error(f"Failed to send photo: {e}")
+            response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
             msg = await update.message.reply_text(
                 file_list_text,
                 reply_markup=keyboard_markup,
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
+            if timing is not None and response_start is not None:
+                timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
     else:
+        response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
         msg = await update.message.reply_text(
             file_list_text,
             reply_markup=keyboard_markup,
             parse_mode='HTML',
             disable_web_page_preview=True
         )
+        if timing is not None and response_start is not None:
+            timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
     track_message_for_deletion(
         context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS
     )
 
 
-async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search runs silently; do not send temporary loading media."""
-    return None
+async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
+    """Send a lightweight temporary search progress message that can be edited/deleted.
+       Returns the sent Message object or None on failure. Controlled by SEARCH_TIMING_ENABLED.
+    """
+    try:
+        if not update.message:
+            return None
+        display = (query or '').strip()
+        if len(display) > 120:
+            display = display[:117] + '...'
+        if display:
+            text = f'🔎 Searching for "{display}"...'
+        else:
+            text = '🔎 Searching...'
+        msg = await update.message.reply_text(text)
+        return msg
+    except Exception as e:
+        logger.debug(f"send_search_progress failed: {e}")
+        return None
 
 
 async def remove_search_progress(progress_message):
@@ -5531,7 +5631,18 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clean_query = re.sub(r'(?i)\b(s\d{1,2}|season\s*\d+|ep\s?\d+|e\d{1,2})\b.*', '', query).strip()
         search_term = clean_query if (clean_query and len(clean_query) > 1) else query
 
-        progress_message = await send_search_progress(update, context)
+        # Lightweight timing instrumentation for debug (disabled by default)
+        times = {}
+        if SEARCH_TIMING_ENABLED:
+            times['handler_start'] = time.perf_counter()
+            logger.info("Search timing stage=handler_started")
+
+        progress_message = context.user_data.pop('_search_progress_message', None)
+        if progress_message is None:
+            progress_message = await send_search_progress(update, context, search_term)
+        if SEARCH_TIMING_ENABLED:
+            times['progress_sent'] = time.perf_counter()
+
         schedule_recommendation_event(
             user_id=update.effective_user.id if update.effective_user else None,
             event_type='pm_search',
@@ -5541,16 +5652,29 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 1. Use the indexed similarity query for the common path. The legacy
         # alias/fuzzy search remains a fallback for titles not covered by SQL.
+        if SEARCH_TIMING_ENABLED:
+            times['before_first_db'] = time.perf_counter()
         movies = await run_async(get_movies_fast_sql, search_term, limit=10)
+        if SEARCH_TIMING_ENABLED:
+            times['first_db'] = time.perf_counter()
         if not movies:
+            if SEARCH_TIMING_ENABLED:
+                times['fuzzy_db_start'] = time.perf_counter()
             movies = await run_async(get_movies_from_db, search_term, limit=10)
+            if SEARCH_TIMING_ENABLED:
+                times['fuzzy_db_end'] = time.perf_counter()
         
         # 2. Not Found
         if not movies:
-            await remove_search_progress(progress_message)
             # Google runs on the server (not through a WebView JSONP callback),
             # so a spelling such as "rechar" can be retried from Telegram too.
-            suggestions = await run_async(get_google_title_suggestions, search_term, limit=3)
+            if SEARCH_TIMING_ENABLED:
+                times['google_start'] = time.perf_counter()
+            suggestions = await get_google_title_suggestions_with_timeout(
+                search_term, limit=3
+            )
+            if SEARCH_TIMING_ENABLED:
+                times['google_end'] = time.perf_counter()
 
             not_found_text = (
                 "<b>━━━━ ❌ 𝗡𝗼𝘁 𝗙𝗼𝘂𝗻𝗱 ━━━━</b>\n\n"
@@ -5613,7 +5737,6 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
 
         # 3. Found
-        await remove_search_progress(progress_message)
         chosen_movie = _select_single_search_result(query, movies)
         
         if chosen_movie:
@@ -5626,7 +5749,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 metadata={'query': search_term[:200], 'title': title},
             )
             # Exact match par qualities menu dikhao
-            await process_movie_exact_match(update, context, movie_id, title)
+            if SEARCH_TIMING_ENABLED:
+                times['exact_match_decision'] = time.perf_counter()
+            await process_movie_exact_match(
+                update, context, movie_id, title, timing=times
+            )
             return
 
         context.user_data['search_results'] = movies
@@ -5653,6 +5780,35 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         # The temporary loading GIF must never remain after the search finishes.
         await remove_search_progress(progress_message)
+        # Optional: log per-stage timing when enabled
+        try:
+            if SEARCH_TIMING_ENABLED and 'times' in locals() and times.get('handler_start'):
+                handler_start = times.get('handler_start')
+                end = time.perf_counter()
+                deltas = {}
+                deltas['total_ms'] = int((end - handler_start) * 1000)
+                if times.get('progress_sent'):
+                    deltas['to_progress_ms'] = int((times.get('progress_sent') - handler_start) * 1000)
+                if times.get('before_first_db') and times.get('first_db'):
+                    deltas['first_db_ms'] = int((times.get('first_db') - times.get('before_first_db')) * 1000)
+                if times.get('fuzzy_db_start') and times.get('fuzzy_db_end'):
+                    deltas['fuzzy_db_ms'] = int((times.get('fuzzy_db_end') - times.get('fuzzy_db_start')) * 1000)
+                if times.get('google_start') and times.get('google_end'):
+                    deltas['google_ms'] = int((times.get('google_end') - times.get('google_start')) * 1000)
+                if times.get('exact_match_decision'):
+                    deltas['exact_match_decision_ms'] = int(
+                        (times.get('exact_match_decision') - handler_start) * 1000
+                    )
+                timing_data = {
+                    key: value for key, value in times.items()
+                    if key in ('delivery_data_ms', 'poster_ms', 'telegram_response_ms')
+                }
+                deltas.update(timing_data)
+                # Truncate query for privacy in logs
+                q_display = (query[:80] + '...') if query and len(query) > 80 else (query or '')
+                logger.info(f"Search timing for '{q_display}': {deltas}")
+        except Exception as e:
+            logger.debug(f"Failed to log search timing: {e}")
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
@@ -13216,8 +13372,27 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 👇 SABSE PEHLE SAFEGUARD LAGAYEIN: Ignore channel posts or anonymous updates
     if not update.effective_user:
         return
+
+    if SEARCH_TIMING_ENABLED:
+        logger.info("Search timing stage=update_received")
         
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    pre_search_query = (
+        update.message.text.strip()
+        if update.message and update.message.text
+        else ""
+    )
+    is_menu_query = pre_search_query in {
+        '🔍 Search Movies', '📊 My Stats', '❓ Help', '🙋 Request Movie'
+    }
+    progress_message = None
+    if pre_search_query and not is_menu_query:
+        progress_message = await send_search_progress(
+            update, context, pre_search_query
+        )
+        if progress_message:
+            context.user_data['_search_progress_message'] = progress_message
 
     # 👇 VIP Payment UTR Check 👇 (Ab yeh safe hai kyunki channel filter ho chuka hai)
     if context.user_data and context.user_data.get('payment_step') == 'utr':
@@ -13226,7 +13401,13 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         
     # === 1. FSub Check (Only in Private Chat) ===
     if update.effective_chat.type == "private":
+        fsub_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
         check = await is_user_member(context, user_id)
+        if fsub_start is not None:
+            logger.info(
+                "Search timing stage=fsub_check duration_ms=%d",
+                int((time.perf_counter() - fsub_start) * 1000),
+            )
         if not check['is_member']:
             if update.message and update.message.text:
                 context.user_data['pending_search_query'] = update.message.text.strip()
@@ -13237,6 +13418,8 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode='Markdown'
             )
             track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
+            await remove_search_progress(progress_message)
+            context.user_data.pop('_search_progress_message', None)
             return
     # ============================================
 

@@ -6,7 +6,7 @@ MAIN_SOURCE = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(
 )
 
 
-def test_search_progress_does_not_send_loading_media():
+def test_search_progress_sends_one_lightweight_status_message():
     start = MAIN_SOURCE.index("async def send_search_progress")
     end = MAIN_SOURCE.index("async def remove_search_progress", start)
     progress_source = MAIN_SOURCE[start:end]
@@ -14,7 +14,8 @@ def test_search_progress_does_not_send_loading_media():
     assert "return None" in progress_source
     assert "copy_message" not in progress_source
     assert "send_animation" not in progress_source
-    assert "reply_text" not in progress_source
+    assert "reply_text" in progress_source
+    assert '🔎 Searching for "' in progress_source
 
 
 def test_approved_loading_media_points_to_the_configured_source_message():
