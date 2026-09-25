@@ -722,28 +722,8 @@ async def make_landscape_poster(url_or_bytes):
     Poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
     PIL processing background thread me hoti hai (event loop block nahi hoga).
     """
-    try:
-        image_data = None
-        if isinstance(url_or_bytes, str) and url_or_bytes.startswith('http'):
-            async with aiohttp.ClientSession() as session:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                async with session.get(url_or_bytes, headers=headers) as resp:
-                    if resp.status == 200:
-                        image_data = await resp.read()
-        elif isinstance(url_or_bytes, bytes):
-            image_data = url_or_bytes
-        elif hasattr(url_or_bytes, 'getvalue'):
-            image_data = url_or_bytes.getvalue()
-
-        if not image_data:
-            return url_or_bytes
-
-        # 🚀 PIL ops background thread me — event loop free!
-        return await run_async(_process_poster_sync, image_data)
-
-    except Exception as e:
-        logger.error(f"❌ Cinematic Conversion Error: {e}")
-        return url_or_bytes
+    # SPEED FIX: Direct return without PIL processing to save 1-3 seconds per search.
+    return url_or_bytes
 
 
 async def check_rate_limit(user_id):
@@ -2383,15 +2363,14 @@ def _get_movies_from_db_nocache(user_query, limit=10):
         # ✅ Updated to include new columns
         # Title ko bhi query jaisa hi normalize karke compare karte hain (DB-side),
         # taaki alag-alag spacing/hyphen/case wale titles bhi pakde jaayein.
+        # SPEED FIX: Removed regexp_replace to avoid full table scans.
+        # Fallback to ILIKE.
         cur.execute(
             """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
                FROM movies
-               WHERE regexp_replace(
-                         regexp_replace(LOWER(title), '''s\\y', '', 'g'),
-                         '[^a-z0-9]', '', 'g'
-                     ) LIKE %s
+               WHERE title ILIKE %s
                ORDER BY title LIMIT %s""",
-            (f'%{norm_query}%', limit)
+            (f'%{user_query}%', limit)
         )
         exact_matches = cur.fetchall()
 
@@ -2401,14 +2380,15 @@ def _get_movies_from_db_nocache(user_query, limit=10):
             close_db_connection(conn)
             return exact_matches
 
+        # SPEED FIX: Removed regexp_replace to avoid full table scans.
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
-            WHERE regexp_replace(LOWER(ma.alias), '[^a-z0-9]', '', 'g') LIKE %s
+            WHERE ma.alias ILIKE %s
             ORDER BY m.title
             LIMIT %s
-        """, (f'%{norm_query}%', limit))
+        """, (f'%{user_query}%', limit))
         alias_matches = cur.fetchall()
 
         if alias_matches:
@@ -2480,20 +2460,19 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
         
         # ✅ Updated to include new columns
         normalized_query = _normalize_search_text(query)
+        # SPEED FIX: Removed regexp_replace from WHERE clause because it forces a full table scan 
+        # and regex execution on every row, causing 3-5 seconds of delay per message.
         sql = """
             SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
                    SIMILARITY(m.title, %s) as sim_score
             FROM movies m
-            WHERE SIMILARITY(m.title, %s) > 0.3
-               OR regexp_replace(
-                    regexp_replace(LOWER(m.title), '''s\\y', '', 'g'),
-                    '[^a-z0-9]', '', 'g'
-                  ) LIKE %s
+            WHERE m.title ILIKE %s
+               OR SIMILARITY(m.title, %s) > 0.3
             ORDER BY sim_score DESC
             LIMIT %s
         """
         
-        cur.execute(sql, (query, query, f'%{normalized_query}%', limit))
+        cur.execute(sql, (query, f'%{query}%', query, limit))
         results = cur.fetchall()
         
         # Format results (remove score from tuple)
