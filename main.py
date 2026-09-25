@@ -61,6 +61,7 @@ class FastCache:
 
 search_cache = FastCache(ttl_seconds=30)  # 30 Seconds cache for SQL/Fuzzy searches
 api_movies_cache = FastCache(ttl_seconds=30) # 30 Seconds cache for Web App Home
+poster_cache = FastCache(ttl_seconds=3600)
 
 # ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
@@ -265,9 +266,10 @@ async def post_to_topic_command(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         # Pehle image download karne ki koshish karo
         downloaded_poster = await get_poster_bytes(final_photo)
-        
+
         # Agar download fail ho jaye, tabhi URL use karo (Fallback)
-        photo_to_send = downloaded_poster if downloaded_poster else final_photo
+        photo_source = downloaded_poster if downloaded_poster else final_photo
+        photo_to_send = await make_landscape_poster(photo_source)
 
         sent_msg = None
         for chat_id in target_channels:
@@ -680,50 +682,61 @@ def clean_telegram_text(text):
     
     return text
 def _process_poster_sync(image_data):
-    """
-    🎨 PIL Image Processing (Background Thread me chalega)
-    Poster ko clean Landscape 16:9 format (1280x720) me convert karta hai.
-    """
-    from PIL import Image, ImageOps, ImageFilter, ImageEnhance
-    img = Image.open(BytesIO(image_data)).convert("RGB")
-    target_w, target_h = 1280, 720
+    """Build the square blurred-background poster used by example.py."""
+    from PIL import Image, ImageFilter, ImageOps
 
-    # 1. Background image (blurred and darkened)
+    img = Image.open(BytesIO(image_data)).convert("RGB")
+    target_w = target_h = 800
+
     bg = ImageOps.fit(
         img,
         (target_w, target_h),
         method=Image.Resampling.LANCZOS,
-        centering=(0.5, 0.45),
+        centering=(0.5, 0.5),
     )
-    bg = bg.filter(ImageFilter.GaussianBlur(radius=25))
-    bg = ImageEnhance.Brightness(bg).enhance(0.5)
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=40))
 
-    # 2. Foreground image (un-cropped, fitted to target size)
-    img_w, img_h = img.size
-    ratio = min(target_w / img_w, target_h / img_h)
-    new_w, new_h = int(img_w * ratio), int(img_h * ratio)
-    
-    fg = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-    
-    # 3. Paste foreground onto background
-    offset_x = (target_w - new_w) // 2
-    offset_y = (target_h - new_h) // 2
-    bg.paste(fg, (offset_x, offset_y))
+    fg_h = int(target_h * 0.95)
+    fg_w = int(img.width * (fg_h / img.height))
+    fg = img.resize((fg_w, fg_h), Image.Resampling.LANCZOS)
+    bg.paste(fg, ((target_w - fg_w) // 2, (target_h - fg_h) // 2))
 
     output = BytesIO()
     output.name = "square_poster.jpg"
-    bg.save(output, format='JPEG', quality=95)
+    bg.save(output, format="JPEG", quality=95)
     output.seek(0)
     return output
 
 
 async def make_landscape_poster(url_or_bytes):
-    """
-    Poster ko Mobile+PC friendly (Square 1:1) format me convert karta hai.
-    PIL processing background thread me hoti hai (event loop block nahi hoga).
-    """
-    # SPEED FIX: Direct return without PIL processing to save 1-3 seconds per search.
-    return url_or_bytes
+    """Download and transform a poster without blocking Telegram handlers."""
+    if not url_or_bytes:
+        return url_or_bytes
+
+    if isinstance(url_or_bytes, str) and url_or_bytes.startswith("http"):
+        cached = poster_cache.get(url_or_bytes)
+        if cached is not None:
+            return BytesIO(cached)
+        downloaded = await get_poster_bytes(url_or_bytes)
+        if not downloaded:
+            return url_or_bytes
+        image_data = downloaded.getvalue()
+    elif isinstance(url_or_bytes, bytes):
+        image_data = url_or_bytes
+    elif hasattr(url_or_bytes, "getvalue"):
+        image_data = url_or_bytes.getvalue()
+    else:
+        return url_or_bytes
+
+    try:
+        processed = await run_async(_process_poster_sync, image_data)
+        poster_bytes = processed.getvalue()
+        if isinstance(url_or_bytes, str):
+            poster_cache.set(url_or_bytes, poster_bytes)
+        return BytesIO(poster_bytes)
+    except Exception as exc:
+        logger.warning("Cinematic poster processing failed: %s", exc)
+        return url_or_bytes
 
 
 async def check_rate_limit(user_id):
@@ -11150,6 +11163,16 @@ async def admin_post_18(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         poster_final = user_photo_id or imdb_poster or DEFAULT_POSTER
+        if user_photo_id:
+            try:
+                telegram_file = await context.bot.get_file(user_photo_id)
+                poster_final = await make_landscape_poster(
+                    bytes(await telegram_file.download_as_bytearray())
+                )
+            except Exception as exc:
+                logger.warning("Uploaded poster processing failed: %s", exc)
+        elif imdb_poster:
+            poster_final = await make_landscape_poster(poster_final)
         sent_post = None
 
         try:
