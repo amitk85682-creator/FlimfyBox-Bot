@@ -4602,11 +4602,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 e_info = re.sub(r'(?i)t\.me/[^\s]+', '', e_info)
                 e_info = re.sub(r'@[a-zA-Z0-9_]+', '', e_info)
                 
-                ep_tag = f"[{e_info.strip()}] " if e_info.strip() else ""
-                
                 # ✅ NAYA: HTML wala Neela (Inline) link
                 real_idx = all_qualities.index(f_data)
-                text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{f_size} | {title} {ep_tag}{q_name.strip()}</a></b>\n\n"
+                label = html_escape(
+                    _format_file_link_label(f_size, title, e_info, q_name)
+                )
+                text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{label}</a></b>\n\n"
             
             text += (
                 f"\n<b>◆ More updates:</b> <a href='{UPDATE_CHANNEL_URL}'>Join BackUp</a>"
@@ -5438,7 +5439,7 @@ def _format_requested_files_header(title, qualities, user, bot_info):
             language = re.sub(r"\s+", " ", language).strip()
             if language and language.casefold() not in {item.casefold() for item in languages}:
                 languages.append(language)
-    language_label = ", ".join(languages) if languages else "Dynamic Language"
+    language_label = ", ".join(languages)
     requester = (
         getattr(user, "first_name", None)
         or getattr(user, "username", None)
@@ -5453,6 +5454,11 @@ def _format_requested_files_header(title, qualities, user, bot_info):
     )
     display_title = html_escape(str(title or "Requested Movie").strip().title())
     language_label = html_escape(language_label)
+    language_line = (
+        f"<b>🧱 𝙻𝚊𝚗𝚐𝚞𝚊ɢᴇ </b><code>{language_label}</code>\n\n"
+        if language_label
+        else ""
+    )
     bot_name = html_escape(
         str(getattr(bot_info, "first_name", None) or getattr(bot_info, "username", None) or "FlimfyBox")
     )
@@ -5464,7 +5470,7 @@ def _format_requested_files_header(title, qualities, user, bot_info):
     )
     return (
         f"<b>🏷 ᴛɪᴛʟᴇ : </b><code>{display_title}</code>\n"
-        f"<b>🧱 𝙻𝚊𝚗𝚐𝚞𝚊ɢᴇ </b><code>{language_label}</code>\n\n"
+        f"{language_line}"
         f"📝 ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ : {requester}\n"
         f"⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : {bot_mention} 🔍\n\n"
         "Your Requested Files Are Here\n\n"
@@ -5476,6 +5482,61 @@ def _format_requested_files_header(title, qualities, user, bot_info):
         f"⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : {bot_mention} 🔍\n\n"
         "Your Requested Files Are Here\n\n"
     )
+
+
+def _format_file_link_label(file_size, title, extra_info, quality, language=""):
+    """Build consistent, pipe-separated file labels for Telegram links."""
+    parts = [
+        str(file_size or "Unknown Size").strip(),
+        str(title or "Requested Movie").strip(),
+    ]
+    if language and str(language).strip():
+        parts.append(str(language).strip())
+
+    metadata = " ".join(
+        value for value in (str(extra_info or ""), str(quality or ""))
+        if value.strip()
+    )
+    episode_pattern = re.compile(
+        r"(?i)\b(?:S\d{1,2}E\d{1,3}|S\d{1,2}|E\d{1,3}|EP\d{1,3}|"
+        r"Season\s*\d+|Episode\s*\d+)\b"
+    )
+    episodes = []
+    for match in episode_pattern.finditer(metadata):
+        token = match.group(0).upper()
+        combined = re.fullmatch(r"S(\d{1,2})E(\d{1,3})", token)
+        if combined:
+            tokens = (f"S{int(combined.group(1)):02}", f"E{int(combined.group(2)):02}")
+        elif token.startswith("SEASON"):
+            season = re.search(r"\d+", token)
+            tokens = (f"S{int(season.group()):02}",) if season else ()
+        elif token.startswith("EPISODE") or token.startswith("EP"):
+            episode = re.search(r"\d+", token)
+            tokens = (f"E{int(episode.group()):02}",) if episode else ()
+        else:
+            number = re.search(r"\d+", token)
+            prefix = "S" if token.startswith("S") else "E"
+            tokens = (f"{prefix}{int(number.group()):02}",) if number else ()
+        for item in tokens:
+            if item not in episodes:
+                episodes.append(item)
+
+    parts.extend(episodes)
+    quality_text = episode_pattern.sub("", str(quality or ""))
+    quality_text = re.sub(r"\s+", " ", quality_text).strip()
+    resolution = re.search(
+        r"(?i)\b(4K|2160p|1440p|1080p|720p|576p|480p|360p)\b", quality_text
+    )
+    if resolution:
+        parts.append(resolution.group(1))
+        source = quality_text[resolution.end():].strip(" -_|")
+        if source:
+            parts.append(source)
+    elif quality_text:
+        parts.append(quality_text)
+
+    return " | ".join(part for part in parts if part)
+
 
 async def process_movie_exact_match(
     update: Update,
@@ -5516,10 +5577,11 @@ async def process_movie_exact_match(
         quality = file_data[0]
         file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
         extra_info = file_data[5] if len(file_data) > 5 else ""
-        
-        ep_tag = f"[{extra_info}] " if extra_info else ""
         real_idx = qualities.index(file_data)
-        file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {ep_tag}{quality}</a></b>\n\n"
+        label = html_escape(
+            _format_file_link_label(file_size, title, extra_info, quality)
+        )
+        file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{label}</a></b>\n\n"
 
     limit = 10
     total_pages = (len(qualities) + limit - 1) // limit if qualities else 1
@@ -6914,11 +6976,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quality = file_data[0]
                 file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
                 extra_info = file_data[5] if len(file_data) > 5 else ""
-                
-                ep_tag = f"[{extra_info}] " if extra_info else ""
                 # ✅ CLEAN HTML LINK: Naruto bot jaisa neela text!
                 real_idx = qualities.index(file_data)
-                file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {ep_tag}{quality}</a></b>\n\n"
+                label = html_escape(
+                    _format_file_link_label(file_size, title, extra_info, quality)
+                )
+                file_list_text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{label}</a></b>\n\n"
 
             selection_text = file_list_text
             
@@ -7043,9 +7106,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 quality = file_data[0]
                 file_size = file_data[3] if len(file_data) > 3 else "Unknown Size"
                 extra_info = file_data[5] if len(file_data) > 5 else ""
-                
-                ep_tag = f"[{extra_info}] " if extra_info else ""
-                file_list_text += f"**{idx}.** 💾 {file_size} | {title} {ep_tag}{quality}\n\n"
+                label = _format_file_link_label(file_size, title, extra_info, quality)
+                file_list_text += f"**{idx}.** 💾 {label}\n\n"
 
             selection_text = file_list_text
             keyboard_markup = create_quality_selection_keyboard(movie_id, title, filtered_qualities, page=0, season=selected_season, view="main")
@@ -7228,12 +7290,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         extra_info = re.sub(r'@[a-zA-Z0-9_]+', '', extra_info)
                         
                         lang_name = str(file_data[4]).strip() if len(file_data) > 4 and file_data[4] else ""
-                        lang_tag = f"[{lang_name}] " if lang_name else ""
-                        
-                        ep_tag = f"[{extra_info.strip()}] " if extra_info.strip() else ""
-                        
                         real_idx = all_qualities.index(file_data)
-                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{file_size} | {title} {lang_tag}{ep_tag}{quality.strip()}</a></b>\n\n"
+                        label = html_escape(
+                            _format_file_link_label(
+                                file_size, title, extra_info, quality, lang_name
+                            )
+                        )
+                        text += f"<b>{idx}.</b> <b><a href='https://t.me/{bot_username}?start=file_{movie_id}_{real_idx}'>{label}</a></b>\n\n"
 
             elif view_type in ["lang", "qual"]:
                 text = f"📁 <b>{title}</b>\n\n👇 <b>Select {view_type.upper()} Filter:</b>\n\n"

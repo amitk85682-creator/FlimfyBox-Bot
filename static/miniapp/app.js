@@ -56,6 +56,34 @@ const tg = window.Telegram?.WebApp || {
         const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v2';
         const HOME_CATALOGUE_CACHE_TTL = 10 * 60 * 1000;
 
+        function parseMiniAppEpisodeMetadata(value) {
+            const text = String(value || '').toUpperCase();
+            const seasonMatch = text.match(/\bS(?:EASON)?\s*0*(\d+)\b/);
+            const season = seasonMatch ? parseInt(seasonMatch[1], 10) : null;
+            const rangeMatch = text.match(
+                /\b(?:S\s*0*\d+\s*)?(?:E(?:PISODE)?|EP)\s*0*(\d+)\s*(?:[-~]\s*(?:E(?:PISODE)?|EP)?\s*0*(\d+))\b/
+            );
+            const singleMatch = rangeMatch ? null : text.match(
+                /\b(?:S\s*0*\d+\s*)?(?:E(?:PISODE)?|EP)\s*0*(\d+)\b/
+            );
+            const episodeStart = rangeMatch
+                ? parseInt(rangeMatch[1], 10)
+                : (singleMatch ? parseInt(singleMatch[1], 10) : null);
+            const episodeEnd = rangeMatch ? parseInt(rangeMatch[2], 10) : null;
+            return { season, episodeStart, episodeEnd };
+        }
+
+        function formatMiniAppQuality(value) {
+            return String(value || '')
+                .replace(/\([^)]*\)/g, ' ')
+                .replace(/\[[^\]]*(?:GB|MB|KB)\s*\]/gi, ' ')
+                .replace(/\bS(?:EASON)?\s*0*\d+\s*(?:E(?:PISODE)?|EP)?\s*0*\d*(?:\s*[-~]\s*(?:E(?:PISODE)?|EP)?\s*0*\d+)?\b/gi, ' ')
+                .replace(/\b(?:E(?:PISODE)?|EP)\s*0*\d+(?:\s*[-~]\s*(?:E(?:PISODE)?|EP)?\s*0*\d+)?\b/gi, ' ')
+                .replace(/\b(?:COMPLETE|COMBINED|COMBIND)\b/gi, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
         function syncTelegramBackButton() {
             const backButton = tg.BackButton;
             if (!backButton || typeof backButton.show !== 'function') return;
@@ -1814,18 +1842,31 @@ document.addEventListener('keydown', (e) => {
                             const movieFiles = [];
 
                             m.files.forEach(f => {
-                                let info = (f.extra_info || '').toUpperCase();
-                                let s = null; let e = null; let epStr = null;
-                                let sMatch = info.match(/S(\d+)|SEASON\s*(\d+)/);
-                                if (sMatch) s = parseInt(sMatch[1] || sMatch[2], 10);
-                                let eMatch = info.match(/E(\d+(?:-\d+)?)|EP\s*(\d+(?:-\d+)?)|EPISODE\s*(\d+(?:-\d+)?)/);
-                                if (eMatch) { epStr = eMatch[1] || eMatch[2] || eMatch[3]; e = parseInt(epStr.split('-')[0], 10); }
+                                const info = `${f.extra_info || ''} ${f.quality || ''}`;
+                                const { season: s, episodeStart: e, episodeEnd } =
+                                    parseMiniAppEpisodeMetadata(info);
                                 if (s !== null) {
                                     hasSeasons = true;
                                     if (!seasonsMap[s]) seasonsMap[s] = { episodes: {} };
                                     const sortEp = e !== null ? e : 0;
-                                    const displayTitle = e !== null ? `EP ${epStr.padStart(2, '0')}` : `Season ${s} extras`;
-                                    if (!seasonsMap[s].episodes[sortEp]) seasonsMap[s].episodes[sortEp] = { title: displayTitle, qualities: [] };
+                                    const isCompleteSeason = e === null;
+                                    const rangeLabel = episodeEnd !== null
+                                        ? `${String(e).padStart(2, '0')}-${String(episodeEnd).padStart(2, '0')}`
+                                        : '';
+                                    const episodeLabel = isCompleteSeason
+                                        ? 'Complete Season'
+                                        : (episodeEnd !== null
+                                            ? `Episode ${rangeLabel} Combined`
+                                            : `Episode ${String(e).padStart(2, '0')}`);
+                                    if (!seasonsMap[s].episodes[sortEp]) {
+                                        seasonsMap[s].episodes[sortEp] = {
+                                            title: episodeLabel,
+                                            episodeStart: e,
+                                            episodeEnd,
+                                            isCompleteSeason,
+                                            qualities: []
+                                        };
+                                    }
                                     seasonsMap[s].episodes[sortEp].qualities.push(f);
                                 } else {
                                     movieFiles.push(f);
@@ -2179,33 +2220,47 @@ document.addEventListener('keydown', (e) => {
             }
 
             const epNumbers = Object.keys(seasonData.episodes).map(Number).sort((a, b) => a - b);
-            
-            let html = `<div class="dl-heading">SEASON ${seasonNum} • ${epNumbers.length} EPISODES</div><div class="episodes-list">`;
+            const episodeCount = Object.values(seasonData.episodes).reduce((count, ep) => {
+                if (ep.isCompleteSeason) return count;
+                if (ep.episodeEnd !== null && ep.episodeEnd !== undefined) {
+                    return count + ep.episodeEnd - ep.episodeStart + 1;
+                }
+                return count + 1;
+            }, 0);
+            const seasonSummary = episodeCount
+                ? `${episodeCount} EPISODES`
+                : 'COMPLETE SEASON';
+            let html = `<div class="dl-heading">SEASON ${seasonNum} • ${seasonSummary}</div><div class="episodes-list">`;
             
             epNumbers.forEach(epNum => {
                 const ep = seasonData.episodes[epNum];
-                let epDisplayNum = epNum > 0 ? epNum.toString().padStart(2, '0') : '--';
-                let epLabel = epNum > 0 ? 'EPISODE' : 'EXTRAS';
-                let actualTitle = ep.title.replace(/^EP \d+\s*/i, ''); // Remove redundant 'EP 01' from title if it exists, leaving the rest if it's there
-                if (!actualTitle || actualTitle === ep.title) {
-                    actualTitle = ep.title;
-                }
-
+                const isCompleteSeason = Boolean(ep.isCompleteSeason);
+                const isEpisodeRange = ep.episodeEnd !== null && ep.episodeEnd !== undefined;
+                const epDisplayNum = isCompleteSeason
+                    ? '—'
+                    : (isEpisodeRange
+                        ? `${String(ep.episodeStart).padStart(2, '0')}-${String(ep.episodeEnd).padStart(2, '0')}`
+                        : String(ep.episodeStart ?? epNum).padStart(2, '0'));
                 html += `
                 <div class="episode-card">
                     <div class="ep-header">
-                        <div class="ep-number-group">
-                            <div class="ep-number-label">${epLabel}</div>
-                            <div class="ep-number">${epDisplayNum}</div>
-                        </div>
-                        <div class="ep-title">${actualTitle}</div>
+                        ${isCompleteSeason
+                            ? '<div class="ep-title">Complete Season</div>'
+                            : (isEpisodeRange
+                                ? `<div class="ep-title">Episode ${epDisplayNum} Combined</div>`
+                                : `<div class="ep-number-group">
+                                    <div class="ep-number-label">EPISODE</div>
+                                    <div class="ep-number">${epDisplayNum}</div>
+                                </div>`)}
                     </div>
                     <div class="ep-qualities">`;
                 
                 ep.qualities.forEach(q => {
+                    const qualityLabel = escapeHtml(formatMiniAppQuality(q.quality) || 'Download');
+                    const fileSize = escapeHtml(q.size || '');
                     html += `
                         <button class="ep-dl-btn" onclick="downloadMovie(${movieId}, ${q.id})">
-                            <span class="ep-qtext"><i class="fas fa-play-circle"></i> ${q.quality} <span class="ep-size">${q.size || ''}</span></span>
+                            <span class="ep-qtext"><i class="fas fa-play-circle"></i> ${qualityLabel} <span class="ep-size">${fileSize}</span></span>
                             <span class="ep-action"><i class="fas fa-download"></i></span>
                         </button>
                     `;

@@ -454,11 +454,11 @@ button:focus-visible, input:focus-visible, .card:focus-visible { outline: 2px so
 .action, .ep-action { color: var(--primary); font-size: 12px; font-weight: 800; }
 .episodes-list { display: flex; flex-direction: column; gap: 10px; }
 .episode-card { padding: 13px; border: 1px solid var(--border); border-radius: 13px; background: var(--surface); }
-.ep-header { display: flex; align-items: center; gap: 12px; }
-.ep-number-group { display: flex; min-width: 33px; flex-direction: column; }
-.ep-number-label { color: var(--muted); font-size: 8px; font-weight: 700; }
-.ep-number { color: #fff; font: 800 20px 'Manrope', sans-serif; }
-.ep-title { color: #fff; font-size: 13px; font-weight: 700; }
+.ep-header { display: flex; min-height: 26px; align-items: center; gap: 12px; }
+.ep-number-group { display: flex; min-width: 33px; flex: none; flex-direction: column; }
+.ep-number-label { color: var(--muted); font-size: 8px; font-weight: 700; white-space: nowrap; }
+.ep-number { color: #fff; font: 800 20px 'Manrope', sans-serif; white-space: nowrap; }
+.ep-title { color: #fff; font-size: 13px; font-weight: 700; line-height: 1.35; }
 .ep-qualities { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
 .ep-dl-btn { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 8px; color: #e8ebf0; background: var(--surface-2); font-size: 11px; }
 .ep-qtext { display: flex; align-items: center; gap: 5px; }

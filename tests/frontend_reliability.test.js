@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const source = fs.readFileSync(
   path.join(__dirname, '..', 'static', 'miniapp', 'app.js'),
@@ -40,6 +41,27 @@ assert.match(source, /\/webapp\?movie=/);
 assert.match(source, /navigator\.share/);
 assert.match(source, /https:\/\/t\.me\/share\/url/);
 assert.match(source, /urlParams\.get\('movie'\)/);
+const episodeHelpersSource = source.match(
+  /function parseMiniAppEpisodeMetadata\(value\) \{[\s\S]*?function formatMiniAppQuality\(value\) \{[\s\S]*?\n        \}/
+);
+assert.ok(episodeHelpersSource, 'Mini App episode helpers should exist');
+const episodeHelpers = vm.runInNewContext(
+  `(() => { ${episodeHelpersSource[0]}; return { parseMiniAppEpisodeMetadata, formatMiniAppQuality }; })()`
+);
+const seasonOnly = episodeHelpers.parseMiniAppEpisodeMetadata('S01 1080p WEB-DL');
+assert.equal(seasonOnly.season, 1);
+assert.equal(seasonOnly.episodeStart, null);
+assert.equal(seasonOnly.episodeEnd, null);
+const episodeRange = episodeHelpers.parseMiniAppEpisodeMetadata('S02 E01-08 1080p WEB-DL');
+assert.equal(episodeRange.season, 2);
+assert.equal(episodeRange.episodeStart, 1);
+assert.equal(episodeRange.episodeEnd, 8);
+assert.equal(
+  episodeHelpers.formatMiniAppQuality('S02 E01 1080p WEB-DL (Japanese, Hindi) [2.73 GB]'),
+  '1080p WEB-DL'
+);
+assert.match(source, /Complete Season/);
+assert.match(source, /Episode \$\{epDisplayNum\} Combined/);
 
 const styles = fs.readFileSync(
   path.join(__dirname, '..', 'static', 'miniapp', 'app.css'),
@@ -81,7 +103,7 @@ assert.match(template, /id="rowUpcoming"/);
 assert.match(template, /id="upcomingScroll"/);
 assert.match(template, /onclick="showUpcoming\(\)"/);
 assert.doesNotMatch(template, /Upcoming titles/);
-assert.match(template, /app\.js'\) }}\?v=upcoming-home-shelf-2/);
+assert.match(template, /app\.js'\) }}\?v=episode-card-metadata-1/);
 assert.match(source, /heroSlider\.style\.backgroundImage/);
 assert.match(source, /const heroArtwork = movie\.backdrop \|\| movie\.image/);
 assert.match(source, /const detailsArtwork = movie\.backdrop \|\| movie\.image/);
