@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450" role="img" aria-label="Poster unavailable">
+  <rect width="300" height="450" fill="#171927"/>
+  <path d="M0 330 108 222l61 61 42-42L300 330v120H0z" fill="#24283b"/>
+  <circle cx="150" cy="166" r="42" fill="#24283b"/>
+  <path d="M137 150h26v49h-26z" fill="#777d9a"/>
+  <path d="M125 212h50v8h-50z" fill="#777d9a"/>
+</svg>

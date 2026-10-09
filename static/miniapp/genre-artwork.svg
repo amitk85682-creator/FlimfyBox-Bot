@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="night" x2="1" y2="1"><stop stop-color="#06111f"/><stop offset=".55" stop-color="#123c57"/><stop offset="1" stop-color="#03040a"/></linearGradient>
+    <linearGradient id="fire" x2="1" y2="1"><stop stop-color="#ffdf85"/><stop offset=".38" stop-color="#f97316"/><stop offset="1" stop-color="#43111a"/></linearGradient>
+    <linearGradient id="rose" x2="1" y2="1"><stop stop-color="#ffd8c7"/><stop offset=".48" stop-color="#bd5b79"/><stop offset="1" stop-color="#32152d"/></linearGradient>
+    <linearGradient id="violet" x2="1" y2="1"><stop stop-color="#071b39"/><stop offset=".5" stop-color="#41237d"/><stop offset="1" stop-color="#d169e8"/></linearGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="13"/></filter>
+    <filter id="soft"><feGaussianBlur stdDeviation="4"/></filter>
+  </defs>
+  <symbol id="atmosphere" viewBox="0 0 600 420">
+    <path d="M0 330Q180 240 340 325T600 270V420H0Z" fill="#02040b" opacity=".55"/>
+    <circle cx="490" cy="75" r="76" fill="#fff" opacity=".08" filter="url(#blur)"/>
+    <path d="M0 100C160 30 330 160 600 70" fill="none" stroke="#fff" stroke-opacity=".1" stroke-width="2"/>
+  </symbol>
+  <symbol id="action" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="url(#fire)"/>
+    <path d="M-40 365L230 30 160 290 360 5 290 278 650 80" fill="none" stroke="#ffd66e" stroke-width="18" opacity=".72"/>
+    <path d="M-20 420L245 128M110 420L340 155M270 420L560 126" stroke="#fff3b0" stroke-width="5" opacity=".65"/>
+    <circle cx="470" cy="100" r="8" fill="#ffe9a3"/><circle cx="520" cy="145" r="4" fill="#fff"/>
+  </symbol>
+  <symbol id="scifi" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="url(#night)"/>
+    <circle cx="460" cy="110" r="96" fill="#52d7ff" opacity=".16" filter="url(#blur)"/>
+    <path d="M100 420V205l45-35 45 35v215M205 420V130l55-42 55 42v290M335 420V185l50-42 50 42v235M455 420V105l45-32 45 32v315" fill="#07101e" stroke="#47d9ff" stroke-opacity=".45"/>
+    <path d="M0 315H600M0 350H600" stroke="#5ce1ff" stroke-opacity=".24"/>
+    <g fill="#d7fbff"><circle cx="90" cy="55" r="2"/><circle cx="170" cy="96" r="2"/><circle cx="310" cy="45" r="2"/><circle cx="540" cy="62" r="2"/></g>
+  </symbol>
+  <symbol id="horror" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#080910"/>
+    <circle cx="410" cy="145" r="115" fill="#8b2437" opacity=".32" filter="url(#blur)"/>
+    <path d="M0 420V285l80-95 34 72 48-122 55 140 77-180 48 185 86-115 50 115 75-70 47 50v155Z" fill="#020207"/>
+    <path d="M390 270q-25-100 15-145M430 275q22-96 3-150" stroke="#c9a9a4" stroke-opacity=".22" stroke-width="5" fill="none"/>
+    <path d="M0 335Q150 280 300 345T600 310" stroke="#c9d3dd" stroke-opacity=".12" stroke-width="34" fill="none" filter="url(#soft)"/>
+  </symbol>
+  <symbol id="comedy" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#f4a33b"/>
+    <circle cx="470" cy="120" r="130" fill="#ffdc71" opacity=".7"/>
+    <path d="M0 390Q130 250 245 370T500 350T650 300V420H0Z" fill="#dc4c77"/>
+    <circle cx="150" cy="150" r="66" fill="#60346f"/><circle cx="128" cy="140" r="9" fill="#fff"/><circle cx="176" cy="140" r="9" fill="#fff"/>
+    <path d="M115 175q35 35 70 0" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <path d="M300 44l18 39 43 5-32 28 9 43-38-22-38 22 9-43-32-28 43-5Z" fill="#fff4b3" opacity=".75"/>
+  </symbol>
+  <symbol id="romance" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="url(#rose)"/>
+    <circle cx="460" cy="105" r="110" fill="#ffe0c5" opacity=".34" filter="url(#blur)"/>
+    <path d="M0 420Q130 265 265 395T600 275V420Z" fill="#24152d" opacity=".72"/>
+    <path d="M288 365C230 285 208 220 265 210c28-5 42 22 42 22s14-27 42-22c57 10 35 75-61 155Z" fill="#ffb0a2" opacity=".65"/>
+    <path d="M390 25v210M350 70h80" stroke="#ffe5c8" stroke-opacity=".4" stroke-width="3"/>
+  </symbol>
+  <symbol id="crime" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#111827"/>
+    <path d="M0 420V200l60-45 45 55 55-110 58 100 65-80 60 80 70-130 70 130 70-50 47 40v230Z" fill="#05070d"/>
+    <path d="M80 420L180 105 280 420M370 420L470 70 560 420" stroke="#79b6d1" stroke-opacity=".35" stroke-width="6"/>
+    <path d="M0 300H600" stroke="#db5260" stroke-opacity=".38" stroke-width="4"/>
+    <circle cx="480" cy="110" r="40" fill="#e9f2df" opacity=".16"/>
+  </symbol>
+  <symbol id="mystery" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#101329"/>
+    <circle cx="308" cy="188" r="122" fill="#6674c9" opacity=".22" filter="url(#blur)"/>
+    <path d="M260 420V205h80v215M215 225l85-80 85 80" fill="#05060d" stroke="#a7b8ff" stroke-opacity=".45" stroke-width="3"/>
+    <circle cx="303" cy="197" r="20" fill="none" stroke="#e8d99b" stroke-width="5"/><path d="M318 212l32 32" stroke="#e8d99b" stroke-width="5"/>
+    <path d="M20 90l110 40M460 75l105-30M60 350l105-28" stroke="#fff" stroke-opacity=".15" stroke-width="2"/>
+  </symbol>
+  <symbol id="fantasy" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="url(#violet)"/>
+    <circle cx="420" cy="105" r="82" fill="#f6e6a8" opacity=".55" filter="url(#soft)"/>
+    <path d="M0 420l110-170 72 100 70-145 88 150 70-130 90 195Z" fill="#130f35" opacity=".86"/>
+    <path d="M260 420c45-115 12-175 75-252M340 420c-25-90 34-154 26-240" stroke="#f4d37b" stroke-opacity=".55" stroke-width="5" fill="none"/>
+    <g fill="#ffe9a5"><circle cx="120" cy="105" r="3"/><circle cx="175" cy="165" r="2"/><circle cx="535" cy="190" r="3"/></g>
+  </symbol>
+  <symbol id="animation" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#31a9a1"/>
+    <circle cx="450" cy="100" r="100" fill="#ffe26d"/><circle cx="130" cy="280" r="120" fill="#ef6ba9"/>
+    <path d="M0 360Q150 250 300 360T600 300V420H0Z" fill="#7044a5"/>
+    <path d="M355 80l20 40 45 5-33 30 9 44-41-22-40 22 9-44-33-30 45-5Z" fill="#fff" opacity=".8"/>
+    <circle cx="220" cy="130" r="32" fill="#fff" opacity=".8"/><circle cx="212" cy="125" r="5" fill="#4c277d"/><circle cx="232" cy="125" r="5" fill="#4c277d"/>
+  </symbol>
+  <symbol id="anime" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#20204c"/>
+    <path d="M0 420L155 50l68 270L340 20l70 300L540 55l60 365Z" fill="#442e91"/>
+    <path d="M80 0l180 420M390 0L245 420" stroke="#ff75c8" stroke-opacity=".55" stroke-width="7"/>
+    <circle cx="380" cy="110" r="58" fill="#75e7ff" opacity=".72"/><path d="M0 330h600" stroke="#ffe678" stroke-width="4" opacity=".7"/>
+  </symbol>
+  <symbol id="documentary" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#85745a"/>
+    <path d="M0 280L130 145l105 90 90-120 120 125 70-85 85 80v185H0Z" fill="#29383c"/>
+    <path d="M0 280h600" stroke="#f0d49a" stroke-width="8" opacity=".65"/>
+    <rect x="54" y="50" width="170" height="5" fill="#fff" opacity=".8"/><rect x="54" y="68" width="110" height="4" fill="#fff" opacity=".45"/>
+  </symbol>
+  <symbol id="sport" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#073b4c"/>
+    <path d="M-30 420L230 0h95L65 420ZM235 420L495 0h95L330 420Z" fill="#10b981" opacity=".8"/>
+    <path d="M0 320h600" stroke="#ffe66d" stroke-width="8"/><path d="M80 420l130-210M350 420l130-210" stroke="#fff" stroke-width="4" opacity=".7"/>
+    <circle cx="420" cy="105" r="35" fill="none" stroke="#fff" stroke-width="5" opacity=".7"/>
+  </symbol>
+  <symbol id="music" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#29114f"/>
+    <path d="M0 420Q150 220 300 420T600 360v60H0Z" fill="#0a102a"/>
+    <circle cx="110" cy="80" r="52" fill="#ff4fa3" opacity=".7" filter="url(#soft)"/><circle cx="500" cy="90" r="62" fill="#50e3ff" opacity=".55" filter="url(#soft)"/>
+    <path d="M245 420V130l120-35v210" fill="none" stroke="#ffe06e" stroke-width="9"/><circle cx="365" cy="320" r="36" fill="#ffe06e"/>
+  </symbol>
+  <symbol id="war" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#6a5038"/>
+    <circle cx="420" cy="100" r="96" fill="#f0b35b" opacity=".5" filter="url(#blur)"/>
+    <path d="M0 420l100-150 100 100 90-170 120 150 85-110 105 130v50H0Z" fill="#242b2c"/>
+    <path d="M0 320h600" stroke="#eaa95a" stroke-width="3" opacity=".5"/><path d="M160 280l40-70 35 70M410 280l55-95 40 95" stroke="#151719" stroke-width="9"/>
+  </symbol>
+  <symbol id="western" viewBox="0 0 600 420">
+    <rect width="600" height="420" fill="#b45d3c"/>
+    <circle cx="440" cy="120" r="100" fill="#ffd78a" opacity=".7"/>
+    <path d="M0 420l130-160 100 80 100-125 80 110 90-70 100 165Z" fill="#4a2530"/>
+    <path d="M0 345q150-70 300 0t300-15" fill="none" stroke="#f2bd70" stroke-width="7" opacity=".6"/>
+    <path d="M300 365v-130M275 250h50" stroke="#21171a" stroke-width="9"/>
+  </symbol>
+</svg>
