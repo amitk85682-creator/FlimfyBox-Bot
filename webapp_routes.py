@@ -4,7 +4,7 @@ import os
 import logging
 import json
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 import time
 from urllib.parse import quote
@@ -192,7 +192,7 @@ def register_webapp_routes(
     home_response_ttl = int(os.environ.get('MINIAPP_HOME_CACHE_SECONDS', '600'))
 
     def tmdb_cached_request(path, params, cache_key, negative=False, ttl_seconds=None):
-        now = datetime.utcnow().timestamp()
+        now = time.time()
         with release_cache_lock:
             cached = release_cache.get(cache_key)
             if cached and cached[0] > now:
@@ -927,8 +927,10 @@ def register_webapp_routes(
     @flask_app.route('/api/upcoming', methods=['GET'])
     def get_upcoming_titles():
         limit = min(max(request.args.get('limit', 18, type=int), 1), 30)
-        today = datetime.utcnow().date()
-        cache_key = f'api-upcoming:v2:{today.isoformat()}'
+        # Releases are calendar dates. Use the catalogue's India timezone so a
+        # title released at midnight does not remain upcoming until 05:30 IST.
+        today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+        cache_key = f'api-upcoming:v3:{today.isoformat()}:{limit}'
         cached = api_movies_cache.get(cache_key)
         if cached:
             return jsonify(cached)
@@ -957,16 +959,21 @@ def register_webapp_routes(
             )
             for item in (data or {}).get('results', []):
                 tmdb_id = item.get('id')
-                release_date = item.get('release_date') or item.get('first_air_date') or ''
+                release_date = item.get('release_date' if media_type == 'movie' else 'first_air_date') or ''
                 if not tmdb_id or not release_date or (media_type, tmdb_id) in seen:
+                    continue
+                try:
+                    if not isinstance(release_date, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', release_date):
+                        continue
+                    release_day = datetime.strptime(release_date, '%Y-%m-%d').date()
+                except (TypeError, ValueError):
+                    continue
+                # Discovery can contain re-releases and stale provider rows.
+                # Never fabricate a date or display an already released title.
+                if not today < release_day <= end_date:
                     continue
                 seen.add((media_type, tmdb_id))
                 is_unreleased = True
-                try:
-                    if release_date:
-                        is_unreleased = datetime.strptime(release_date, '%Y-%m-%d').date() > today
-                except ValueError:
-                    is_unreleased = True
                 results.append({
                     'id': f'tmdb_{tmdb_id}',
                     'tmdb_id': tmdb_id,
@@ -988,7 +995,7 @@ def register_webapp_routes(
                     'release_state': 'released' if not is_unreleased else 'upcoming'
                 })
         results.sort(key=lambda item: item['release_date'])
-        response = {'status': 'success', 'movies': results[:limit], 'updated_at': datetime.utcnow().isoformat()}
+        response = {'status': 'success', 'movies': results[:limit], 'updated_at': datetime.now(timezone.utc).isoformat()}
         api_movies_cache.set(cache_key, response)
         return jsonify(response)
 
@@ -1169,7 +1176,10 @@ def register_webapp_routes(
     @flask_app.route('/healthz', methods=['GET', 'HEAD'])
     def healthz():
         """Fast Render health probe; intentionally independent of TMDB/DB."""
-        response = jsonify({'status': 'ok', 'service': 'flimfybox-miniapp'})
+        response = jsonify({
+            'status': 'ok', 'service': 'flimfybox-miniapp',
+            'revision': os.environ.get('RENDER_GIT_COMMIT', 'local'),
+        })
         response.headers['Cache-Control'] = 'no-store'
         return response, 200
 
@@ -1719,18 +1729,22 @@ def register_webapp_routes(
         if len(query) > 200:
             return jsonify({'status': 'error', 'message': 'Query is too long'}), 400
 
+        autocomplete = request.args.get('autocomplete', '').lower() in {'1', 'true'} or len(query) < 3
+        limit = min(max(request.args.get('limit', 20, type=int), 1), 20)
+
         normalized_query = re.sub(
             r"'s\b|’s\b", "", query.lower()
         )
         normalized_query = re.sub(r"[^a-z0-9]", "", normalized_query)
     
-        cache_key = f"api_search_{query}"
+        cache_key = f"api-search:v3:{'prefix' if autocomplete else 'full'}:{limit}:{query.casefold()}"
         cached = search_cache.get(cache_key)
         if cached:
             return jsonify(cached)
     
         conn = get_db_connection()
         local_results = []
+        local_failed = not bool(conn)
         # Retain the local catalogue candidates so TMDB results can be mapped
         # back to their available local record after a misspelled search.
         catalog_candidates = []
@@ -1741,7 +1755,7 @@ def register_webapp_routes(
         else:
             try:
                 cur = conn.cursor()
-                cur.execute("""
+                select_sql = """
                     SELECT id, title, year, poster_url, rating, genre, category,
                            tmdb_id, content_type, is_unreleased,
                            (
@@ -1757,18 +1771,30 @@ def register_webapp_routes(
                                )
                            ) AS is_available
                     FROM movies
+                """
+                if autocomplete:
+                    # The matching expression has a text_pattern_ops B-tree
+                    # index (migration 13). Escape SQL wildcard characters so
+                    # typing '%' or '_' still means that literal title prefix.
+                    prefix = query.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+                    cur.execute(select_sql + """
+                        WHERE LOWER(title) LIKE %s
+                        ORDER BY LOWER(title), year DESC NULLS LAST, id DESC
+                        LIMIT %s
+                    """, (prefix, limit))
+                else:
+                    cur.execute(select_sql + """
                     WHERE title ILIKE %s
                        OR title ILIKE %s
-                       OR regexp_replace(
-                            regexp_replace(LOWER(title), '''s\\y', '', 'g'),
-                            '[^a-z0-9]', '', 'g'
-                          ) LIKE %s
+                       OR (%s <> '' AND regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s)
                     ORDER BY year DESC NULLS LAST, id DESC
-                    LIMIT 20
+                    LIMIT %s
                 """, (
                     f'%{query}%',
                     f'%{query.replace(" ", "%")}%',
-                    f'%{normalized_query}%'
+                    normalized_query,
+                    f'%{normalized_query}%',
+                    limit,
                 ))
                 rows = cur.fetchall()
                 for r in rows:
@@ -1790,29 +1816,19 @@ def register_webapp_routes(
                     })
                 # A typo such as "rechar" has no ILIKE match, so score the
                 # local titles before declaring it unavailable.
-                if not local_results:
-                    cur.execute("""
-                        SELECT id, title, year, poster_url, rating, genre, category,
-                               tmdb_id, content_type, is_unreleased,
-                               (
-                                   COALESCE(NULLIF(url, ''), NULLIF(file_id, '')) IS NOT NULL
-                                   OR EXISTS (
-                                       SELECT 1
-                                       FROM movie_files mf
-                                       WHERE mf.movie_id = movies.id
-                                         AND (
-                                             NULLIF(mf.url, '') IS NOT NULL
-                                             OR NULLIF(mf.file_id, '') IS NOT NULL
-                                         )
-                               )
-                               ) AS is_available
-                        FROM movies WHERE title IS NOT NULL
-                    """)
+                if not local_results and not autocomplete:
+                    # The trigram index narrows candidates in PostgreSQL;
+                    # never transfer and score the entire catalogue per key.
+                    cur.execute(select_sql + """
+                        WHERE title %% %s
+                        ORDER BY SIMILARITY(title, %s) DESC, id DESC
+                        LIMIT 80
+                    """, (query, query))
                     candidates = cur.fetchall()
                     catalog_candidates = candidates
-                    titles = [row[1] for row in candidates]
+                    titles = {index: row[1] for index, row in enumerate(candidates)}
                     for _, score, index in process.extract(query, titles, scorer=fuzz.WRatio, limit=8):
-                        if score < 58:
+                        if score < 75:
                             continue
                         r = candidates[index]
                         is_available = bool(r[10])
@@ -1829,76 +1845,69 @@ def register_webapp_routes(
                         })
                 cur.close()
             except Exception as e:
+                local_failed = True
                 # A local schema/connection failure should not hide a valid TMDB
                 # result. The title can still be shown as request-only.
                 logger.error(f"Local search error; continuing with TMDB: {e}")
             finally:
                 close_db_connection(conn)
+
+        # Keystrokes are a local prefix lookup only. Likewise, a successful
+        # catalogue search must never wait for TMDB or a Google suggestion.
+        if autocomplete or local_results:
+            if local_failed and not local_results:
+                return jsonify({'status': 'error', 'message': 'Search is temporarily unavailable. Please try again.'}), 503
+            result = {'status': 'success', 'results': local_results[:limit]}
+            search_cache.set(cache_key, result)
+            return jsonify(result)
     
         tmdb_results = []
-        # TMDB is the discovery source as well as the local-enrichment source.
-        # Query it even when local results exist so TMDB-only titles are not
-        # hidden behind the local result count.
+        discovery_failed = False
+        # Only an explicit full search with no local result needs discovery.
+        # One bounded provider lookup replaces Google + up to four serial calls.
         if TMDB_API_KEY:
             try:
-                # Retry TMDB with server-side Google suggestions. This works in
-                # Telegram WebView too, unlike a browser-side JSONP callback.
                 search_terms = [query]
-                if not local_results:
-                    suggest_url = 'https://suggestqueries.google.com/complete/search'
-                    suggest_response = requests.get(
-                        suggest_url,
-                        params={'client': 'firefox', 'q': f'{query} movie'},
-                        headers={'User-Agent': 'Mozilla/5.0'}, timeout=3
-                    ).json()
-                    for suggestion in (suggest_response[1] if len(suggest_response) > 1 else [])[:6]:
-                        # Suggestions like "Reacher movie cast" are Google
-                        # query completions, not actual title names.
-                        corrected = re.sub(
-                            r'\s+(?:movie|film|series|web\s+series)(?:\s+(?:cast|trailer|release\s+date|review|episodes?|season\s*\d+|\d{4}))*\s*$',
-                            '', str(suggestion), flags=re.I
-                        ).strip()
-                        if (
-                            corrected
-                            and fuzz.WRatio(query, corrected) >= 60
-                            and corrected.lower() not in {term.lower() for term in search_terms}
-                        ):
-                            search_terms.append(corrected)
-                        if len(search_terms) >= 4:
-                            break
                 for search_term in search_terms:
                     tmdb_url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(search_term)}"
-                    resp = requests.get(tmdb_url, timeout=5).json()
+                    provider_response = requests.get(tmdb_url, timeout=(1, 2))
+                    provider_response.raise_for_status()
+                    resp = provider_response.json()
                     for item in resp.get('results', [])[:8]:
                         # Skip non-movie/TV results (e.g. person)
                         if item.get('media_type') not in ('movie', 'tv', None):
                             continue
+                        media_type = item.get('media_type') or 'movie'
+                        release_date = item.get('first_air_date' if media_type == 'tv' else 'release_date') or ''
+                        is_upcoming = False
+                        try:
+                            if not isinstance(release_date, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', release_date):
+                                raise ValueError('Unknown release date')
+                            release_day = datetime.strptime(release_date, '%Y-%m-%d').date()
+                            is_upcoming = release_day > datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+                        except (TypeError, ValueError):
+                            release_date = ''
                         img_path = item.get('poster_path') or item.get('backdrop_path')
                         poster_url = f"https://image.tmdb.org/t/p/w500{img_path}" if img_path else '/static/miniapp/poster-placeholder.svg'
                         tmdb_results.append({
                             'id': 'tmdb_' + str(item['id']),
                             'tmdb_id': item.get('id'),
                             'title': item.get('title') or item.get('name') or 'Unknown',
-                            'year': (item.get('release_date') or item.get('first_air_date') or '')[:4],
-                            'release_date': item.get('release_date') or item.get('first_air_date') or '',
+                            'year': release_date[:4],
+                            'release_date': release_date,
                             'image': poster_url,
                             'rating': round(item.get('vote_average', 0), 1),
-                            'genre': 'Action, Drama',
-                            'category': 'Movie' if item.get('media_type') == 'movie' else 'TV Series',
-                            'media_type': item.get('media_type') or 'movie',
+                            'genre': '',
+                            'category': 'Movie' if media_type == 'movie' else 'TV Series',
+                            'media_type': media_type,
                             'source': 'tmdb',
                             'description': item.get('overview', ''),
                             'is_available': False,
-                            'is_upcoming': bool(
-                                item.get('release_date') or item.get('first_air_date')
-                            ) and (
-                                item.get('release_date') or item.get('first_air_date')
-                            )[:10] > datetime.utcnow().date().isoformat(),
-                            'availability_state': 'upcoming' if (
-                                item.get('release_date') or item.get('first_air_date') or ''
-                            )[:10] > datetime.utcnow().date().isoformat() else 'unavailable',
+                            'is_upcoming': is_upcoming,
+                            'availability_state': 'upcoming' if is_upcoming else 'unavailable',
                         })
             except Exception as e:
+                discovery_failed = True
                 logger.error(f"TMDB search error: {e}")
     
         # Deduplicate: normalize title (remove punctuation, spaces, lowercase)
@@ -1909,7 +1918,7 @@ def register_webapp_routes(
         # "Dhurandhar". If that TMDB title is effectively the same as a local
         # title, use the local record and mark it Available—not Request.
         if catalog_candidates and tmdb_results:
-            candidate_titles = [row[1] for row in catalog_candidates]
+            candidate_titles = {index: row[1] for index, row in enumerate(catalog_candidates)}
             already_local_ids = {movie['id'] for movie in local_results}
             for tmdb_movie in tmdb_results:
                 best = process.extractOne(tmdb_movie['title'], candidate_titles, scorer=fuzz.ratio)
@@ -1996,6 +2005,8 @@ def register_webapp_routes(
                 seen.add(key)
                 combined.append(m)
     
+        if not combined and (discovery_failed or (local_failed and not TMDB_API_KEY)):
+            return jsonify({'status': 'error', 'message': 'Search is temporarily unavailable. Please try again.'}), 503
         result = {'status': 'success', 'results': combined}
         search_cache.set(cache_key, result)
         return jsonify(result)

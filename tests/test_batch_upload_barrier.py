@@ -265,3 +265,30 @@ def test_queued_pre_done_uploads_are_included_even_before_handlers_start():
         assert coordinator.is_upload_allowed(_update(611, document=True)) is False
 
     asyncio.run(scenario())
+
+
+def test_search_is_admitted_while_all_upload_slots_are_busy():
+    async def scenario():
+        coordinator, _batch = _coordinator()
+        processor = _processor_type(coordinator, concurrency=1)
+        upload_started, release_upload = asyncio.Event(), asyncio.Event()
+        replied = []
+
+        async def upload():
+            upload_started.set()
+            await release_upload.wait()
+
+        async def search():
+            replied.append('Reacher')
+
+        task = asyncio.create_task(processor.process_update(_update(700, document=True), upload()))
+        await upload_started.wait()
+        try:
+            await asyncio.wait_for(processor.process_update(_update(701, text='Reacher', user_id=99), search()), 0.1)
+            assert replied == ['Reacher']
+            assert not task.done()
+        finally:
+            release_upload.set()
+            await task
+
+    asyncio.run(scenario())

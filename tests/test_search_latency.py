@@ -6,6 +6,8 @@ import logging
 import re
 import threading
 import __future__
+import concurrent.futures
+from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -126,13 +128,9 @@ def test_delete_queue_write_does_not_block_other_users_or_fetch_bot_again():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('poster_result', ['hang', 'url', 'bytes'])
-def test_search_delivers_files_when_poster_is_slow_or_unavailable(poster_result):
+def test_search_delivers_file_links_without_waiting_for_any_poster_io():
     async def scenario():
-        async def poster(_):
-            if poster_result == 'hang':
-                await asyncio.Event().wait()
-            return BytesIO(b'poster') if poster_result == 'bytes' else 'https://slow.example/poster'
+        poster = AsyncMock(side_effect=AssertionError('Search must not fetch posters'))
 
         async def run_async(func, *args):
             return func(*args)
@@ -143,7 +141,7 @@ def test_search_delivers_files_when_poster_is_slow_or_unavailable(poster_result)
         context = SimpleNamespace(user_data={}, bot=SimpleNamespace(username='testbot'))
         ns = load_functions(
             'process_movie_exact_match', SEARCH_TIMING_ENABLED=False,
-            SEARCH_POSTER_TIMEOUT_SECONDS=0.01, run_async=run_async,
+            run_interactive=run_async,
             get_movie_delivery_data=lambda _: ([('1080p', '', '', '1 GB')], ('Movie', 'https://slow.example/poster')),
             _format_requested_files_header=lambda *args: 'Files',
             _format_file_link_label=lambda *args: '1080p', html_escape=lambda value: value,
@@ -152,13 +150,128 @@ def test_search_delivers_files_when_poster_is_slow_or_unavailable(poster_result)
             track_message_for_deletion=lambda *args: None,
         )
         await asyncio.wait_for(ns['process_movie_exact_match'](update, context, 7, 'Reacher'), 0.5)
-        if poster_result == 'bytes':
-            message.reply_photo.assert_awaited_once()
-            message.reply_text.assert_not_awaited()
-        else:
-            message.reply_photo.assert_not_awaited()
-            message.reply_text.assert_awaited_once()
-            assert '?start=file_7_0' in message.reply_text.call_args.args[0]
+        poster.assert_not_awaited()
+        message.reply_photo.assert_not_awaited()
+        message.reply_text.assert_awaited_once()
+        assert '?start=file_7_0' in message.reply_text.call_args.args[0]
+
+    asyncio.run(scenario())
+
+
+def test_interactive_search_runs_even_when_background_executor_is_saturated():
+    async def scenario():
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as interactive:
+            ns = load_functions('run_async', 'run_interactive', _interactive_executor=interactive)
+            background = asyncio.create_task(ns['run_async'](release.wait, 2))
+            await asyncio.sleep(0.01)
+            try:
+                assert await asyncio.wait_for(ns['run_interactive'](lambda: 'Reacher'), 0.2) == 'Reacher'
+                assert not background.done()
+            finally:
+                release.set()
+                await background
+
+    asyncio.run(scenario())
+
+
+def test_upcoming_worker_does_not_block_event_loop_and_saves_only_sent_events():
+    async def scenario():
+        release = threading.Event()
+        entered = threading.Event()
+        thread_ids, saved = [], []
+
+        def load():
+            thread_ids.append(threading.get_ident())
+            entered.set()
+            assert release.wait(2)
+            return [(7, 5, '123', 'Reacher', datetime.now(timezone.utc).date(), False, True, True)]
+
+        def mark(*args):
+            thread_ids.append(threading.get_ident())
+            saved.append(args)
+
+        async def send(coro):
+            return await coro
+
+        async def stop(_):
+            raise asyncio.CancelledError
+
+        bot = SimpleNamespace(get_me=AsyncMock(return_value=SimpleNamespace(username='testbot')),
+                              send_message=AsyncMock())
+        ns = load_functions('run_async', 'upcoming_reminder_worker',
+                            _get_pending_upcoming_notifications=load,
+                            _mark_upcoming_notification=mark, datetime=datetime,
+                            html_escape=lambda value: value, safe_send=send)
+        ns['asyncio'] = SimpleNamespace(get_running_loop=asyncio.get_running_loop,
+                                       CancelledError=asyncio.CancelledError, sleep=stop)
+        task = asyncio.create_task(ns['upcoming_reminder_worker'](SimpleNamespace(bot=bot)))
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.001)
+            assert entered.is_set()
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert saved == [(7, 'availability')]
+        bot.send_message.assert_awaited_once()
+        assert 'available for download' in bot.send_message.call_args.kwargs['text']
+        assert all(item != threading.get_ident() for item in thread_ids)
+
+    asyncio.run(scenario())
+
+
+def test_notification_read_releases_connection_even_when_no_rows():
+    released = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, *args): pass
+        def fetchall(self): return []
+
+    conn = SimpleNamespace(cursor=Cursor)
+    ns = load_functions('_get_pending_upcoming_notifications',
+                        get_db_connection=lambda: conn, close_db_connection=released.append)
+    assert ns['_get_pending_upcoming_notifications']() == []
+    assert released == [conn]
+
+
+def test_membership_network_failure_is_not_cached_as_a_denial():
+    class Forbidden(Exception): pass
+    class BadRequest(Exception): pass
+
+    async def scenario():
+        verified = {}
+
+        async def lookup(chat_id, user_id):
+            if chat_id == 10:
+                raise TimeoutError('Telegram unreachable')
+            return SimpleNamespace(status='member')
+
+        ns = load_functions('is_user_member', FORCE_JOIN_ENABLED=True,
+                            ACTIVE_FSUB={'id': 10}, BACKUP_FSUB_LIST=[],
+                            REQUIRED_GROUP_ID=20, VERIFICATION_CACHE_TIME=3600,
+                            verified_users=verified, datetime=datetime,
+                            telegram=SimpleNamespace(error=SimpleNamespace(Forbidden=Forbidden, BadRequest=BadRequest)))
+        bot = SimpleNamespace(get_chat_member=AsyncMock(side_effect=lookup))
+        result = await ns['is_user_member'](SimpleNamespace(bot=bot), 42)
+        assert result['is_member'] is False
+        assert result['error'] == 'membership_check_unavailable'
+        assert verified == {}
+
+        bot.get_chat_member.side_effect = None
+        bot.get_chat_member.return_value = SimpleNamespace(status='member')
+        assert (await ns['is_user_member'](SimpleNamespace(bot=bot), 42))['is_member']
+        bot.get_chat_member.reset_mock()
+        assert (await ns['is_user_member'](SimpleNamespace(bot=bot), 42))['is_member']
+        bot.get_chat_member.assert_not_awaited()
 
     asyncio.run(scenario())
 

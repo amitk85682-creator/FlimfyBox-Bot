@@ -57,7 +57,7 @@ def test_worker_tracks_notification_stages_separately():
 def test_upcoming_endpoint_excludes_titles_releasing_today():
     assert "'primary_release_date.gte': (today + timedelta(days=1)).isoformat()" in ROUTES
     assert "'first_air_date.gte': (today + timedelta(days=1)).isoformat()" in ROUTES
-    assert "date() > today" in ROUTES
+    assert "today < release_day <= end_date" in ROUTES
 
 
 def test_existing_local_rating_path_remains_available():

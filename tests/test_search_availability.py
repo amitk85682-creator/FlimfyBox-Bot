@@ -22,9 +22,8 @@ def test_search_merges_by_provider_identity_before_title_year_fallback():
 
 
 def test_frontend_distinguishes_available_unavailable_and_upcoming_results():
-    assert "const isUpcoming = Boolean(r.is_upcoming);" in FRONTEND
-    assert "const isAvailable = Boolean(r.is_available);" in FRONTEND
-    assert "const status = isUpcoming ? 'Upcoming' : (isAvailable ? 'Available' : 'Unavailable');" in FRONTEND
+    # Actual status behavior is tested in miniapp_search_theme.test.js.
+    assert "FlimfyUI.availabilityLabel(movie)" in FRONTEND
     assert "function renderUnavailableAction(movie)" in FRONTEND
 
 

@@ -509,6 +509,15 @@ def _migration_12(conn):
         """)
 
 
+def _migration_13(conn):
+    """Index one- and two-character autocomplete without a catalogue scan."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_movies_title_prefix
+            ON movies (LOWER(title) text_pattern_ops)
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -522,6 +531,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (10, _migration_10),
     (11, _migration_11),
     (12, _migration_12),
+    (13, _migration_13),
 )
 
 

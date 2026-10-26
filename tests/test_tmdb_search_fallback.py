@@ -13,6 +13,9 @@ class FakeTmdbResponse:
     def json(self):
         return self.payload
 
+    def raise_for_status(self):
+        return None
+
 
 def test_search_uses_tmdb_when_local_catalogue_is_unavailable(webapp_factory, monkeypatch):
     def fake_get(url, **kwargs):

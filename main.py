@@ -746,6 +746,12 @@ class BatchUploadCoordinator:
 class BatchAwareUpdateProcessor(BaseUpdateProcessor):
     """Register update boundaries before semaphore waits; keep handlers concurrent."""
 
+    def __init__(self, max_concurrent_updates):
+        super().__init__(max_concurrent_updates)
+        # Uploads can spend minutes resolving metadata. They must not consume
+        # the same admission slots as searches and button presses.
+        self._upload_semaphore = asyncio.Semaphore(min(8, max_concurrent_updates))
+
     async def do_process_update(self, update, coroutine):
         await coroutine
 
@@ -758,6 +764,9 @@ class BatchAwareUpdateProcessor(BaseUpdateProcessor):
             message = getattr(update, "effective_message", None)
             if batch_upload_coordinator.is_active_done_update(update):
                 await self.do_process_update(update, coroutine)
+            elif message and any(getattr(message, kind, None) for kind in ('document', 'video', 'audio', 'animation')):
+                async with self._upload_semaphore:
+                    await self.do_process_update(update, coroutine)
             else:
                 async with self._semaphore:
                     await self.do_process_update(update, coroutine)
@@ -828,6 +837,18 @@ if not DATABASE_URL:
 
 # 👇👇👇 START COPY HERE (Line 290 ke aas-paas paste karein) 👇👇👇
 import functools
+
+# Keep interactive database lookups out of the metadata/download executor.
+# Threads are created lazily; only short, bounded DB functions use this pool.
+_interactive_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix='bot-search'
+)
+
+
+async def run_interactive(func, *args, **kwargs):
+    return await asyncio.get_running_loop().run_in_executor(
+        _interactive_executor, functools.partial(func, *args, **kwargs)
+    )
 
 async def run_async(func, *args, **kwargs):
     """
@@ -2114,20 +2135,24 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
     # check needlessly adds both network latencies to every uncached message.
     async def check_required_group():
         try:
-            member = await context.bot.get_chat_member(
+            member = await asyncio.wait_for(context.bot.get_chat_member(
                 chat_id=REQUIRED_GROUP_ID,
                 user_id=user_id,
-            )
+            ), timeout=5)
             return member.status in VALID_STATUSES
         except Exception as e:
             logger.error(f"Group Check Error: {e}")
+            result['error'] = 'membership_check_unavailable'
             return False
 
     group_check_task = asyncio.create_task(check_required_group())
 
     # --- 1. SMART CHANNEL CHECK (WITH AUTO-SWITCH) ---
     try:
-        channel_member = await context.bot.get_chat_member(chat_id=ACTIVE_FSUB['id'], user_id=user_id)
+        channel_member = await asyncio.wait_for(
+            context.bot.get_chat_member(chat_id=ACTIVE_FSUB['id'], user_id=user_id),
+            timeout=5,
+        )
         if channel_member.status in VALID_STATUSES:
             result['channel'] = True
             
@@ -2185,12 +2210,16 @@ async def is_user_member(context, user_id: int, force_fresh: bool = False):
         # Temporary glitch (ignore and allow/deny gracefully without switching)
         logger.error(f"Temporary Channel Check Error: {e}")
         result['channel'] = False 
+        result['error'] = 'membership_check_unavailable'
 
     # --- 2. GROUP CHECK ---
     result['group'] = await group_check_task
 
     result['is_member'] = result['channel'] and result['group']
-    verified_users[user_id] = (current_time, result)
+    # A Telegram timeout is not a real membership result. Caching it for an
+    # hour prevented already-joined users from searching after one glitch.
+    if not result['error']:
+        verified_users[user_id] = (current_time, result)
     
     return result
 
@@ -5273,7 +5302,7 @@ async def deliver_movie_page_on_start(update: Update, context: ContextTypes.DEFA
         return
 
     title, genre, year, language, seasons_data = movie
-    qualities = get_all_movie_qualities(movie_id)
+    qualities = await run_interactive(get_all_movie_qualities, movie_id)
     start = (page - 1) * 10
     page_files = qualities[start:start + 10]
     if not page_files:
@@ -5504,7 +5533,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
-        all_qualities = get_all_movie_qualities(movie_id)
+        all_qualities = await run_interactive(get_all_movie_qualities, movie_id)
         if all_qualities:
             context.user_data['selected_movie_data'] = {'id': movie_id, 'title': title, 'qualities': all_qualities}
             context.user_data['active_filter'] = None
@@ -6097,7 +6126,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     
                     # File ka data nikalo
-                    qualities = get_all_movie_qualities(movie_id)
+                    qualities = await run_interactive(get_all_movie_qualities, movie_id)
                     if qualities and len(qualities) > file_index:
                         file_data = qualities[file_index]
                         url = file_data[1]
@@ -6485,7 +6514,7 @@ async def process_movie_exact_match(
     timing: Optional[dict] = None,
 ):
     delivery_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
-    qualities, (category, poster_url) = await run_async(
+    qualities, (category, poster_url) = await run_interactive(
         get_movie_delivery_data, movie_id
     )
     if timing is not None and delivery_start is not None:
@@ -6535,73 +6564,23 @@ async def process_movie_exact_match(
         current_files=current_files
     )
     
-    if poster_url:
-        try:
-            poster_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
-            processed_poster = await asyncio.wait_for(
-                make_landscape_poster(poster_url),
-                timeout=SEARCH_POSTER_TIMEOUT_SECONDS,
-            )
-            # A failed download returns the original URL. Do not ask Telegram
-            # to download the same slow/broken URL again before showing files.
-            if isinstance(processed_poster, str) and processed_poster.startswith('http'):
-                raise ValueError("Search poster unavailable; sending file links")
-            if timing is not None and poster_start is not None:
-                timing['poster_ms'] = int((time.perf_counter() - poster_start) * 1000)
-            response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
-            msg = await update.message.reply_photo(
-                photo=processed_poster,
-                caption=file_list_text,
-                reply_markup=keyboard_markup,
-                parse_mode='HTML'
-            )
-            if timing is not None and response_start is not None:
-                timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
-        except Exception as e:
-            logger.error(f"Failed to send photo: {e}")
-            response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
-            msg = await update.message.reply_text(
-                file_list_text,
-                reply_markup=keyboard_markup,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            if timing is not None and response_start is not None:
-                timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
-    else:
-        response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
-        msg = await update.message.reply_text(
-            file_list_text,
-            reply_markup=keyboard_markup,
-            parse_mode='HTML',
-            disable_web_page_preview=True
-        )
-        if timing is not None and response_start is not None:
-            timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
+    # File links are the result. Do not delay them for remote poster downloads,
+    # Pillow processing or Telegram's media upload/fetch pipeline.
+    response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
+    msg = await update.message.reply_text(
+        file_list_text, reply_markup=keyboard_markup, parse_mode='HTML',
+        disable_web_page_preview=True,
+    )
+    if timing is not None and response_start is not None:
+        timing['telegram_response_ms'] = int((time.perf_counter() - response_start) * 1000)
     track_message_for_deletion(
         context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS
     )
 
 
 async def send_search_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str = None):
-    """Send a lightweight temporary search progress message that can be edited/deleted.
-       Returns the sent Message object or None on failure. Controlled by SEARCH_TIMING_ENABLED.
-    """
-    try:
-        if not update.message:
-            return None
-        display = (query or '').strip()
-        if len(display) > 120:
-            display = display[:117] + '...'
-        if display:
-            text = f'🔎 Searching for "{display}"...'
-        else:
-            text = '🔎 Searching...'
-        msg = await update.message.reply_text(text)
-        return msg
-    except Exception as e:
-        logger.debug(f"send_search_progress failed: {e}")
-        return None
+    """Compatibility hook: search results are sent without a loading message."""
+    return None
 
 
 async def remove_search_progress(progress_message):
@@ -6662,13 +6641,13 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # alias/fuzzy search remains a fallback for titles not covered by SQL.
         if SEARCH_TIMING_ENABLED:
             times['before_first_db'] = time.perf_counter()
-        movies = await run_async(get_movies_fast_sql, search_term, limit=10)
+        movies = await run_interactive(get_movies_fast_sql, search_term, limit=10)
         if SEARCH_TIMING_ENABLED:
             times['first_db'] = time.perf_counter()
         if not movies:
             if SEARCH_TIMING_ENABLED:
                 times['fuzzy_db_start'] = time.perf_counter()
-            movies = await run_async(get_movies_from_db, search_term, limit=10)
+            movies = await run_interactive(get_movies_from_db, search_term, limit=10)
             if SEARCH_TIMING_ENABLED:
                 times['fuzzy_db_end'] = time.perf_counter()
         
@@ -6720,26 +6699,12 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             keyboard = InlineKeyboardMarkup(keyboard_rows)
 
-            msg = None
-            if SEARCH_ERROR_GIFS:
-                try:
-                    gif = random.choice(SEARCH_ERROR_GIFS)
-                    msg = await update.message.reply_animation(
-                        animation=gif,
-                        caption=not_found_text,
-                        reply_markup=keyboard,
-                        parse_mode='HTML'
-                    )
-                except Exception as exc:
-                    logger.warning(f"Search failure animation could not be sent: {exc}")
-
-            if msg is None:
-                msg = await update.message.reply_text(
-                    text=not_found_text,
-                    reply_markup=keyboard,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True
-                )
+            msg = await update.message.reply_text(
+                text=not_found_text,
+                reply_markup=keyboard,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
             # Auto Delete Not Found Msg
             track_user_message_for_deletion(context, update.effective_chat.id, msg)
             return # <--- YAHAN SE MAIN_MENU HATA DIYA HAI
@@ -7055,7 +7020,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         suggested_title = unquote(data[len("retrysearch_"):]).strip()
         if not suggested_title:
             return
-        movies = await run_async(get_movies_from_db, suggested_title, limit=10)
+        movies = await run_interactive(get_movies_from_db, suggested_title, limit=10)
         if not movies:
             request_title = quote(suggested_title[:35], safe='')
             keyboard_rows = []
@@ -7150,7 +7115,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Memory se movie ka naam nikal lo
         movie_data = context.user_data.get('selected_movie_data')
         if not movie_data or movie_data.get('id') != movie_id:
-            movie_data = load_movie_selection_data(movie_id)
+            movie_data = await run_interactive(load_movie_selection_data, movie_id)
         title = movie_data['title'] if movie_data else "Requested Movie"
 
         try:
@@ -7175,7 +7140,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('selected_season', None)
         movie_data = context.user_data.get('selected_movie_data')
         if not movie_data or movie_data.get('id') != movie_id:
-            movie_data = load_movie_selection_data(movie_id)
+            movie_data = await run_interactive(load_movie_selection_data, movie_id)
             if movie_data:
                 context.user_data['selected_movie_data'] = movie_data
         if not movie_data:
@@ -7619,7 +7584,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = "Movie"
             pre_fetched_meta = {}
 
-        qualities = get_all_movie_qualities(movie_id)
+        qualities = await run_interactive(get_all_movie_qualities, movie_id)
         
         # NAYA: Filter apply karo taaki Send All sirf filter ki hui files bheje
         active_filter = context.user_data.get('active_filter')
@@ -7939,7 +7904,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             movie_id, title, category, poster_url = movie
-            qualities = get_all_movie_qualities(movie_id)
+            qualities = await run_interactive(get_all_movie_qualities, movie_id)
 
             if not qualities:
                 await query.answer("❌ No files found!", show_alert=True)
@@ -8139,7 +8104,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if movie_id_from_callback is not None and (
                 not movie_data or movie_data.get('id') != movie_id_from_callback
             ):
-                movie_data = load_movie_selection_data(movie_id_from_callback)
+                movie_data = await run_interactive(load_movie_selection_data, movie_id_from_callback)
                 if movie_data:
                     context.user_data['selected_movie_data'] = movie_data
             if not movie_data:
@@ -8438,7 +8403,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 close_db_connection(conn)
                 
                 title = res[0] if res else "Movie"
-                qualities = get_all_movie_qualities(movie_id)
+                qualities = await run_interactive(get_all_movie_qualities, movie_id)
                 
                 # Context update karo
                 context.user_data['selected_movie_data'] = {
@@ -8526,7 +8491,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_data = context.user_data.get('selected_movie_data')
 
             if not movie_data or movie_data.get('id') != movie_id:
-                qualities = get_all_movie_qualities(movie_id)
+                qualities = await run_interactive(get_all_movie_qualities, movie_id)
                 movie_data = {'id': movie_id, 'title': 'Movie', 'qualities': qualities}
 
             if not movie_data or 'qualities' not in movie_data:
@@ -15630,7 +15595,8 @@ register_webapp_routes(
 # Guaranteed dependency-free health endpoint. Register it only if the imported
 # webapp route module has not already provided one.
 def _miniapp_healthz():
-    return jsonify({'status': 'ok', 'service': 'flimfybox-mini-app'}), 200
+    return jsonify({'status': 'ok', 'service': 'flimfybox-mini-app',
+                    'revision': os.environ.get('RENDER_GIT_COMMIT', 'local')}), 200
 
 
 def _miniapp_readyz():
@@ -15996,7 +15962,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 3. 🚀 FAST SEARCH CALL (Sirf SQL Check)
     # Hum 5 results maang rahe hain taaki agar typos ho to best match mile
-    movies = await run_async(get_movies_fast_sql, text, limit=5)
+    movies = await run_interactive(get_movies_fast_sql, text, limit=5)
     schedule_recommendation_event(
         user_id=update.effective_user.id if update.effective_user else None,
         event_type='group_search',
@@ -16105,66 +16071,14 @@ async def upcoming_reminder_worker(app: Application):
         return
 
     while True:
-        conn = None
         try:
-            conn = get_db_connection()
-            if conn is None:
-                await asyncio.sleep(60)
-                continue
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, user_id, tmdb_id, movie_title, release_date,
-                           release_notification_requested,
-                           availability_notification_requested
-                    FROM upcoming_notifications
-                    WHERE (release_notification_requested AND release_notified_at IS NULL
-                           AND release_date <= CURRENT_DATE)
-                       OR (availability_notification_requested
-                           AND availability_notified_at IS NULL)
-                    ORDER BY created_at ASC
-                    LIMIT 50
-                    """
-                )
-                rows = cur.fetchall()
-
-            if not rows:
-                await asyncio.sleep(60)
-                continue
-
-            for notification_id, user_id, tmdb_id, title, release_date, release_requested, availability_requested in rows:
+            # Every DB call completes and releases its pooled connection before
+            # Telegram I/O or sleep. No synchronous SQL runs on the bot loop.
+            rows = await run_async(_get_pending_upcoming_notifications)
+            for notification_id, user_id, tmdb_id, title, release_date, release_requested, availability_requested, local_available in rows:
                 try:
-                    normalized_tmdb_id = str(tmdb_id).replace('tmdb_', '').strip()
-                    if not normalized_tmdb_id or not normalized_tmdb_id.isdigit():
-                        raise ValueError(f'Invalid tmdb_id for reminder: {tmdb_id!r}')
-
-                    cur = conn.cursor()
-                    cur.execute("""
-                        SELECT EXISTS(
-                            SELECT 1
-                            FROM movies m
-                            LEFT JOIN movie_files mf ON mf.movie_id = m.id
-                            WHERE (
-                                m.tmdb_id = %s
-                                OR (
-                                    m.tmdb_id IS NULL
-                                    AND LOWER(REGEXP_REPLACE(m.title, '[^a-z0-9]', '', 'g'))
-                                        = LOWER(REGEXP_REPLACE(%s, '[^a-z0-9]', '', 'g'))
-                                )
-                            )
-                            AND (
-                                NULLIF(m.url, '') IS NOT NULL
-                                OR NULLIF(m.file_id, '') IS NOT NULL
-                                OR NULLIF(mf.url, '') IS NOT NULL
-                                OR NULLIF(mf.file_id, '') IS NOT NULL
-                            )
-                        )
-                    """, (int(normalized_tmdb_id), title))
-                    local_available = bool(cur.fetchone()[0])
-                    cur.close()
                     today = datetime.utcnow().date()
-                    if release_requested and release_date <= today:
+                    if release_requested and release_date and release_date <= today:
                         await safe_send(app.bot.send_message(
                             chat_id=int(user_id),
                             text=(
@@ -16174,14 +16088,7 @@ async def upcoming_reminder_worker(app: Application):
                             ),
                             parse_mode='HTML'
                         ))
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                UPDATE upcoming_notifications
-                                SET release_notified_at = CURRENT_TIMESTAMP,
-                                    notified_at = COALESCE(notified_at, CURRENT_TIMESTAMP)
-                                WHERE id = %s AND release_notified_at IS NULL
-                            """, (notification_id,))
-                        conn.commit()
+                        await run_async(_mark_upcoming_notification, notification_id, 'release')
                     if availability_requested and local_available:
                         await safe_send(app.bot.send_message(
                             chat_id=int(user_id),
@@ -16191,13 +16098,7 @@ async def upcoming_reminder_worker(app: Application):
                             ),
                             parse_mode='HTML'
                         ))
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                UPDATE upcoming_notifications
-                                SET availability_notified_at = CURRENT_TIMESTAMP
-                                WHERE id = %s AND availability_notified_at IS NULL
-                            """, (notification_id,))
-                        conn.commit()
+                        await run_async(_mark_upcoming_notification, notification_id, 'availability')
                 except Exception as exc:
                     logger.warning('Upcoming reminder processing failed for user_id=%s: %s', user_id, exc)
                 await asyncio.sleep(0.2)
@@ -16205,10 +16106,79 @@ async def upcoming_reminder_worker(app: Application):
             raise
         except Exception as exc:
             logger.exception('Upcoming reminder worker error: %s', exc)
-        finally:
-            if conn:
-                close_db_connection(conn)
         await asyncio.sleep(45)
+
+
+def _get_pending_upcoming_notifications():
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            cur.execute("""
+                SELECT id, user_id, tmdb_id, movie_title, release_date,
+                       (release_notification_requested AND release_notified_at IS NULL),
+                       (availability_notification_requested AND availability_notified_at IS NULL)
+                FROM upcoming_notifications
+                WHERE (release_notification_requested AND release_notified_at IS NULL
+                       AND release_date <= CURRENT_DATE)
+                   OR (availability_notification_requested AND availability_notified_at IS NULL)
+                ORDER BY created_at ASC LIMIT 50
+            """)
+            rows = cur.fetchall()
+            resolved = []
+            for row in rows:
+                normalized_id = str(row[2]).replace('tmdb_', '').strip()
+                if not normalized_id.isdigit():
+                    continue
+                local_available = False
+                if row[6]:
+                    cur.execute("""
+                        SELECT EXISTS(
+                            SELECT 1 FROM movies m
+                            LEFT JOIN movie_files mf ON mf.movie_id = m.id
+                            WHERE (m.tmdb_id = %s OR (
+                                m.tmdb_id IS NULL
+                                AND REGEXP_REPLACE(LOWER(m.title), '[^a-z0-9]', '', 'g')
+                                    = REGEXP_REPLACE(LOWER(%s), '[^a-z0-9]', '', 'g')
+                            )) AND (
+                                NULLIF(m.url, '') IS NOT NULL OR NULLIF(m.file_id, '') IS NOT NULL
+                                OR NULLIF(mf.url, '') IS NOT NULL OR NULLIF(mf.file_id, '') IS NOT NULL
+                            )
+                        )
+                    """, (int(normalized_id), row[3]))
+                    local_available = bool(cur.fetchone()[0])
+                resolved.append(tuple(row) + (local_available,))
+            return resolved
+    finally:
+        close_db_connection(conn)
+
+
+def _mark_upcoming_notification(notification_id, stage):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('Notification state could not be saved')
+    try:
+        with conn.cursor() as cur:
+            if stage == 'release':
+                cur.execute("""
+                    UPDATE upcoming_notifications
+                    SET release_notified_at = CURRENT_TIMESTAMP,
+                        notified_at = COALESCE(notified_at, CURRENT_TIMESTAMP)
+                    WHERE id = %s AND release_notified_at IS NULL
+                """, (notification_id,))
+            elif stage == 'availability':
+                cur.execute("""
+                    UPDATE upcoming_notifications
+                    SET availability_notified_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND availability_notified_at IS NULL
+                """, (notification_id,))
+            else:
+                raise ValueError('Unknown notification stage')
+        conn.commit()
+    finally:
+        close_db_connection(conn)
 
 
 def _get_due_delete_messages(bot_username):

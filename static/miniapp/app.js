@@ -87,7 +87,7 @@ const tg = window.Telegram?.WebApp || {
         let initialHomePending = 0;
         let initialHomeTimeout = null;
         let telegramBackButtonHandler = null;
-        const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v2';
+        const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v4';
         const HOME_CATALOGUE_CACHE_TTL = 10 * 60 * 1000;
 
         function parseMiniAppEpisodeMetadata(value) {
@@ -169,7 +169,7 @@ const tg = window.Telegram?.WebApp || {
         }
 
         async function loadHomeSection(url, cacheKey) {
-            const storageKey = `flimfybox-home-section-${cacheKey}-v3`;
+            const storageKey = `flimfybox-home-section-${cacheKey}-v4`;
             let cached = null;
             try {
                 cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
@@ -815,11 +815,18 @@ const tg = window.Telegram?.WebApp || {
         window.showSettings = function() {
             const autoplay = localStorage.getItem('flimfybox-autoplay') !== 'off';
             const compact = localStorage.getItem('flimfybox-compact') === 'on';
-            showInfoPanel('Settings', `
+            const theme = FlimfyUI.themePreference(document.documentElement.dataset.themePreference);
+            showInfoPanel('Make it yours', `
+                <span class="settings-label">Appearance</span>
+                <div class="theme-choices" role="group" aria-label="Colour theme">
+                    ${[['dark', 'moon', 'Dark'], ['light', 'sun', 'Light'], ['system', 'desktop', 'System']].map(([value, icon, label]) => `
+                        <button type="button" class="theme-choice ${theme === value ? 'selected' : ''}" data-theme-choice="${value}" aria-pressed="${theme === value}" onclick="FlimfyUI.applyTheme(this.dataset.themeChoice)"><i class="fas fa-${icon}" aria-hidden="true"></i>${label}</button>
+                    `).join('')}
+                </div>
                 <label class="settings-toggle"><span>Rotate featured titles</span><input id="settingsAutoplay" type="checkbox" ${autoplay ? 'checked' : ''} onchange="localStorage.setItem('flimfybox-autoplay', this.checked ? 'on' : 'off'); showToast('Display preference saved')"></label>
                 <label class="settings-toggle"><span>Compact cards</span><input id="settingsCompact" type="checkbox" ${compact ? 'checked' : ''} onchange="localStorage.setItem('flimfybox-compact', this.checked ? 'on' : 'off'); document.body.classList.toggle('compact-cards', this.checked); showToast('Display preference saved')"></label>
                 <p class="info-note">Your preferences are saved on this device.</p>
-            `, 'gear', '<button type="button" class="primary-action" onclick="closeInfoModal()">Save & close</button>');
+            `, 'sliders', '<button type="button" class="primary-action" onclick="closeInfoModal()">Done</button>');
         };
 
         document.addEventListener('keydown', event => {
@@ -873,7 +880,7 @@ const tg = window.Telegram?.WebApp || {
             document.getElementById('myListContent').style.display = 'none';
             document.getElementById('searchResultsContent').style.display = 'block';
             renderSearchDiscovery();
-            if (document.getElementById('searchInput').value.trim()) triggerSearchAgain();
+            if (document.getElementById('searchInput').value.trim()) runTitleSearch(document.getElementById('searchInput').value);
             setTimeout(() => document.getElementById('searchInput').focus(), 120);
         };
 
@@ -1265,9 +1272,24 @@ const tg = window.Telegram?.WebApp || {
                 };
             }
             const heroArtwork = movie.backdrop || movie.image;
-            heroSlider.style.backgroundImage = heroArtwork
+            const heroArt = document.getElementById('heroArt');
+            const artwork = heroArtwork
                 ? `url("${artworkUrl(heroArtwork, 'w1280')}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
+            const slideId = String(movie.id);
+            heroSlider.dataset.slideId = slideId;
+            const preload = new Image();
+            preload.onload = () => {
+                if (heroSlider.dataset.slideId !== slideId) return;
+                heroSlider.style.backgroundImage = heroArt.style.backgroundImage || artwork;
+                heroArt.style.opacity = '0';
+                heroArt.style.backgroundImage = artwork;
+                requestAnimationFrame(() => requestAnimationFrame(() => { heroArt.style.opacity = '1'; }));
+            };
+            preload.src = artworkUrl(heroArtwork, 'w1280');
+            const copy = heroSlider.querySelector('.hero-info');
+            copy.classList.remove('changing');
+            requestAnimationFrame(() => copy.classList.add('changing'));
             document.getElementById('heroTitle').innerText = movie.title;
             document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
             document.getElementById('heroDescription').textContent = movie.description || movie.overview || `${movie.genre || movie.category || 'Something new'} for your next movie night. Open this title for its story and available files.`;
@@ -1398,7 +1420,7 @@ const tg = window.Telegram?.WebApp || {
                 loadHomeSection('/api/upcoming?limit=18', 'upcoming')
                     .then(data => {
                         if (data.status !== 'success') throw new Error(data.message || 'Could not load upcoming');
-                        const upcoming = Array.isArray(data.movies) ? data.movies : [];
+                        const upcoming = (Array.isArray(data.movies) ? data.movies : []).filter(movie => FlimfyUI.futureRelease(movie));
                         upcoming.forEach(item => {
                             if (item && item.id) {
                                 tmdbMoviesMap[item.id] = { ...item, source: 'tmdb', id: item.id };
@@ -1407,7 +1429,7 @@ const tg = window.Telegram?.WebApp || {
                         upcomingScroll.innerHTML = upcoming.length
                             ? renderCards(upcoming, 'card', true)
                             : '<div class="search-empty-state">No upcoming titles right now.<br><span>Check back soon.</span></div>';
-                        upcomingRow.style.display = upcoming.length ? '' : 'none';
+                        upcomingRow.style.display = '';
                     })
                     .catch(error => {
                         console.error('Upcoming load failed:', error);
@@ -1593,168 +1615,158 @@ const tg = window.Telegram?.WebApp || {
             }).join('');
         }
 
-// Hybrid Search
+// Hybrid Search: prefixes while typing; broader discovery only on explicit submit.
 let searchTimeout;
 let searchRequestId = 0;
+let highlightedSearchIndex = -1;
+const searchResultCache = new Map();
 
-document.getElementById('genreSearchInput')?.addEventListener('input', (e) => {
-    renderExploreScreen();
-});
+document.getElementById('genreSearchInput')?.addEventListener('input', () => renderExploreScreen());
 
-window.triggerSearchAgain = function() {
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput && searchInput.value.trim() !== '') {
-        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+function setSearchExpanded(expanded) {
+    document.getElementById('searchInput').setAttribute('aria-expanded', String(expanded));
+    document.getElementById('searchDropdown').classList.toggle('active', expanded);
+    if (!expanded) document.getElementById('searchInput').removeAttribute('aria-activedescendant');
+}
+
+function rememberSearchResults(results) {
+    results.forEach(movie => {
+        if (movie.source === 'tmdb') tmdbMoviesMap[movie.id] = movie;
+        else if (!allMovies.some(item => String(item.id) === String(movie.id))) allMovies.push(movie);
+    });
+}
+
+function renderSearchMatches(query, results, { pending = false, committed = false, failed = false } = {}) {
+    const dropdown = document.getElementById('searchDropdown');
+    const onSearchPage = document.body.classList.contains('screen-search');
+    rememberSearchResults(results);
+    const status = pending ? 'Matching titles…' : failed ? 'Could not refresh matches. Try again.' :
+        results.length ? `${results.length} matching title${results.length === 1 ? '' : 's'}` :
+        committed ? 'No matching titles found.' : 'No titles start with this yet. Keep typing or search all titles.';
+    dropdown.innerHTML = `<div class="search-dropdown-label" role="status">${escapeHtml(status)}</div>` + results.slice(0, 8).map((movie, index) => {
+        const prefix = FlimfyUI.normalize(movie.title).startsWith(FlimfyUI.normalize(query));
+        const title = prefix
+            ? `<mark>${escapeHtml(movie.title.slice(0, query.length))}</mark>${escapeHtml(movie.title.slice(query.length))}`
+            : escapeHtml(movie.title);
+        return `<button type="button" class="search-item" id="search-option-${index}" role="option" aria-selected="false" data-result-id="${escapeHtml(movie.id)}">
+            <img src="${escapeHtml(artworkUrl(movie.image, 'w185'))}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${POSTER_PLACEHOLDER}'">
+            <span class="search-item-info"><span class="search-item-title">${title}</span>
+            <span class="search-item-meta"><span>${escapeHtml(movie.year || '')}</span><span>${FlimfyUI.availabilityLabel(movie)}</span></span></span>
+            <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i></button>`;
+    }).join('') + `<button class="search-all" type="button">Search all titles for “${escapeHtml(query)}” <span aria-hidden="true">↗</span></button>`;
+    dropdown.querySelectorAll('[data-result-id]').forEach(button => {
+        button.addEventListener('click', () => {
+            const movie = results.find(item => String(item.id) === button.dataset.resultId);
+            if (!movie) return;
+            addRecentSearch(movie.title);
+            setSearchExpanded(false);
+            openCardDetails(movie, movie.source === 'tmdb');
+        });
+    });
+    dropdown.querySelector('.search-all').addEventListener('click', () => triggerSearchAgain());
+    highlightedSearchIndex = -1;
+    document.getElementById('searchInput').removeAttribute('aria-activedescendant');
+    setSearchExpanded(!onSearchPage && document.activeElement === document.getElementById('searchInput'));
+    if (onSearchPage) {
+        document.querySelector('.search-discover-state').hidden = true;
+        document.getElementById('searchHeader').textContent = committed ? `Results for “${query}”` : `Titles starting with “${query}”`;
+        const grid = document.getElementById('searchGrid');
+        grid.innerHTML = results.length ? renderCards(results, 'grid-card') :
+            `<div class="search-empty-state" role="status"><strong>${escapeHtml(status)}</strong>${pending ? '' : committed && !failed
+                ? '<span>Can’t find it? Send a title request.</span><button class="btn-request" type="button" data-request-search>Request this title</button>'
+                : '<button class="btn-request" type="button" data-search-retry>Search all titles</button>'}</div>`;
+        grid.querySelector('[data-search-retry]')?.addEventListener('click', () => triggerSearchAgain());
+        grid.querySelector('[data-request-search]')?.addEventListener('click', () => requestMovie(query));
     }
-};
+}
 
-window.clearSearchInput = function() {
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput) {
-        searchInput.value = '';
-        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-        searchInput.focus();
-    }
-};
-
-document.getElementById('searchInput').addEventListener('click', function(e) {
-    if (this.value.trim() !== '') {
-        this.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-});
-
-document.getElementById('searchInput').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-        this.blur(); // Collapse keyboard on mobile after pressing Enter
-    }
-});
-
-document.getElementById('searchInput').addEventListener('input', (e) => {
+async function runTitleSearch(query, committed = false) {
     clearTimeout(searchTimeout);
     const currentId = ++searchRequestId;
     if (searchController) searchController.abort();
-    const q = e.target.value.trim();
-    const dropdown = document.getElementById('searchDropdown');
-    const clearBtn = document.getElementById('clearSearchBtn');
-
-    if (clearBtn) {
-        clearBtn.style.display = e.target.value.length > 0 ? 'block' : 'none';
-    }
-
+    const q = query.trim();
+    document.getElementById('clearSearchBtn').style.display = q ? 'block' : 'none';
     if (!q) {
         renderSearchDiscovery();
+        document.getElementById('searchInput').setAttribute('aria-expanded', 'true');
         return;
     }
-
-    dropdown.innerHTML = '<div class="loader">Searching catalog…</div>';
-    dropdown.classList.add('active');
-    if (document.body.classList.contains('screen-search')) {
-        document.querySelector('.search-discover-state').hidden = true;
-        document.getElementById('searchHeader').textContent = `Searching for “${q}”…`;
-        document.getElementById('searchGrid').innerHTML = '<div class="search-empty-state">Finding your next watch…</div>';
-    }
-
-    searchTimeout = setTimeout(async () => {
+    const key = `${committed ? 'full' : 'prefix'}:${FlimfyUI.normalize(q)}`;
+    const cached = searchResultCache.get(key);
+    const immediate = cached?.results || FlimfyUI.prefixMatches(allMovies, q);
+    if (committed) addRecentSearch(q);
+    renderSearchMatches(q, immediate, { pending: !cached, committed });
+    if (cached && Date.now() - cached.time < 120000) return;
+    const execute = async () => {
         searchController = new AbortController();
         const signal = searchController.signal;
         try {
-            const suggestionPromise = fetchWithTimeout(`/api/suggest?q=${encodeURIComponent(q)}`, { signal }, 1500)
-                .then(response => response.ok ? response.json() : [])
-                .catch(error => {
-                    if (isAbortError(error)) return [];
-                    console.warn('Search suggestions unavailable:', error);
-                    return [];
-                });
-            // Optional suggestions must never delay matching catalogue results.
-            const response = await fetchWithTimeout(`/api/search?q=${encodeURIComponent(q)}`, { signal });
-            const searchData = await response.json();
-            if (currentId !== searchRequestId) return;
-            if (!response.ok || searchData.status !== 'success') throw new Error(searchData.message || 'Search failed');
-            const results = searchData.results || [];
-            const suggestionResponse = results.length ? [] : await suggestionPromise;
-            const suggestions = Array.isArray(suggestionResponse) ? suggestionResponse : [];
-            if (currentId !== searchRequestId) return;
-            if (document.body.classList.contains('screen-search')) {
-                document.getElementById('searchHeader').textContent = `${results.length} result${results.length === 1 ? '' : 's'} for “${q}”`;
-                document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card');
-            }
-            results.forEach(r => {
-                if (r.source === 'tmdb') tmdbMoviesMap[r.id] = r;
-                else if (!allMovies.some(m => String(m.id) === String(r.id))) allMovies.push(r);
-            });
-
-            if (!results.length) {
-                const suggestionMarkup = renderSuggestionMarkup(suggestions);
-                addRecentSearch(q);
-                dropdown.innerHTML = suggestionMarkup + `<div class="empty-search-state"><strong>No match found</strong><span>“${escapeHtml(q)}” isn't in the catalogue yet.</span><div style="margin-top:12px;"><button class="btn-sm btn-sm-primary" type="button" data-request-search><i class="fas fa-paper-plane"></i> Request this title</button></div></div>`;
-                bindSearchSuggestions(dropdown, q);
-                if (document.body.classList.contains('screen-search')) {
-                    const grid = document.getElementById('searchGrid');
-                    grid.innerHTML = dropdown.innerHTML;
-                    bindSearchSuggestions(grid, q);
-                    dropdown.classList.remove('active');
-                }
-                return;
-            }
-
-            addRecentSearch(q);
-            dropdown.innerHTML = results.slice(0, 8).map(r => {
-                const isTMDB = r.source === 'tmdb';
-                const isUpcoming = Boolean(r.is_upcoming);
-                const isAvailable = Boolean(r.is_available);
-                const status = isUpcoming ? 'Upcoming' : (isAvailable ? 'Available' : 'Unavailable');
-                const actionLabel = isUpcoming ? 'Notify' : (isAvailable ? 'View' : 'Request');
-                return `<div class="search-item fade-in" data-result-id="${escapeHtml(r.id)}" data-result-tmdb="${isTMDB}">
-                    <img src="${escapeHtml(artworkUrl(r.image, 'w185'))}" alt="" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'">
-                    <div class="search-item-info"><div class="search-item-title">${escapeHtml(r.title)}</div>
-                    <div class="search-item-meta"><span>${escapeHtml(r.year || '—')}</span><span class="status-pill ${isAvailable ? 'available' : 'request'}">${status}</span></div></div>
-                    <div class="search-actions"><button class="btn-sm ${isAvailable ? 'btn-sm-primary' : 'btn-sm-outline'}" type="button">${actionLabel}</button></div></div>`;
-            }).join('');
-            bindSearchSuggestions(dropdown, q, results);
-            if (document.body.classList.contains('screen-search')) dropdown.classList.remove('active');
+            const response = await fetchWithTimeout(`/api/search?q=${encodeURIComponent(q)}${committed ? '' : '&autocomplete=1'}`, { signal }, committed ? 8000 : 5000);
+            const data = await response.json();
+            if (currentId !== searchRequestId || signal.aborted) return;
+            if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Search failed');
+            const raw = Array.isArray(data.results) ? data.results : [];
+            const results = committed ? raw : FlimfyUI.prefixMatches(raw, q);
+            searchResultCache.set(key, { results, time: Date.now() });
+            if (searchResultCache.size > 80) searchResultCache.delete(searchResultCache.keys().next().value);
+            renderSearchMatches(q, results, { committed });
         } catch (error) {
-            if (isAbortError(error)) return;
-            console.error('Search failed:', error);
-            if (currentId === searchRequestId) {
-                if (document.body.classList.contains('screen-search')) document.getElementById('searchHeader').textContent = 'Search unavailable';
-                dropdown.innerHTML = '<div class="search-empty-state"><strong>Search unavailable</strong><span>Please try again in a moment.</span></div>';
-                if (document.body.classList.contains('screen-search')) {
-                    document.getElementById('searchHeader').textContent = 'Search unavailable';
-                    document.getElementById('searchGrid').innerHTML = '<div class="search-empty-state"><strong>Could not reach the catalogue.</strong><span>Check your connection, then try again.</span><button class="btn-request" type="button" onclick="triggerSearchAgain()">Retry search</button></div>';
-                    dropdown.classList.remove('active');
-                }
-            }
+            if (isAbortError(error) || currentId !== searchRequestId) return;
+            renderSearchMatches(q, immediate, { committed, failed: true });
         }
-    }, 260);
+    };
+    if (committed) await execute();
+    else searchTimeout = setTimeout(execute, 140);
+}
+
+window.triggerSearchAgain = function() {
+    const input = document.getElementById('searchInput');
+    if (!input.value.trim()) { input.focus(); return; }
+    if (!document.body.classList.contains('screen-search')) {
+        closeDetails(); closeMorePanel(); closeInfoModal();
+        document.body.classList.remove('screen-home', 'screen-explore', 'screen-list');
+        document.body.classList.add('screen-search');
+        setActiveNav(1);
+        ['mainContent', 'exploreContent', 'myListContent'].forEach(id => document.getElementById(id).style.display = 'none');
+        document.getElementById('genreDetailPage').classList.remove('open');
+        document.getElementById('searchResultsContent').style.display = 'block';
+    }
+    runTitleSearch(input.value, true);
+    input.blur();
+};
+
+window.clearSearchInput = function() {
+    const input = document.getElementById('searchInput');
+    input.value = '';
+    runTitleSearch('');
+    input.focus();
+};
+
+document.getElementById('searchInput').addEventListener('input', event => runTitleSearch(event.target.value));
+document.getElementById('searchInput').addEventListener('focus', event => {
+    if (event.target.value.trim()) runTitleSearch(event.target.value);
+    else if (document.body.classList.contains('screen-search')) renderSearchDiscovery();
 });
-
-function renderSuggestionMarkup(suggestions) {
-    if (!Array.isArray(suggestions) || !suggestions.length) return '';
-    return `<div class="search-suggestion-group"><div class="search-dropdown-label">Suggestions</div>${suggestions.slice(0, 6).map(item => `
-        <button class="search-suggestion" type="button" data-suggestion="${escapeHtml(item)}">
-            <i class="fas fa-magnifying-glass"></i><span>${escapeHtml(item)}</span>
-        </button>`).join('')}</div>`;
-}
-
-function bindSearchSuggestions(dropdown, query, results = []) {
-    dropdown.querySelectorAll('[data-suggestion]').forEach(button => {
-        button.addEventListener('click', () => {
-            const input = document.getElementById('searchInput');
-            input.value = button.dataset.suggestion || '';
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-        });
-    });
-    dropdown.querySelector('[data-request-search]')?.addEventListener('click', () => requestSilent(query));
-    dropdown.querySelectorAll('[data-result-id]').forEach(item => {
-        item.addEventListener('click', () => {
-            const movie = results.find(result => String(result.id) === String(item.dataset.resultId));
-            if (!movie) return;
-            addRecentSearch(movie.title || query);
-            openDetails(String(movie.id), item.dataset.resultTmdb === 'true');
-            dropdown.classList.remove('active');
-        });
-    });
-}
+document.getElementById('searchInput').addEventListener('keydown', event => {
+    const dropdown = document.getElementById('searchDropdown');
+    const options = dropdown.classList.contains('active') ? Array.from(dropdown.querySelectorAll('[role="option"]')) : [];
+    if (['ArrowDown', 'ArrowUp'].includes(event.key) && options.length) {
+        event.preventDefault();
+        highlightedSearchIndex = highlightedSearchIndex < 0
+            ? (event.key === 'ArrowDown' ? 0 : options.length - 1)
+            : (highlightedSearchIndex + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
+        options.forEach((option, i) => option.setAttribute('aria-selected', String(i === highlightedSearchIndex)));
+        const active = options[highlightedSearchIndex];
+        event.target.setAttribute('aria-activedescendant', active.id);
+        active.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter') {
+        event.preventDefault();
+        if (highlightedSearchIndex >= 0 && options[highlightedSearchIndex]) options[highlightedSearchIndex].click();
+        else triggerSearchAgain();
+    } else if (event.key === 'Escape') {
+        setSearchExpanded(false);
+    }
+});
 
 
 // Hide dropdown if clicked outside
@@ -1762,12 +1774,12 @@ document.addEventListener('click', (e) => {
     const dropdown = document.getElementById('searchDropdown');
     const container = document.querySelector('.search-section');
     if (!container.contains(e.target)) {
-        dropdown.classList.remove('active');
+        setSearchExpanded(false);
     }
 });
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-        document.getElementById('searchDropdown').classList.remove('active');
+        setSearchExpanded(false);
         closeTrailer();
         closeWebPlayer();
     }
@@ -1879,9 +1891,7 @@ document.addEventListener('keydown', (e) => {
                 document.getElementById('castSection').innerHTML = '';
                 // Only show "upcoming" UI if the movie is genuinely pre-release.
                 // A TMDB result that has already released should show the Request flow.
-                const isGenuinelyUpcoming = movie.is_upcoming === true
-                    || movie.availability_state === 'upcoming'
-                    || (movie.release_date && movie.release_date > new Date().toISOString().slice(0, 10));
+                const isGenuinelyUpcoming = FlimfyUI.futureRelease(movie);
                 if (isGenuinelyUpcoming) {
                     renderUpcomingActions(movie);
                 } else {

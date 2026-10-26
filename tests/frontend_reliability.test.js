@@ -29,8 +29,7 @@ assert.match(source, /Never block the Home shell behind a full-page loader/);
 assert.match(source, /document\.body\.classList\.remove\('app-booting'\)/);
 assert.match(source, /screen\.classList\.add\('is-complete'\)/);
 assert.match(source, /if \(isAbortError\(error\)\) return;/);
-assert.match(source, /Search suggestions unavailable/);
-assert.match(source, /const suggestions = Array\.isArray\(suggestionResponse\) \? suggestionResponse : \[\]/);
+assert.match(source, /&autocomplete=1/);
 assert.match(source, /String\(activeDetailsMovieId\) !== mutationMovieId/);
 assert.match(source, /poster-placeholder\.svg/);
 assert.match(source, /IMAGE_FALLBACK_GRADIENT/);
@@ -63,33 +62,8 @@ assert.equal(
 assert.match(source, /Complete Season/);
 assert.match(source, /Episode \$\{epDisplayNum\} Combined/);
 
-const styles = fs.readFileSync(
-  path.join(__dirname, '..', 'static', 'miniapp', 'app.css'),
-  'utf8'
-);
-assert.match(styles, /\.more-panel\.open\s*\{[\s\S]*pointer-events:\s*auto/);
-assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel\s*\{[\s\S]*display:\s*block/);
-assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.more-panel-grid button\s*\{[\s\S]*display:\s*flex/);
-assert.match(source, /const posters = \[GENRE_ARTWORK\[genre\.id\]\];/);
-assert.doesNotMatch(source, /const posters = Array\.isArray\(catalogueGenre\.posters\)/);
+const styles = fs.readFileSync(path.join(__dirname, '..', 'static', 'miniapp', 'cinema.css'), 'utf8');
 assert.match(source, /const movieDetailsCache = new Map\(\)/);
-assert.match(source, /detailsPage\.classList\.remove\('is-loading'\)/);
-assert.match(source, /const cachedDetails = movieDetailsCache\.get\(String\(id\)\)/);
-assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.hero-slider\s*\{[\s\S]*border-radius:\s*24px/);
-assert.match(styles, /@media \(min-width: 700px\)[\s\S]*\.movie-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(6/);
-assert.match(styles, /\.more-panel-grid\s*\{[\s\S]*display:\s*grid\s*!important/);
-assert.match(styles, /\.more-panel-grid button\s*\{[\s\S]*display:\s*flex\s*!important/);
-assert.match(styles, /body\.screen-explore #exploreContent \.genre-card-grid\s*\{[\s\S]*grid-template-columns:\s*repeat\(4/);
-assert.match(styles, /body\.screen-explore #exploreContent \.genre-card-name::after\s*\{[\s\S]*content:\s*'Explore →'/);
-assert.match(styles, /body\.screen-explore \.search-section\s*\{[\s\S]*display:\s*none !important/);
-assert.match(styles, /body\.screen-explore #exploreContent \.browse-surprise-panel\s*\{[\s\S]*display:\s*none !important/);
-assert.match(styles, /\.bottom-nav\s*\{[\s\S]*flex-direction:\s*row !important/);
-assert.match(styles, /\.bottom-nav \.nav-item\s*\{[\s\S]*flex-direction:\s*column !important/);
-assert.match(styles, /\.bottom-nav\s*\{[\s\S]*max-height:\s*84px !important/);
-assert.match(styles, /\.bottom-nav\s*\{[\s\S]*top:\s*auto !important[\s\S]*bottom:/);
-assert.match(styles, /@media \(min-width: 900px\)[\s\S]*\.hero-slider\s*\{[\s\S]*height:\s*clamp\(360px,\s*34vw,\s*460px\) !important/);
-assert.match(styles, /@media \(min-width: 900px\)[\s\S]*\.hero-slider\s*\{[\s\S]*max-width:\s*none !important/);
-assert.match(styles, /@media \(min-width: 900px\)[\s\S]*\.hero-info\s*\{[\s\S]*width:\s*min\(620px,\s*54%\)/);
 const template = fs.readFileSync(
   path.join(__dirname, '..', 'templates', 'mini_app.html'),
   'utf8'
@@ -103,7 +77,7 @@ assert.match(template, /id="rowUpcoming"/);
 assert.match(template, /id="upcomingScroll"/);
 assert.match(template, /onclick="showUpcoming\(\)"/);
 assert.doesNotMatch(template, /Upcoming titles/);
-assert.match(template, /app\.js'\) }}\?v=cinema-1/);
+assert.match(template, /app\.js'\) }}\?v=studio-2/);
 assert.match(source, /heroSlider\.style\.backgroundImage/);
 assert.match(source, /const heroArtwork = movie\.backdrop \|\| movie\.image/);
 assert.match(source, /const detailsArtwork = movie\.backdrop \|\| movie\.image/);
@@ -111,19 +85,15 @@ assert.match(source, /ensureHomeSectionRow\(rowId, title, icon, caption\)/);
 assert.match(source, /rowUpcoming/);
 assert.match(source, /window\.showUpcoming = function\(\)[\s\S]*?closeMorePanel\(\)[\s\S]*?showHome\(\)[\s\S]*?getElementById\('rowUpcoming'\)[\s\S]*?scrollIntoView\(\{ behavior: 'smooth', block: 'center' \}\)/);
 assert.doesNotMatch(source, /Upcoming titles/);
-assert.match(source, /flimfybox-home-section-\$\{cacheKey\}-v3/);
+assert.match(source, /flimfybox-home-section-\$\{cacheKey\}-v4/);
 assert.match(source, /Stale-while-refresh/);
 assert.match(source, /refreshHomeSection\(url, cacheKey, storageKey\)/);
 assert.match(source, /return cached\.data/);
 assert.match(source, /heroTimer = setInterval\(\(\) => stepHero\(1, false\), 6500\)/);
 assert.match(source, /getElementById\('heroTitle'\)/);
-assert.match(styles, /\.hero-info\s*\{[\s\S]*padding:\s*0 !important[\s\S]*border:\s*0 !important[\s\S]*background:\s*transparent !important[\s\S]*box-shadow:\s*none !important/);
-assert.match(styles, /@media \(max-width: 699px\)[\s\S]*\.dp-header[\s\S]*top: max\(44px, calc\(env\(safe-area-inset-top, 0px\) \+ 18px\)\)/);
 assert.match(template, /class="btn-back details-back-button"[^>]*onclick="closeDetails\(\)"[^>]*>[\s\S]*<span>Back<\/span>/);
 assert.equal((template.match(/class="btn-back details-back-button"/g) || []).length, 2);
 assert.equal((template.match(/onclick="closeDetails\(\)"/g) || []).length, 1);
-assert.match(styles, /\.details-back-button[\s\S]*min-height:\s*44px/);
-assert.match(styles, /\.dp-header[\s\S]*env\(safe-area-inset-top, 0px\)/);
 assert.doesNotMatch(template, /class="header-close"[^>]*onclick="tg\.close\(\)"/);
 assert.match(source, /tg\.BackButton/);
 assert.match(source, /backButton\.show\(\)/);
@@ -136,3 +106,7 @@ assert.deepEqual(mutationGate(false), { accepted: true, inFlight: true });
 assert.deepEqual(mutationGate(true), { accepted: false, inFlight: true });
 
 console.log('frontend reliability checks passed');
+assert.match(styles, /data-theme="light"/);
+assert.match(styles, /prefers-reduced-motion/);
+assert.match(styles, /:focus-visible/);
+assert.doesNotMatch(template, /miniapp\/app\.css/);

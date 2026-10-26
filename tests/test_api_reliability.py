@@ -12,6 +12,16 @@ def test_search_rejects_unbounded_query(webapp_factory):
     assert response.status_code == 400
 
 
+def test_health_exposes_running_revision_without_database_work(webapp_factory, monkeypatch):
+    monkeypatch.setenv('RENDER_GIT_COMMIT', 'abc123')
+    app, _, connection = webapp_factory()
+    response = app.test_client().get('/healthz')
+    assert response.status_code == 200
+    assert response.json['revision'] == 'abc123'
+    assert response.headers['Cache-Control'] == 'no-store'
+    assert not connection.queries
+
+
 def test_invalid_positive_identifier_is_rejected(webapp_factory):
     app, _captured, _connection = webapp_factory()
     assert app.test_client().post('/api/gen_link/0').status_code == 400
