@@ -79,7 +79,8 @@ def test_delete_queue_uses_database_clock_for_deadlines():
 def test_auto_delete_worker_retries_failed_telegram_deletions():
     worker_source = MAIN_SOURCE[MAIN_SOURCE.index("async def auto_delete_worker("):]
     assert "Auto-delete retry needed" in worker_source
-    assert "else:\n                        cur.execute(\"DELETE FROM auto_delete_queue" in worker_source
+    assert "deleted_ids.append(row_id)" in worker_source
+    assert "await run_async(_remove_deleted_messages, deleted_ids)" in worker_source
 
 
 def test_tracking_schedules_direct_delete_and_durable_queue():

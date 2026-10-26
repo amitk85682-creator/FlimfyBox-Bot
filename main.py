@@ -10,6 +10,7 @@ import threading
 import asyncio
 import logging  # Logging import zaroori hai
 import random
+import uuid
 import requests
 import signal
 import sys
@@ -23,7 +24,7 @@ import aiohttp
 # import anthropic  # Agar zaroorat ho toh uncomment karein
 from flask import jsonify
 from flask_cors import CORS
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, quote, unquote
 from collections import defaultdict
 from telegram.error import RetryAfter, TelegramError
@@ -66,6 +67,11 @@ poster_cache = FastCache(ttl_seconds=3600)
 # Toggle lightweight search-stage timing instrumentation with env var SEARCH_TIMING=1
 SEARCH_TIMING_ENABLED = os.environ.get('SEARCH_TIMING', '0') == '1'
 GOOGLE_SUGGESTION_TIMEOUT_SECONDS = 1.5
+SEARCH_POSTER_TIMEOUT_SECONDS = 2.0
+GEMINI_RECONCILIATION_TIMEOUT_SECONDS = 25
+SUPERBATCH_IDENTITY_TIMEOUT_SECONDS = 35
+SUPERBATCH_MOVIE_TIMEOUT_SECONDS = 100
+SUPERBATCH_FILE_TIMEOUT_SECONDS = 180
 
 # ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
@@ -366,7 +372,7 @@ try:
     if pool_url:
         db_pool = psycopg2.pool.ThreadedConnectionPool(
             2, 8,  # Supabase Free Tier (60 connections) ke liye optimized
-            dsn=pool_url
+            dsn=pool_url, connect_timeout=10
         )
         logger.info("✅ Database Connection Pool Created (Thread-Safe)!")
 except Exception as e:
@@ -472,8 +478,14 @@ MAX_REQUESTS_PER_MINUTE = int(os.environ.get('MAX_REQUESTS_PER_MINUTE', '10'))
 messages_to_auto_delete = defaultdict(list)
 
 # ✅ NEW GLOBAL VARIABLES FOR BATCH SESSION
-BATCH_SESSION = {'active': False, 'movie_id': None, 'movie_title': None, 'file_count': 0, 'admin_id': None}
-SUPER_BATCH_SESSION = {'active': False, 'admin_id': None, 'files': []}
+BATCH_SESSION = {
+    'active': False, 'movie_id': None, 'movie_title': None,
+    'file_count': 0, 'admin_id': None, 'batch_id': None,
+}
+SUPER_BATCH_SESSION = {
+    'active': False, 'admin_id': None, 'files': [],
+    'batch_id': None, 'status': 'idle',
+}
 
 
 class BatchUploadCoordinator:
@@ -482,22 +494,63 @@ class BatchUploadCoordinator:
     def __init__(self):
         self._sessions = {}
 
-    def begin(self, admin_id, movie_id, start_update_id=None):
+    def begin(
+        self, admin_id, movie_id, start_update_id=None, *,
+        kind="movie", batch_id=None, starting=False,
+    ):
+        previous = self._sessions.get(admin_id)
+        if previous and not previous.get("finalization_started"):
+            previous.update({
+                "movie_id": movie_id if movie_id is not None else previous.get("movie_id"),
+                "kind": kind,
+                "batch_id": batch_id or previous.get("batch_id"),
+                "starting": starting,
+            })
+            if start_update_id is not None:
+                previous["start_update_id"] = start_update_id
+            if not starting and previous.get("ready"):
+                previous["ready"].set()
+            return previous
+
         session = {
             "admin_id": admin_id,
             "movie_id": movie_id,
             "start_update_id": start_update_id,
+            "kind": kind,
+            "batch_id": batch_id,
+            "starting": starting,
             "pending": {},
             "closing_update_id": None,
             "finalization_started": False,
+            "ready": asyncio.Event(),
         }
+        if not starting:
+            session["ready"].set()
         self._sessions[admin_id] = session
         return session
 
+    def reserve_superbatch(self, admin_id, start_update_id):
+        session = self._sessions.get(admin_id)
+        if session and session.get("kind") == "super" and not session.get("finalization_started"):
+            return session
+        return self.begin(
+            admin_id, None, start_update_id, kind="super",
+            batch_id=str(uuid.uuid4()), starting=True,
+        )
+
+    @staticmethod
+    def _command(message):
+        text = str(getattr(message, "text", "") or "").strip()
+        match = re.match(r"^/([A-Za-z0-9_]+)(?:@\w+)?(?:\s|$)", text)
+        return match.group(1).casefold() if match else ""
+
     @staticmethod
     def _is_done_command(message):
-        text = str(getattr(message, "text", "") or "")
-        return bool(re.match(r"^/done(?:@\w+)?(?:\s|$)", text, re.IGNORECASE))
+        return BatchUploadCoordinator._command(message) == "done"
+
+    @staticmethod
+    def _is_superdone_command(message):
+        return BatchUploadCoordinator._command(message) == "superdone"
 
     @staticmethod
     def _is_upload(message):
@@ -513,23 +566,56 @@ class BatchUploadCoordinator:
         if not user or not message or not self._is_private_message(message):
             return None
 
-        session = self._sessions.get(user.id)
-        if (
-            not session
-            or not BATCH_SESSION.get("active")
-            or BATCH_SESSION.get("admin_id") != user.id
-            or BATCH_SESSION.get("movie_id") != session["movie_id"]
-        ):
+        command = self._command(message)
+        update_id = getattr(update, "update_id", None)
+        if command == "superbatch" and update_id is not None and user.id in ADMIN_IDS:
+            self.reserve_superbatch(user.id, update_id)
+            return None
+        if command == "batch" and update_id is not None and user.id in ADMIN_IDS:
+            existing = self._sessions.get(user.id)
+            if (
+                existing is None
+                or existing.get("start_failed")
+                or existing.get("finalization_started")
+            ):
+                self.begin(
+                    user.id, None, update_id, kind="movie",
+                    batch_id=str(uuid.uuid4()), starting=True,
+                )
             return None
 
-        update_id = getattr(update, "update_id", None)
+        session = self._sessions.get(user.id)
         if update_id is None:
             return None
+        if (
+            session
+            and session.get("start_failed")
+            and self._is_upload(message)
+        ):
+            self._sessions.pop(user.id, None)
+            session = None
+        if session is None and self._is_upload(message) and user.id in ADMIN_IDS:
+            if not (
+                BATCH_SESSION.get("active")
+                or SUPER_BATCH_SESSION.get("active")
+            ):
+                session = self.begin(
+                    user.id, None, update_id, kind="movie",
+                    batch_id=str(uuid.uuid4()), starting=True,
+                )
+        if not session or not self._session_is_active(session, user.id):
+            return None
+
         start_update_id = session["start_update_id"]
         if start_update_id is not None and update_id <= start_update_id:
             return None
 
-        if self._is_done_command(message):
+        is_done = (
+            self._is_superdone_command(message)
+            if session["kind"] == "super"
+            else self._is_done_command(message)
+        )
+        if is_done:
             if session["closing_update_id"] is None:
                 session["closing_update_id"] = update_id
             return None
@@ -540,9 +626,31 @@ class BatchUploadCoordinator:
         if cutoff is not None and update_id > cutoff:
             return None
 
-        future = asyncio.get_running_loop().create_future()
-        session["pending"][update_id] = future
+        future = session["pending"].get(update_id)
+        if future is None:
+            future = asyncio.get_running_loop().create_future()
+            session["pending"][update_id] = future
         return session, update_id, future
+
+    @staticmethod
+    def _session_is_active(session, admin_id):
+        if session.get("closing_update_id") is not None:
+            return True
+        if session.get("starting"):
+            return True
+        if session.get("kind") == "super":
+            return bool(
+                SUPER_BATCH_SESSION.get("active")
+                and SUPER_BATCH_SESSION.get("admin_id") == admin_id
+            )
+        return bool(
+            BATCH_SESSION.get("active")
+            and BATCH_SESSION.get("admin_id") == admin_id
+            and (
+                session.get("movie_id") is None
+                or BATCH_SESSION.get("movie_id") == session.get("movie_id")
+            )
+        )
 
     @staticmethod
     def _is_private_message(message):
@@ -555,13 +663,9 @@ class BatchUploadCoordinator:
         if not user or not message:
             return True
         session = self._sessions.get(user.id)
-        if (
-            not session
-            or not BATCH_SESSION.get("active")
-            or BATCH_SESSION.get("admin_id") != user.id
-            or BATCH_SESSION.get("movie_id") != session["movie_id"]
-            or not self._is_upload(message)
-        ):
+        if not session or not self._is_upload(message):
+            return True
+        if not self._session_is_active(session, user.id):
             return True
         cutoff = session["closing_update_id"]
         update_id = getattr(update, "update_id", None)
@@ -577,14 +681,18 @@ class BatchUploadCoordinator:
     def is_active_done_update(self, update):
         user = getattr(update, "effective_user", None)
         message = getattr(update, "effective_message", None)
-        if not user or not message or not self._is_done_command(message):
+        if not user or not message:
             return False
         session = self._sessions.get(user.id)
+        if not session:
+            return False
+        is_done = (
+            self._is_superdone_command(message)
+            if session["kind"] == "super"
+            else self._is_done_command(message)
+        )
         return bool(
-            session
-            and BATCH_SESSION.get("active")
-            and BATCH_SESSION.get("admin_id") == user.id
-            and BATCH_SESSION.get("movie_id") == session["movie_id"]
+            is_done and self._session_is_active(session, user.id)
         )
 
     async def wait_for_prior_uploads(self, admin_id):
@@ -601,6 +709,20 @@ class BatchUploadCoordinator:
         if pending:
             await asyncio.gather(*pending)
 
+    async def wait_until_ready(self, admin_id):
+        session = self._sessions.get(admin_id)
+        if session and session.get("ready"):
+            await session["ready"].wait()
+        return session
+
+    def mark_ready(self, admin_id):
+        session = self._sessions.get(admin_id)
+        if session:
+            session["starting"] = False
+            if session.get("ready"):
+                session["ready"].set()
+        return session
+
     def claim_finalization(self, admin_id):
         session = self._sessions.get(admin_id)
         if not session or session["finalization_started"]:
@@ -608,13 +730,17 @@ class BatchUploadCoordinator:
         session["finalization_started"] = True
         return True
 
+    def finish(self, admin_id):
+        return self._sessions.pop(admin_id, None)
+
     @staticmethod
     def complete_upload(ticket):
         if not ticket:
             return
-        _session, _update_id, future = ticket
+        session, update_id, future = ticket
         if not future.done():
             future.set_result(None)
+        session["pending"].pop(update_id, None)
 
 
 class BatchAwareUpdateProcessor(BaseUpdateProcessor):
@@ -646,6 +772,49 @@ class BatchAwareUpdateProcessor(BaseUpdateProcessor):
 
 
 batch_upload_coordinator = BatchUploadCoordinator()
+
+
+def _batch_event(event, batch_id, stage, *, movie_index=None, movie_total=None,
+                 file_index=None, file_total=None, duration_ms=None, outcome=None):
+    logger.info(
+        "batch_event=%s batch_id=%s stage=%s movie=%s/%s file=%s/%s "
+        "duration_ms=%s outcome=%s",
+        event,
+        batch_id or "unassigned",
+        stage,
+        movie_index if movie_index is not None else "-",
+        movie_total if movie_total is not None else "-",
+        file_index if file_index is not None else "-",
+        file_total if file_total is not None else "-",
+        duration_ms if duration_ms is not None else "-",
+        outcome or "-",
+    )
+
+
+async def _safe_batch_status_edit(status_message, text, **kwargs):
+    if status_message is None:
+        return False
+    try:
+        await asyncio.wait_for(status_message.edit_text(text, **kwargs), timeout=10)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Batch status edit failed; processing continues (error_class=%s)",
+            type(exc).__name__,
+        )
+        return False
+
+
+async def _safe_batch_reply(message, text, **kwargs):
+    try:
+        return await asyncio.wait_for(message.reply_text(text, **kwargs), timeout=10)
+    except Exception as exc:
+        logger.warning(
+            "Batch status message could not be sent (error_class=%s)",
+            type(exc).__name__,
+        )
+        return None
+
 
 # Validate required environment variables
 if not TELEGRAM_BOT_TOKEN:
@@ -815,7 +984,7 @@ async def get_poster_bytes(url):
             'Referer': 'https://www.imdb.com/'
         }
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
             async with session.get(url, headers=headers) as response:
                 if response.status == 200:
                     image_data = await response.read()
@@ -1454,12 +1623,23 @@ Required JSON example:
 {{"title":"Movie Name","year":"2026","language":"Hindi Dub, English","extra_info":"Episode 12","category":"Web Series"}}
 """
 
-    last_error = None
-    for key in gemini_keys:
+    last_error_class = None
+    for attempt, key in enumerate(gemini_keys[:3]):
+        started_at = time.monotonic()
         try:
             genai.configure(api_key=key)
             model = genai.GenerativeModel('gemini-flash-latest')
-            response = await run_async(model.generate_content, prompt)
+            response = await asyncio.wait_for(
+                run_async(
+                    model.generate_content,
+                    prompt,
+                    request_options={
+                        "timeout": GEMINI_RECONCILIATION_TIMEOUT_SECONDS,
+                        "retry": None,
+                    },
+                ),
+                timeout=GEMINI_RECONCILIATION_TIMEOUT_SECONDS + 1,
+            )
             response_text = (getattr(response, "text", "") or "").strip()
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if not json_match:
@@ -1484,16 +1664,37 @@ Required JSON example:
                 final_data.get("title"),
                 final_data.get("year") or "no year",
             )
+            logger.info(
+                "batch_event=IDENTITY_RECONCILIATION_COMPLETED "
+                "duration_ms=%d outcome=provider",
+                int((time.monotonic() - started_at) * 1000),
+            )
             return final_data
         except Exception as exc:
-            last_error = exc
+            last_error_class = type(exc).__name__
             error_msg = str(exc).lower()
             if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-                logger.warning("⚠️ Evidence Gemini key quota exhausted; trying next key")
+                logger.warning(
+                    "Evidence Gemini attempt %s quota exhausted; trying next configured key",
+                    attempt + 1,
+                )
             else:
-                logger.warning("⚠️ Evidence Gemini key failed; trying next key: %s", exc)
+                logger.warning(
+                    "Evidence Gemini attempt %s failed with %s",
+                    attempt + 1,
+                    last_error_class,
+                )
+            if attempt < min(len(gemini_keys), 3) - 1:
+                await asyncio.sleep(min(0.5 * (2 ** attempt) + random.random() * 0.25, 2.0))
 
-    logger.error("Evidence Engine reconciliation failed on all keys: %s", last_error)
+    logger.error(
+        "Evidence Engine reconciliation failed after bounded attempts; "
+        "last_error_class=%s outcome=local_fallback",
+        last_error_class or "NoConfiguredKey",
+    )
+    logger.info(
+        "batch_event=IDENTITY_RECONCILIATION_COMPLETED outcome=local_fallback"
+    )
     return fallback
 
 
@@ -2110,6 +2311,7 @@ def get_last_similar_request_for_user(user_id: int, title: str, minutes_window: 
     if not conn:
         return None
 
+    cur = None
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -2190,37 +2392,34 @@ def user_burst_count(user_id: int, window_seconds: int = 60):
 USER_TEXT_DELETE_SECONDS = 5 * 60
 USER_FILE_DELETE_SECONDS = 2 * 60
 
-async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
-    """Messages ko DB me save karta hai taaki restart hone par bhi yaad rahe"""
+def _save_delete_queue(bot_username, chat_id, message_ids, delay):
+    """Persist deletion deadlines in a worker thread, never on the bot loop."""
+    conn = get_db_connection()
+    if not conn:
+        return
     try:
-        bot_info = await context.bot.get_me()
-        bot_username = bot_info.username
-        
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                for msg_id in message_ids:
-                    cur.execute(
-                        """
-                        INSERT INTO auto_delete_queue
-                            (bot_username, chat_id, message_id, delete_at)
-                        VALUES (%s, %s, %s, NOW() + (%s * INTERVAL '1 second'))
-                        """,
-                        (bot_username, chat_id, msg_id, delay)
-                    )
-                conn.commit()
-                cur.close()
-                logger.info(
-                    "Auto-delete queued for chat=%s messages=%s delay=%ss bot=%s",
-                    chat_id, message_ids, delay, bot_username
+        with conn.cursor() as cur:
+            for msg_id in message_ids:
+                cur.execute(
+                    """INSERT INTO auto_delete_queue
+                        (bot_username, chat_id, message_id, delete_at)
+                    VALUES (%s, %s, %s, NOW() + (%s * INTERVAL '1 second'))""",
+                    (bot_username, chat_id, msg_id, delay),
                 )
-            except Exception as e:
-                logger.error(f"Error saving to delete queue: {e}")
-            finally:
-                close_db_connection(conn)
+        conn.commit()
+    finally:
+        close_db_connection(conn)
+
+
+async def add_messages_to_db_queue(context, chat_id, message_ids, delay):
+    """Persist deletion deadlines without delaying concurrent user messages."""
+    try:
+        bot_username = context.bot.username
+        if not bot_username:
+            bot_username = (await context.bot.get_me()).username
+        await run_async(_save_delete_queue, bot_username, chat_id, message_ids, delay)
     except Exception as e:
-        logger.error(f"Failed to get bot info for delete queue: {e}")
+        logger.error(f"Error saving to delete queue: {e}")
 
 async def delete_messages_after_delay(context, chat_id, message_ids, delay=USER_TEXT_DELETE_SECONDS):
     """Persist messages for deletion after restarts."""
@@ -2388,6 +2587,500 @@ def close_db_connection(conn):
             db_pool.putconn(conn)
         except Exception:
             pass
+
+
+BATCH_PROCESS_ID = str(uuid.uuid4())
+_RECOVERED_BATCH_IDS = set()
+
+
+def _batch_job_create(batch_id, admin_id, kind, start_update_id=None, bot_id=None):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while creating batch checkpoint")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ingestion_batches
+                    (id, admin_id, bot_id, kind, status, start_update_id,
+                     lease_owner, lease_until)
+                VALUES (
+                    %s, %s, %s, %s, 'collecting', %s, %s,
+                    CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+                )
+                ON CONFLICT (id) DO NOTHING
+                """,
+                (
+                    batch_id, admin_id, bot_id, kind, start_update_id,
+                    BATCH_PROCESS_ID,
+                ),
+            )
+        conn.commit()
+        return batch_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_job_update(batch_id, **fields):
+    allowed = {
+        "status", "closing_update_id", "movie_id", "movie_metadata",
+        "lease_owner", "completed_at",
+    }
+    updates = {key: value for key, value in fields.items() if key in allowed}
+    if not updates:
+        return
+    assignments = []
+    values = []
+    for key, value in updates.items():
+        if key == "movie_metadata":
+            assignments.append("movie_metadata = %s::jsonb")
+            values.append(json.dumps(value or {}))
+        elif key == "completed_at" and value == "now":
+            assignments.append("completed_at = CURRENT_TIMESTAMP")
+        else:
+            assignments.append(f"{key} = %s")
+            values.append(value)
+    assignments.extend([
+        "updated_at = CURRENT_TIMESTAMP",
+        "last_progress_at = CURRENT_TIMESTAMP",
+    ])
+    if "status" in updates:
+        if (
+            updates["status"] in ("collecting", "processing")
+            and updates.get("lease_owner", BATCH_PROCESS_ID) is not None
+        ):
+            assignments.append(
+                "lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes'"
+            )
+        else:
+            assignments.append("lease_until = NULL")
+    elif "lease_owner" in updates:
+        if updates["lease_owner"] is not None:
+            assignments.append(
+                "lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes'"
+            )
+        else:
+            assignments.append("lease_until = NULL")
+    else:
+        assignments.append(
+            "lease_until = CASE WHEN status IN ('collecting', 'processing') "
+            "AND lease_owner IS NOT NULL THEN CURRENT_TIMESTAMP + "
+            "INTERVAL '5 minutes' ELSE lease_until END"
+        )
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while updating batch checkpoint")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ingestion_batches SET "
+                + ", ".join(assignments)
+                + " WHERE id = %s",
+                values + [batch_id],
+            )
+            if cur.rowcount != 1:
+                raise LookupError("Batch checkpoint no longer exists")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_active_heartbeat():
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while renewing batch leases")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingestion_batches
+                SET lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE lease_owner = %s
+                  AND status IN ('collecting', 'processing')
+                """,
+                (BATCH_PROCESS_ID,),
+            )
+            cur.execute(
+                """
+                UPDATE ingestion_batch_items
+                SET lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE lease_owner = %s AND state = 'processing'
+                """,
+                (BATCH_PROCESS_ID,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_item_create(batch_id, update_id, message, record):
+    media = message.document or message.video
+    chat = getattr(message, "chat", None)
+    if not media or chat is None or update_id is None:
+        raise ValueError("Batch file update is missing its Telegram message reference")
+    media_type = "video" if message.video else "document"
+    evidence = {
+        "caption_evidence": record.get("caption_evidence") or {},
+        "filename_evidence": record.get("filename_evidence") or {},
+        "forward_source": record.get("forward_source") or {},
+        "thumb_id": record.get("thumb_id"),
+    }
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while accepting batch file")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ingestion_batch_items
+                    (batch_id, update_id, source_chat_id, source_message_id,
+                     media_type, file_id, file_unique_id, file_name, file_size,
+                     caption, evidence)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (batch_id, update_id) DO UPDATE
+                    SET updated_at = ingestion_batch_items.updated_at
+                RETURNING id, state, stage
+                """,
+                (
+                    batch_id, update_id, chat.id, message.message_id,
+                    media_type, getattr(media, "file_id", None),
+                    getattr(media, "file_unique_id", None),
+                    record.get("file_name") or getattr(media, "file_name", "") or "",
+                    getattr(media, "file_size", 0) or 0,
+                    message.caption or message.text or "",
+                    json.dumps(evidence),
+                ),
+            )
+            result = cur.fetchone()
+        conn.commit()
+        if not result:
+            raise RuntimeError("Batch file checkpoint insert returned no row")
+        return result[0]
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_item_update(item_id, **fields):
+    allowed = {
+        "state", "stage", "attempts", "movie_id", "movie_file_id",
+        "storage_map", "storage_pending_chat", "error_class", "error_detail",
+        "retry_after_at",
+    }
+    updates = {key: value for key, value in fields.items() if key in allowed}
+    if not updates:
+        return
+    assignments = []
+    values = []
+    for key, value in updates.items():
+        if key == "storage_map":
+            assignments.append("storage_map = %s::jsonb")
+            values.append(json.dumps(value or {}))
+        else:
+            assignments.append(f"{key} = %s")
+            values.append(value)
+    assignments.append("updated_at = CURRENT_TIMESTAMP")
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while updating batch file")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ingestion_batch_items SET "
+                + ", ".join(assignments)
+                + " WHERE id = %s",
+                values + [item_id],
+            )
+            if cur.rowcount != 1:
+                raise LookupError("Batch file checkpoint no longer exists")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_item_fetch(item_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while reading batch file")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, batch_id, update_id, source_chat_id, source_message_id,
+                       media_type, file_id, file_unique_id, file_name, file_size,
+                       caption, evidence, state, stage, attempts, movie_id,
+                       movie_file_id, storage_map, storage_pending_chat,
+                       retry_after_at
+                FROM ingestion_batch_items WHERE id = %s
+                """,
+                (item_id,),
+            )
+            return cur.fetchone()
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_items_fetch(batch_id, unfinished_only=False):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while reading batch files")
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT id, batch_id, update_id, source_chat_id, source_message_id,
+                       media_type, file_id, file_unique_id, file_name, file_size,
+                       caption, evidence, state, stage, attempts, movie_id,
+                       movie_file_id, storage_map, storage_pending_chat,
+                       retry_after_at
+                FROM ingestion_batch_items WHERE batch_id = %s
+            """
+            if unfinished_only:
+                query += " AND state IN ('pending', 'processing', 'failed')"
+            cur.execute(query + " ORDER BY update_id, id", (batch_id,))
+            return cur.fetchall()
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_job_fetch(batch_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while reading batch")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, admin_id, kind, status, start_update_id,
+                       closing_update_id, movie_id, movie_metadata,
+                       lease_owner, lease_until
+                FROM ingestion_batches WHERE id = %s
+                """,
+                (batch_id,),
+            )
+            return cur.fetchone()
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_job_claim(batch_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while claiming batch recovery")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingestion_batches
+                SET status = 'processing',
+                    lease_owner = %s,
+                    lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                  AND status IN ('collecting', 'processing', 'failed', 'completed_with_errors')
+                  AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP
+                       OR lease_owner = %s)
+                RETURNING id
+                """,
+                (BATCH_PROCESS_ID, batch_id, BATCH_PROCESS_ID),
+            )
+            claimed = cur.fetchone()
+        conn.commit()
+        return bool(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_item_claim(item_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while claiming batch file")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingestion_batch_items
+                SET state = 'processing', attempts = attempts + 1,
+                    lease_owner = %s,
+                    lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                    updated_at = CURRENT_TIMESTAMP,
+                    error_class = NULL, error_detail = NULL
+                WHERE id = %s
+                  AND (
+                      state = 'pending'
+                      OR (state = 'processing' AND lease_until < CURRENT_TIMESTAMP)
+                  )
+                RETURNING id
+                """,
+                (BATCH_PROCESS_ID, item_id),
+            )
+            claimed = cur.fetchone()
+        conn.commit()
+        return bool(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_job_snapshot(batch_id, admin_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while reading batch status")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT b.id, b.kind, b.status, b.created_at, b.last_progress_at,
+                       COUNT(i.id),
+                       COUNT(i.id) FILTER (WHERE i.state = 'succeeded'),
+                       COUNT(i.id) FILTER (WHERE i.state = 'skipped'),
+                       COUNT(i.id) FILTER (WHERE i.state = 'failed'),
+                       COUNT(i.id) FILTER (WHERE i.state = 'unrecoverable'),
+                       COUNT(i.id) FILTER (WHERE i.state = 'pending'),
+                       COUNT(i.id) FILTER (WHERE i.state = 'processing')
+                FROM ingestion_batches b
+                LEFT JOIN ingestion_batch_items i ON i.batch_id = b.id
+                WHERE b.id = %s AND b.admin_id = %s
+                GROUP BY b.id
+                """,
+                (batch_id, admin_id),
+            )
+            return cur.fetchone()
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_job_finish(batch_id, admin_id):
+    snapshot = _batch_job_snapshot(batch_id, admin_id)
+    if not snapshot:
+        raise LookupError("Batch checkpoint no longer exists")
+    failed_count = (
+        (snapshot[8] or 0)
+        + (snapshot[9] or 0)
+        + (snapshot[10] or 0)
+        + (snapshot[11] or 0)
+    )
+    _batch_job_update(
+        batch_id,
+        status="completed_with_errors" if failed_count else "completed",
+        completed_at="now",
+        lease_owner=None,
+    )
+    return snapshot
+
+
+def _batch_item_retry_failed(batch_id, admin_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while retrying batch files")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingestion_batch_items AS i
+                SET state = 'pending', error_class = NULL, error_detail = NULL,
+                    retry_after_at = NULL,
+                    lease_owner = NULL, lease_until = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                FROM ingestion_batches AS b
+                WHERE i.batch_id = b.id AND i.batch_id = %s AND b.admin_id = %s
+                  AND i.state = 'failed'
+                  AND i.stage IN (
+                      'accepted', 'identity_reconciliation', 'metadata_lookup',
+                        'movie_db_committed', 'storage_copying', 'storage_copied',
+                        'file_db_committed'
+                  )
+                  AND (i.retry_after_at IS NULL OR i.retry_after_at <= CURRENT_TIMESTAMP)
+                """,
+                (batch_id, admin_id),
+            )
+            retried = cur.rowcount
+            if retried:
+                cur.execute(
+                    """
+                    UPDATE ingestion_batches
+                    SET status = 'processing', completed_at = NULL,
+                        lease_owner = NULL, lease_until = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND admin_id = %s
+                      AND status IN (
+                          'collecting', 'processing', 'failed',
+                          'completed_with_errors'
+                      )
+                    """,
+                    (batch_id, admin_id),
+                )
+        conn.commit()
+        return retried
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_recovery_jobs_fetch(limit=20):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while finding interrupted batches")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT b.id, b.admin_id, b.bot_id, b.kind, b.status,
+                     b.start_update_id, b.closing_update_id,
+                     b.movie_id, b.movie_metadata
+                FROM ingestion_batches AS b
+                WHERE b.status IN (
+                  'collecting', 'processing', 'failed', 'completed_with_errors'
+                )
+                AND (b.lease_until IS NULL OR b.lease_until < CURRENT_TIMESTAMP)
+                AND (
+                  b.status = 'collecting'
+                  OR b.status = 'processing'
+                  OR EXISTS (
+                    SELECT 1
+                    FROM ingestion_batch_items AS i
+                    WHERE i.batch_id = b.id
+                        AND (
+                            i.state = 'pending'
+                            OR (i.state = 'processing'
+                                AND (i.lease_until IS NULL
+                                     OR i.lease_until < CURRENT_TIMESTAMP))
+                            OR (i.state = 'failed'
+                                AND (i.retry_after_at IS NULL
+                                     OR i.retry_after_at <= CURRENT_TIMESTAMP))
+                        )
+                    )
+                  )
+                ORDER BY b.updated_at
+                LIMIT %s
+                """,
+                (max(1, min(int(limit), 100)),),
+            )
+            return cur.fetchall()
+    finally:
+        close_db_connection(conn)
 
 
 def close_db_pool():
@@ -2595,7 +3288,7 @@ def get_movies_from_db(user_query, limit=10):
     return result
 
 def _get_movies_from_db_nocache(user_query, limit=10):
-    """Search for MULTIPLE movies in database with fuzzy matching"""
+    """Search normalized titles/aliases, then rank a bounded typo candidate set."""
     conn = None
     try:
         conn = get_db_connection()
@@ -2606,80 +3299,68 @@ def _get_movies_from_db_nocache(user_query, limit=10):
 
         logger.info(f"Searching for: '{user_query}'")
 
-        # 🔧 FIX: query ko normalize karo (lowercase + sirf letters/numbers).
-        # Isse "spider man", "spiderman", "Spider-Man" sab same ban jaate hain,
-        # aur neeche wali query DB me title chahe space se ho ya hyphen se, dono match karegi.
-        norm_query = _normalize_search_text(user_query)
+        # Match the expression used by the existing normalized trigram indexes.
+        norm_query = re.sub(r'[^a-z0-9]', '', user_query.lower())
 
         if not norm_query:
             # Sirf symbols/spaces type kiye the — kuch bhi search karne layak nahi hai
             cur.close()
-            close_db_connection(conn)
             return []
 
-        # ✅ Updated to include new columns
-        # Title ko bhi query jaisa hi normalize karke compare karte hain (DB-side),
-        # taaki alag-alag spacing/hyphen/case wale titles bhi pakde jaayein.
-        # SPEED FIX: Removed regexp_replace to avoid full table scans.
-        # Fallback to ILIKE.
         cur.execute(
             """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
                FROM movies
-               WHERE title ILIKE %s
+               WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s
                ORDER BY title LIMIT %s""",
-            (f'%{user_query}%', limit)
+            (f'%{norm_query}%', limit)
         )
         exact_matches = cur.fetchall()
 
         if exact_matches:
             logger.info(f"Found {len(exact_matches)} exact matches")
             cur.close()
-            close_db_connection(conn)
             return exact_matches
 
-        # SPEED FIX: Removed regexp_replace to avoid full table scans.
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
-            WHERE ma.alias ILIKE %s
+            WHERE regexp_replace(LOWER(ma.alias), '[^a-z0-9]', '', 'g') LIKE %s
             ORDER BY m.title
             LIMIT %s
-        """, (f'%{user_query}%', limit))
+        """, (f'%{norm_query}%', limit))
         alias_matches = cur.fetchall()
 
         if alias_matches:
             logger.info(f"Found {len(alias_matches)} alias matches")
             cur.close()
-            close_db_connection(conn)
             return alias_matches
 
-        cur.execute("SELECT id, title, url, file_id, imdb_id, poster_url, year, genre FROM movies")
-        all_movies = cur.fetchall()
-
-        if not all_movies:
-            cur.close()
-            close_db_connection(conn)
-            return []
-
-        movie_titles = [movie[1] for movie in all_movies]
-        movie_dict = {movie[1]: movie for movie in all_movies}
-
-        # 🔧 FIX: pre-filter pool ko result 'limit' se bada rakha hai (kam se kam 50),
-        # taaki score >= 65 filter lagne se PEHLE hi koi sahi match discard na ho jaaye
-        # (jaise pehle "spiderman" jaisi short query ke liye ho raha tha).
-        # Speed par asar nahi: fuzzywuzzy already sabhi titles ko score karta hai,
-        # sirf top-N return karta hai — N badhane se extra compute nahi lagta.
-        pool_size = max(limit * 5, 50)
-        # WRatio is resilient to transposed/missing letters: "rechar" → "Reacher".
-        matches = process.extract(user_query, movie_titles, scorer=fuzz.WRatio, limit=pool_size)
-
-        filtered_movies = [movie_dict[title] for title, score, index in matches if score >= 58]
+        # The % operator can use the GIN index; SIMILARITY(...) > threshold
+        # alone cannot. SET LOCAL is reset when the pooled transaction closes.
+        cur.execute("SET LOCAL pg_trgm.similarity_threshold = 0.15")
+        cur.execute("""
+            SELECT id, title, url, file_id, imdb_id, poster_url, year, genre
+            FROM movies
+            WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') %% %s
+            ORDER BY SIMILARITY(
+                regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g'), %s
+            ) DESC, id
+            LIMIT %s
+        """, (norm_query, norm_query, min(max(limit * 5, 50), 100)))
+        candidates = cur.fetchall()
+        # Use movie IDs as keys: duplicate titles from different years must
+        # survive, and fuzzywuzzy returns 3-tuples only for mapping inputs.
+        movie_dict = {movie[0]: movie for movie in candidates}
+        matches = process.extract(
+            user_query, {movie[0]: movie[1] for movie in candidates},
+            scorer=fuzz.WRatio, limit=limit,
+        )
+        filtered_movies = [movie_dict[movie_id] for _, score, movie_id in matches if score >= 58]
 
         logger.info(f"Found {len(filtered_movies)} fuzzy matches")
 
         cur.close()
-        close_db_connection(conn)
         return filtered_movies[:limit]
 
     except Exception as e:
@@ -2730,11 +3411,12 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
         results = cur.fetchall()
 
         if not results:
+            cur.execute("SET LOCAL pg_trgm.similarity_threshold = 0.3")
             fuzzy_sql = """
                 SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
                        SIMILARITY(m.title, %s) as sim_score
                 FROM movies m
-                WHERE SIMILARITY(m.title, %s) > 0.3
+                WHERE m.title %% %s
                 ORDER BY sim_score DESC
                 LIMIT %s
             """
@@ -3584,7 +4266,7 @@ def _has_compatible_title_candidate(cur, title, year, content_type):
     return False
 
 
-def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "", adult_mode: bool = False, hint_category: str = ""):
+def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "", adult_mode: bool = False, hint_category: str = "", include_seasons: bool = True):
     """
     IMDb से डेटा और TMDb से सिर्फ Lamba (Portrait) पोस्टर निकालने वाला इंजन
     adult_mode=True होने पर TMDb सर्च में include_adult=true भेजेगा और OMDb को बायपास करेगा।
@@ -3736,7 +4418,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             seasons_data = {}
             try:
                 tmdb_id = None
-                if category in ["Web Series", "Anime", "Adult"]:
+                if include_seasons and category in ["Web Series", "Anime", "Adult"]:
                     if not tmdb_id and imdb_id:
                         tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
                         t_resp = requests.get(tmdb_find, timeout=10).json()
@@ -3836,7 +4518,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         
         seasons_data = {}
         try:
-            if category in ["Web Series", "Anime", "Adult"] and tmdb_id:
+            if include_seasons and category in ["Web Series", "Anime", "Adult"] and tmdb_id:
                 tv_details = requests.get(f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={tmdb_api_key}", timeout=10).json()
                 for s in tv_details.get('seasons', []):
                     s_num = str(s.get('season_number', ''))
@@ -5856,7 +6538,14 @@ async def process_movie_exact_match(
     if poster_url:
         try:
             poster_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
-            processed_poster = await make_landscape_poster(poster_url)
+            processed_poster = await asyncio.wait_for(
+                make_landscape_poster(poster_url),
+                timeout=SEARCH_POSTER_TIMEOUT_SECONDS,
+            )
+            # A failed download returns the original URL. Do not ask Telegram
+            # to download the same slow/broken URL again before showing files.
+            if isinstance(processed_poster, str) and processed_poster.startswith('http'):
+                raise ValueError("Search poster unavailable; sending file links")
             if timing is not None and poster_start is not None:
                 timing['poster_ms'] = int((time.perf_counter() - poster_start) * 1000)
             response_start = time.perf_counter() if SEARCH_TIMING_ENABLED else None
@@ -8056,6 +8745,7 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
 
     new_scope = get_file_content_scope(new_extra_info)
 
+    cur = None
     try:
         cur = conn.cursor()
         cur.execute(
@@ -8063,8 +8753,6 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
             (movie_id,)
         )
         existing_files = cur.fetchall()
-        cur.close()
-
         for row in existing_files:
             old_label, old_extra_info = row
             if get_file_content_scope(old_extra_info) != new_scope:
@@ -8082,10 +8770,15 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
                 return True, old_label
 
         return False, None
-
-    except Exception as e:
-        logger.error(f"❌ Anti-Downgrade check error: {e}")
-        return False, None  # Error par allow kar do (safe side)
+    except Exception as exc:
+        logger.error(
+            "Anti-downgrade check failed for movie_id=%s (%s)",
+            movie_id, type(exc).__name__,
+        )
+        raise RuntimeError("Could not verify existing file quality") from exc
+    finally:
+        if cur:
+            cur.close()
 
 
 def auto_upgrade_delete(movie_id, new_quality_label, new_extra_info, conn):
@@ -8167,22 +8860,28 @@ def upsert_movie_file(conn, movie_id, label, file_size_str, main_url, backup_map
                  languages, extra_info, file_unique_id, file_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO UPDATE SET
-                movie_id   = EXCLUDED.movie_id,
                 quality    = EXCLUDED.quality,
                 file_size  = EXCLUDED.file_size,
                 url        = EXCLUDED.url,
                 backup_map = EXCLUDED.backup_map,
                 languages  = EXCLUDED.languages,
                 extra_info = EXCLUDED.extra_info
+            WHERE movie_files.movie_id = EXCLUDED.movie_id
+            RETURNING id
         """, (movie_id, label, file_size_str, main_url,
               backup_map_json, f_lang, f_extra, file_unique_id, file_id))
+        result = cur.fetchone()
+        if not result:
+            raise ValueError(
+                "Telegram file identity is already attached to a different movie"
+            )
         conn.commit()
         cur.close()
         logger.info(
             "✅ upsert_movie_file: Saved '%s' for movie_id=%s (file_unique_id=%s, file_id=%s)",
             label, movie_id, file_unique_id, file_id,
         )
-        return True
+        return result[0]
     except Exception as err:
         conn.rollback()
         try:
@@ -8191,6 +8890,33 @@ def upsert_movie_file(conn, movie_id, label, file_size_str, main_url, backup_map
             pass
         logger.error("❌ upsert_movie_file FAILED: %s", err)
         raise
+
+
+def _find_existing_movie_file(conn, movie_id, file_unique_id, file_id):
+    if not file_unique_id and not file_id:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT id, movie_id, quality
+            FROM movie_files
+            WHERE (%s IS NOT NULL AND file_unique_id = %s)
+               OR (%s IS NOT NULL AND file_id = %s)
+            """,
+            (file_unique_id, file_unique_id, file_id, file_id),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+    if not rows:
+        return None
+    if len({row[0] for row in rows}) != 1:
+        raise ValueError("Telegram identifiers resolve to multiple stored file rows")
+    row = rows[0]
+    if row[1] != movie_id:
+        raise ValueError("Telegram file is already attached to a different movie")
+    return row
 
 
 def generate_quality_label(file_name, file_size_str="", ai_language=""):
@@ -8309,15 +9035,17 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cast_str = await run_async(fetch_cast_from_imdb, imdb_id_f, 5)
         
         # 3. DB Insertion (All Fields)
+        trailer_key = await run_async(
+            resolve_trailer_key, title, year, imdb_id_f, category, title
+        )
         conn = get_db_connection()
+        if not conn:
+            raise RuntimeError("Database unavailable while creating /batchid batch")
         cur = conn.cursor()
         
         # 🛑 "cast" quoted and year is integer
         # 🎯 NAYA LOGIC: Title ki jagah IMDb ID par conflict check karega
         import json
-        trailer_key = await run_async(
-            resolve_trailer_key, title, year, imdb_id_f, category, title
-        )
         movie_values = (
             title, imdb_id_f, tmdb_id, poster, year, genre, rating, plot, category,
             content_type, "Hindi", cast_str,
@@ -8356,21 +9084,53 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         cur.close()
         close_db_connection(conn)
+        conn = None
 
-        # 4. Start Batch Session
-        BATCH_SESSION.update({
-            'active': True, 'movie_id': movie_id, 'movie_title': title, 
-            'file_count': file_count, 'admin_id': update.effective_user.id, 
-            'language': 'Hindi', 'category': category
-        })
-        batch_upload_coordinator.begin(
-            update.effective_user.id, movie_id, update.update_id
+        coordinator_session = batch_upload_coordinator._sessions.get(
+            update.effective_user.id
         )
+        batch_id = (
+            coordinator_session.get("batch_id")
+            if coordinator_session else str(uuid.uuid4())
+        )
+        async with auto_batch_lock:
+            if BATCH_SESSION.get("active") or SUPER_BATCH_SESSION.get("active"):
+                await _safe_batch_status_edit(
+                    status_msg,
+                    "❌ Another batch became active while metadata was loading. "
+                    "No batch was started."
+                )
+                return
+            await run_async(
+                _batch_job_create, batch_id, update.effective_user.id,
+                "movie", update.update_id, context.bot.id,
+            )
+            await run_async(
+                _batch_job_update,
+                batch_id,
+                movie_id=movie_id,
+                movie_metadata={
+                    "title": title, "year": year, "category": category,
+                    "language": "Hindi",
+                },
+            )
+
+            BATCH_SESSION.update({
+                'active': True, 'movie_id': movie_id, 'movie_title': title,
+                'file_count': file_count, 'admin_id': update.effective_user.id,
+                'batch_id': batch_id,
+                'language': 'Hindi', 'category': category
+            })
+            batch_upload_coordinator.begin(
+                update.effective_user.id, movie_id, update.update_id,
+                kind="movie", batch_id=batch_id,
+            )
 
         # 5. Success Message with Details
         success_msg = (
             f"✅ **Dada! Metadata Fetched Successfully**\n\n"
             f"🎬 **Title:** `{title}`\n"
+            f"🆔 **Batch ID:** `{batch_id}`\n"
             f"📅 **Year:** {year}\n"
             f"🎭 **Genre:** {genre}\n"
             f"⭐️ **Rating:** {rating}\n"
@@ -8390,12 +9150,20 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
         keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
         
-        await status_msg.edit_text(success_msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await _safe_batch_status_edit(
+            status_msg, success_msg, parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     # ✅ BAS YE 3 LINES YAHAN ADD KARNI HAIN 👇
     except Exception as e:
-        print(f"Error in batch_id_command: {e}")
-        await status_msg.edit_text(f"❌ Kuch galat ho gaya: {e}")
+        logger.error("Batch ID command failed (%s)", type(e).__name__)
+        await _safe_batch_status_edit(
+            status_msg, "❌ Movie metadata could not be saved. Please retry."
+        )
+    finally:
+        if 'conn' in locals() and conn:
+            close_db_connection(conn)
 
 
 # ============================================================================
@@ -8440,20 +9208,45 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Retrieve stored IMDb ID and cast from user_data (if batchid was used)
     imdb_id = context.user_data.pop('batch_imdb_id', None)
     cast_str = context.user_data.pop('batch_cast', None)
+    coordinator_session = batch_upload_coordinator._sessions.get(user_id)
+    if not coordinator_session:
+        coordinator_session = batch_upload_coordinator.begin(
+            user_id, None, getattr(update, "update_id", None),
+            kind="movie", batch_id=str(uuid.uuid4()), starting=True,
+        )
+    batch_id = coordinator_session["batch_id"]
 
     status_msg = await update.message.reply_text(f"⏳ Saving '{title}' to Database...", parse_mode='Markdown')
 
-    conn = get_db_connection()
-    if not conn: return
-    
     try:
-        cur = conn.cursor()
-        
-        # ✅ FIXED: Quote "cast" because it's a reserved keyword
         trailer_key = await run_async(
             resolve_trailer_key, title, year, imdb_id, category, title
         )
         tmdb_id = await run_async(resolve_tmdb_id_from_imdb, imdb_id, category)
+    except Exception as exc:
+        coordinator_session["start_failed"] = True
+        batch_upload_coordinator.mark_ready(user_id)
+        logger.error("Manual batch metadata lookup failed (%s)", type(exc).__name__)
+        await _safe_batch_status_edit(
+            status_msg,
+            "❌ Metadata lookup failed; no batch was started. Please retry /batch."
+        )
+        return
+
+    conn = get_db_connection()
+    if not conn:
+        coordinator_session["start_failed"] = True
+        batch_upload_coordinator.mark_ready(user_id)
+        await _safe_batch_status_edit(
+            status_msg,
+            "❌ Database unavailable; no batch was started. Please retry /batch."
+        )
+        return
+
+    try:
+        cur = conn.cursor()
+
+        # ✅ FIXED: Quote "cast" because it's a reserved keyword
         existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
         values = (
             title, imdb_id, tmdb_id, poster_url, year, genre, rating, plot,
@@ -8493,23 +9286,56 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
         file_count = cur.fetchone()[0]
         cur.close()
+        close_db_connection(conn)
+        conn = None
 
-        BATCH_SESSION.update({
-            'active': True,
-            'movie_id': movie_id,
-            'movie_title': title,
-            'file_count': 0,
-            'admin_id': user_id,
-            'language': language,
-            'category': category
-        })
-        batch_upload_coordinator.begin(user_id, movie_id, update.update_id)
+        async with auto_batch_lock:
+            if BATCH_SESSION.get("active") or SUPER_BATCH_SESSION.get("active"):
+                await _safe_batch_status_edit(
+                    status_msg,
+                    "❌ Another batch became active while this request was loading. "
+                    "No batch was started."
+                )
+                return
+            await run_async(
+                _batch_job_create,
+                batch_id,
+                user_id,
+                "movie",
+                getattr(update, "update_id", None),
+                context.bot.id,
+            )
+            await run_async(
+                _batch_job_update,
+                batch_id,
+                movie_id=movie_id,
+                movie_metadata={
+                    "title": title, "year": year, "category": category,
+                    "language": language,
+                },
+            )
+
+            BATCH_SESSION.update({
+                'active': True,
+                'movie_id': movie_id,
+                'movie_title': title,
+                'file_count': file_count,
+                'admin_id': user_id,
+                'batch_id': batch_id,
+                'language': language,
+                'category': category
+            })
+            batch_upload_coordinator.begin(
+                user_id, movie_id, update.update_id,
+                kind="movie", batch_id=batch_id,
+            )
 
         # Show cast in confirmation message (if any)
         cast_display = f"👥 **Cast:** {cast_str}\n" if cast_str else ""
         msg_text = (
             f"✅ **Batch Custom Mode Started!**\n\n"
             f"🎬 **Title:** {title}\n"
+            f"🆔 **Batch ID:** `{batch_id}`\n"
             f"📅 **Year:** {year}\n"
             f"🎭 **Genre:** {genre}\n"
             f"🗣️ **Language:** {language}\n"
@@ -8525,11 +9351,22 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
         keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
         
-        await status_msg.edit_text(msg_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await _safe_batch_status_edit(
+            status_msg, msg_text, parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     except Exception as e:
-        logger.error(f"Batch Error: {e}")
-        await status_msg.edit_text(f"❌ DB Error: {e}")
+        BATCH_SESSION.update({
+            "active": False, "movie_id": None, "movie_title": None,
+            "batch_id": None, "admin_id": None,
+        })
+        coordinator_session["start_failed"] = True
+        batch_upload_coordinator.mark_ready(user_id)
+        logger.error("Manual batch creation failed (%s)", type(e).__name__)
+        await _safe_batch_status_edit(
+            status_msg, "❌ Batch could not be created. Please retry /batch."
+        )
     finally:
         if conn: close_db_connection(conn)
 
@@ -8539,19 +9376,70 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Super Batch shuru karega"""
-    if update.effective_user.id not in ADMIN_IDS: return
-    
-    SUPER_BATCH_SESSION['active'] = True
-    SUPER_BATCH_SESSION['admin_id'] = update.effective_user.id
-    SUPER_BATCH_SESSION['files'] = []
-    
-    await update.message.reply_text(
-        "🚀 **SUPER BATCH MODE ON!**\n\n"
-        "👉 Ab aap ek sath 50-100 files (alag-alag movies ki) yahan forward kar dein.\n"
-        "👉 Bot khud unhe movies ke hisaab se group karega.\n"
-        "👉 Jab sab bhej dein, to type karein: `/superdone`",
-        parse_mode='Markdown'
-    )
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    async with auto_batch_lock:
+        if BATCH_SESSION.get("active") or SUPER_BATCH_SESSION.get("active"):
+            await update.message.reply_text(
+                "❌ A batch is already active. Finish it before starting another."
+            )
+            return
+
+        session = batch_upload_coordinator._sessions.get(update.effective_user.id)
+        if not session or session.get("kind") != "super":
+            session = batch_upload_coordinator.reserve_superbatch(
+                update.effective_user.id,
+                getattr(update, "update_id", None),
+            )
+        batch_id = session["batch_id"]
+        SUPER_BATCH_SESSION.update({
+            "active": True,
+            "admin_id": update.effective_user.id,
+            "files": [],
+            "batch_id": batch_id,
+            "status": "starting",
+        })
+        try:
+            await run_async(
+                _batch_job_create,
+                batch_id,
+                update.effective_user.id,
+                "super",
+                getattr(update, "update_id", None),
+                context.bot.id,
+            )
+        except Exception as exc:
+            SUPER_BATCH_SESSION.update({
+                "active": False, "admin_id": None, "files": [],
+                "batch_id": None, "status": "idle",
+            })
+            session["start_failed"] = True
+            batch_upload_coordinator.mark_ready(update.effective_user.id)
+            logger.error(
+                "Batch checkpoint creation failed (error_class=%s)",
+                type(exc).__name__,
+            )
+            await update.message.reply_text(
+                "❌ Batch could not start because its durable checkpoint was unavailable."
+            )
+            return
+
+        SUPER_BATCH_SESSION["status"] = "collecting"
+        batch_upload_coordinator.begin(
+            update.effective_user.id,
+            None,
+            getattr(update, "update_id", None),
+            kind="super",
+            batch_id=batch_id,
+        )
+        await update.message.reply_text(
+            "🚀 **SUPER BATCH MODE ON!**\n\n"
+            f"🆔 Batch ID: `{batch_id}`\n"
+            "👉 Ab aap ek sath 50-100 files (alag-alag movies ki) yahan forward kar dein.\n"
+            "👉 Bot khud unhe movies ke hisaab se group karega.\n"
+            "👉 Jab sab bhej dein, to type karein: `/superdone`",
+            parse_mode='Markdown'
+        )
 
 # 🎵 SONG FILTER: Superbatch me kabhi-kabhi movie ke saath "Song.mkv" jaisi
 # standalone video-song files bhi aa jaati hain, jo galti se movie/episode
@@ -8615,6 +9503,25 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
     record = await _collect_superbatch_file(update.effective_message)
     if not record:
         return
+    try:
+        item_id = await run_async(
+            _batch_item_create,
+            SUPER_BATCH_SESSION["batch_id"],
+            getattr(update, "update_id", None),
+            update.effective_message,
+            record,
+        )
+    except Exception as exc:
+        logger.error(
+            "SuperBatch file was not acknowledged (error_class=%s)",
+            type(exc).__name__,
+        )
+        await update.effective_message.reply_text(
+            "❌ File checkpoint failed; please resend this file."
+        )
+        return
+    record["batch_item_id"] = item_id
+    record["update_id"] = update.update_id
     SUPER_BATCH_SESSION['files'].append(record)
     count = len(SUPER_BATCH_SESSION['files'])
     if count % 10 == 0:
@@ -8622,6 +9529,186 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or update.effective_user.id not in ADMIN_IDS:
+        return
+    admin_id = update.effective_user.id
+    session = await batch_upload_coordinator.wait_until_ready(admin_id)
+    if (
+        not session
+        or session.get("kind") != "super"
+        or session.get("start_failed")
+        or not SUPER_BATCH_SESSION.get("active")
+        or SUPER_BATCH_SESSION.get("admin_id") != admin_id
+    ):
+        await _safe_batch_reply(update.message, "❌ Koi active SuperBatch nahi hai!")
+        return
+    if not batch_upload_coordinator.claim_finalization(admin_id):
+        return
+
+    await batch_upload_coordinator.wait_for_prior_uploads(admin_id)
+    batch_id = session.get("batch_id")
+    closing_update_id = session.get("closing_update_id")
+    succeeded = False
+    try:
+        await run_async(
+            _batch_job_update,
+            batch_id,
+            status="processing",
+            closing_update_id=closing_update_id,
+            lease_owner=BATCH_PROCESS_ID,
+        )
+        SUPER_BATCH_SESSION["status"] = "processing"
+        await _superbatch_done_impl(update, context)
+        succeeded = True
+    except Exception as exc:
+        logger.error(
+            "SuperBatch finalization failed (batch_id=%s, error_class=%s)",
+            batch_id,
+            type(exc).__name__,
+        )
+        try:
+            await run_async(
+                _batch_job_update,
+                batch_id,
+                status="failed",
+                lease_owner=None,
+            )
+        except Exception as checkpoint_exc:
+            logger.error(
+                "Could not persist SuperBatch failure (error_class=%s)",
+                type(checkpoint_exc).__name__,
+            )
+        try:
+            await _safe_batch_reply(
+                update.message,
+                "❌ SuperBatch processing stopped unexpectedly. "
+                "Use /batchstatus with the batch ID to inspect recoverable files."
+            )
+        except Exception as reply_exc:
+            logger.warning(
+                "SuperBatch failure message could not be sent (error_class=%s)",
+                type(reply_exc).__name__,
+            )
+    finally:
+        try:
+            if succeeded:
+                await run_async(_batch_job_finish, batch_id, admin_id)
+            else:
+                await run_async(
+                    _batch_job_update,
+                    batch_id,
+                    status="failed",
+                    lease_owner=None,
+                )
+        except Exception as exc:
+            logger.error(
+                "Could not finalize SuperBatch checkpoint (error_class=%s)",
+                type(exc).__name__,
+            )
+        SUPER_BATCH_SESSION.update({
+            "active": False, "admin_id": None, "files": [],
+            "batch_id": None, "status": "idle",
+        })
+        if BATCH_SESSION.get("batch_id") == batch_id:
+            BATCH_SESSION.update({
+                "active": False, "movie_id": None, "movie_title": None,
+                "file_count": 0, "admin_id": None, "batch_id": None,
+                "year": "", "category": "", "language": "",
+            })
+        batch_upload_coordinator.finish(admin_id)
+
+
+async def _mark_superbatch_item_failed(item_id, exc, stage=None):
+    """A broken checkpoint must not abort the remaining movies/files."""
+    if not item_id:
+        return
+    try:
+        current = await asyncio.wait_for(run_async(_batch_item_fetch, item_id), timeout=10)
+        if not current or current[12] in ("succeeded", "skipped", "unrecoverable"):
+            return
+        uncertain = len(current) > 18 and current[18] is not None
+        await asyncio.wait_for(run_async(
+            _batch_item_update, item_id,
+            state="unrecoverable" if uncertain else "failed",
+            stage=stage or current[13],
+            error_class="StorageCopyOutcomeUnknown" if uncertain else type(exc).__name__,
+            error_detail="SuperBatch stage failed or timed out; confirmed copies retained",
+        ), timeout=10)
+    except Exception as checkpoint_exc:
+        logger.error("SuperBatch failure checkpoint unavailable item=%s (%s)", item_id, type(checkpoint_exc).__name__)
+
+
+async def _prepare_superbatch_movie(representative, display_name):
+    try:
+        reconciled = await asyncio.wait_for(reconcile_evidence_with_gemini(
+            representative.get('caption_evidence', {}),
+            representative.get('filename_evidence', {}),
+            caption_raw=representative.get('caption', ''),
+            filename_raw=representative.get('file_name', ''),
+            forward_source=representative.get('forward_source'),
+        ), timeout=SUPERBATCH_IDENTITY_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("SuperBatch identity timed out; using local evidence: %s", display_name)
+        reconciled = _local_evidence_fallback(
+            representative.get('caption_evidence', {}),
+            representative.get('filename_evidence', {}),
+            representative.get('forward_source'),
+        )
+    return await asyncio.wait_for(_core_movie_processor(
+        representative.get('caption') or representative.get('file_name') or display_name,
+        reconciled_data=reconciled,
+    ), timeout=SUPERBATCH_MOVIE_TIMEOUT_SECONDS)
+
+
+async def _save_one_superbatch_file(item, context, movie_id):
+    item_id = item.get("batch_item_id")
+    if item_id and not await run_async(_batch_item_claim, item_id):
+        item_state = await run_async(_batch_item_fetch, item_id)
+        if not item_state or item_state[12] in ("skipped", "unrecoverable"):
+            return None
+        if item_state[12] != "succeeded":
+            logger.warning(
+                "SuperBatch item claim unavailable (item_id=%s)",
+                item_id,
+            )
+            return None
+    else:
+        await run_async(
+            _batch_item_update,
+            item_id,
+            state="processing",
+            stage="movie_db_committed",
+            movie_id=movie_id,
+        ) if item_id else None
+
+    return await _pm_save_file(item["message_obj"], context, item_id)
+
+
+async def _save_superbatch_files(movie_files, context, movie_id, progress=None):
+    saved_labels = []
+    for index, item in enumerate(movie_files, 1):
+        item_id = item.get("batch_item_id")
+        if progress:
+            await progress(index, len(movie_files))
+        try:
+            label = await asyncio.wait_for(
+                _save_one_superbatch_file(item, context, movie_id),
+                timeout=SUPERBATCH_FILE_TIMEOUT_SECONDS,
+            )
+            if label:
+                saved_labels.append(label)
+        except Exception as exc:
+            logger.error(
+                "SuperBatch file failed (item_id=%s, error_class=%s)",
+                item_id,
+                type(exc).__name__,
+            )
+            await _mark_superbatch_item_failed(item_id, exc)
+        await asyncio.sleep(0.5)
+    return saved_labels
+
+
+async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Superbatch ka kaam:
       1. Files ko movie ke hisaab se group karo
@@ -8632,15 +9719,17 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
         return
 
+    batch_id = SUPER_BATCH_SESSION.get("batch_id")
     SUPER_BATCH_SESSION['active'] = False
     files = SUPER_BATCH_SESSION['files']
     SUPER_BATCH_SESSION['files'] = []
 
     if not files:
-        await update.message.reply_text("❌ Koi file nahi mili!")
+        await _safe_batch_reply(update.message, "❌ Koi file nahi mili!")
         return
 
-    status_msg = await update.message.reply_text(
+    status_msg = await _safe_batch_reply(
+        update.message,
         f"🔄 **{len(files)} files group ho rahi hain...**", parse_mode='Markdown'
     )
 
@@ -8650,7 +9739,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     grouped_movies = _build_superbatch_groups(files)
 
     total_movies = len(grouped_movies)
-    await status_msg.edit_text(f"✅ **Files grouped into {total_movies} unique movies!**\n\n🚀 Auto-Processing & Posting starts now...", parse_mode='Markdown')
+    await _safe_batch_status_edit(
+        status_msg,
+        f"✅ **Files grouped into {total_movies} unique movies!**\n\n"
+        "🚀 Auto-Processing & Posting starts now...",
+        parse_mode='Markdown',
+    )
 
     success_movies = 0
     total_files_saved = 0           # 👈 NAYA: Kitni files save hui uski ginti
@@ -8661,7 +9755,11 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             representative = _select_representative_file(movie_files)
             display_name = representative.get('display_title', group_key)
-            await status_msg.edit_text(f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: `{display_name}`")
+            await _safe_batch_status_edit(
+                status_msg,
+                f"⚙️ Processing Movie {i}/{total_movies}...\n"
+                f"🎬 Name: {display_name}\nStage: identity & metadata",
+            )
 
             image_bytes = None
             if representative.get('thumb_id'):
@@ -8673,22 +9771,15 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Exactly ONE Gemini reconciliation per finalized group, using the
             # most complete same-file caption+filename evidence packet.
-            reconciled_data = await reconcile_evidence_with_gemini(
-                representative.get('caption_evidence', {}),
-                representative.get('filename_evidence', {}),
-                caption_raw=representative.get('caption', ''),
-                filename_raw=representative.get('file_name', ''),
-                forward_source=representative.get('forward_source'),
-            )
-
-            result = await _core_movie_processor(
-                representative.get('caption') or representative.get('file_name') or display_name,
-                image_bytes,
-                reconciled_data=reconciled_data,
-            )
+            result = await _prepare_superbatch_movie(representative, display_name)
 
             if not result:
                 logger.warning(f"Superbatch: '{display_name}' process nahi ho paya, skip kar raha hoon.")
+                for item in movie_files:
+                    item_id = item.get("batch_item_id")
+                    await _mark_superbatch_item_failed(
+                        item_id, ValueError("Movie identity unresolved"), "identity_reconciliation"
+                    )
                 continue
 
             movie_id   = result['movie_id']
@@ -8708,20 +9799,27 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'movie_id':    movie_id,
                 'movie_title': title,
                 'file_count':  0,
-                'admin_id':    ADMIN_USER_ID,
+                'admin_id':    update.effective_user.id,
+                'batch_id':    SUPER_BATCH_SESSION.get("batch_id"),
                 'year':        str(year) if year else '',
                 'category':    category,
                 'language':    movie_lang,
             })
 
             # ── STEP 3: Har file ke liye unified Phase 2 saver ───────────────
-            saved_labels = []
+            async def file_progress(index, total):
+                # Avoid a Telegram edit per file on large episode collections.
+                if index == 1 or index % 5 == 0 or index == total:
+                    await _safe_batch_status_edit(
+                        status_msg,
+                        f"⚙️ Processing Movie {i}/{total_movies}...\n"
+                        f"🎬 Name: {title}\n📁 Saving file {index}/{total}",
+                    )
+
             try:
-                for f in movie_files:
-                    label = await _pm_save_file(f['message_obj'], context)
-                    if label:
-                        saved_labels.append(label)
-                    await asyncio.sleep(0.5)
+                saved_labels = await _save_superbatch_files(
+                    movie_files, context, movie_id, progress=file_progress
+                )
             finally:
                 # Koi file error kare tab bhi next movie ke liye session leak na ho.
                 BATCH_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None,
@@ -8750,7 +9848,10 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue  # 'continue' का मतलब है ये चैनल/फोरम में पोस्ट किए बिना अगली मूवी पर चला जायेगा
                 
             # अगर असली इमेज है, तभी लैंडस्केप पोस्टर बनाओ
-            photo_to_send = await make_landscape_poster(raw_photo)
+            await _safe_batch_status_edit(
+                status_msg, f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: {title}\nStage: channel post"
+            )
+            photo_to_send = await asyncio.wait_for(make_landscape_poster(raw_photo), timeout=15)
 
             # 🛑 100% SAFE HTML CAPTION + RANDOM STYLES
             safe_rating = rating if rating else "N/A"
@@ -8809,9 +9910,10 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_media = photo_to_send
             
             uploaded_file_id = None # Isme Telegram ki File ID store hogi
+            posted_any = False
 
             # 👇 GLOBAL DUPLICATE CHECK — Agar kisi bhi channel me 7 din me post ho chuki hai to skip 👇
-            if is_movie_posted_recently(movie_id, days=7):
+            if await asyncio.wait_for(run_async(is_movie_posted_recently, movie_id, days=7), timeout=15):
                 logger.info(f"⏭️ Skipping '{title}' (already posted within the last 7 days in some channel).")
                 continue
             
@@ -8824,67 +9926,107 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         
                         # Agar humare pass pehle se ID hai, toh file upload nahi karni
                         if uploaded_file_id:
-                            sent_msg = await context.bot.send_photo(
+                            sent_msg = await asyncio.wait_for(context.bot.send_photo(
                                 chat_id=chat_id,
                                 photo=uploaded_file_id, # 👈 Direct ID
                                 caption=caption,
                                 parse_mode='HTML',
                                 reply_markup=post_keyboard
-                            )
+                            ), timeout=35)
                         else:
                             # Pehli baar upload karna hai (Bytes se)
                             if is_bytes:
                                 current_media.seek(0) # File pointer ko shuru me laao
                                 
-                            sent_msg = await context.bot.send_photo(
+                            sent_msg = await asyncio.wait_for(context.bot.send_photo(
                                 chat_id=chat_id,
                                 photo=current_media, # 👈 Actual bytes
                                 caption=caption,
                                 parse_mode='HTML',
                                 reply_markup=post_keyboard
-                            )
+                            ), timeout=35)
                             # Ek baar upload hone ke baad, Telegram se permanent File ID save karlo
                             if sent_msg and sent_msg.photo:
                                 uploaded_file_id = sent_msg.photo[-1].file_id 
                                 
                         # ✅ DB me save karna zaroori hai taaki baad me /restore kaam kare
                         if sent_msg:
+                            posted_any = True
                             ch_name = sent_msg.chat.title if sent_msg.chat else "Unknown"
-                            save_post_to_db(
+                            await asyncio.wait_for(run_async(save_post_to_db,
                                 movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot", caption, 
                                 uploaded_file_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies",
                                 movie_name=title, imdb_id=imdb_id, tmdb_id=None, channel_name=ch_name
-                            )
+                            ), timeout=20)
                             await asyncio.sleep(1.5)
                             
                     except Exception as e:
                         logger.error(f"❌ Failed to post in channel {chat_id_str}: {e}")
 
-            success_movies += 1
-            movies_posted_list.append(title) # 👈 NAYA: List me Title add kiya
+            if posted_any:
+                success_movies += 1
+                movies_posted_list.append(title)
             await asyncio.sleep(2) # Flood limit se bachne ke liye delay
 
-        except Exception as e:
-            logger.error(f"SuperBatch Movie Error: {e}")
+        except Exception as exc:
+            logger.error(
+                "SuperBatch movie failed (error_class=%s)",
+                type(exc).__name__,
+            )
+            for item in movie_files:
+                item_id = item.get("batch_item_id")
+                await _mark_superbatch_item_failed(item_id, exc)
             continue
 
     # 📝 NAYA: List format banana
-    if movies_posted_list:
-        posted_names = "\n".join([f"🔹 {name}" for name in movies_posted_list])
-    else:
-        posted_names = "Koyi nayi movie post nahi hui."
+    posted_names = _superbatch_posted_summary(movies_posted_list)
+
+    try:
+        batch_snapshot = await asyncio.wait_for(run_async(
+            _batch_job_snapshot, batch_id, update.effective_user.id
+        ), timeout=15)
+    except Exception as exc:
+        logger.warning("Final batch snapshot unavailable (%s)", type(exc).__name__)
+        batch_snapshot = None
+    saved_count = batch_snapshot[6] if batch_snapshot else total_files_saved
+    failed_count = batch_snapshot[8] if batch_snapshot else "unknown"
+    unrecoverable_count = batch_snapshot[9] if batch_snapshot else "unknown"
+    skipped_count = batch_snapshot[7] if batch_snapshot else "unknown"
 
     # 🎉 NAYA: Final Message (HTML format me)
     final_text = (
         f"🎉 <b>SUPER BATCH COMPLETED!</b>\n\n"
-        f"💾 <b>Total Files Saved in DB:</b> {total_files_saved}\n"
+        f"🆔 <b>Batch ID:</b> {batch_id}\n"
+        f"💾 <b>Total Files Saved in DB:</b> {saved_count}\n"
+        f"⏭️ <b>Skipped:</b> {skipped_count} | "
+        f"❌ <b>Failed:</b> {failed_count} | "
+        f"⚠️ <b>Unrecoverable:</b> {unrecoverable_count}\n"
         f"🚀 <b>Movies/Series Auto-Posted:</b> {len(movies_posted_list)}/{total_movies}\n\n"
-        f"<b>📑 Posted List:</b>\n{posted_names}"
+        f"<b>📑 Posted List:</b>\n{posted_names}\n\n"
+        f"Inspect: <code>/batchstatus {batch_id}</code>\n"
+        f"Retry failed files: <code>/batchretry {batch_id}</code>"
     )
 
-    await status_msg.edit_text(final_text, parse_mode='HTML')
+    if not await _safe_batch_status_edit(status_msg, final_text, parse_mode='HTML'):
+        await _safe_batch_reply(update.message, final_text, parse_mode='HTML')
 
     SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
+
+
+def _superbatch_posted_summary(titles):
+    """Keep completion below Telegram's limit, even for hundreds of movies."""
+    lines = []
+    size = 0
+    for title in titles:
+        line = "🔹 " + html_escape(str(title)[:120])
+        line_size = len(line.encode('utf-16-le')) // 2
+        if size + line_size > 2400:
+            break
+        lines.append(line)
+        size += line_size + 1
+    if len(lines) < len(titles):
+        lines.append(f"… aur {len(titles) - len(lines)} titles")
+    return "\n".join(lines) or "Koyi nayi movie post nahi hui."
 
 
 # ==============================================================================
@@ -8901,6 +10043,24 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #         → DB INSERT  (pm_file_listener wala COMPLETE ON CONFLICT logic)
 #         → Returns dict with movie_id aur saari details
 # ==============================================================================
+def _set_batch_db_limits(conn):
+    """Bound lock/query waits for this transaction, without changing migrations."""
+    cur = conn.cursor()
+    try:
+        cur.execute("SET LOCAL statement_timeout = '30s'")
+        cur.execute("SET LOCAL lock_timeout = '5s'")
+    finally:
+        cur.close()
+
+
+async def _optional_movie_lookup(function, *args, default=None):
+    try:
+        return await asyncio.wait_for(run_async(function, *args), timeout=12)
+    except Exception as exc:
+        logger.warning("Optional movie lookup %s skipped (%s)", function.__name__, type(exc).__name__)
+        return default
+
+
 async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconciled_data: dict = None) -> dict:
     """
     Ek jagah se sab kuch. Returns movie dict ya None agar fail ho.
@@ -8921,7 +10081,12 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         return None
 
     # --- STEP 2: TMDB + IMDb METADATA ---
-    metadata = await run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, False, gemini_category)
+    # This ingestion path never consumes seasons_data. Fetching every episode
+    # of a long-running series can otherwise take minutes before saving a file.
+    metadata = await asyncio.wait_for(
+        run_async(fetch_movie_metadata, movie_name, movie_year, movie_lang, False, gemini_category, False),
+        timeout=40,
+    )
     if metadata:
         title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
     else:
@@ -8948,127 +10113,184 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     )
 
     # --- STEP 3: IMDb CAST ---
-    cast_str = ""
-    if imdb_id:
-        cast_str = await run_async(fetch_cast_from_imdb, imdb_id, 5)
-    trailer_key = await run_async(
-        resolve_trailer_key,
-        title,
-        year,
-        imdb_id,
-        category,
-        movie_name,
+    cast_str, trailer_key, artwork, tmdb_id = await asyncio.gather(
+        _optional_movie_lookup(fetch_cast_from_imdb, imdb_id, 5, default="")
+        if imdb_id else asyncio.sleep(0, result=""),
+        _optional_movie_lookup(resolve_trailer_key, title, year, imdb_id, category, movie_name),
+        _optional_movie_lookup(fetch_tmdb_artwork, title, year, imdb_id, category, default=(None, None)),
+        _optional_movie_lookup(resolve_tmdb_id_from_imdb, imdb_id, category),
     )
-    artwork_poster_url, backdrop_poster_url = await run_async(
-        fetch_tmdb_artwork,
-        title,
-        year,
-        imdb_id,
-        category,
-    )
+    artwork_poster_url, backdrop_poster_url = artwork
     if artwork_poster_url and not poster_url:
         poster_url = artwork_poster_url
 
     # --- STEP 4: DB INSERT (pm_file_listener ka EXACT ON CONFLICT logic) ---
     if not imdb_id:  # Fix for empty string violating unique constraint
         imdb_id = None
-    tmdb_id = await run_async(
-        resolve_tmdb_id_from_imdb, imdb_id, category
-    )
 
-    conn = get_db_connection()
-    if not conn:
-        return None
-
-    try:
-        cur = conn.cursor()
-        existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
-        if not existing_id and _has_compatible_title_candidate(
-            cur, title, year, content_type
-        ):
-            logger.warning(
-                "Holding movie ingestion for unresolved exact-title candidate: '%s' (%s)",
-                title,
-                year or "no year",
-            )
+    def persist_movie():
+        conn = get_db_connection()
+        if not conn:
             return None
 
-        movie_values = (
-            title, imdb_id, tmdb_id, poster_url, backdrop_poster_url, year,
-            genre, rating, plot, category, content_type, movie_lang,
-            extra_info, cast_str, trailer_key,
-        )
-        if existing_id:
-            cur.execute(
-                """
-                UPDATE movies
-                SET title = %s, imdb_id = COALESCE(%s, movies.imdb_id),
-                    tmdb_id = COALESCE(%s, movies.tmdb_id),
-                    poster_url = COALESCE(%s, poster_url),
-                    backdrop_poster_url = COALESCE(%s, backdrop_poster_url),
-                    year = CASE WHEN movies.year = 0 THEN %s ELSE movies.year END,
-                    genre = COALESCE(%s, genre), rating = COALESCE(%s, rating),
-                    description = COALESCE(%s, description),
-                    category = COALESCE(%s, category),
-                    content_type = COALESCE(%s, content_type),
-                    language = CASE WHEN %s <> '' THEN %s ELSE movies.language END,
-                    extra_info = CASE WHEN %s <> '' THEN %s ELSE movies.extra_info END,
-                    "cast" = COALESCE(%s, "cast"),
-                    trailer_key = COALESCE(%s, trailer_key)
-                WHERE id = %s
-                RETURNING id
-                """,
-                (
-                    title, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
-                    year, genre, rating, plot, category, content_type,
-                    movie_lang, movie_lang, extra_info, extra_info, cast_str,
-                    trailer_key, existing_id,
-                ),
-            )
-        else:
-            cur.execute(
-                """
-                INSERT INTO movies
-                    (title, url, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
-                     year, genre, rating, description, category, content_type,
-                     language, extra_info, "cast", trailer_key)
-                VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                movie_values,
-            )
-        movie_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
+        try:
+            _set_batch_db_limits(conn)
+            cur = conn.cursor()
+            existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+            if not existing_id and _has_compatible_title_candidate(
+                cur, title, year, content_type
+            ):
+                logger.warning(
+                    "Holding movie ingestion for unresolved exact-title candidate: '%s' (%s)",
+                    title,
+                    year or "no year",
+                )
+                return None
 
-        return {
-            'movie_id':   movie_id,
-            'title':      title,
-            'year':       year,
-            'genre':      genre,
-            'rating':     rating,
-            'plot':       plot,
-            'category':   category,
-            'movie_lang': movie_lang,
-            'poster_url': poster_url,
-            'backdrop_poster_url': backdrop_poster_url,
-            'imdb_id':    imdb_id,
-            'tmdb_id':    tmdb_id,
-            'cast_str':   cast_str,
-        }
-    except Exception as e:
-        logger.error(f"_core_movie_processor DB Error: {e}")
-        if conn: conn.rollback()
-        return None
-    finally:
-        close_db_connection(conn)
+            movie_values = (
+                title, imdb_id, tmdb_id, poster_url, backdrop_poster_url, year,
+                genre, rating, plot, category, content_type, movie_lang,
+                extra_info, cast_str, trailer_key,
+            )
+            if existing_id:
+                cur.execute(
+                    """
+                    UPDATE movies
+                    SET title = %s, imdb_id = COALESCE(%s, movies.imdb_id),
+                        tmdb_id = COALESCE(%s, movies.tmdb_id),
+                        poster_url = COALESCE(%s, poster_url),
+                        backdrop_poster_url = COALESCE(%s, backdrop_poster_url),
+                        year = CASE WHEN movies.year = 0 THEN %s ELSE movies.year END,
+                        genre = COALESCE(%s, genre), rating = COALESCE(%s, rating),
+                        description = COALESCE(%s, description),
+                        category = COALESCE(%s, category),
+                        content_type = COALESCE(%s, content_type),
+                        language = CASE WHEN %s <> '' THEN %s ELSE movies.language END,
+                        extra_info = CASE WHEN %s <> '' THEN %s ELSE movies.extra_info END,
+                        "cast" = COALESCE(%s, "cast"),
+                        trailer_key = COALESCE(%s, trailer_key)
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (
+                        title, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
+                        year, genre, rating, plot, category, content_type,
+                        movie_lang, movie_lang, extra_info, extra_info, cast_str,
+                        trailer_key, existing_id,
+                    ),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO movies
+                        (title, url, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
+                         year, genre, rating, description, category, content_type,
+                         language, extra_info, "cast", trailer_key)
+                    VALUES (%s, '', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    movie_values,
+                )
+            movie_id = cur.fetchone()[0]
+            conn.commit()
+            cur.close()
+
+            return {
+                'movie_id':   movie_id,
+                'title':      title,
+                'year':       year,
+                'genre':      genre,
+                'rating':     rating,
+                'plot':       plot,
+                'category':   category,
+                'movie_lang': movie_lang,
+                'poster_url': poster_url,
+                'backdrop_poster_url': backdrop_poster_url,
+                'imdb_id':    imdb_id,
+                'tmdb_id':    tmdb_id,
+                'cast_str':   cast_str,
+            }
+        except Exception as e:
+            logger.error(f"_core_movie_processor DB Error: {e}")
+            if conn: conn.rollback()
+            return None
+        finally:
+            close_db_connection(conn)
+
+    return await run_async(persist_movie)
 
 
 # ==============================================================================
 # 📤 _pm_save_file — pm_file_listener ka Phase 2 (ek jagah, sab use karein)
 # superbatch_done bhi isko call karta hai — alag/duplicate code nahi
 # ==============================================================================
-async def _pm_save_file(message, context) -> str | None:
+_FILE_SAVE_LOCKS = {}
+_FILE_SAVE_LOCKS_GUARD = asyncio.Lock()
+
+
+def _precheck_batch_file(movie_id, file_unique_id, file_id, label, extra):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable for file precheck")
+    try:
+        _set_batch_db_limits(conn)
+        existing_file = _find_existing_movie_file(conn, movie_id, file_unique_id, file_id)
+        rejected, existing = (False, None) if existing_file else is_downgrade(movie_id, label, extra, conn)
+        return existing_file, rejected, existing
+    finally:
+        close_db_connection(conn)
+
+
+def _commit_batch_file(movie_id, label, file_size, url, backups, language, extra, unique_id, file_id):
+    # The worker owns its connection through completion, even if its awaiting
+    # coroutine times out. Never return a connection while a thread is using it.
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable for file save")
+    try:
+        _set_batch_db_limits(conn)
+        movie_file_id = upsert_movie_file(
+            conn, movie_id, label, file_size, url, backups, language, extra,
+            unique_id, file_id=file_id,
+        )
+        deleted = 0
+        try:
+            _set_batch_db_limits(conn)
+            deleted, _labels = auto_upgrade_delete(movie_id, label, extra, conn)
+        except Exception as exc:
+            logger.warning("Batch quality cleanup skipped (%s)", type(exc).__name__)
+        return movie_file_id, deleted
+    finally:
+        close_db_connection(conn)
+
+
+async def _pm_save_file(message, context, batch_item_id=None) -> str | None:
+    media = getattr(message, "document", None) or getattr(message, "video", None)
+    identity = (
+        getattr(media, "file_unique_id", None)
+        or getattr(media, "file_id", None)
+        or (f"batch-item:{batch_item_id}" if batch_item_id else None)
+    )
+    if not identity:
+        return await _pm_save_file_locked(message, context, batch_item_id)
+
+    async with _FILE_SAVE_LOCKS_GUARD:
+        slot = _FILE_SAVE_LOCKS.get(identity)
+        if slot is None:
+            slot = {"lock": asyncio.Lock(), "users": 0}
+            _FILE_SAVE_LOCKS[identity] = slot
+        slot["users"] += 1
+    try:
+        async with slot["lock"]:
+            return await _pm_save_file_locked(message, context, batch_item_id)
+    finally:
+        async with _FILE_SAVE_LOCKS_GUARD:
+            slot["users"] -= 1
+            if slot["users"] == 0:
+                _FILE_SAVE_LOCKS.pop(identity, None)
+
+
+async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | None:
     """
     Unified Phase 2 saver. Gemini bilkul use nahi hota.
     Caption aur raw filename separately parse hote hain, field-wise merge hota hai,
@@ -9077,16 +10299,31 @@ async def _pm_save_file(message, context) -> str | None:
     media = message.document or message.video
     if not media:
         logger.error("_pm_save_file: Unsupported media type")
+        if batch_item_id:
+            await run_async(
+                _batch_item_update, batch_item_id,
+                state="failed", stage="accepted",
+                error_class="UnsupportedMedia",
+                error_detail="Batch item has no supported document or video",
+            )
         return None
 
     movie_id = BATCH_SESSION.get('movie_id')
     if not movie_id:
         logger.error("_pm_save_file: BATCH_SESSION movie_id missing")
+        if batch_item_id:
+            await run_async(
+                _batch_item_update, batch_item_id,
+                state="failed", stage="identity_reconciliation",
+                error_class="MissingMovieIdentity",
+                error_detail="The batch item has no resolved movie_id",
+            )
         return None
 
     file_name = getattr(media, 'file_name', None) or "File"
     file_size = getattr(media, 'file_size', 0) or 0
     file_unique_id = getattr(media, 'file_unique_id', None)
+    file_id = getattr(media, 'file_id', None)
     file_size_str = get_readable_file_size(file_size)
     current_lang = BATCH_SESSION.get('language', '')
     raw_caption = message.caption or message.text or ""
@@ -9102,39 +10339,207 @@ async def _pm_save_file(message, context) -> str | None:
     f_lang = _merge_csv_values(cap_data.get('language'), fn_data.get('language'))
     f_extra = _merge_extra_info(cap_data.get('extra_info'), fn_data.get('extra_info'))
 
-    # Downgrade check BEFORE copying to channels, taaki rejected orphan uploads na banein.
-    precheck_conn = get_db_connection()
-    if not precheck_conn:
-        return None
+    saved_item = None
+    storage_map = {}
+    pending_chat = None
+    if batch_item_id:
+        saved_item = await run_async(_batch_item_fetch, batch_item_id)
+        if not saved_item:
+            raise LookupError("Batch item checkpoint no longer exists")
+        storage_map = saved_item[17] or {}
+        pending_chat = saved_item[18]
+        if saved_item[12] in ("succeeded", "skipped"):
+            return label if saved_item[12] == "succeeded" else None
+        if pending_chat is not None:
+            await run_async(
+                _batch_item_update, batch_item_id,
+                state="unrecoverable", stage="storage_copying",
+                error_class="StorageCopyOutcomeUnknown",
+                error_detail="The process stopped during a Telegram storage copy",
+            )
+            return None
+
+    async def checkpoint(**fields):
+        if batch_item_id:
+            await run_async(_batch_item_update, batch_item_id, **fields)
+
+    # Exact Telegram identifiers are checked before copying to storage.
+    existing_file = None
+    rejected = False
+    quality_check_error = None
     try:
-        rejected, existing = is_downgrade(movie_id, label, f_extra, precheck_conn)
+        existing_file, rejected, existing = await run_async(
+            _precheck_batch_file, movie_id, file_unique_id, file_id, label, f_extra
+        )
     except Exception as exc:
-        logger.error("_pm_save_file pre-upload downgrade check failed: %s", exc)
+        quality_check_error = type(exc).__name__
+
+    if quality_check_error:
+        logger.error(
+            "_pm_save_file pre-upload identity/quality check failed (%s)",
+            quality_check_error,
+        )
+        await checkpoint(
+            state="failed", stage="identity_reconciliation",
+            error_class=quality_check_error,
+            error_detail="Existing file or quality could not be verified",
+        )
         return None
-    finally:
-        close_db_connection(precheck_conn)
+
+    if existing_file:
+        if not (batch_item_id and storage_map):
+            await checkpoint(
+                state="succeeded", stage="file_db_committed",
+                movie_id=movie_id, movie_file_id=existing_file[0],
+                error_class=None, error_detail=None,
+                storage_pending_chat=None,
+            )
+            return existing_file[2] or label
 
     if rejected:
         logger.info("🛡️ _pm_save_file: REJECTED '%s' — DB already has better '%s'", label, existing)
+        await checkpoint(
+            state="skipped", stage="completed", movie_id=movie_id,
+            error_class="QualityDowngrade",
+            error_detail="A better existing quality was retained",
+        )
         return None
 
     channels = get_storage_channels()
     if not channels:
         logger.error("_pm_save_file: No STORAGE_CHANNELS found")
+        await checkpoint(
+            state="failed", stage="storage_copying",
+            error_class="NoStorageChannels",
+            error_detail="No configured Telegram storage channels are available",
+        )
         return None
 
-    backup_map = {}
+    backup_map = dict(storage_map)
+    uncertain_chat = None
+    retry_scheduled = False
     for chat_id in channels:
+        if str(chat_id) in backup_map:
+            continue
+        await checkpoint(
+            stage="storage_copying", storage_map=backup_map,
+            storage_pending_chat=chat_id,
+            error_class=None, error_detail=None,
+        )
         try:
-            sent = await message.copy(chat_id=chat_id)
+            sent = await asyncio.wait_for(
+                message.copy(chat_id=chat_id),
+                timeout=35,
+            )
             backup_map[str(chat_id)] = sent.message_id
+            await checkpoint(
+                stage="storage_copying", storage_map=backup_map,
+                storage_pending_chat=None, retry_after_at=None,
+            )
             await asyncio.sleep(0.3)
+        except RetryAfter as exc:
+            delay_value = exc.retry_after
+            if isinstance(delay_value, timedelta):
+                delay_value = delay_value.total_seconds()
+            retry_after = max(0, float(delay_value))
+            if retry_after <= 5:
+                await asyncio.sleep(retry_after)
+                try:
+                    sent = await asyncio.wait_for(
+                        message.copy(chat_id=chat_id),
+                        timeout=35,
+                    )
+                    backup_map[str(chat_id)] = sent.message_id
+                    await checkpoint(
+                        stage="storage_copying", storage_map=backup_map,
+                        storage_pending_chat=None, retry_after_at=None,
+                    )
+                    continue
+                except RetryAfter as retry_exc:
+                    retry_delay = retry_exc.retry_after
+                    if isinstance(retry_delay, timedelta):
+                        retry_delay = retry_delay.total_seconds()
+                    await checkpoint(
+                        state="failed", stage="storage_copying",
+                        storage_map=backup_map,
+                        storage_pending_chat=None,
+                        error_class="RetryAfter",
+                        error_detail="Telegram requested a delayed storage retry",
+                        retry_after_at=datetime.now(timezone.utc)
+                        + timedelta(seconds=max(0, float(retry_delay))),
+                    )
+                    retry_scheduled = True
+                    break
+                except Exception as retry_exc:
+                    logger.error(
+                        "_pm_save_file retry failed (%s)", type(retry_exc).__name__
+                    )
+                    if type(retry_exc).__name__ in (
+                        "TimedOut", "NetworkError", "TimeoutError"
+                    ):
+                        uncertain_chat = chat_id
+                        break
+                    await checkpoint(
+                        storage_map=backup_map, storage_pending_chat=None,
+                        error_class=type(retry_exc).__name__,
+                        error_detail="Telegram storage copy failed after retry",
+                    )
+                    continue
+            if batch_item_id:
+                await checkpoint(
+                    state="failed", stage="storage_copying",
+                    storage_map=backup_map, storage_pending_chat=None,
+                    error_class="RetryAfter",
+                    error_detail="Telegram requested a delayed storage retry",
+                    retry_after_at=datetime.now(timezone.utc)
+                    + timedelta(seconds=retry_after),
+                )
+            retry_scheduled = True
+            break
         except Exception as exc:
-            logger.error("_pm_save_file upload failed for %s: %s", chat_id, exc)
+            logger.error("_pm_save_file upload failed (%s)", type(exc).__name__)
+            if type(exc).__name__ in (
+                "TimedOut", "NetworkError", "TimeoutError"
+            ):
+                uncertain_chat = chat_id
+                break
+            await checkpoint(
+                storage_map=backup_map, storage_pending_chat=None,
+                error_class=type(exc).__name__,
+                error_detail="Telegram storage copy failed",
+            )
+
+    if retry_scheduled:
+        return None
 
     if not backup_map:
         logger.error("_pm_save_file: All uploads failed")
+        if batch_item_id:
+            await checkpoint(
+                state="unrecoverable" if uncertain_chat is not None else "failed",
+                stage="storage_copying",
+                storage_map=backup_map,
+                storage_pending_chat=uncertain_chat,
+                error_class=(
+                    "StorageCopyOutcomeUnknown"
+                    if uncertain_chat is not None
+                    else "StorageCopyFailed"
+                ),
+                error_detail=(
+                    "Telegram did not confirm whether storage accepted the copy"
+                    if uncertain_chat is not None
+                    else "No storage channel accepted the file"
+                ),
+            )
         return None
+
+    if uncertain_chat is not None:
+        await checkpoint(
+            stage="storage_copying", storage_map=backup_map,
+            storage_pending_chat=uncertain_chat,
+            error_class="PartialStorageCopyOutcomeUnknown",
+            error_detail="A storage channel copy timed out after another copy succeeded",
+        )
 
     main_channel_id = next((cid for cid in channels if str(cid) in backup_map), None)
     main_message_id = backup_map.get(str(main_channel_id)) if main_channel_id is not None else None
@@ -9144,56 +10549,477 @@ async def _pm_save_file(message, context) -> str | None:
     if thumb:
         BATCH_SESSION['extracted_thumb'] = getattr(thumb, 'file_id', None)
 
-    conn = get_db_connection()
-    if not conn:
-        for chat_id, message_id in backup_map.items():
-            try:
-                await context.bot.delete_message(chat_id=int(chat_id), message_id=message_id)
-            except Exception:
-                pass
-        return None
-
     try:
-        upsert_movie_file(
-            conn, movie_id, label, file_size_str, main_url,
-            json.dumps(backup_map), f_lang, f_extra, file_unique_id,
-            file_id=getattr(media, 'file_id', None),
+        movie_file_id, deleted = await run_async(
+            _commit_batch_file, movie_id, label, file_size_str, main_url,
+            json.dumps(backup_map), f_lang, f_extra, file_unique_id, file_id,
         )
         BATCH_SESSION['file_count'] = BATCH_SESSION.get('file_count', 0) + 1
+        await checkpoint(
+            state="processing", stage="file_db_committed",
+            movie_id=movie_id, movie_file_id=movie_file_id,
+            storage_map=backup_map, storage_pending_chat=uncertain_chat,
+            error_class=(
+                "PartialStorageCopyOutcomeUnknown"
+                if uncertain_chat is not None else None
+            ),
+            error_detail=(
+                "At least one storage copy succeeded; another channel outcome is unknown"
+                if uncertain_chat is not None else None
+            ),
+        )
         logger.info(
             "_pm_save_file saved: %s — %s [%s]",
             BATCH_SESSION.get('movie_title'), label, file_size_str,
         )
 
-        try:
-            deleted, deleted_labels = auto_upgrade_delete(movie_id, label, f_extra, conn)
-            if deleted > 0:
-                BATCH_SESSION['file_count'] = max(0, BATCH_SESSION.get('file_count', 0) - deleted)
-                logger.info("🔄 _pm_save_file: %s old print(s) deleted: %s", deleted, deleted_labels)
-        except Exception as exc:
-            logger.error("Auto-Upgrade error in _pm_save_file: %s", exc)
+        if deleted:
+            BATCH_SESSION['file_count'] = max(0, BATCH_SESSION.get('file_count', 0) - deleted)
 
+        await checkpoint(
+            state="succeeded", stage="completed",
+            movie_id=movie_id, movie_file_id=movie_file_id,
+            storage_map=backup_map, storage_pending_chat=uncertain_chat,
+            retry_after_at=None,
+            error_class=(
+                "PartialStorageCopyOutcomeUnknown"
+                if uncertain_chat is not None else None
+            ),
+            error_detail=(
+                "The file was saved, but one storage channel response was uncertain"
+                if uncertain_chat is not None else None
+            ),
+        )
         return label
     except Exception as exc:
-        logger.error("_pm_save_file DB error: %s", exc)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        for chat_id, message_id in backup_map.items():
-            try:
-                await context.bot.delete_message(chat_id=int(chat_id), message_id=message_id)
-            except Exception:
-                pass
+        logger.error("_pm_save_file DB error (%s)", type(exc).__name__)
+        await checkpoint(
+            state="failed", stage="storage_copied",
+            movie_id=movie_id, storage_map=backup_map,
+            storage_pending_chat=uncertain_chat,
+            error_class=type(exc).__name__,
+            error_detail="File database upsert or checkpoint failed after storage copy",
+        )
         return None
+
+
+class _RecoveredTelegramMessage:
+    def __init__(self, bot, row):
+        item_id, batch_id, update_id, chat_id, message_id, media_type = row[:6]
+        self.bot = bot
+        self.chat = type("RecoveredChat", (), {"id": chat_id})()
+        self.message_id = message_id
+        self.caption = row[10] or ""
+        self.text = None
+        self.document = None
+        self.video = None
+        media = type(
+            "RecoveredMedia",
+            (),
+            {
+                "file_id": row[6],
+                "file_unique_id": row[7],
+                "file_name": row[8] or "",
+                "file_size": row[9] or 0,
+                "thumbnail": None,
+                "thumb": None,
+            },
+        )()
+        setattr(self, media_type, media)
+
+    async def copy(self, chat_id):
+        return await self.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=self.chat.id,
+            message_id=self.message_id,
+        )
+
+
+def _evidence_dict(value):
+    if isinstance(value, str):
+        return json.loads(value)
+    return value if isinstance(value, dict) else {}
+
+
+def _recovered_batch_record(bot, row):
+    evidence = _evidence_dict(row[11])
+    return {
+        "file_id": row[6],
+        "file_unique_id": row[7],
+        "file_name": row[8] or "",
+        "file_size": row[9] or 0,
+        "caption": row[10] or "",
+        "caption_evidence": evidence.get("caption_evidence") or {},
+        "filename_evidence": evidence.get("filename_evidence") or {},
+        "forward_source": evidence.get("forward_source") or {},
+        "thumb_id": evidence.get("thumb_id"),
+        "message_obj": _RecoveredTelegramMessage(bot, row),
+        "batch_item_id": row[0],
+        "update_id": row[2],
+    }
+
+
+def _movie_batch_metadata_fetch(movie_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while restoring movie batch")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT title, year, category, language FROM movies WHERE id = %s",
+                (movie_id,),
+            )
+            return cur.fetchone()
     finally:
         close_db_connection(conn)
 
 
+async def _resume_batch_item(bot, job, row):
+    item_id = row[0]
+    if not await run_async(_batch_item_claim, item_id):
+        return False
+
+    batch_id, admin_id, kind = job[0], job[1], job[3]
+    movie_id = row[15] or job[7]
+    metadata = _evidence_dict(job[8])
+    record = _recovered_batch_record(bot, row)
+    message = record["message_obj"]
+    try:
+        if movie_id:
+            movie_data = await run_async(_movie_batch_metadata_fetch, movie_id)
+            if not movie_data:
+                raise LookupError("The batch movie no longer exists")
+            title, year, category, language = movie_data
+            result = {
+                "movie_id": movie_id,
+                "title": title,
+                "year": year,
+                "category": category,
+                "movie_lang": language,
+            }
+        else:
+            caption_evidence = record["caption_evidence"]
+            filename_evidence = record["filename_evidence"]
+            if not filename_evidence and record["file_name"]:
+                filename_evidence = await fallback_extraction(record["file_name"])
+            if not caption_evidence and record["caption"]:
+                caption_evidence = await fallback_extraction(record["caption"])
+            reconciled = await reconcile_evidence_with_gemini(
+                caption_evidence,
+                filename_evidence,
+                caption_raw=record["caption"],
+                filename_raw=record["file_name"],
+                forward_source=record["forward_source"],
+            )
+            result = await _core_movie_processor(
+                record["caption"] or record["file_name"],
+                reconciled_data=reconciled,
+            )
+            if not result:
+                raise LookupError("Movie identity could not be resolved during recovery")
+            movie_id = result["movie_id"]
+            title = result["title"]
+            year = result["year"]
+            category = result["category"]
+            language = result["movie_lang"]
+            if kind == "movie":
+                metadata = {
+                    "title": title, "year": year, "category": category,
+                    "language": language,
+                }
+                await run_async(
+                    _batch_job_update,
+                    batch_id,
+                    movie_id=movie_id,
+                    movie_metadata=metadata,
+                )
+
+        BATCH_SESSION.update({
+            "active": True,
+            "movie_id": movie_id,
+            "movie_title": title,
+            "file_count": 0,
+            "admin_id": admin_id,
+            "batch_id": batch_id,
+            "year": str(year) if year else "",
+            "category": category or "",
+            "language": language or "",
+            "extracted_thumb": record.get("thumb_id"),
+        })
+        await run_async(
+            _batch_item_update,
+            item_id,
+            state="processing",
+            stage="movie_db_committed",
+            movie_id=movie_id,
+        )
+        await _pm_save_file(message, type("RecoveredContext", (), {"bot": bot})(), item_id)
+        return True
+    except Exception as exc:
+        logger.error(
+            "Batch item recovery failed (batch_id=%s, item_id=%s, error_class=%s)",
+            batch_id,
+            item_id,
+            type(exc).__name__,
+        )
+        await run_async(
+            _batch_item_update,
+            item_id,
+            state="failed",
+            stage=row[13] or "identity_reconciliation",
+            error_class=type(exc).__name__,
+            error_detail="Persisted batch item could not be resumed",
+        )
+        return False
+    finally:
+        BATCH_SESSION.update({
+            "active": False, "movie_id": None, "movie_title": None,
+            "file_count": 0, "admin_id": None, "batch_id": None,
+            "year": "", "category": "", "language": "",
+        })
+
+
+async def _recover_interrupted_batches(application):
+    try:
+        await run_async(_batch_active_heartbeat)
+        jobs = await run_async(_batch_recovery_jobs_fetch)
+    except Exception as exc:
+        logger.error("Batch recovery scan failed (%s)", type(exc).__name__)
+        return
+
+    for job in jobs:
+        batch_id, admin_id, kind = job[0], job[1], job[3]
+        if job[2] is not None and job[2] != application.bot.id:
+            continue
+        if batch_id in _RECOVERED_BATCH_IDS:
+            continue
+        active_session = batch_upload_coordinator._sessions.get(admin_id)
+        if active_session and active_session.get("batch_id") != batch_id:
+            continue
+        if (
+            BATCH_SESSION.get("active")
+            and BATCH_SESSION.get("batch_id") != batch_id
+        ) or (
+            SUPER_BATCH_SESSION.get("active")
+            and SUPER_BATCH_SESSION.get("batch_id") != batch_id
+        ):
+            continue
+        try:
+            if not await run_async(_batch_job_claim, batch_id):
+                continue
+            await run_async(_batch_item_retry_failed, batch_id, admin_id)
+            rows = await run_async(_batch_items_fetch, batch_id, True)
+            deferred_item = False
+            for row in rows:
+                if row[12] in ("pending", "failed", "processing"):
+                    resumed = await _resume_batch_item(application.bot, job, row)
+                    if row[12] == "processing" and not resumed:
+                        current = await run_async(_batch_item_fetch, row[0])
+                        if current and current[12] == "processing":
+                            deferred_item = True
+
+            all_rows = await run_async(_batch_items_fetch, batch_id, False)
+            if kind == "super":
+                SUPER_BATCH_SESSION.update({
+                    "active": True,
+                    "admin_id": admin_id,
+                    "files": [
+                        _recovered_batch_record(application.bot, row)
+                        for row in all_rows
+                    ],
+                    "batch_id": batch_id,
+                    "status": "collecting",
+                })
+                batch_upload_coordinator.begin(
+                    admin_id, None, job[5], kind="super", batch_id=batch_id
+                )
+            else:
+                movie_id = job[7]
+                if not movie_id:
+                    recovered = next(
+                        (row[15] for row in all_rows if row[15]), None
+                    )
+                    movie_id = recovered
+                movie_data = (
+                    await run_async(_movie_batch_metadata_fetch, movie_id)
+                    if movie_id else None
+                )
+                if movie_data:
+                    title, year, category, language = movie_data
+                    BATCH_SESSION.update({
+                        "active": True,
+                        "movie_id": movie_id,
+                        "movie_title": title,
+                        "file_count": 0,
+                        "admin_id": admin_id,
+                        "batch_id": batch_id,
+                        "year": str(year) if year else "",
+                        "category": category or "",
+                        "language": language or "",
+                    })
+                    batch_upload_coordinator.begin(
+                        admin_id, movie_id, job[5], kind="movie",
+                        batch_id=batch_id,
+                    )
+                else:
+                    raise LookupError("Could not restore the movie batch identity")
+
+            restored = batch_upload_coordinator._sessions.get(admin_id)
+            if restored and job[6] is not None:
+                restored["closing_update_id"] = job[6]
+            await run_async(
+                _batch_job_update,
+                batch_id,
+                status="collecting",
+                closing_update_id=job[6],
+                lease_owner=BATCH_PROCESS_ID,
+            )
+            logger.info(
+                "Recovered batch %s for admin %s (%s)",
+                batch_id, admin_id, kind,
+            )
+            if job[6] is not None:
+                await application.bot.send_message(
+                    chat_id=admin_id,
+                    text=(
+                        f"Batch {batch_id} was recovered. All eligible earlier "
+                        "files have been resumed; resend /done or /superdone "
+                        "to complete its finalization."
+                    ),
+                )
+            if not deferred_item:
+                _RECOVERED_BATCH_IDS.add(batch_id)
+        except Exception as exc:
+            logger.error(
+                "Batch recovery failed (batch_id=%s, error_class=%s)",
+                batch_id,
+                type(exc).__name__,
+            )
+            try:
+                await run_async(
+                    _batch_job_update,
+                    batch_id,
+                    status="failed",
+                    lease_owner=None,
+                )
+            except Exception as checkpoint_exc:
+                logger.error(
+                    "Failed to persist recovery error (%s)",
+                    type(checkpoint_exc).__name__,
+                )
+
+
+async def _batch_recovery_loop(application):
+    while True:
+        await _recover_interrupted_batches(application)
+        await asyncio.sleep(30)
+
+
+async def _batch_lease_heartbeat_loop():
+    while True:
+        try:
+            await run_async(_batch_active_heartbeat)
+        except Exception as exc:
+            logger.warning("Batch lease heartbeat failed (%s)", type(exc).__name__)
+        await asyncio.sleep(30)
+
+
+async def batch_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await _safe_batch_reply(
+            update.effective_message,
+            "Usage: /batchstatus <batch_id>",
+        )
+        return
+    batch_id = context.args[0].strip()
+    if len(batch_id) > 80:
+        await _safe_batch_reply(update.effective_message, "Invalid batch ID.")
+        return
+    try:
+        snapshot = await run_async(
+            _batch_job_snapshot, batch_id, update.effective_user.id
+        )
+    except Exception as exc:
+        logger.error("Batch status lookup failed (%s)", type(exc).__name__)
+        await _safe_batch_reply(
+            update.effective_message,
+            "❌ Batch status is temporarily unavailable.",
+        )
+        return
+    if not snapshot:
+        await _safe_batch_reply(
+            update.effective_message, "❌ Batch not found for this admin."
+        )
+        return
+    await _safe_batch_reply(
+        update.effective_message,
+        (
+            f"Batch: {snapshot[0]}\nStatus: {snapshot[2]}\n"
+            f"Items: {snapshot[5]} | Saved: {snapshot[6]} | "
+            f"Skipped: {snapshot[7]} | Failed: {snapshot[8]} | "
+            f"Unrecoverable: {snapshot[9]} | Pending: {snapshot[10]} | "
+            f"Processing: {snapshot[11]}"
+        ),
+    )
+
+
+async def batch_retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await _safe_batch_reply(
+            update.effective_message,
+            "Usage: /batchretry <batch_id>",
+        )
+        return
+    batch_id = context.args[0].strip()
+    try:
+        snapshot = await run_async(
+            _batch_job_snapshot, batch_id, update.effective_user.id
+        )
+        if not snapshot:
+            await _safe_batch_reply(
+        update.effective_message, "❌ Batch not found for this admin."
+            )
+            return
+        retried = await run_async(
+            _batch_item_retry_failed, batch_id, update.effective_user.id
+        )
+        if not retried:
+            await _safe_batch_reply(
+        update.effective_message,
+        "No failed files are currently eligible for retry. "
+        "Use /batchstatus to inspect the batch.",
+            )
+            return
+        _RECOVERED_BATCH_IDS.discard(batch_id)
+        await _recover_interrupted_batches(context.application)
+        await _safe_batch_reply(
+            update.effective_message,
+            f"✅ Retry started for {retried} failed file(s) in batch {batch_id}.",
+        )
+    except Exception as exc:
+        logger.error("Batch retry failed (%s)", type(exc).__name__)
+        await _safe_batch_reply(
+            update.effective_message,
+            "❌ Batch retry could not be started.",
+        )
+
+
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = getattr(update, "effective_user", None)
+    reserved = batch_upload_coordinator._sessions.get(user.id) if user else None
+    if reserved and reserved.get("kind") == "super" and reserved.get("starting"):
+        await batch_upload_coordinator.wait_until_ready(user.id)
+        reserved = batch_upload_coordinator._sessions.get(user.id)
+    if reserved and reserved.get("start_failed"):
+        return
+
     if not batch_upload_coordinator.is_upload_allowed(update):
         logger.info(
-            "Ignoring upload update %s received after /done for admin %s",
+            "Ignoring upload update %s received after batch completion request for admin %s",
             getattr(update, "update_id", "unknown"),
             getattr(getattr(update, "effective_user", None), "id", "unknown"),
         )
@@ -9201,6 +11027,17 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 🛑 18+ Batch active hai toh yahan kuch nahi karna
     if BATCH_18_SESSION.get('active'):
+        return
+
+    if (
+        BATCH_SESSION.get("active")
+        and BATCH_SESSION.get("admin_id") != getattr(user, "id", None)
+    ):
+        return
+    if (
+        SUPER_BATCH_SESSION.get("active")
+        and SUPER_BATCH_SESSION.get("admin_id") != getattr(user, "id", None)
+    ):
         return
 
     # ==========================================
@@ -9213,7 +11050,35 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         record = await _collect_superbatch_file(update.effective_message)
+        if record:
+            try:
+                item_id = await run_async(
+                    _batch_item_create,
+                    SUPER_BATCH_SESSION["batch_id"],
+                    getattr(update, "update_id", None),
+                    update.effective_message,
+                    record,
+                )
+            except Exception as exc:
+                logger.error(
+                    "SuperBatch file was not acknowledged (error_class=%s)",
+                    type(exc).__name__,
+                )
+                await update.effective_message.reply_text(
+                    "❌ File checkpoint failed; please resend this file."
+                )
+                return
+            record["batch_item_id"] = item_id
+            record["update_id"] = getattr(update, "update_id", None)
         if record and _looks_like_song_file(update.effective_message, record):
+            await run_async(
+                _batch_item_update,
+                record["batch_item_id"],
+                state="skipped",
+                stage="completed",
+                error_class="FilteredMedia",
+                error_detail="Excluded by the existing likely-song filter",
+            )
             logger.info(f"Superbatch: skipping likely song file: {record.get('file_name')}")
             await update.effective_message.reply_text(
                 f"⏭️ **Skip kiya (Song lag rahi hai):** `{record.get('file_name')}`\n"
@@ -9223,7 +11088,12 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if record:
-            SUPER_BATCH_SESSION['files'].append(record)
+            record["batch_id"] = SUPER_BATCH_SESSION["batch_id"]
+            if not any(
+                existing.get("update_id") == record.get("update_id")
+                for existing in SUPER_BATCH_SESSION["files"]
+            ):
+                SUPER_BATCH_SESSION['files'].append(record)
             count = len(SUPER_BATCH_SESSION['files'])
             if count % 10 == 0:
                 await update.effective_message.reply_text(
@@ -9311,17 +11181,59 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 🤖 PHASE 1: START BATCH — _core_movie_processor se power lelo
         # ==========================================
         if not BATCH_SESSION.get('active'):
+            coordinator_session = batch_upload_coordinator._sessions.get(user.id)
+            batch_id = (
+                coordinator_session.get("batch_id")
+                if coordinator_session else str(uuid.uuid4())
+            )
+            try:
+                await run_async(
+                    _batch_job_create, batch_id, user.id, "movie",
+                    getattr(update, "update_id", None), context.bot.id,
+                )
+                first_record = await _collect_superbatch_file(message)
+                if not first_record:
+                    raise ValueError("The first batch update is not a supported file")
+                first_item_id = await run_async(
+                    _batch_item_create, batch_id, update.update_id,
+                    message, first_record,
+                )
+                if not await run_async(_batch_item_claim, first_item_id):
+                    raise RuntimeError("The first batch file could not be claimed")
+            except Exception as exc:
+                if coordinator_session:
+                    coordinator_session["start_failed"] = True
+                    batch_upload_coordinator.mark_ready(user.id)
+                logger.error(
+                    "Automatic batch checkpoint failed (error_class=%s)",
+                    type(exc).__name__,
+                )
+                await message.reply_text(
+                    "❌ The first file could not be checkpointed. "
+                    "Please resend it or use /batch Movie Name."
+                )
+                return
 
             raw_caption = message.caption or message.text or ""
             raw_filename = _get_message_filename(message)
             if not raw_caption and not raw_filename:
+                await run_async(
+                    _batch_item_update, first_item_id,
+                    state="failed", stage="identity_reconciliation",
+                    error_class="MissingMovieIdentity",
+                    error_detail="The first file has no caption or filename identity",
+                )
+                if coordinator_session:
+                    coordinator_session["start_failed"] = True
+                    batch_upload_coordinator.mark_ready(user.id)
                 await message.reply_text(
                     "❌ **Batch Off!**\nCaption ya Telegram filename mein movie identity nahi mili.",
                     parse_mode='Markdown',
                 )
                 return
 
-            status_msg = await message.reply_text(
+            status_msg = await _safe_batch_reply(
+                message,
                 "🧠 Caption + Filename Evidence → Gemini → TMDB/IMDb pipeline chal raha hai...",
                 quote=True,
             )
@@ -9345,15 +11257,34 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # Same file ke caption aur raw Telegram filename ko local parser se
             # separately extract karke Gemini ek baar reconcile karega.
-            reconciled_data = await process_file_with_evidence_engine(message)
-            result = await _core_movie_processor(
-                raw_caption or raw_filename,
-                image_bytes,
-                reconciled_data=reconciled_data,
-            )
+            try:
+                reconciled_data = await process_file_with_evidence_engine(message)
+                result = await _core_movie_processor(
+                    raw_caption or raw_filename,
+                    image_bytes,
+                    reconciled_data=reconciled_data,
+                )
+            except Exception as exc:
+                result = None
+                await run_async(
+                    _batch_item_update, first_item_id,
+                    state="failed", stage="identity_reconciliation",
+                    error_class=type(exc).__name__,
+                    error_detail="Movie identity processing failed",
+                )
+                logger.error(
+                    "Automatic batch identity processing failed (%s)",
+                    type(exc).__name__,
+                )
 
             if not result:
-                await status_msg.edit_text("❌ Movie naam extract nahi ho paya.\n\n`/batch Movie Name` use karein.")
+                if coordinator_session:
+                    coordinator_session["start_failed"] = True
+                    batch_upload_coordinator.mark_ready(user.id)
+                await _safe_batch_status_edit(
+                    status_msg,
+                    "❌ Movie naam extract nahi ho paya.\n\n`/batch Movie Name` use karein.",
+                )
                 return
 
             movie_id   = result['movie_id']
@@ -9371,64 +11302,194 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
                     file_count = cur.fetchone()[0]
                     cur.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.error(
+                        "Existing movie file count lookup failed (%s)",
+                        type(exc).__name__,
+                    )
                 finally:
                     close_db_connection(conn)
 
             BATCH_SESSION.update({
                 'active': True, 'movie_id': movie_id, 'movie_title': title,
-                'file_count': file_count, 'admin_id': ADMIN_USER_ID,
+                'file_count': file_count, 'admin_id': user.id,
+                'batch_id': batch_id,
                 'year': str(year) if year else "", 'category': category, 'language': movie_lang
             })
+            try:
+                await run_async(
+                    _batch_job_update,
+                    batch_id,
+                    movie_id=movie_id,
+                    movie_metadata={
+                        "title": title, "year": year, "category": category,
+                        "language": movie_lang,
+                    },
+                )
+                await run_async(
+                    _batch_item_update, first_item_id,
+                    state="processing", stage="movie_db_committed",
+                    movie_id=movie_id,
+                )
+            except Exception as exc:
+                BATCH_SESSION["active"] = False
+                if coordinator_session:
+                    coordinator_session["start_failed"] = True
+                    batch_upload_coordinator.mark_ready(user.id)
+                logger.error(
+                    "Automatic batch identity checkpoint failed (%s)",
+                    type(exc).__name__,
+                )
+                await _safe_batch_status_edit(
+                    status_msg,
+                    "❌ Movie was identified, but its batch checkpoint failed. "
+                    "No file was copied to storage; resend or use /batch."
+                )
+                return
+            batch_upload_coordinator.begin(
+                user.id, movie_id, update.update_id,
+                kind="movie", batch_id=batch_id,
+            )
 
             keyboard = []
             if file_count > 0:
                 keyboard.append([InlineKeyboardButton("🗑️ Delete OLD Files", callback_data=f"clearfiles_{movie_id}")])
             keyboard.append([InlineKeyboardButton("❌ Cancel Batch", callback_data="cancel_batch")])
 
-            await status_msg.edit_text(
+            await _safe_batch_status_edit(
+                status_msg,
                 f"✅ **Batch Started!**\n\n🎬 Movie: **{title}**\n📅 Year: {year if year else 'N/A'}\n🏷️ Category: {category}\n\n🚀 **Ab apni files bhejna shuru karo!**\nJab ho jaye: `/done`",
                 parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            first_label = None
+            try:
+                first_label = await _pm_save_file(message, context, first_item_id)
+            except Exception as exc:
+                logger.error(
+                    "First automatic batch file failed (error_class=%s)",
+                    type(exc).__name__,
+                )
+            finally:
+                batch_upload_coordinator.mark_ready(user.id)
+            if first_label:
+                first_size = getattr(
+                    message.document or message.video, "file_size", 0
+                ) or 0
+                await _safe_batch_status_edit(
+                    status_msg,
+                    f"✅ **Batch Started & First File Saved**\n\n"
+                    f"🎬 Movie: **{title}**\n"
+                    f"🆔 Batch ID: `{batch_id}`\n"
+                    f"💾 `{title} {first_label}` "
+                    f"[{get_readable_file_size(first_size)}]\n"
+                    f"🔢 Total Files: {BATCH_SESSION.get('file_count', 0)}\n"
+                    "Send remaining files, then `/done`.",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            else:
+                await _safe_batch_status_edit(
+                    status_msg,
+                    f"✅ **Batch Started** for **{title}**, but the first file was "
+                    "not saved. It is checkpointed for retry; send remaining files "
+                    "or use /batchretry after completion.",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             return
 
         # ==========================================
         # 📤 PHASE 2: SAVE FILES (Jab Batch ON ho)
         # ==========================================
-        upload_status = await message.reply_text("⏳ Uploading file...", quote=True)
+        upload_status = await _safe_batch_reply(
+            message, "⏳ Uploading file...", quote=True
+        )
         # ... (Baaki ka Phase 2 ka code aapka same rahega)
 
         # 📤 PHASE 2: UNIFIED FILE SAVING
-        label = await _pm_save_file(message, context)
+        try:
+            file_record = await _collect_superbatch_file(message)
+            batch_item_id = await run_async(
+                _batch_item_create,
+                BATCH_SESSION["batch_id"],
+                update.update_id,
+                message,
+                file_record,
+            )
+            if not await run_async(_batch_item_claim, batch_item_id):
+                raise RuntimeError("The batch file could not be claimed")
+        except Exception as exc:
+            logger.error(
+                "Movie batch file was not acknowledged (error_class=%s)",
+                type(exc).__name__,
+            )
+            await _safe_batch_status_edit(
+                upload_status,
+                "❌ File checkpoint failed; please resend this file."
+            )
+            return
+
+        try:
+            label = await _pm_save_file(message, context, batch_item_id)
+        except Exception as exc:
+            logger.error(
+                "Movie batch file save failed (error_class=%s)",
+                type(exc).__name__,
+            )
+            await _safe_batch_status_edit(
+                upload_status,
+                "❌ The file could not be saved. Its checkpoint was retained for retry."
+            )
+            return
         
         if label:
             file_size = message.document.file_size if message.document else (message.video.file_size if message.video else 0)
             file_size_str = get_readable_file_size(file_size)
             movie_title = BATCH_SESSION.get('movie_title', 'Movie')
-            await upload_status.edit_text(
+            await _safe_batch_status_edit(
+                upload_status,
                 f"✅ **Saved:** `{movie_title} {label}` [{file_size_str}]\n🔢 Total Files: {BATCH_SESSION.get('file_count', 0)}", 
                 parse_mode='Markdown'
             )
         else:
-            await upload_status.edit_text(
+            await _safe_batch_status_edit(
+                upload_status,
                 "❌ **Save Failed or Blocked!**\nYa toh error aaya, ya DB mein pehle se better print (downgrade) hai. Logs check karein.", 
                 parse_mode='Markdown'
             )
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not BATCH_SESSION.get('active'): 
+    if not update.effective_user:
+        return
+    admin_id = update.effective_user.id
+    session = await batch_upload_coordinator.wait_until_ready(admin_id)
+    if (
+        not session
+        or session.get("kind") != "movie"
+        or session.get("start_failed")
+        or not BATCH_SESSION.get("active")
+        or BATCH_SESSION.get("admin_id") != admin_id
+    ):
         await update.message.reply_text("❌ Koi batch active nahi hai!")
         return
 
-    admin_id = update.effective_user.id
     if not batch_upload_coordinator.claim_finalization(admin_id):
         return
     
     status_msg = await update.message.reply_text("🔄 **Batch complete kar raha hoon...**", parse_mode='Markdown')
+    batch_id = session.get("batch_id") or BATCH_SESSION.get("batch_id")
 
     try:
         await batch_upload_coordinator.wait_for_prior_uploads(admin_id)
+        if not batch_id:
+            raise RuntimeError("Active batch has no durable batch ID")
+        await run_async(
+            _batch_job_update,
+            batch_id,
+            status="processing",
+            closing_update_id=session.get("closing_update_id"),
+            lease_owner=BATCH_PROCESS_ID,
+        )
 
         movie_id = BATCH_SESSION.get('movie_id')
         movie_title = BATCH_SESSION.get('movie_title', 'Unknown')
@@ -9437,13 +11498,17 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         # DB से क्वालिटी और डेटा निकालें
         conn = get_db_connection()
+        if not conn:
+            raise RuntimeError("Database unavailable while finalizing batch")
         cur = conn.cursor()
-        cur.execute("SELECT genre, language, \"cast\", poster_url, rating FROM movies WHERE id = %s", (movie_id,))
-        minfo = cur.fetchone()
-        cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
-        qrows = cur.fetchall()
-        cur.close()
-        close_db_connection(conn)
+        try:
+            cur.execute("SELECT genre, language, \"cast\", poster_url, rating FROM movies WHERE id = %s", (movie_id,))
+            minfo = cur.fetchone()
+            cur.execute("SELECT quality FROM movie_files WHERE movie_id = %s", (movie_id,))
+            qrows = cur.fetchall()
+        finally:
+            cur.close()
+            close_db_connection(conn)
 
         db_genre = minfo[0] if minfo and minfo[0] else "Unknown"
         db_lang = minfo[1] if minfo and minfo[1] else "Hindi (LiNE) + HC-ESubs"
@@ -9495,9 +11560,11 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         report = (
             f"🎉 **Batch Completed!**\n\n"
             f"🎬 **Movie:** `{movie_title}`\n"
+            f"🆔 **Batch ID:** `{batch_id}`\n"
             f"📅 **Year:** {movie_year if movie_year else 'N/A'}\n"
             f"🏷️ **Category:** {movie_category}\n"
-            f"📂 **Files Saved:** {BATCH_SESSION.get('file_count', 0)}\n\n"
+            f"📂 **Files Saved:** "
+            f"{(await run_async(_batch_job_snapshot, batch_id, admin_id))[6]}\n\n"
         )
 
         extracted_thumb = BATCH_SESSION.get('extracted_thumb')
@@ -9508,18 +11575,36 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("📢 Manual Post (Send Poster)", callback_data=f"askposter_{movie_id}")]
         ])
 
-        await status_msg.edit_text(report, parse_mode='Markdown', reply_markup=keyboard)
+        await _safe_batch_status_edit(
+            status_msg, report, parse_mode='Markdown', reply_markup=keyboard
+        )
 
-    except Exception as e:
-        logger.error(f"Error in batch_done_command: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Error during /done: {e}")
+    except Exception as exc:
+        logger.error(
+            "Batch finalization failed (batch_id=%s, error_class=%s)",
+            batch_id,
+            type(exc).__name__,
+        )
+        await _safe_batch_status_edit(
+            status_msg,
+            "❌ Error during /done. Use /batchstatus with the batch ID to inspect recoverable files.",
+        )
 
     finally:
+        if batch_id:
+            try:
+                await run_async(_batch_job_finish, batch_id, admin_id)
+            except Exception as exc:
+                logger.error(
+                    "Could not finalize batch checkpoint (error_class=%s)",
+                    type(exc).__name__,
+                )
         BATCH_SESSION.update({
             'active': False, 'movie_id': None, 'movie_title': None, 
             'file_count': 0, 'admin_id': None, 'year': '', 'category': '', 
-            'extracted_thumb': None
+            'extracted_thumb': None, 'batch_id': None,
         })
+        batch_upload_coordinator.finish(admin_id)
 
                 
 async def handle_admin_poster(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -14126,6 +16211,37 @@ async def upcoming_reminder_worker(app: Application):
         await asyncio.sleep(45)
 
 
+def _get_due_delete_messages(bot_username):
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, chat_id, message_id FROM auto_delete_queue "
+                "WHERE bot_username = %s AND delete_at <= NOW() "
+                "ORDER BY delete_at LIMIT 50",
+                (bot_username,),
+            )
+            return cur.fetchall()
+    finally:
+        close_db_connection(conn)
+
+
+def _remove_deleted_messages(row_ids):
+    if not row_ids:
+        return
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM auto_delete_queue WHERE id = ANY(%s)", (row_ids,))
+        conn.commit()
+    finally:
+        close_db_connection(conn)
+
+
 async def auto_delete_worker(app: Application):
     """
     Background worker jo har 5 second me DB check karega, 
@@ -14141,55 +16257,33 @@ async def auto_delete_worker(app: Application):
     logger.info(f"🧹 Auto-Delete Worker Started for @{bot_username}")
 
     while True:
-        conn = None
         try:
-            conn = get_db_connection()
-            if conn:
-                cur = conn.cursor()
-                # 1. Wo messages dhoondo jinka time pura ho chuka hai
-                cur.execute(
-                    "SELECT id, chat_id, message_id FROM auto_delete_queue WHERE bot_username = %s AND delete_at <= NOW() LIMIT 50",
-                    (bot_username,)
-                )
-                rows = cur.fetchall()
-                
-                for row in rows:
-                    row_id, chat_id, msg_id = row
-                    
-                    # 2. Telegram se file delete karo
-                    try:
-                        await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                    except telegram.error.BadRequest as exc:
-                        # Telegram returns BadRequest for an already deleted
-                        # message. Remove that queue row; retry other failures.
-                        if "not found" in str(exc).lower() or "message to delete not found" in str(exc).lower():
-                            cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
-                            conn.commit()
-                        else:
-                            logger.warning(
-                                "Auto-delete retry needed for chat=%s message=%s: %s",
-                                chat_id, msg_id, exc
-                            )
-                    except Exception as exc:
+            # Release the DB connection before waiting on Telegram, and keep
+            # all synchronous SQL off the event loop shared by every bot.
+            rows = await run_async(_get_due_delete_messages, bot_username)
+            deleted_ids = []
+            for row_id, chat_id, msg_id in rows:
+                try:
+                    await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                except telegram.error.BadRequest as exc:
+                    if "not found" in str(exc).lower():
+                        deleted_ids.append(row_id)
+                    else:
                         logger.warning(
                             "Auto-delete retry needed for chat=%s message=%s: %s",
                             chat_id, msg_id, exc
                         )
-                    else:
-                        cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
-                        conn.commit()
-                    
-                cur.close()
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-delete retry needed for chat=%s message=%s: %s",
+                        chat_id, msg_id, exc
+                    )
+                else:
+                    deleted_ids.append(row_id)
+            # One commit per page instead of one blocking commit per message.
+            await run_async(_remove_deleted_messages, deleted_ids)
         except Exception as e:
             logger.error(f"Auto-delete worker error: {e}")
-            if conn:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-        finally:
-            if conn:
-                close_db_connection(conn)
             
         # Har 5 second me database check karega
         await asyncio.sleep(5)
@@ -14368,6 +16462,8 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("batch", batch_add_command))
     application.add_handler(CommandHandler("done", batch_done_command))
     application.add_handler(CommandHandler("batchid", batch_id_command))
+    application.add_handler(CommandHandler("batchstatus", batch_status_command))
+    application.add_handler(CommandHandler("batchretry", batch_retry_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     application.add_handler(CommandHandler("post", post_to_topic_command))
     
@@ -14490,8 +16586,10 @@ async def main():
 
             await app.initialize()
             await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
+            await _recover_interrupted_batches(app)
+            await app.updater.start_polling(drop_pending_updates=False)
             worker_tasks.append(asyncio.create_task(auto_delete_worker(app)))
+            worker_tasks.append(asyncio.create_task(_batch_recovery_loop(app)))
             apps.append(app)
 
             bot_info = await app.bot.get_me()
@@ -14510,6 +16608,7 @@ async def main():
     # intentionally one task for the process, not one per bot token.
     if apps:
         worker_tasks.append(asyncio.create_task(upcoming_reminder_worker(apps[0])))
+        worker_tasks.append(asyncio.create_task(_batch_lease_heartbeat_loop()))
     worker_tasks.append(asyncio.create_task(keep_miniapp_alive_worker()))
     _startup_complete.set()
     logger.info("✅ Startup complete; service is ready.")

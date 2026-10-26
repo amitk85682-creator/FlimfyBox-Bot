@@ -1,4 +1,6 @@
 import sqlite3
+import inspect
+import textwrap
 
 import pytest
 
@@ -104,6 +106,39 @@ def test_migration_10_definition_remains_unchanged():
     assert 'CREATE UNIQUE INDEX IF NOT EXISTS movie_files_file_id_unique_idx' in statements[0]
     assert 'ON movie_files (file_id)' in statements[0]
     assert 'WHERE file_id IS NOT NULL' in statements[0]
+    expected_source = '''\
+def _migration_10(conn):
+    """Make the Telegram file ID a database-enforced fallback identity."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS movie_files_file_id_unique_idx
+            ON movie_files (file_id)
+            WHERE file_id IS NOT NULL
+        """)
+'''
+    assert textwrap.dedent(inspect.getsource(db_migrations._migration_10)) == expected_source
+
+
+def test_migration_12_defines_durable_batch_and_item_recovery_schema():
+    migrations = dict(db_migrations.MIGRATIONS)
+    assert 12 in migrations
+
+    connection = MigrationConnection()
+    migrations[12](connection)
+    statements = [query for query, _ in connection.queries]
+    joined = "\n".join(statements)
+
+    assert "CREATE TABLE IF NOT EXISTS ingestion_batches" in joined
+    assert "CREATE TABLE IF NOT EXISTS ingestion_batch_items" in joined
+    assert "bot_id BIGINT" in joined
+    assert "update_id BIGINT NOT NULL" in joined
+    assert "source_chat_id BIGINT NOT NULL" in joined
+    assert "source_message_id BIGINT NOT NULL" in joined
+    assert "storage_map JSONB NOT NULL" in joined
+    assert "storage_pending_chat BIGINT" in joined
+    assert "retry_after_at TIMESTAMPTZ" in joined
+    assert "UNIQUE (batch_id, update_id)" in joined
+    assert "idx_ingestion_batch_items_recovery" in joined
 
 
 def test_already_applied_migrations_are_skipped(monkeypatch):

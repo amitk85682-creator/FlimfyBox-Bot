@@ -66,11 +66,13 @@ class InMemoryMovieFilesDB:
                 )
             ), None)
             if existing:
+                if existing["movie_id"] != row["movie_id"]:
+                    return None
                 existing.update({
                     k: v for k, v in row.items()
                     if k not in ("id", "file_unique_id", "file_id")
                 })
-                return
+                return existing["id"]
             for identity in ("file_unique_id", "file_id"):
                 value = row.get(identity)
                 if value is not None and any(r.get(identity) == value for r in self._rows):
@@ -78,6 +80,7 @@ class InMemoryMovieFilesDB:
             row = dict(row, id=self._next_id)
             self._next_id += 1
             self._rows.append(row)
+            return row["id"]
 
     @property
     def all(self):
@@ -107,13 +110,14 @@ class FakeCursorForUpsert:
     def __init__(self, db: InMemoryMovieFilesDB):
         self._db = db
         self.rowcount = 0
+        self._result = None
 
     def execute(self, sql, params=None):
         sql_norm = " ".join(sql.split()).upper()
         if "INSERT INTO MOVIE_FILES" in sql_norm and "ON CONFLICT" in sql_norm:
             row = self._build_row(params, with_fuid=True)
-            self._db.upsert(row)
-            self.rowcount = 1
+            self._result = self._db.upsert(row)
+            self.rowcount = int(self._result is not None)
         elif "INSERT INTO MOVIE_FILES" in sql_norm:
             row = self._build_row(params, with_fuid="NULL" not in sql_norm)
             self._db.insert(row)
@@ -136,6 +140,9 @@ class FakeCursorForUpsert:
 
     def close(self):
         pass
+
+    def fetchone(self):
+        return (self._result,) if self._result is not None else None
 
     @staticmethod
     def _build_row(params, with_fuid=True):
@@ -376,6 +383,26 @@ class TestConcurrentRetryIdempotency:
             )
 
         assert db.count() == 2
+
+    def test_same_telegram_identity_is_not_moved_between_movies(self):
+        db = InMemoryMovieFilesDB()
+        conn = FakeConnForUpsert(db)
+
+        upsert_movie_file(
+            conn, movie_id=11965, label="480p", file_size_str="600 MB",
+            main_url="url", backup_map_json="{}", f_lang="", f_extra="",
+            file_unique_id="SHARED_FILE",
+        )
+
+        with pytest.raises(ValueError, match="different movie"):
+            upsert_movie_file(
+                conn, movie_id=11966, label="1080p", file_size_str="1 GB",
+                main_url="other", backup_map_json="{}", f_lang="", f_extra="",
+                file_unique_id="SHARED_FILE",
+            )
+
+        assert db.count() == 1
+        assert db.all[0]["movie_id"] == 11965
 
 
 class TestNullFileUniqueIdDoesNotClobberReal:

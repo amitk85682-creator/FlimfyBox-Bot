@@ -432,6 +432,83 @@ def _migration_11(conn):
         """)
 
 
+def _migration_12(conn):
+    """Persist accepted batch work and its recoverable per-file progress."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ingestion_batches (
+                id TEXT PRIMARY KEY,
+                admin_id BIGINT NOT NULL,
+                bot_id BIGINT,
+                kind TEXT NOT NULL CHECK (kind IN ('movie', 'super')),
+                status TEXT NOT NULL DEFAULT 'collecting'
+                    CHECK (status IN (
+                        'collecting', 'processing', 'completed',
+                        'completed_with_errors', 'failed'
+                    )),
+                start_update_id BIGINT,
+                closing_update_id BIGINT,
+                movie_id BIGINT,
+                movie_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                lease_owner TEXT,
+                lease_until TIMESTAMPTZ,
+                last_progress_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMPTZ
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ingestion_batch_items (
+                id BIGSERIAL PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES ingestion_batches(id) ON DELETE CASCADE,
+                update_id BIGINT NOT NULL,
+                source_chat_id BIGINT NOT NULL,
+                source_message_id BIGINT NOT NULL,
+                media_type TEXT NOT NULL CHECK (media_type IN ('document', 'video')),
+                file_id TEXT,
+                file_unique_id TEXT,
+                file_name TEXT NOT NULL DEFAULT '',
+                file_size BIGINT NOT NULL DEFAULT 0,
+                caption TEXT NOT NULL DEFAULT '',
+                evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+                state TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN (
+                        'pending', 'processing', 'succeeded',
+                        'skipped', 'failed', 'unrecoverable'
+                    )),
+                stage TEXT NOT NULL DEFAULT 'accepted'
+                    CHECK (stage IN (
+                        'accepted', 'identity_reconciliation', 'metadata_lookup',
+                        'movie_db_committed', 'storage_copying',
+                        'storage_copied', 'file_db_committed',
+                        'posting', 'completed'
+                    )),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                lease_owner TEXT,
+                lease_until TIMESTAMPTZ,
+                retry_after_at TIMESTAMPTZ,
+                movie_id BIGINT,
+                movie_file_id BIGINT,
+                storage_map JSONB NOT NULL DEFAULT '{}'::jsonb,
+                storage_pending_chat BIGINT,
+                error_class TEXT,
+                error_detail TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (batch_id, update_id)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ingestion_batches_recovery
+            ON ingestion_batches (status, lease_until)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ingestion_batch_items_recovery
+            ON ingestion_batch_items (batch_id, state, stage, update_id)
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -444,6 +521,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (9, _migration_9),
     (10, _migration_10),
     (11, _migration_11),
+    (12, _migration_12),
 )
 
 

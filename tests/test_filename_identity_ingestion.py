@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import time
 import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,9 @@ def _load_functions(names, namespace=None):
     env = {
         "re": re,
         "json": json,
+        "time": time,
+        "asyncio": asyncio,
+        "GEMINI_RECONCILIATION_TIMEOUT_SECONDS": 25,
         "unicodedata": unicodedata,
         "logger": logging.getLogger("test_filename_identity"),
         "_EVIDENCE_KEYS": ("title", "year", "language", "extra_info", "category"),
@@ -66,7 +70,7 @@ def test_exact_drishyam_filename_is_reconciled_to_canonical_title():
     }
 
     class FakeModel:
-        def generate_content(self, _prompt):
+        def generate_content(self, _prompt, **_kwargs):
             return SimpleNamespace(text=json.dumps(model_result))
 
     class FakeGenAI:
@@ -76,8 +80,8 @@ def test_exact_drishyam_filename_is_reconciled_to_canonical_title():
         def GenerativeModel(self, _name):
             return FakeModel()
 
-    async def run_async(function, *args):
-        return function(*args)
+    async def run_async(function, *args, **kwargs):
+        return function(*args, **kwargs)
 
     env = _load_functions(
         EVIDENCE_FUNCTIONS,
@@ -169,7 +173,7 @@ def _core_namespace(connection, metadata, identity_rows=None):
         return function(*args)
 
     env = _load_functions(
-        {"_core_movie_processor", "_find_movie_by_provider_identity",
+        {"_core_movie_processor", "_optional_movie_lookup", "_set_batch_db_limits", "_find_movie_by_provider_identity",
          "_has_compatible_title_candidate"},
         {
             "run_async": run_async,

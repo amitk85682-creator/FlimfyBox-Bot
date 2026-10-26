@@ -9,6 +9,6 @@ const source = fs.readFileSync(
 
 assert.match(source, /function normalizeTrailerKey\(value\)/);
 assert.match(source, /window\.playCurrentTrailer = async function\(\)/);
-assert.match(source, /fetch\(`\/api\/movie\/\$\{encodeURIComponent\(movieId\)\}`\)/);
+assert.match(source, /fetchWithTimeout\(`\/api\/movie\/\$\{encodeURIComponent\(movieId\)\}`\)/);
 assert.match(source, /const fetchedKey = normalizeTrailerKey\(details\?\.trailer_key\)/);
 assert.match(source, /playTrailer\(fetchedKey\)/);

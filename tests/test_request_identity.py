@@ -115,12 +115,15 @@ def test_both_request_functions_send_signed_init_data_header():
     source = (
         Path(__file__).resolve().parents[1] / 'static' / 'miniapp' / 'app.js'
     ).read_text(encoding='utf-8')
-    for function_name in ('requestMovie', 'requestSilent'):
-        start = source.index(f'window.{function_name} = function')
-        end = source.index('\n        };', start)
-        function_source = source[start:end]
-        assert "'Content-Type': 'application/json'" in function_source
-        assert '...telegramAuthHeaders()' in function_source
-        assert 'user_id:' not in function_source
-        assert 'username:' not in function_source
-        assert 'first_name:' not in function_source
+    start = source.index('window.requestMovie = async function')
+    end = source.index('\n        };', start)
+    function_source = source[start:end]
+    assert "'Content-Type': 'application/json'" in function_source
+    assert '...telegramAuthHeaders()' in function_source
+    assert 'user_id:' not in function_source
+    assert 'username:' not in function_source
+    assert 'first_name:' not in function_source
+    # Both entry points use the same authenticated, duplicate-protected sender.
+    start = source.index('window.requestSilent = function')
+    end = source.index('\n        };', start)
+    assert 'return requestMovie(title)' in source[start:end]

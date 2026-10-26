@@ -112,6 +112,34 @@ def test_done_during_active_upload_waits_for_that_upload():
     asyncio.run(scenario())
 
 
+def test_done_waits_until_first_automatic_upload_finishes_movie_resolution():
+    async def scenario():
+        coordinator, _batch = _coordinator()
+        session = coordinator.begin(
+            42, None, 350, kind="movie", batch_id="auto-batch",
+            starting=True,
+        )
+        session["ready"].clear()
+        assert coordinator.admit_update(
+            _update(350, document=True)
+        ) is None
+        coordinator.admit_update(_update(351, text="/done"))
+
+        ready_wait = asyncio.create_task(coordinator.wait_until_ready(42))
+        await asyncio.sleep(0)
+        assert not ready_wait.done()
+
+        coordinator.begin(
+            42, 7001, 350, kind="movie", batch_id="auto-batch"
+        )
+        coordinator.mark_ready(42)
+        restored = await asyncio.wait_for(ready_wait, timeout=0.1)
+        assert restored["movie_id"] == 7001
+        await coordinator.wait_for_prior_uploads(42)
+
+    asyncio.run(scenario())
+
+
 def test_repeated_done_claims_finalize_only_once():
     coordinator, _batch = _coordinator()
     coordinator.admit_update(_update(301, text="/done"))

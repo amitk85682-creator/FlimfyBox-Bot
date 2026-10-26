@@ -19,6 +19,40 @@ const tg = window.Telegram?.WebApp || {
             }
         }
         tg.ready();
+        async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+            const controller = new AbortController();
+            const externalSignal = options.signal;
+            let timedOut = false;
+            const abort = () => controller.abort();
+            if (externalSignal?.aborted) controller.abort();
+            externalSignal?.addEventListener('abort', abort, { once: true });
+            const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } catch (error) {
+                if (timedOut) throw new Error('The connection is taking too long. Please try again.');
+                throw error;
+            } finally {
+                clearTimeout(timer);
+                externalSignal?.removeEventListener('abort', abort);
+            }
+        }
+
+        function artworkUrl(value, size = 'w342') {
+            const raw = String(value || '');
+            if (!raw || !/^(https?:\/\/|\/)/i.test(raw)) return POSTER_PLACEHOLDER;
+            return raw.replace(/^(https:\/\/image\.tmdb\.org\/t\/p\/)(original|w\d+)/, `$1${size}`);
+        }
+
+        function syncSafeArea() {
+            const inset = (tg.safeAreaInset?.top || 0) + (tg.contentSafeAreaInset?.top || 0);
+            document.documentElement.style.setProperty('--tg-safe-top', `${inset}px`);
+        }
+        syncSafeArea();
+        if (typeof tg.onEvent === 'function') {
+            tg.onEvent('safeAreaChanged', syncSafeArea);
+            tg.onEvent('contentSafeAreaChanged', syncSafeArea);
+        }
         const BOT_USERNAME = "FlimfyBoxBot"; // change if needed
 
         // State
@@ -164,7 +198,7 @@ const tg = window.Telegram?.WebApp || {
         }
 
         async function fetchHomeSection(url, cacheKey, storageKey) {
-            const response = await fetch(url);
+            const response = await fetchWithTimeout(url);
             const data = await response.json();
             if (!response.ok || data.status === 'error') {
                 throw new Error(data.message || 'Could not load home section');
@@ -457,7 +491,7 @@ const tg = window.Telegram?.WebApp || {
             const requestedType = browseType;
             if (genreCatalog && genreCatalogType === requestedType && !force) return genreCatalog;
             const requestId = ++genreCatalogRequestId;
-            const response = await fetch(`/api/genres?type=${encodeURIComponent(requestedType)}`);
+            const response = await fetchWithTimeout(`/api/genres?type=${encodeURIComponent(requestedType)}`);
             const data = await response.json();
             if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not load genres');
             if (requestId !== genreCatalogRequestId || requestedType !== browseType) return null;
@@ -517,7 +551,7 @@ const tg = window.Telegram?.WebApp || {
             recommendation.hidden = false;
             result.innerHTML = '<div class="surprise-loading">Finding your next watch…</div>';
             try {
-                const response = await fetch(`/api/browse/surprise?type=${encodeURIComponent(browseType)}`);
+                const response = await fetchWithTimeout(`/api/browse/surprise?type=${encodeURIComponent(browseType)}`);
                 const data = await response.json();
                 if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not find a title');
                 if (!data.movie) {
@@ -561,7 +595,7 @@ const tg = window.Telegram?.WebApp || {
         }
 
         async function apiRequest(url, options = {}) {
-            const response = await fetch(url, options);
+            const response = await fetchWithTimeout(url, options);
             let data;
             try {
                 data = await response.json();
@@ -594,7 +628,7 @@ const tg = window.Telegram?.WebApp || {
         async function refreshMyListButton(movieId, button) {
             if (!tg.initData || !button) return;
             try {
-                const response = await fetch(`/api/my-list/${encodeURIComponent(movieId)}/status`, {
+                const response = await fetchWithTimeout(`/api/my-list/${encodeURIComponent(movieId)}/status`, {
                     headers: telegramAuthHeaders()
                 });
                 const data = await response.json();
@@ -614,7 +648,7 @@ const tg = window.Telegram?.WebApp || {
 
         function trackRecommendationEvent(eventType, movieId = null, metadata = {}) {
             if (!tg.initData) return;
-            fetch('/api/recommendation-events', {
+            fetchWithTimeout('/api/recommendation-events', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
                 body: JSON.stringify({ event_type: eventType, movie_id: movieId, metadata })
@@ -622,10 +656,24 @@ const tg = window.Telegram?.WebApp || {
         }
 
         function setActiveNav(index) {
+            document.querySelectorAll('[data-nav]').forEach(item => {
+                item.classList.toggle('active', Number(item.dataset.nav) === index);
+                item.setAttribute('aria-current', Number(item.dataset.nav) === index ? 'page' : 'false');
+            });
+            const title = document.getElementById('pageTitle');
+            if (title) title.textContent = ['Discover', 'Search', 'Browse', 'My watchlist'][index] || 'Discover';
             document.querySelectorAll('.nav-item').forEach((item, itemIndex) => {
                 item.classList.toggle('active', itemIndex === index);
+                item.setAttribute('aria-current', itemIndex === index ? 'page' : 'false');
             });
         }
+
+        window.scrollToCollection = function(id) {
+            showHome();
+            const row = document.getElementById(id);
+            if (row && row.style.display !== 'none') row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            else { showExplore(); if (id === 'rowAnime') openGenreDetail('anime'); }
+        };
 
         window.openMorePanel = function() {
             document.getElementById('morePanel').classList.add('open');
@@ -712,7 +760,7 @@ const tg = window.Telegram?.WebApp || {
         };
 
         window.loadGlobalChat = function() {
-            fetch('/api/global-chat', { headers: globalChatHeaders() })
+            fetchWithTimeout('/api/global-chat', { headers: globalChatHeaders() })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))
                 .then(({ ok, data }) => {
                     if (!ok) throw new Error(data.message || 'Could not load Global Chat.');
@@ -745,7 +793,7 @@ const tg = window.Telegram?.WebApp || {
             const message = input.value.trim();
             if (!message) return;
             input.disabled = true;
-            fetch('/api/global-chat', {
+            fetchWithTimeout('/api/global-chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...globalChatHeaders() },
                 body: JSON.stringify({ message })
@@ -765,10 +813,10 @@ const tg = window.Telegram?.WebApp || {
         }
 
         window.showSettings = function() {
-            const notifications = localStorage.getItem('flimfybox-notifications') !== 'off';
+            const autoplay = localStorage.getItem('flimfybox-autoplay') !== 'off';
             const compact = localStorage.getItem('flimfybox-compact') === 'on';
             showInfoPanel('Settings', `
-                <label class="settings-toggle"><span>New title notifications</span><input id="settingsNotifications" type="checkbox" ${notifications ? 'checked' : ''} onchange="localStorage.setItem('flimfybox-notifications', this.checked ? 'on' : 'off'); showToast(this.checked ? 'Notifications enabled' : 'Notifications disabled')"></label>
+                <label class="settings-toggle"><span>Rotate featured titles</span><input id="settingsAutoplay" type="checkbox" ${autoplay ? 'checked' : ''} onchange="localStorage.setItem('flimfybox-autoplay', this.checked ? 'on' : 'off'); showToast('Display preference saved')"></label>
                 <label class="settings-toggle"><span>Compact cards</span><input id="settingsCompact" type="checkbox" ${compact ? 'checked' : ''} onchange="localStorage.setItem('flimfybox-compact', this.checked ? 'on' : 'off'); document.body.classList.toggle('compact-cards', this.checked); showToast('Display preference saved')"></label>
                 <p class="info-note">Your preferences are saved on this device.</p>
             `, 'gear', '<button type="button" class="primary-action" onclick="closeInfoModal()">Save & close</button>');
@@ -780,6 +828,7 @@ const tg = window.Telegram?.WebApp || {
         document.body.classList.toggle('compact-cards', localStorage.getItem('flimfybox-compact') === 'on');
 
         window.showHome = function() {
+            closeDetails();
             closeMorePanel();
             closeInfoModal();
             document.body.classList.remove('screen-explore', 'screen-search', 'screen-list');
@@ -789,12 +838,13 @@ const tg = window.Telegram?.WebApp || {
             document.getElementById('searchResultsContent').style.display = 'none';
             document.getElementById('exploreContent').style.display = 'none';
             document.getElementById('genreDetailPage').classList.remove('open');
-            document.querySelectorAll('.movie-row').forEach(row => row.style.display = '');
+
             setActiveNav(0);
             window.scrollTo({ top: 0, behavior: 'smooth' });
         };
 
         window.showExplore = function() {
+            closeDetails();
             closeMorePanel();
             closeInfoModal();
             document.body.classList.remove('screen-home', 'screen-search', 'screen-list');
@@ -823,10 +873,14 @@ const tg = window.Telegram?.WebApp || {
             document.getElementById('myListContent').style.display = 'none';
             document.getElementById('searchResultsContent').style.display = 'block';
             renderSearchDiscovery();
+            if (document.getElementById('searchInput').value.trim()) triggerSearchAgain();
             setTimeout(() => document.getElementById('searchInput').focus(), 120);
         };
 
         function renderSearchDiscovery() {
+            document.querySelector('.search-discover-state').hidden = false;
+            document.getElementById('searchHeader').textContent = 'Find your next favourite';
+            document.getElementById('searchGrid').innerHTML = '';
             const dropdown = document.getElementById('searchDropdown');
             const recent = getRecentSearches();
             dropdown.innerHTML = recent.length
@@ -846,6 +900,7 @@ const tg = window.Telegram?.WebApp || {
         }
 
         window.showMyList = async function() {
+            closeDetails();
             closeMorePanel();
             closeInfoModal();
             document.body.classList.remove('screen-home', 'screen-explore', 'screen-search');
@@ -861,7 +916,7 @@ const tg = window.Telegram?.WebApp || {
             setActiveNav(3);
             grid.innerHTML = '<div class="loader" style="grid-column:1/-1">Loading your saved titles…</div>';
             try {
-                const response = await fetch('/api/my-list', { headers: telegramAuthHeaders() });
+                const response = await fetchWithTimeout('/api/my-list', { headers: telegramAuthHeaders() });
                 const data = await response.json();
                 if (requestId !== myListRequestId) return;
                 if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not load My List');
@@ -874,12 +929,12 @@ const tg = window.Telegram?.WebApp || {
                     : '<div class="empty-my-list">Your list is empty.<br><span>Save a title with the + button.</span></div>';
             } catch (error) {
                 if (requestId !== myListRequestId) return;
-                grid.innerHTML = `<div class="empty-my-list">${error.message}</div>`;
+                grid.innerHTML = `<div class="empty-my-list">${escapeHtml(error.message)}<br><button class="btn-request" onclick="showMyList()">Try again</button></div>`;
             }
         };
 
         window.toggleCurrentMyList = async function() {
-            const movieId = activeDetailsMovieId;
+            const movieId = String(activeDetailsMovieId || '');
             const mutationMovieId = String(movieId || '');
             if (!movieId || !activeMovie || activeMovie.source === 'tmdb' || String(movieId).startsWith('tmdb_')) {
                 showToast('Only available titles can be saved right now.');
@@ -892,7 +947,7 @@ const tg = window.Telegram?.WebApp || {
             try {
                 // Snapshot the details-page movie. The home carousel changes in
                 // the background, so never read a mutable global after await.
-                const statusResponse = await fetch(`/api/my-list/${encodeURIComponent(mutationMovieId)}/status`, {
+                const statusResponse = await fetchWithTimeout(`/api/my-list/${encodeURIComponent(mutationMovieId)}/status`, {
                     headers: telegramAuthHeaders()
                 });
                 const statusData = await statusResponse.json();
@@ -902,7 +957,7 @@ const tg = window.Telegram?.WebApp || {
                 const isSaved = Boolean(statusData.saved);
                 if (isSaved) savedMovieIds.add(movieId);
                 else savedMovieIds.delete(movieId);
-                const response = await fetch(isSaved ? `/api/my-list/${movieId}` : '/api/my-list', {
+                const response = await fetchWithTimeout(isSaved ? `/api/my-list/${movieId}` : '/api/my-list', {
                     method: isSaved ? 'DELETE' : 'POST',
                     headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
                     body: JSON.stringify({ movie_id: movieId })
@@ -936,11 +991,19 @@ const tg = window.Telegram?.WebApp || {
         let currentPage = 1;
         let isFetching = false;
         let hasMoreMovies = true;
+        let catalogueRetryPending = false;
+        let failedCataloguePage = null;
+
+        window.retryCatalogue = function() {
+            catalogueRetryPending = false;
+            loadMovies(failedCataloguePage || currentPage);
+        };
 
         // Load movies from API with Infinite Scroll support
         async function loadMovies(page = 1) {
-            if (isFetching || !hasMoreMovies) return;
+            if (isFetching || (page > 1 && !hasMoreMovies) || catalogueRetryPending) return;
             isFetching = true;
+            document.getElementById('catalogueRetry')?.remove();
             const cachedHome = page === 1 ? readHomeCatalogueCache() : null;
 
             try {
@@ -970,7 +1033,7 @@ const tg = window.Telegram?.WebApp || {
                 }
 
                 if (data.status === 'success') {
-                    const newMovies = data.movies.filter(m => m.image);
+                    const newMovies = data.movies || [];
                     hasMoreMovies = data.has_more; 
                     
                     if (page === 1) {
@@ -985,12 +1048,16 @@ const tg = window.Telegram?.WebApp || {
                         const newCardsHTML = renderCards(newMovies, 'grid-card', false);
                         document.getElementById('moreGrid').insertAdjacentHTML('beforeend', newCardsHTML);
                     }
-                    currentPage++; // Agli baar ke liye page badha do
+                    currentPage = page + 1;
+                    failedCataloguePage = null;
                 }
             } catch (e) {
                 if (isAbortError(e)) return;
                 console.error('Fetch failed', e);
-                document.getElementById('moreGrid').innerHTML = '<div class="empty-search-state" style="grid-column:1/-1">We could not load the catalogue.<br><span>Check your connection and try again.</span></div>';
+                document.getElementById('scrollLoader')?.remove();
+                catalogueRetryPending = true;
+                failedCataloguePage = page;
+                document.getElementById('moreGrid').insertAdjacentHTML('beforeend', '<div id="catalogueRetry" class="empty-search-state">We could not load more titles.<br><span>Check your connection and try again.</span><button class="btn-request" onclick="retryCatalogue()">Try again</button></div>');
                 if (page === 1) completeInitialHomeLoadingStep();
             } finally {
                 isFetching = false;
@@ -1002,7 +1069,7 @@ const tg = window.Telegram?.WebApp || {
             // Agar user page ke bottom se 600px upar hai, toh advance mein next page load kar lo
             if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 600) {
                 // Check karo ki normal page open hai (Search result open na ho)
-                if (document.getElementById('searchResultsContent').style.display === 'none') {
+                if (document.body.classList.contains('screen-home') && !document.getElementById('detailsPage').classList.contains('open')) {
                     loadMovies(currentPage);
                 }
             }
@@ -1199,24 +1266,32 @@ const tg = window.Telegram?.WebApp || {
             }
             const heroArtwork = movie.backdrop || movie.image;
             heroSlider.style.backgroundImage = heroArtwork
-                ? `url("${heroArtwork}"), ${IMAGE_FALLBACK_GRADIENT}`
+                ? `url("${artworkUrl(heroArtwork, 'w1280')}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
             document.getElementById('heroTitle').innerText = movie.title;
             document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
+            document.getElementById('heroDescription').textContent = movie.description || movie.overview || `${movie.genre || movie.category || 'Something new'} for your next movie night. Open this title for its story and available files.`;
             document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
             document.getElementById('heroWatch').onclick = openHeroDetails;
             document.getElementById('heroInfo').onclick = openHeroDetails;
+            document.getElementById('heroWatch').disabled = false;
+            document.getElementById('heroInfo').disabled = false;
             heroSlider.querySelectorAll('.hero-progress-dot').forEach((dot, dotIndex) => dot.classList.toggle('active', dotIndex === heroIndex));
             const position = document.getElementById('heroPosition');
             if (position) position.textContent = `${heroIndex + 1} / ${heroItems.length}`;
         }
 
-        function stepHero(direction) {
+        function stepHero(direction, manual = true) {
+            if (!manual && (document.hidden || !document.body.classList.contains('screen-home')
+                || document.querySelector('.details-page.open, .info-modal.open')
+                || document.getElementById('heroSlider').matches(':hover, :focus-within')
+                || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+                || localStorage.getItem('flimfybox-autoplay') === 'off')) return;
             if (!heroItems.length) return;
             showHeroSlide(heroIndex + direction);
             if (heroTimer) {
                 clearInterval(heroTimer);
-                heroTimer = setInterval(() => stepHero(1), 6500);
+                heroTimer = setInterval(() => stepHero(1, false), 6500);
             }
         }
         window.stepHero = stepHero;
@@ -1451,10 +1526,7 @@ const tg = window.Telegram?.WebApp || {
                     heroItems = trending.slice(0, Number(data.hero_limit || 10))
                         .filter((movie, index, items) => items.findIndex(item => String(item.id) === String(movie.id)) === index);
                     if (!heroItems.length) {
-                        heroSlider.classList.add('is-loading');
-                        document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
-                        document.getElementById('heroTitle').innerText = 'Trending titles aren\'t in the catalogue yet';
-                        document.getElementById('heroMeta').innerText = 'TMDB ranking is available, but local catalogue coverage is empty';
+                        showCatalogueHeroFallback(movies);
                         return;
                     }
                     heroSlider.classList.remove('is-loading');
@@ -1462,22 +1534,39 @@ const tg = window.Telegram?.WebApp || {
                     heroSlider.querySelector('.hero-progress')?.remove();
                     renderHeroProgress(heroItems.length, heroIndex);
                     showHeroSlide(heroIndex);
-                    heroTimer = setInterval(() => stepHero(1), 6500);
+                    heroTimer = setInterval(() => stepHero(1, false), 6500);
                 })
                 .catch(error => {
                     console.error('Trending load failed:', error);
-                    const heroSlider = document.getElementById('heroSlider');
-                    heroSlider.classList.add('is-loading');
-                    document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
-                    document.getElementById('heroTitle').innerText = 'Trending titles are temporarily unavailable';
-                    document.getElementById('heroMeta').innerText = 'Please refresh in a moment';
+                    if (trendingRequest !== trendingRequestId) return;
+                    showCatalogueHeroFallback(movies);
                 })
                 .finally(completeInitialHomeLoadingStep);
 
-            document.getElementById('moreGrid').innerHTML = renderCards(movies.slice(15), 'grid-card', false);
+            document.getElementById('moreGrid').innerHTML = renderCards(movies, 'grid-card', false);
+        }
+
+        function showCatalogueHeroFallback(movies) {
+            heroItems = movies.slice(0, 5);
+            const heroSlider = document.getElementById('heroSlider');
+            heroSlider.classList.remove('is-loading');
+            heroSlider.querySelector('.hero-progress')?.remove();
+            if (heroItems.length) {
+                heroIndex = 0;
+                renderHeroProgress(heroItems.length, 0);
+                showHeroSlide(0);
+                document.querySelector('#heroSlider .eyebrow').textContent = 'FROM THE CATALOGUE';
+            } else {
+                document.getElementById('heroTitle').textContent = 'Your next story is on its way';
+                document.getElementById('heroMeta').textContent = 'New titles will appear here';
+                document.getElementById('heroDescription').textContent = 'Search for a title or explore the collections below.';
+                document.getElementById('heroWatch').disabled = true;
+                document.getElementById('heroInfo').disabled = true;
+            }
         }
 
         window.openCardDetails = function(movie, isTMDB) {
+            if (isTMDB) tmdbMoviesMap[movie.id] = movie;
             if (!isTMDB && !allMovies.some(item => String(item.id) === String(movie.id))) {
                 allMovies.push(movie);
             }
@@ -1485,20 +1574,22 @@ const tg = window.Telegram?.WebApp || {
         };
 
         function renderCards(movies, cardClass = 'card', forceTMDB = false) {
-            if (!movies.length) return '<div class="search-empty-state" style="grid-column:1/-1;">No titles to show right now.<br><span>Check back soon.</span></div>';
+            if (!movies.length) return '<div class="search-empty-state">No titles to show right now.<br><span>Check back soon.</span></div>';
             return movies.map(m => {
                 const isTMDB = forceTMDB || m.source === 'tmdb';
-                const rating = m.rating && m.rating !== 'N/A' ? `⭐ ${m.rating}` : '';
+                const rating = m.rating && m.rating !== 'N/A' ? `★ ${escapeHtml(m.rating)}` : '';
                 const badge = isTMDB
-                    ? `<div class="card-badge request">${m.is_upcoming ? 'Upcoming' : 'Request'}</div>`
-                    : (rating ? `<div class="card-badge available">${rating}</div>` : '');
-                return `
-                    <div class="${cardClass}" tabindex="0" role="button" aria-label="Open ${m.title}" onclick='openCardDetails(${JSON.stringify(m).replace(/'/g, "&#39;")}, ${isTMDB})' onkeydown="if(event.key==='Enter') openCardDetails(${JSON.stringify(m).replace(/'/g, "&#39;")}, ${isTMDB})">
-                        <img src="${m.image || POSTER_PLACEHOLDER}" class="card-img" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback')">
-                        <div class="card-title">${m.title}</div>
-                        <div class="card-meta"><span>${m.year || '—'}</span>${badge}</div>
-                    </div>
-                `;
+                    ? `<span class="card-badge request">${m.is_upcoming ? 'Coming soon' : 'Request'}</span>`
+                    : (rating ? `<span class="card-badge available">${rating}</span>` : '');
+                const payload = encodeURIComponent(JSON.stringify(m)).replace(/'/g, '%27');
+                return `<button type="button" class="${cardClass}" aria-label="Open ${escapeHtml(m.title)}"
+                    data-movie="${payload}" data-tmdb="${isTMDB}"
+                    onclick="openCardDetails(JSON.parse(decodeURIComponent(this.dataset.movie)), this.dataset.tmdb === 'true')">
+                    <img src="${escapeHtml(artworkUrl(m.image))}" alt="${escapeHtml(m.title)} poster" class="card-img" loading="lazy" decoding="async" width="342" height="513"
+                        onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback')">
+                    <div class="card-title">${escapeHtml(m.title)}</div>
+                    <div class="card-meta"><span>${escapeHtml(m.year || '—')}</span>${badge}</div>
+                </button>`;
             }).join('');
         }
 
@@ -1540,6 +1631,7 @@ document.getElementById('searchInput').addEventListener('keydown', function(e) {
 
 document.getElementById('searchInput').addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
+    const currentId = ++searchRequestId;
     if (searchController) searchController.abort();
     const q = e.target.value.trim();
     const dropdown = document.getElementById('searchDropdown');
@@ -1556,29 +1648,36 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
 
     dropdown.innerHTML = '<div class="loader">Searching catalog…</div>';
     dropdown.classList.add('active');
+    if (document.body.classList.contains('screen-search')) {
+        document.querySelector('.search-discover-state').hidden = true;
+        document.getElementById('searchHeader').textContent = `Searching for “${q}”…`;
+        document.getElementById('searchGrid').innerHTML = '<div class="search-empty-state">Finding your next watch…</div>';
+    }
 
     searchTimeout = setTimeout(async () => {
-        searchRequestId++;
-        const currentId = searchRequestId;
         searchController = new AbortController();
         const signal = searchController.signal;
         try {
-            const suggestionPromise = fetch(`/api/suggest?q=${encodeURIComponent(q)}`, { signal })
+            const suggestionPromise = fetchWithTimeout(`/api/suggest?q=${encodeURIComponent(q)}`, { signal }, 1500)
                 .then(response => response.ok ? response.json() : [])
                 .catch(error => {
-                    if (isAbortError(error)) throw error;
+                    if (isAbortError(error)) return [];
                     console.warn('Search suggestions unavailable:', error);
                     return [];
                 });
-            const [suggestionResponse, response] = await Promise.all([
-                suggestionPromise,
-                fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal })
-            ]);
-            const suggestions = Array.isArray(suggestionResponse) ? suggestionResponse : [];
+            // Optional suggestions must never delay matching catalogue results.
+            const response = await fetchWithTimeout(`/api/search?q=${encodeURIComponent(q)}`, { signal });
             const searchData = await response.json();
             if (currentId !== searchRequestId) return;
             if (!response.ok || searchData.status !== 'success') throw new Error(searchData.message || 'Search failed');
             const results = searchData.results || [];
+            const suggestionResponse = results.length ? [] : await suggestionPromise;
+            const suggestions = Array.isArray(suggestionResponse) ? suggestionResponse : [];
+            if (currentId !== searchRequestId) return;
+            if (document.body.classList.contains('screen-search')) {
+                document.getElementById('searchHeader').textContent = `${results.length} result${results.length === 1 ? '' : 's'} for “${q}”`;
+                document.getElementById('searchGrid').innerHTML = renderCards(results, 'grid-card');
+            }
             results.forEach(r => {
                 if (r.source === 'tmdb') tmdbMoviesMap[r.id] = r;
                 else if (!allMovies.some(m => String(m.id) === String(r.id))) allMovies.push(r);
@@ -1589,6 +1688,12 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 addRecentSearch(q);
                 dropdown.innerHTML = suggestionMarkup + `<div class="empty-search-state"><strong>No match found</strong><span>“${escapeHtml(q)}” isn't in the catalogue yet.</span><div style="margin-top:12px;"><button class="btn-sm btn-sm-primary" type="button" data-request-search><i class="fas fa-paper-plane"></i> Request this title</button></div></div>`;
                 bindSearchSuggestions(dropdown, q);
+                if (document.body.classList.contains('screen-search')) {
+                    const grid = document.getElementById('searchGrid');
+                    grid.innerHTML = dropdown.innerHTML;
+                    bindSearchSuggestions(grid, q);
+                    dropdown.classList.remove('active');
+                }
                 return;
             }
 
@@ -1600,17 +1705,24 @@ document.getElementById('searchInput').addEventListener('input', (e) => {
                 const status = isUpcoming ? 'Upcoming' : (isAvailable ? 'Available' : 'Unavailable');
                 const actionLabel = isUpcoming ? 'Notify' : (isAvailable ? 'View' : 'Request');
                 return `<div class="search-item fade-in" data-result-id="${escapeHtml(r.id)}" data-result-tmdb="${isTMDB}">
-                    <img src="${escapeHtml(r.image || POSTER_PLACEHOLDER)}" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'">
+                    <img src="${escapeHtml(artworkUrl(r.image, 'w185'))}" alt="" loading="lazy" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'">
                     <div class="search-item-info"><div class="search-item-title">${escapeHtml(r.title)}</div>
                     <div class="search-item-meta"><span>${escapeHtml(r.year || '—')}</span><span class="status-pill ${isAvailable ? 'available' : 'request'}">${status}</span></div></div>
                     <div class="search-actions"><button class="btn-sm ${isAvailable ? 'btn-sm-primary' : 'btn-sm-outline'}" type="button">${actionLabel}</button></div></div>`;
             }).join('');
             bindSearchSuggestions(dropdown, q, results);
+            if (document.body.classList.contains('screen-search')) dropdown.classList.remove('active');
         } catch (error) {
             if (isAbortError(error)) return;
             console.error('Search failed:', error);
             if (currentId === searchRequestId) {
+                if (document.body.classList.contains('screen-search')) document.getElementById('searchHeader').textContent = 'Search unavailable';
                 dropdown.innerHTML = '<div class="search-empty-state"><strong>Search unavailable</strong><span>Please try again in a moment.</span></div>';
+                if (document.body.classList.contains('screen-search')) {
+                    document.getElementById('searchHeader').textContent = 'Search unavailable';
+                    document.getElementById('searchGrid').innerHTML = '<div class="search-empty-state"><strong>Could not reach the catalogue.</strong><span>Check your connection, then try again.</span><button class="btn-request" type="button" onclick="triggerSearchAgain()">Retry search</button></div>';
+                    dropdown.classList.remove('active');
+                }
             }
         }
     }, 260);
@@ -1724,11 +1836,14 @@ document.addEventListener('keydown', (e) => {
             const detailsRating = document.getElementById('dpRating');
             const detailsGenre = document.getElementById('dpGenre');
             const detailsDescription = document.getElementById('dpDesc');
+            document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
+            detailsPage.scrollTop = 0;
+            document.getElementById('searchDropdown').classList.remove('active');
             const detailsArtwork = movie.backdrop || movie.image;
             detailsBackdrop.style.backgroundImage = detailsArtwork
-                ? `url("${detailsArtwork}"), ${IMAGE_FALLBACK_GRADIENT}`
+                ? `url("${artworkUrl(detailsArtwork, 'w1280')}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
-            detailsPoster.src = movie.image || POSTER_PLACEHOLDER;
+            detailsPoster.src = artworkUrl(movie.image);
             detailsPoster.onerror = () => {
                 detailsPoster.onerror = null;
                 detailsPoster.src = POSTER_PLACEHOLDER;
@@ -1754,9 +1869,9 @@ document.addEventListener('keydown', (e) => {
             if (isTMDB || movie.is_upcoming || movie.is_available === false) {
                 const backdropImg = movie.backdrop || movie.image;
                 document.getElementById('dpBackdrop').style.backgroundImage = backdropImg
-                    ? `url("${backdropImg}"), ${IMAGE_FALLBACK_GRADIENT}`
+                    ? `url("${artworkUrl(backdropImg, 'w1280')}"), ${IMAGE_FALLBACK_GRADIENT}`
                     : IMAGE_FALLBACK_GRADIENT;
-                document.getElementById('dpFloatPoster').src = movie.image || POSTER_PLACEHOLDER;
+                document.getElementById('dpFloatPoster').src = artworkUrl(movie.image);
                 document.getElementById('dpTitle').innerText = movie.title;
                 document.getElementById('dpRating').innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
                 document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
@@ -1779,7 +1894,7 @@ document.addEventListener('keydown', (e) => {
             const cachedDetails = movieDetailsCache.get(String(id));
             const detailsRequest = cachedDetails
                 ? Promise.resolve({ status: 'success', movie: cachedDetails })
-                : fetch(`/api/movie/${id}`, { signal: detailsController.signal })
+                : fetchWithTimeout(`/api/movie/${id}`, { signal: detailsController.signal })
                 .then(async res => {
                     let data;
                     try {
@@ -1800,12 +1915,13 @@ document.addEventListener('keydown', (e) => {
                         const m = data.movie;
                         movieDetailsCache.set(String(id), m);
                         activeMovie = { ...movie, ...m, source: 'local' };
+                        document.getElementById('dpLanguage').textContent = m.language || movie.language || 'Audio details below';
                         addRecentlyViewed(activeMovie);
                         const backdropUrl = m.backdrop ? m.backdrop : m.image;
                         document.getElementById('dpBackdrop').style.backgroundImage = backdropUrl
-                            ? `url("${backdropUrl}"), ${IMAGE_FALLBACK_GRADIENT}`
+                            ? `url("${artworkUrl(backdropUrl, 'w1280')}"), ${IMAGE_FALLBACK_GRADIENT}`
                             : IMAGE_FALLBACK_GRADIENT;
-                        document.getElementById('dpFloatPoster').src = m.image || POSTER_PLACEHOLDER;
+                        document.getElementById('dpFloatPoster').src = artworkUrl(m.image);
                         document.getElementById('dpTitle').innerText = m.title;
                         document.getElementById('dpRating').innerText = m.rating && m.rating !== 'N/A' ? m.rating : '—';
                         document.getElementById('dpGenre').innerText = m.genre || 'Drama';
@@ -1815,7 +1931,7 @@ document.addEventListener('keydown', (e) => {
                             let castHtml = '<div style="margin-bottom:20px;">';
                             actors.forEach(actor => {
                                 const cleanName = actor.trim();
-                                if (cleanName) castHtml += `<span class="cast-chip">${cleanName}</span>`;
+                                if (cleanName) castHtml += `<span class="cast-chip">${escapeHtml(cleanName)}</span>`;
                             });
                             castHtml += '</div>';
                             document.getElementById('castSection').innerHTML = castHtml;
@@ -1887,22 +2003,18 @@ document.addEventListener('keydown', (e) => {
                                 let links = '<div class="dl-heading">Available qualities</div>';
                                 m.files.forEach(f => {
                                     links += `
-                                        <button class="dl-btn" onclick="downloadMovie(${m.id}, ${f.id})">
-                                            <span class="quality-text"><i class="fas fa-download"></i> ${f.quality} <span class="file-size">${f.size || 'N/A'}</span></span>
+                                        <button class="dl-btn" onclick="downloadMovie(${Number(m.id)}, ${Number(f.id)})">
+                                            <span class="quality-text"><i class="fas fa-download"></i> ${escapeHtml(f.quality)} <span class="file-size">${escapeHtml(f.size || 'N/A')}</span></span>
                                             <span class="action">Download</span>
                                         </button>
                                     `;
                                 });
                                 linksContainer.innerHTML = links;
                             }
+                        } else if (m.is_available) {
+                            linksContainer.innerHTML = `<div class="dl-heading">Available file</div><button class="dl-btn" type="button" onclick="downloadMovie(${Number(m.id)})"><span class="quality-text"><i class="fas fa-download"></i> Open available file</span><span class="action">Open</span></button>`;
                         } else {
-                            linksContainer.innerHTML = `
-                                <div class="dl-heading">Download</div>
-                                <button class="dl-btn" onclick="downloadMovie(${m.id})">
-                                    <span class="quality-text"><i class="fas fa-download"></i> 1080p Full HD</span>
-                                    <span class="action">Download</span>
-                                </button>
-                            `;
+                            renderUnavailableAction(activeMovie);
                         }
                         detailsPage.classList.remove('is-loading');
                     }
@@ -1944,7 +2056,7 @@ document.addEventListener('keydown', (e) => {
             }
             const button = actionContainer.querySelector('.upcoming-notify-button');
             if (!button || !tmdbId || !releaseDate) return;
-            fetch(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
+            fetchWithTimeout(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
                 headers: telegramAuthHeaders()
             })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -1980,7 +2092,7 @@ document.addEventListener('keydown', (e) => {
             };
 
             if (actionContainer) {
-                const requestBtnHtml = `<button class="btn-request" type="button" onclick="requestSilent('${String(movie.title || '').replace(/'/g, "\\'")}')">
+                const requestBtnHtml = `<button class="btn-request" type="button" data-request-title="${escapeHtml(movie.title || '')}" onclick="requestSilent(this.dataset.requestTitle)">
                     <i class="fas fa-paper-plane"></i> Request ${escapeHtml(movie.title || 'this title')}
                 </button>`;
                 
@@ -1988,7 +2100,7 @@ document.addEventListener('keydown', (e) => {
                 
                 const button = actionContainer.querySelector('.upcoming-notify-button');
                 if (button && tmdbId) {
-                    fetch(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
+                    fetchWithTimeout(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
                         headers: telegramAuthHeaders()
                     })
                         .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -2023,7 +2135,7 @@ document.addEventListener('keydown', (e) => {
                 title: button.dataset.title,
                 release_date: button.dataset.releaseDate
             };
-            fetch('/api/upcoming/reminder', {
+            fetchWithTimeout('/api/upcoming/reminder', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
                 body: JSON.stringify(body)
@@ -2074,7 +2186,7 @@ document.addEventListener('keydown', (e) => {
                     'click',
                     () => submitCommunityRating(movieId, container)
                 );
-                fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
+                fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     headers: telegramAuthHeaders()
                 })
                     .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -2129,7 +2241,7 @@ document.addEventListener('keydown', (e) => {
                 const submit = container.querySelector('.community-rating-submit');
                 if (submit) submit.disabled = true;
                 container.querySelector('.community-rating-summary').textContent = 'Saving your rating…';
-                fetch(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
+                fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -2177,7 +2289,7 @@ document.addEventListener('keydown', (e) => {
                 button.classList.add('is-loading');
             }
             try {
-                const response = await fetch(`/api/movie/${encodeURIComponent(movieId)}`);
+                const response = await fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}`);
                 const data = await response.json();
                 if (String(activeMovie?.id) !== String(movieId)) return;
                 const details = data && data.status === 'success' ? data.movie : null;
@@ -2275,6 +2387,10 @@ document.addEventListener('keydown', (e) => {
 
         window.closeDetails = function() {
             document.getElementById('detailsPage').classList.remove('open');
+            if (detailsController) detailsController.abort();
+            detailsRequestId++;
+            closeTrailer();
+            closeWebPlayer();
         };
 
         window.playTrailer = function(key) {
@@ -2288,7 +2404,9 @@ document.addEventListener('keydown', (e) => {
         };
 
         // In-App Web Player Modal Logic
+        let playerRequestId = 0;
         window.openWebPlayer = function(tmdbId) {
+            const requestId = ++playerRequestId;
             document.getElementById('searchDropdown').classList.remove('active');
             const modal = document.getElementById('webPlayerModal');
             const iframeCont = document.getElementById('wpIframeContainer');
@@ -2299,9 +2417,10 @@ document.addEventListener('keydown', (e) => {
             iframeCont.innerHTML = '<div class="wp-loader"><div class="loader"></div>Fetching Secure Stream...</div>';
             
             // Background async call to fetch IMDb ID
-            fetch(`/api/imdb_id/${tmdbId}`)
+            fetchWithTimeout(`/api/imdb_id/${tmdbId}`)
                 .then(res => res.json())
                 .then(data => {
+                    if (requestId !== playerRequestId || !modal.classList.contains('active')) return;
                     if (data.status === 'success' && data.imdb_id) {
                         titleEl.innerText = 'Secure Player · Premium Stream';
                         // streamimdb.ru requires IMDb ID for playing
@@ -2312,65 +2431,51 @@ document.addEventListener('keydown', (e) => {
                     }
                 })
                 .catch(e => {
+                    if (requestId !== playerRequestId) return;
                     titleEl.innerText = 'Network Error';
                     iframeCont.innerHTML = '<div style="color:white;text-align:center;">❌ Network error while loading player.</div>';
                 });
         };
 
         window.closeWebPlayer = function() {
+            playerRequestId++;
             document.getElementById('webPlayerModal').classList.remove('active');
             document.getElementById('wpIframeContainer').innerHTML = ''; // Stop video playback
         };
 
-        window.requestMovie = function(title) {
-            tg.HapticFeedback.notificationOccurred('success');
+        const pendingRequests = new Set();
+        window.requestMovie = async function(title) {
+            const key = String(title || '').trim();
+            if (!key || pendingRequests.has(key)) return;
+            pendingRequests.add(key);
             showToast('⏳ Requesting...');
-            fetch('/api/request', {
+            try {
+            const response = await fetchWithTimeout('/api/request', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     ...telegramAuthHeaders()
                 },
-                body: JSON.stringify({title})
-            })
-            .then(r => r.json())
-            .then(d => {
-                if (d.status === 'success') {
+                body: JSON.stringify({title: key})
+            });
+            const d = await response.json();
+                if (response.ok && d.status === 'success') {
+                    tg.HapticFeedback.notificationOccurred('success');
                     showToast(d.guest
                         ? '✅ Request saved. Open in Telegram for a DM.'
                         : '✅ Request sent!');
                 }
-                else showToast('❌ Failed');
-            })
-            .catch(() => showToast('❌ Error'));
+                else throw new Error(d.message || 'Could not send the request. Please try again.');
+            } catch (error) {
+                showToast(error.message || 'Could not send the request. Please try again.');
+            } finally {
+                pendingRequests.delete(key);
+            }
         };
 
         // 🔥 NAYA: Silent Request (Jab TMDB aur Google dono fail ho jayein)
         window.requestSilent = function(title) {
-            tg.HapticFeedback.notificationOccurred('success');
-            showToast('⏳ Sending Request...');
-            
-            fetch('/api/request', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...telegramAuthHeaders()
-                },
-                body: JSON.stringify({title: title})
-            })
-            .then(r => r.json())
-            .then(d => {
-                if (d.status === 'success') {
-                    showToast(d.guest
-                        ? '✅ Request saved. Open in Telegram for a DM.'
-                        : '✅ Request Sent to Admin!');
-                    // Request bhejte hi Mini app close kar do (Seamless feel ke liye)
-                    setTimeout(() => { tg.close(); }, 1500);
-                } else {
-                    showToast('❌ Failed to send');
-                }
-            })
-            .catch(() => showToast('❌ Network Error'));
+            return requestMovie(title);
         };
 
         // 🛡️ NAYA: Anti-Bot Middleware Par Bhejne Wala Function
@@ -2411,7 +2516,7 @@ document.addEventListener('keydown', (e) => {
                 if (cachedMovie) {
                     openDetails(String(sharedMovieId), false);
                 } else {
-                    fetch(`/api/movie/${encodeURIComponent(sharedMovieId)}`)
+                    fetchWithTimeout(`/api/movie/${encodeURIComponent(sharedMovieId)}`)
                         .then(response => response.ok ? response.json() : null)
                         .then(data => {
                             if (!data || data.status !== 'success' || !data.movie) return;
