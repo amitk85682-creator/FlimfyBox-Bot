@@ -4653,10 +4653,41 @@ async def send_admin_notification(context, user, movie_title, group_info=None, r
     except Exception as e:
         logger.error(f"Error sending admin notification: {e}")
 
+def _load_requested_title_users(movie_title, include_group=False):
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            columns = "user_id, username, first_name, group_id, message_id" if include_group else "user_id, username, first_name"
+            cur.execute(
+                f"SELECT {columns} FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
+                (f'%{movie_title}%',),
+            )
+            return cur.fetchall()
+    finally:
+        close_db_connection(conn)
+
+
+def _mark_title_requests_notified(movie_title, user_ids):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Request notification state could not be saved")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            cur.execute(
+                "UPDATE user_requests SET notified = TRUE WHERE user_id = ANY(%s) AND movie_title ILIKE %s",
+                (list(user_ids), f'%{movie_title}%'),
+            )
+        conn.commit()
+    finally:
+        close_db_connection(conn)
+
+
 async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title, movie_url_or_file_id):
     logger.info(f"Attempting to notify users for movie: {movie_title}")
-    conn = None
-    cur = None
     notified_count = 0
 
     caption_text = (
@@ -4669,16 +4700,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     join_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ Join Channel", url=FILMFYBOX_CHANNEL_URL)]])
 
     try:
-        conn = get_db_connection()
-        if not conn:
-            return 0
-
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT user_id, username, first_name FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
-            (f'%{movie_title}%',)
-        )
-        users_to_notify = cur.fetchall()
+        users_to_notify = await run_async(_load_requested_title_users, movie_title)
 
         for user_id, username, first_name in users_to_notify:
             try:
@@ -4766,12 +4788,12 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         reply_markup=join_keyboard
                     ))
 
+                if not sent_msg:
+                    continue
                 if sent_msg:
                     # copy_message() returns MessageId rather than a media-bearing
                     # Message, so infer file retention from the delivery source too.
-                    is_file_message = bool(file_id or (
-                        url and "t.me/" in str(url)
-                    )) or any(
+                    is_file_message = bool(is_file_id or val.startswith("https://t.me/")) or any(
                         getattr(sent_msg, media_type, None)
                         for media_type in ('document', 'video', 'audio', 'photo')
                     )
@@ -4783,11 +4805,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                         context, user_id, warning_msg, is_file=True
                     )
 
-                cur.execute(
-                    "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
-                    (user_id, f'%{movie_title}%')
-                )
-                conn.commit()
+                await run_async(_mark_title_requests_notified, movie_title, [user_id])
                 notified_count += 1
 
                 await asyncio.sleep(0.1)
@@ -4804,29 +4822,13 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
     except Exception as e:
         logger.error(f"Error in notify_users_for_movie: {e}", exc_info=True)
         return 0
-    finally:
-        if cur:
-            try: cur.close()
-            except Exception: pass
-        if conn:
-            close_db_connection(conn)
+
 
 async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
     """Notify users in group when a requested movie becomes available"""
     logger.info(f"Attempting to notify users in group for movie: {movie_title}")
-    conn = None
-    cur = None
     try:
-        conn = get_db_connection()
-        if not conn:
-            return
-
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT user_id, username, first_name, group_id, message_id FROM user_requests WHERE movie_title ILIKE %s AND notified = FALSE",
-            (f'%{movie_title}%',)
-        )
-        users_to_notify = cur.fetchall()
+        users_to_notify = await run_async(_load_requested_title_users, movie_title, True)
 
         if not users_to_notify:
             return
@@ -4859,12 +4861,7 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
                     parse_mode='Markdown'
                 )
 
-                for user_id in notified_users_ids:
-                    cur.execute(
-                        "UPDATE user_requests SET notified = TRUE WHERE user_id = %s AND movie_title ILIKE %s",
-                        (user_id, f'%{movie_title}%')
-                    )
-                conn.commit()
+                await run_async(_mark_title_requests_notified, movie_title, notified_users_ids)
 
             except Exception as e:
                 logger.error(f"Failed to send message to group {group_id}: {e}")
@@ -4872,9 +4869,6 @@ async def notify_in_group(context: ContextTypes.DEFAULT_TYPE, movie_title):
 
     except Exception as e:
         logger.error(f"Error in notify_in_group: {e}")
-    finally:
-        if cur: cur.close()
-        if conn: close_db_connection(conn)
 
 # ==================== NEW GENRE FUNCTIONS ====================
 

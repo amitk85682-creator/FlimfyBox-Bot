@@ -243,6 +243,49 @@ def test_notification_read_releases_connection_even_when_no_rows():
     assert released == [conn]
 
 
+def test_title_notification_releases_connection_before_telegram_and_tracks_success():
+    async def scenario():
+        active, queries, threads, tracked = [], [], [], []
+
+        class Cursor:
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def execute(self, sql, params=None):
+                queries.append((sql, params))
+                threads.append(threading.get_ident())
+            def fetchall(self): return [(42, 'tester', 'Test')]
+
+        conn = SimpleNamespace(cursor=Cursor, commit=lambda: None)
+
+        def acquire():
+            active.append(conn)
+            return conn
+
+        async def send(**kwargs):
+            assert active == [], 'Telegram I/O must not hold the shared database pool'
+            return SimpleNamespace(message_id=1)
+
+        async def safe(coro): return await coro
+        bot = SimpleNamespace(send_message=AsyncMock(side_effect=send), copy_message=AsyncMock(side_effect=send))
+        ns = load_functions('run_async', '_load_requested_title_users', '_mark_title_requests_notified',
+                            'notify_users_for_movie', get_db_connection=acquire,
+                            close_db_connection=active.remove, safe_send=safe,
+                            FILMFYBOX_CHANNEL_URL='https://t.me/test',
+                            InlineKeyboardButton=lambda *a, **k: None, InlineKeyboardMarkup=lambda *a: None,
+                            get_primary_dump_channel_id=lambda: -1001,
+                            track_user_message_for_deletion=lambda *a, **k: tracked.append(k),
+                            telegram=SimpleNamespace(error=SimpleNamespace(Forbidden=type('Forbidden',(Exception,),{}))))
+        count = await ns['notify_users_for_movie'](SimpleNamespace(bot=bot), 'Reacher', 'https://example.com/file')
+        assert count == 1
+        assert active == []
+        assert len(tracked) == 2
+        assert tracked[0]['is_file'] is False
+        assert any('UPDATE user_requests' in query for query, _ in queries)
+        assert all(identifier != threading.get_ident() for identifier in threads)
+
+    asyncio.run(scenario())
+
+
 def test_membership_network_failure_is_not_cached_as_a_denial():
     class Forbidden(Exception): pass
     class BadRequest(Exception): pass
