@@ -1610,7 +1610,7 @@ const tg = window.Telegram?.WebApp || {
                     <img src="${escapeHtml(artworkUrl(m.image))}" alt="${escapeHtml(m.title)} poster" class="card-img" loading="lazy" decoding="async" width="342" height="513"
                         onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback')">
                     <div class="card-title">${escapeHtml(m.title)}</div>
-                    <div class="card-meta"><span>${escapeHtml(m.year || '—')}</span>${badge}</div>
+                    <div class="card-meta"><span>${escapeHtml(FlimfyUI.identityLabel(m))}</span>${badge}</div>
                 </button>`;
             }).join('');
         }
@@ -1651,7 +1651,7 @@ function renderSearchMatches(query, results, { pending = false, committed = fals
         return `<button type="button" class="search-item" id="search-option-${index}" role="option" aria-selected="false" data-result-id="${escapeHtml(movie.id)}">
             <img src="${escapeHtml(artworkUrl(movie.image, 'w185'))}" alt="" loading="lazy" onerror="this.onerror=null;this.src='${POSTER_PLACEHOLDER}'">
             <span class="search-item-info"><span class="search-item-title">${title}</span>
-            <span class="search-item-meta"><span>${escapeHtml(movie.year || '')}</span><span>${FlimfyUI.availabilityLabel(movie)}</span></span></span>
+            <span class="search-item-meta"><span>${escapeHtml(FlimfyUI.identityLabel(movie))}</span><span>${movie.is_available === true ? 'Available' : FlimfyUI.availabilityLabel(movie)}</span></span></span>
             <i class="fas fa-arrow-up-right-from-square" aria-hidden="true"></i></button>`;
     }).join('') + `<button class="search-all" type="button">Search all titles for “${escapeHtml(query)}” <span aria-hidden="true">↗</span></button>`;
     dropdown.querySelectorAll('[data-result-id]').forEach(button => {
@@ -1862,7 +1862,7 @@ document.addEventListener('keydown', (e) => {
             };
             detailsTitle.innerText = movie.title || 'Loading details…';
             detailsRating.innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
-            detailsGenre.innerText = movie.genre || movie.category || 'Catalogue title';
+            detailsGenre.innerText = [FlimfyUI.identityLabel(movie), movie.genre].filter(Boolean).join(' • ');
             detailsDescription.innerText = 'Loading story and availability…';
             document.getElementById('castSection').innerHTML = '';
             document.getElementById('dpTrailerBtn').innerHTML = '';
@@ -1886,7 +1886,7 @@ document.addEventListener('keydown', (e) => {
                 document.getElementById('dpFloatPoster').src = artworkUrl(movie.image);
                 document.getElementById('dpTitle').innerText = movie.title;
                 document.getElementById('dpRating').innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
-                document.getElementById('dpGenre').innerText = movie.genre || 'Action, Drama';
+                document.getElementById('dpGenre').innerText = [FlimfyUI.identityLabel(movie), movie.genre].filter(Boolean).join(' • ');
                 document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
                 document.getElementById('castSection').innerHTML = '';
                 // Only show "upcoming" UI if the movie is genuinely pre-release.
@@ -1934,7 +1934,7 @@ document.addEventListener('keydown', (e) => {
                         document.getElementById('dpFloatPoster').src = artworkUrl(m.image);
                         document.getElementById('dpTitle').innerText = m.title;
                         document.getElementById('dpRating').innerText = m.rating && m.rating !== 'N/A' ? m.rating : '—';
-                        document.getElementById('dpGenre').innerText = m.genre || 'Drama';
+                        document.getElementById('dpGenre').innerText = [FlimfyUI.identityLabel(m), m.genre].filter(Boolean).join(' • ');
                         document.getElementById('dpDesc').innerText = m.description || 'Story details are not available yet.';
                         if (m.cast && m.cast.trim().length > 0) {
                             const actors = m.cast.split(',');

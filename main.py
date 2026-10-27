@@ -1722,6 +1722,10 @@ Required JSON example:
 async def process_file_with_evidence_engine(message) -> dict:
     """Normal auto-batch ke liye local caption+filename extraction, phir one Gemini reconciliation."""
     evidence = await extract_same_file_evidence(message)
+    from catalog_identity import evidence_conflict, AmbiguousMovieIdentity
+    conflict = evidence_conflict(evidence['caption_evidence'], evidence['filename_evidence'])
+    if conflict:
+        raise AmbiguousMovieIdentity(conflict)
     return await reconcile_evidence_with_gemini(
         evidence["caption_evidence"],
         evidence["filename_evidence"],
@@ -1769,13 +1773,15 @@ def _best_local_identity(record):
 
 def _build_superbatch_groups(files):
     """
-    Conservative local grouping:
-    exact canonical title + compatible year first; fuzzy merge only when one
-    unambiguous very-high-confidence match exists. Ambiguous remakes stay separate.
+    Group only exact canonical title, year and media type.
+    Missing years and fuzzy/subset titles remain separate for identity review.
     """
+    from catalog_identity import media_kind
     prepared = []
     for index, record in enumerate(files):
         title, year, canonical = _best_local_identity(record)
+        evidence = _local_evidence_fallback(record.get('caption_evidence', {}), record.get('filename_evidence', {}))
+        record['_identity_kind'] = media_kind(evidence.get('category'), evidence.get('extra_info'))
         record["display_title"] = f"{title} ({year})" if year else title
         prepared.append((record, title, year, canonical, index))
 
@@ -1786,15 +1792,11 @@ def _build_superbatch_groups(files):
         compatible = []
         for group in groups:
             group_year = group["year"]
-            years_ok = not year or not group_year or year == group_year
-            if not years_ok:
+            years_ok = year == group_year
+            if not years_ok or record['_identity_kind'] != group['kind']:
                 continue
             if canonical and canonical == group["canonical"]:
                 compatible.append((100, group))
-            elif canonical and group["canonical"]:
-                similarity = fuzz.token_set_ratio(canonical, group["canonical"])
-                if similarity >= 96:
-                    compatible.append((similarity, group))
 
         compatible.sort(key=lambda item: item[0], reverse=True)
         selected = None
@@ -1807,6 +1809,7 @@ def _build_superbatch_groups(files):
             selected = {
                 "canonical": canonical or f"unknown-{original_index}",
                 "year": year,
+                "kind": record['_identity_kind'],
                 "display_title": record.get("display_title") or title,
                 "files": [],
             }
@@ -3034,6 +3037,7 @@ def _batch_item_retry_failed(batch_id, admin_id):
                 FROM ingestion_batches AS b
                 WHERE i.batch_id = b.id AND i.batch_id = %s AND b.admin_id = %s
                   AND i.state = 'failed'
+                  AND i.error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
                   AND i.stage IN (
                       'accepted', 'identity_reconciliation', 'metadata_lookup',
                         'movie_db_committed', 'storage_copying', 'storage_copied',
@@ -3756,37 +3760,44 @@ def normalize_seasons_data(value):
 
 
 def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
-    """Automatically fetch and update metadata for a movie"""
+    """Fill missing fields for one verified ID; never update namesakes by title."""
+    conn = get_db_connection()
+    if not conn:
+        return False
     try:
-        metadata = fetch_movie_metadata(movie_title)
-        if metadata:
-            # 🔧 FIX: 8 values unpack (pehle 6 thi — CRASH hoti thi!)
-            title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
-            category, content_type = normalize_catalog_labels(
-                category=category,
-                language="",
-                extra_info="",
-                genre=genre,
-                title=title,
-            )
-            update_movie_metadata(
-                movie_id=movie_id,
-                imdb_id=imdb_id if imdb_id else None,
-                poster_url=poster_url if poster_url else None,
-                year=year if year else None,
-                genre=genre if genre else None,
-                rating=rating if rating and rating != 'N/A' else None,
-                description=plot if plot else None,      # 🔧 NAYA: Plot bhi save karo
-                category=category if category else None,
-                content_type=content_type,
-                seasons_data=seasons_data if seasons_data else {}
-            )
-            logger.info(f"✅ Metadata updated for movie {movie_id}: {title}")
-            return True
+        cur = conn.cursor()
+        cur.execute("SELECT imdb_id, year, content_type FROM movies WHERE id=%s", (movie_id,))
+        identity = cur.fetchone()
+    finally:
+        close_db_connection(conn)
+    if not identity or not identity[0]:
         return False
-    except Exception as e:
-        logger.error(f"Error in auto_fetch_and_update_metadata: {e}")
+    metadata = fetch_movie_metadata(identity[0], str(identity[1] or ""), hint_category=identity[2] or "")
+    if not metadata or metadata[4] != identity[0]:
         return False
+    _title, year, poster, genre, _imdb, rating, plot, _category, _seasons = metadata
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = '10s'")
+        cur.execute("""UPDATE movies
+                       SET genre=COALESCE(NULLIF(genre,''),%s),
+                           poster_url=COALESCE(NULLIF(poster_url,''),%s),
+                           year=COALESCE(NULLIF(year,0),%s),
+                           rating=COALESCE(NULLIF(NULLIF(rating,''),'N/A'),%s),
+                           description=COALESCE(NULLIF(description,''),%s)
+                       WHERE id=%s AND imdb_id=%s""",
+                    (genre, poster if poster != 'N/A' else None, year or None,
+                     rating, plot, movie_id, identity[0]))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
 
 # ============================================================================
 # 🔍 GOOGLE SEARCH METADATA FETCHER (Premium Edition)
@@ -3992,7 +4003,7 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
             ] + [
                 (item, 'tv') for item in find_response.get('tv_results', [])
             ]
-        if not candidates and title:
+        if not candidates and title and not imdb_id:
             search_response = requests.get(
                 "https://api.themoviedb.org/3/search/multi",
                 params={'api_key': api_key, 'query': title, 'include_adult': 'true'},
@@ -4003,14 +4014,12 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
                 for item in search_response.get('results', [])
                 if item.get('media_type') in {'movie', 'tv'}
             ]
-            if year:
-                dated = [
-                    item for item in candidates
-                    if str(item[0].get('release_date') or item[0].get('first_air_date') or '')[:4] == str(year)[:4]
-                ]
-                if dated:
-                    candidates = dated
-            candidates = [item for item in candidates if item[1] == media_type] or candidates
+            match = _find_best_tmdb_match(
+                [item for item, _kind in candidates], title, str(year or ""), category
+            )
+            candidates = [(match, match.get('media_type', media_type))] if match else []
+        if len(candidates) != 1:
+            return None
 
         for candidate, candidate_type in candidates[:3]:
             videos = requests.get(
@@ -4073,10 +4082,14 @@ def fetch_tmdb_artwork(
                 (item, "tv") for item in found.get("tv_results", [])
             ]
 
+        if len(candidates) > 1:
+            return None, None
         if candidates:
             match = candidates[0][0]
             media_type = candidates[0][1]
         else:
+            if imdb_id:
+                return None, None
             found = requests.get(
                 "https://api.themoviedb.org/3/search/multi",
                 params={"api_key": api_key, "query": title, "include_adult": "true"},
@@ -4086,7 +4099,7 @@ def fetch_tmdb_artwork(
                 item for item in found.get("results", [])
                 if item.get("media_type") in {"movie", "tv"}
             ]
-            match = _find_best_tmdb_match(results, title, str(year or ""))
+            match = _find_best_tmdb_match(results, title, str(year or ""), category)
             if not match:
                 return None, None
             media_type = match.get("media_type") or (
@@ -4120,90 +4133,12 @@ def fetch_tmdb_artwork(
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
 
 def get_tmdb_backdrop(query, search_year=""):
-    """TMDB API se HD Original Poster (Vertical with Text) nikalta hai — run_async se call karo"""
-    api_key = "9fa44f5e9fbd41415df930ce5b81c4d7" 
-    try:
-        url = f"https://api.themoviedb.org/3/search/multi?api_key={api_key}&query={quote(query)}"
-        resp = requests.get(url, timeout=10).json()
-        
-        if resp.get('results'):
-            for item in resp['results']:
-                item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
-                if search_year and str(search_year) != item_year:
-                    continue
-                
-                # 🛑 NAYA: Ab pehle Original Poster (Jisme Text hota hai) dhundega
-                if item.get('poster_path'):
-                    return f"https://image.tmdb.org/t/p/original{item['poster_path']}"
-                elif item.get('backdrop_path'):
-                    return f"https://image.tmdb.org/t/p/original{item['backdrop_path']}"
-            
-            first = resp['results'][0]
-            if first.get('poster_path'):
-                return f"https://image.tmdb.org/t/p/original{first['poster_path']}"
-            elif first.get('backdrop_path'):
-                return f"https://image.tmdb.org/t/p/original{first['backdrop_path']}"
-    except Exception as e:
-        logger.error(f"TMDB Error: {e}")
-    return None
-def _find_best_tmdb_match(tmdb_results: list, search_query: str, search_year: str = ""):
-    """
-    🎯 TMDb results mein se BEST match choose karta hai — blindly first nahi.
-    Scoring: Title similarity + Year match + Popularity
-    Ye galat movie aane ka sabse bada fix hai.
-    """
-    if not tmdb_results:
-        return None
-    
-    search_lower = search_query.lower().strip()
-    best_match = None
-    best_score = -1
-    
-    for item in tmdb_results:
-        score = 0
-        
-        # 1. Title similarity score (0-100)
-        item_title = (item.get('title') or item.get('name') or '').lower().strip()
-        item_original = (item.get('original_title') or item.get('original_name') or '').lower().strip()
-        
-        # Best of title vs original_title (Hindi movies ka original_title alag hota hai)
-        title_sim = fuzz.token_set_ratio(search_lower, item_title)
-        original_sim = fuzz.token_set_ratio(search_lower, item_original)
-        similarity = max(title_sim, original_sim)
-        score += similarity  # 0-100 points
-        
-        # 2. Year match bonus (+50 points — bahut strong signal)
-        if search_year and str(search_year).strip().isdigit():
-            item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
-            if item_year == str(search_year).strip():
-                score += 50  # Year match — strong boost
-            elif item_year and abs(int(item_year) - int(search_year)) <= 1:
-                score += 20  # Off by 1 year — small boost
-        
-        # 3. Popularity bonus (popular items are usually correct)
-        popularity = item.get('popularity', 0)
-        if popularity > 50:
-            score += 10
-        elif popularity > 10:
-            score += 5
-        
-        # 4. Has poster bonus (real movies usually have posters)
-        if item.get('poster_path'):
-            score += 5
-        
-        logger.debug(f"TMDb scoring: '{item_title}' | sim={similarity} | total={score}")
-        
-        if score > best_score:
-            best_score = score
-            best_match = item
-    
-    # Minimum threshold — agar score bahut low hai toh reject karo
-    if best_score < 55:
-        logger.warning(f"⚠️ TMDb: Best match score {best_score} too low for '{search_query}', rejecting")
-        return None
-    
-    logger.info(f"✅ TMDb Best Match: '{best_match.get('title') or best_match.get('name')}' (score: {best_score})")
-    return best_match
+    """Use the same strict identity rules for legacy poster enrichment."""
+    poster, _backdrop = fetch_tmdb_artwork(query, search_year)
+    return poster
+def _find_best_tmdb_match(tmdb_results, search_query, search_year="", hint_category=""):
+    from catalog_identity import pick_tmdb_identity
+    return pick_tmdb_identity(tmdb_results, search_query, search_year, hint_category)
 
 def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
     """Resolve the canonical TMDB identity without relying on a display title."""
@@ -4236,7 +4171,8 @@ def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
     return None
 
 
-def _find_movie_by_provider_identity(cur, imdb_id=None, tmdb_id=None):
+def _find_movie_by_provider_identity(cur, imdb_id=None, tmdb_id=None, content_type=""):
+    from catalog_identity import media_kind
     """Return the existing movie ID for provider IDs, never for title alone."""
     imdb_id = str(imdb_id).strip() if imdb_id else None
     tmdb_id = int(tmdb_id) if tmdb_id is not None else None
@@ -4248,9 +4184,12 @@ def _find_movie_by_provider_identity(cur, imdb_id=None, tmdb_id=None):
     if imdb_id:
         conditions.append("imdb_id = %s")
         params.append(imdb_id)
-    if tmdb_id is not None:
-        conditions.append("tmdb_id = %s")
-        params.append(tmdb_id)
+    kind = media_kind(content_type)
+    if tmdb_id is not None and kind:
+        conditions.append("(tmdb_id = %s AND LOWER(content_type) = ANY(%s))")
+        params.extend([tmdb_id, ['web series', 'tv series', 'tv', 'series'] if kind == 'tv' else ['movie', 'movies']])
+    if not conditions:
+        return None
 
     cur.execute(
         f"SELECT id, imdb_id, tmdb_id FROM movies WHERE {' OR '.join(conditions)}",
@@ -4266,6 +4205,11 @@ def _find_movie_by_provider_identity(cur, imdb_id=None, tmdb_id=None):
             f"IMDb/TMDB identities point to different movies: imdb_id={imdb_id!r}, "
             f"tmdb_id={tmdb_id!r}"
         )
+    for row in matches:
+        if imdb_id and row[1] and imdb_id != row[1]:
+            raise ValueError("Stored IMDb identity conflicts with incoming TMDB identity")
+        if tmdb_id is not None and row[2] is not None and int(row[2]) != tmdb_id:
+            raise ValueError("Stored TMDB identity conflicts with incoming IMDb identity")
     return matches[0][0]
 
 
@@ -4319,9 +4263,9 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 return None
 
             # 🔧 FIX: Smart match instead of blindly first
-            best_match = _find_best_tmdb_match(t_resp['results'], search_query, search_year)
+            best_match = _find_best_tmdb_match(t_resp['results'], search_query, search_year, hint_category)
             if not best_match:
-                best_match = t_resp['results'][0]  # Fallback to first if scoring rejects all
+                return None  # No safe unique match.
 
             title = best_match.get('title') or best_match.get('name') or search_query
             year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
@@ -4357,26 +4301,10 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         
         # ━━━━━ STEP 1: OMDb Search (agar key hai toh) ━━━━━
         if omdb_api_key and not is_imdb_id:
-            # 🔧 FIX: Pehle BINA type ke try karo (type galat hone se result miss hota tha)
-            url_no_type = f"https://www.omdbapi.com/?t={quote(search_query)}&apikey={omdb_api_key}&plot=full"
-            if search_year and str(search_year).strip().isdigit():
-                url_no_type += f"&y={str(search_year).strip()}"
-            
-            resp = requests.get(url_no_type, timeout=10).json()
-            
-            if resp.get("Response") == "True":
-                omdb_resp = resp
-            else:
-                # 🔧 FIX: Retry WITH type parameter (agar bina type se nahi mila)
-                is_series = "series" in hint_category.lower() if hint_category else False
-                if is_series:
-                    url_with_type = f"https://www.omdbapi.com/?t={quote(search_query)}&type=series&apikey={omdb_api_key}&plot=full"
-                    if search_year and str(search_year).strip().isdigit():
-                        url_with_type += f"&y={str(search_year).strip()}"
-                    resp2 = requests.get(url_with_type, timeout=10).json()
-                    if resp2.get("Response") == "True":
-                        omdb_resp = resp2
-                        
+            from catalog_identity import lookup_omdb_identity
+            omdb_resp = lookup_omdb_identity(
+                requests, omdb_api_key, search_query, search_year, hint_category
+            )
         elif omdb_api_key and is_imdb_id:
             url = f"https://www.omdbapi.com/?i={search_query}&apikey={omdb_api_key}&plot=full"
             resp = requests.get(url, timeout=10).json()
@@ -4430,16 +4358,9 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 try:
                     tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(title)}"
                     t_resp = requests.get(tmdb_search, timeout=10).json()
-                    if t_resp.get('results'):
-                        for item in t_resp['results']:
-                            item_year = str(item.get('release_date', item.get('first_air_date', '')))[:4]
-                            if str(year) == item_year and item.get('poster_path'):
-                                poster_url = f"https://image.tmdb.org/t/p/original{item['poster_path']}"
-                                break
-                        else:
-                            path = t_resp['results'][0].get('poster_path')
-                            if path:
-                                poster_url = f"https://image.tmdb.org/t/p/original{path}"
+                    match = _find_best_tmdb_match(t_resp.get('results', []), title, str(year), category)
+                    if match and match.get('poster_path'):
+                        poster_url = f"https://image.tmdb.org/t/p/original{match['poster_path']}"
                 except:
                     pass
 
@@ -4488,6 +4409,9 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         logger.info(f"⚠️ OMDb miss for '{search_query}', trying TMDb smart search...")
         
         # 🔧 FIX: search/multi use karo (movie + tv dono milenge) 
+        if is_imdb_id:
+            return None
+
         tmdb_search = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(search_query)}"
         if search_year and str(search_year).strip().isdigit():
             tmdb_search += f"&year={search_year.strip()}"
@@ -4507,11 +4431,9 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 return None
 
         # 🔧 FIX: Smart match — blindly first nahi lega!
-        best_match = _find_best_tmdb_match(t_resp['results'], search_query, search_year)
+        best_match = _find_best_tmdb_match(t_resp['results'], search_query, search_year, hint_category)
         if not best_match:
-            # Agar smart match reject kar de, still try first as last resort
-            best_match = t_resp['results'][0]
-            logger.warning(f"⚠️ TMDb smart match rejected all, using first result as fallback")
+            return None
 
         title = best_match.get('title') or best_match.get('name') or search_query
         year_str = str(best_match.get('release_date', best_match.get('first_air_date', '')))[:4]
@@ -9011,19 +8933,10 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             json.dumps(seasons_data) if seasons_data else '{}', trailer_key,
         )
         existing_movie_id = _find_movie_by_provider_identity(
-            cur, imdb_id_f, tmdb_id
+            cur, imdb_id_f, tmdb_id, content_type
         )
         if existing_movie_id:
-            cur.execute("""
-                UPDATE movies
-                SET title = %s, imdb_id = %s, tmdb_id = %s, poster_url = %s,
-                    year = %s, genre = %s, rating = %s, description = %s,
-                    category = %s, content_type = %s, language = %s,
-                    "cast" = %s, seasons_data = %s,
-                    trailer_key = COALESCE(%s, trailer_key)
-                WHERE id = %s
-                RETURNING id
-            """, (*movie_values, existing_movie_id))
+            cur.execute("SELECT id FROM movies WHERE id = %s", (existing_movie_id,))
         else:
             cur.execute("""
                 INSERT INTO movies
@@ -9206,7 +9119,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = conn.cursor()
 
         # ✅ FIXED: Quote "cast" because it's a reserved keyword
-        existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+        existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id, content_type)
         values = (
             title, imdb_id, tmdb_id, poster_url, year, genre, rating, plot,
             category, content_type, language, cast_str, trailer_key,
@@ -9591,13 +9504,17 @@ async def _mark_superbatch_item_failed(item_id, exc, stage=None):
             state="unrecoverable" if uncertain else "failed",
             stage=stage or current[13],
             error_class="StorageCopyOutcomeUnknown" if uncertain else type(exc).__name__,
-            error_detail="SuperBatch stage failed or timed out; confirmed copies retained",
+            error_detail=str(exc)[:500] if type(exc).__name__ == "AmbiguousMovieIdentity" else "SuperBatch stage failed or timed out; confirmed copies retained",
         ), timeout=10)
     except Exception as checkpoint_exc:
         logger.error("SuperBatch failure checkpoint unavailable item=%s (%s)", item_id, type(checkpoint_exc).__name__)
 
 
 async def _prepare_superbatch_movie(representative, display_name):
+    from catalog_identity import evidence_conflict, AmbiguousMovieIdentity
+    conflict = evidence_conflict(representative.get('caption_evidence', {}), representative.get('filename_evidence', {}))
+    if conflict:
+        raise AmbiguousMovieIdentity(conflict + "; use /batchid <IMDb ID>")
     try:
         reconciled = await asyncio.wait_for(reconcile_evidence_with_gemini(
             representative.get('caption_evidence', {}),
@@ -10039,6 +9956,11 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     if movie_name == "UNKNOWN" or len(movie_name) < 2:
         return None
 
+    from catalog_identity import find_existing_upload, media_kind, release_year, AmbiguousMovieIdentity
+    existing = await run_async(find_existing_upload, get_db_connection, close_db_connection, ai_data)
+    if existing:
+        return existing
+
     # --- STEP 2: TMDB + IMDb METADATA ---
     # This ingestion path never consumes seasons_data. Fetching every episode
     # of a long-running series can otherwise take minutes before saving a file.
@@ -10048,15 +9970,17 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     )
     if metadata:
         title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
+        expected_kind = media_kind(gemini_category, extra_info)
+        actual_kind = media_kind(category)
+        if (release_year(movie_year) and release_year(year) != release_year(movie_year)) or (
+            expected_kind and actual_kind and expected_kind != actual_kind
+        ):
+            raise AmbiguousMovieIdentity("Provider result conflicts with the file year or Movie / Series type; use /batchid <IMDb ID>")
+
     else:
-        title      = movie_name
-        year       = int(movie_year) if movie_year and str(movie_year).isdigit() else 0
-        poster_url = None
-        imdb_id    = None
-        genre      = "Unknown"
-        rating     = "N/A"
-        plot       = "Auto Added"
-        category   = gemini_category if gemini_category else "Movies"
+        raise AmbiguousMovieIdentity("No unique provider match. File retained for identity review; use /batchstatus and /batchresolve.")
+    if not imdb_id:
+        raise AmbiguousMovieIdentity("Provider identity is missing. Review the title before attaching files.")
 
     # 👇 NAYA LOGIC: Gemini Category Priority for Anime 👇
     cat_lower = str(gemini_category or "").lower()
@@ -10075,8 +9999,8 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     cast_str, trailer_key, artwork, tmdb_id = await asyncio.gather(
         _optional_movie_lookup(fetch_cast_from_imdb, imdb_id, 5, default="")
         if imdb_id else asyncio.sleep(0, result=""),
-        _optional_movie_lookup(resolve_trailer_key, title, year, imdb_id, category, movie_name),
-        _optional_movie_lookup(fetch_tmdb_artwork, title, year, imdb_id, category, default=(None, None)),
+        _optional_movie_lookup(resolve_trailer_key, title, year, imdb_id, content_type, movie_name),
+        _optional_movie_lookup(fetch_tmdb_artwork, title, year, imdb_id, content_type, default=(None, None)),
         _optional_movie_lookup(resolve_tmdb_id_from_imdb, imdb_id, category),
     )
     artwork_poster_url, backdrop_poster_url = artwork
@@ -10095,7 +10019,8 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         try:
             _set_batch_db_limits(conn)
             cur = conn.cursor()
-            existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(LOWER(BTRIM(%s))))", (title,))
+            existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id, content_type)
             if not existing_id and _has_compatible_title_candidate(
                 cur, title, year, content_type
             ):
@@ -10104,7 +10029,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                     title,
                     year or "no year",
                 )
-                return None
+                raise AmbiguousMovieIdentity("A matching catalogue entry appeared during lookup. Review the existing identity before retrying.")
 
             movie_values = (
                 title, imdb_id, tmdb_id, poster_url, backdrop_poster_url, year,
@@ -10112,32 +10037,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                 extra_info, cast_str, trailer_key,
             )
             if existing_id:
-                cur.execute(
-                    """
-                    UPDATE movies
-                    SET title = %s, imdb_id = COALESCE(%s, movies.imdb_id),
-                        tmdb_id = COALESCE(%s, movies.tmdb_id),
-                        poster_url = COALESCE(%s, poster_url),
-                        backdrop_poster_url = COALESCE(%s, backdrop_poster_url),
-                        year = CASE WHEN movies.year = 0 THEN %s ELSE movies.year END,
-                        genre = COALESCE(%s, genre), rating = COALESCE(%s, rating),
-                        description = COALESCE(%s, description),
-                        category = COALESCE(%s, category),
-                        content_type = COALESCE(%s, content_type),
-                        language = CASE WHEN %s <> '' THEN %s ELSE movies.language END,
-                        extra_info = CASE WHEN %s <> '' THEN %s ELSE movies.extra_info END,
-                        "cast" = COALESCE(%s, "cast"),
-                        trailer_key = COALESCE(%s, trailer_key)
-                    WHERE id = %s
-                    RETURNING id
-                    """,
-                    (
-                        title, imdb_id, tmdb_id, poster_url, backdrop_poster_url,
-                        year, genre, rating, plot, category, content_type,
-                        movie_lang, movie_lang, extra_info, extra_info, cast_str,
-                        trailer_key, existing_id,
-                    ),
-                )
+                cur.execute("SELECT id FROM movies WHERE id = %s", (existing_id,))
             else:
                 cur.execute(
                     """
@@ -10169,6 +10069,9 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                 'tmdb_id':    tmdb_id,
                 'cast_str':   cast_str,
             }
+        except ValueError as e:
+            conn.rollback()
+            raise AmbiguousMovieIdentity(str(e)) from e
         except Exception as e:
             logger.error(f"_core_movie_processor DB Error: {e}")
             if conn: conn.rollback()
@@ -10290,6 +10193,23 @@ async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | No
     # Independent local extraction; no Gemini in Phase 2.
     cap_data = await fallback_extraction(raw_caption) if raw_caption else {}
     fn_data = await fallback_extraction(file_name) if file_name else {}
+    from catalog_identity import validate_file_target, AmbiguousMovieIdentity
+    checkpoint = await run_async(_batch_item_fetch, batch_item_id) if batch_item_id else None
+    evidence = (checkpoint[11] or {}) if checkpoint else {}
+    if isinstance(evidence, str):
+        evidence = json.loads(evidence)
+    reviewed = evidence.get('reviewed_movie_id') == movie_id
+    if not reviewed:
+        try:
+            await run_async(validate_file_target, get_db_connection, close_db_connection,
+                            movie_id, cap_data, fn_data)
+        except AmbiguousMovieIdentity as exc:
+            if batch_item_id:
+                await run_async(_batch_item_update, batch_item_id, state='failed',
+                                stage='identity_reconciliation', error_class='AmbiguousMovieIdentity',
+                                error_detail=str(exc)[:500])
+            return None
+
     cap_clean = strip_caption_junk(raw_caption) if raw_caption else ""
 
     cap_label = generate_quality_label(cap_clean, file_size_str, current_lang) if cap_clean else ""
@@ -10727,7 +10647,7 @@ async def _resume_batch_item(bot, job, row):
             state="failed",
             stage=row[13] or "identity_reconciliation",
             error_class=type(exc).__name__,
-            error_detail="Persisted batch item could not be resumed",
+            error_detail=str(exc)[:500] if type(exc).__name__ == "AmbiguousMovieIdentity" else "Persisted batch item could not be resumed",
         )
         return False
     finally:
@@ -10922,6 +10842,31 @@ async def batch_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Processing: {snapshot[11]}"
         ),
     )
+
+    from catalog_identity import pending_identity_reviews
+    reviews = await run_async(pending_identity_reviews, get_db_connection, close_db_connection,
+                              batch_id, update.effective_user.id)
+    if reviews:
+        text = "Identity review needed (files retained):\n" + "\n".join(
+            f"Item {item_id}: {str(name or '')[:90]}\n{str(reason or '')[:230]}"
+            for item_id, name, reason in reviews)
+        await _safe_batch_reply(update.effective_message, text +
+            "\nChoose after checking: /batchresolve <item_id> <catalogue_id>, then /batchretry " + batch_id)
+
+
+async def batch_resolve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 2 or not all(str(arg).isdigit() for arg in context.args):
+        await _safe_batch_reply(update.effective_message, "Usage: /batchresolve <item_id> <catalogue_id> (after checking the file identity)")
+        return
+    from catalog_identity import resolve_review_item
+    try:
+        batch_id = await run_async(resolve_review_item, get_db_connection, close_db_connection,
+                                   int(context.args[0]), int(context.args[1]), update.effective_user.id)
+        await _safe_batch_reply(update.effective_message, f"Identity selected. Resume retained file with /batchretry {batch_id}")
+    except (ValueError, RuntimeError) as exc:
+        await _safe_batch_reply(update.effective_message, str(exc))
 
 
 async def batch_retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11229,7 +11174,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _batch_item_update, first_item_id,
                     state="failed", stage="identity_reconciliation",
                     error_class=type(exc).__name__,
-                    error_detail="Movie identity processing failed",
+                    error_detail=str(exc)[:500] if type(exc).__name__ == "AmbiguousMovieIdentity" else "Movie identity processing failed",
                 )
                 logger.error(
                     "Automatic batch identity processing failed (%s)",
@@ -11242,7 +11187,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     batch_upload_coordinator.mark_ready(user.id)
                 await _safe_batch_status_edit(
                     status_msg,
-                    "❌ Movie naam extract nahi ho paya.\n\n`/batch Movie Name` use karein.",
+                    f"⚠️ Movie identity unresolved; file retained.\nInspect: /batchstatus {batch_id}\nSelect the correct title with /batchresolve <item_id> <catalogue_id>.",
                 )
                 return
 
@@ -13100,6 +13045,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_year = fallback_data.get("year", "")
             movie_lang = fallback_data.get("language", "Hindi") or "Hindi"
             movie_extra = fallback_data.get("extra_info", "")
+            evidence_category = fallback_data.get("category", "Web Series")
             gemini_category = "Adult" if force_adult else "Web Series"
 
         if movie_name == "UNKNOWN" or len(movie_name) < 2:
@@ -13159,7 +13105,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 resolve_tmdb_id_from_imdb, imdb_id, category
             )
             existing = None
-            existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id)
+            existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id, evidence_category)
             if existing_id:
                 cur.execute(
                     "SELECT id, poster_url, year FROM movies WHERE id = %s",
@@ -13180,26 +13126,8 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     title=title,
                 )
                 
-                cur.execute("""
-                    UPDATE movies 
-                    SET imdb_id = COALESCE(%s, imdb_id),
-                        tmdb_id = COALESCE(%s, tmdb_id),
-                        poster_url = COALESCE(%s, poster_url),
-                        year = CASE WHEN %s > 0 THEN %s ELSE year END,
-                        genre = COALESCE(%s, genre),
-                        rating = COALESCE(%s, rating),
-                        description = COALESCE(%s, description),
-                        category = %s,
-                        content_type = %s,
-                        language = COALESCE(NULLIF(%s, ''), language),
-                        extra_info = COALESCE(NULLIF(%s, ''), extra_info),
-                        "cast" = COALESCE(%s, "cast"),
-                        trailer_key = COALESCE(%s, trailer_key)
-                    WHERE id = %s
-                    RETURNING id
-                """, (imdb_id, tmdb_id, final_poster, final_year, final_year, genre,
-                      rating, plot, normalized_category, content_type, movie_lang,
-                      movie_extra, cast_str, trailer_key, existing_id))
+                # Uploading more files is not an instruction to replace curated metadata.
+                cur.execute("SELECT id FROM movies WHERE id = %s", (existing_id,))
                 movie_id = cur.fetchone()[0]
                 logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
                 
@@ -15081,94 +15009,36 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn: close_db_connection(conn)
 
 async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Magic Command: Finds movies with missing info and fixes them - UPDATED
-    """
-    user_id = update.effective_user.id
-    if not is_admin(user_id):
-        await update.message.reply_text("⛔ सिर्फ एडमिन के लिए!")
+    if not is_admin(update.effective_user.id):
         return
+    status = await update.message.reply_text("Checking missing metadata by verified identity…")
 
-    status_msg = await update.message.reply_text("⏳ **Scanning Database for incomplete movies...**", parse_mode='Markdown')
-
-    conn = get_db_connection()
-    if not conn:
-        await status_msg.edit_text("❌ Database connection failed.")
-        return
+    def load_missing():
+        conn = get_db_connection()
+        if not conn:
+            raise RuntimeError("Database unavailable")
+        try:
+            cur = conn.cursor()
+            cur.execute("SET LOCAL statement_timeout = '10s'")
+            cur.execute("SELECT id, title FROM movies WHERE genre IS NULL OR poster_url IS NULL OR year IS NULL")
+            return cur.fetchall()
+        finally:
+            close_db_connection(conn)
 
     try:
-        cur = conn.cursor()
-        # Find movies where ANY key info is missing (Genre, Poster, or Year)
-        cur.execute("SELECT title FROM movies WHERE genre IS NULL OR poster_url IS NULL OR year IS NULL")
-        movies_to_fix = cur.fetchall()
-        
-        if not movies_to_fix:
-            await status_msg.edit_text("✅ **All Good!** Database mein sabhi movies ka metadata complete hai.")
-            return
-
-        total = len(movies_to_fix)
-        await status_msg.edit_text(f"🧐 Found **{total}** movies to fix. Starting update process... (This may take time)")
-
-        success_count = 0
-        failed_count = 0
-
-        for index, (title,) in enumerate(movies_to_fix):
+        rows = await run_async(load_missing)
+        fixed = 0
+        for index, (movie_id, title) in enumerate(rows):
             try:
-                # Progress update every 10 movies
-                if index % 10 == 0:
-                    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
-                # ✅ FETCH CORRECT METADATA (6 Values)
-                metadata = fetch_movie_metadata(title)
-                if metadata:
-                    new_title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data = metadata
-
-                    # Only update if we found something useful
-                    if genre or poster_url or year > 0:
-                        # ✅ CORRECT SQL UPDATE QUERY (Order Matters!)
-                        cur.execute("""
-                            UPDATE movies 
-                            SET genre = %s, 
-                                poster_url = %s, 
-                                year = %s, 
-                                imdb_id = %s, 
-                                rating = %s
-                            WHERE title = %s
-                        """, (genre, poster_url, year, imdb_id, rating, title))
-                        
-                        conn.commit()
-                        success_count += 1
-                    else:
-                        failed_count += 1
-                else:
-                    failed_count += 1
-                
-                # Sleep slightly to respect API limits
-                await asyncio.sleep(0.5) 
-
-            except Exception as e:
-                # 🛑 ROLLBACK IS CRITICAL HERE
-                if conn:
-                    conn.rollback() 
-                logger.error(f"Failed to fix {title}: {e}")
-                failed_count += 1
-
-        # Final Report
-        await status_msg.edit_text(
-            f"🎉 **Repair Complete!**\n\n"
-            f"✅ Fixed: {success_count}\n"
-            f"❌ Failed: {failed_count}\n"
-            f"📊 Total Processed: {total}\n\n"
-            f"Database updated successfully! 🚀",
-            parse_mode='Markdown'
-        )
-
-    except Exception as e:
-        logger.error(f"Error in fix_metadata: {e}")
-        await status_msg.edit_text(f"❌ Error: {e}")
-    finally:
-        if cur: cur.close()
-        if conn: close_db_connection(conn)
+                fixed += bool(await run_async(auto_fetch_and_update_metadata, movie_id, title))
+            except Exception as exc:
+                logger.warning("Metadata repair skipped id=%s (%s)", movie_id, type(exc).__name__)
+            if index % 10 == 0:
+                await _safe_batch_status_edit(status, f"Checked {index + 1}/{len(rows)}; filled {fixed}. Unverified identities are skipped.")
+        await _safe_batch_status_edit(status, f"Metadata check complete. Filled: {fixed}. Skipped / unavailable: {len(rows) - fixed}. Existing details were preserved.")
+    except Exception as exc:
+        logger.error("Metadata repair failed (%s)", type(exc).__name__)
+        await _safe_batch_status_edit(status, "Metadata check failed; retry when the database is available.")
 
 async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -16427,6 +16297,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("done", batch_done_command))
     application.add_handler(CommandHandler("batchid", batch_id_command))
     application.add_handler(CommandHandler("batchstatus", batch_status_command))
+    application.add_handler(CommandHandler("batchresolve", batch_resolve_command))
     application.add_handler(CommandHandler("batchretry", batch_retry_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
     application.add_handler(CommandHandler("post", post_to_topic_command))

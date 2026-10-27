@@ -7,6 +7,8 @@ import re
 import sys
 import time
 import unicodedata
+import pytest
+from catalog_identity import AmbiguousMovieIdentity
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -221,7 +223,7 @@ def test_core_reuses_provider_identity_and_saves_file_under_canonical_id():
 
     assert result["movie_id"] == 15634
     statements = [query for query, _params in connection.cursor_instance.executed]
-    assert any("UPDATE movies" in query for query in statements)
+    assert not any("UPDATE movies" in query for query in statements)
     assert not any("INSERT INTO movies" in query for query in statements)
 
     helpers_path = ROOT / "tests" / "test_movie_file_dedup.py"
@@ -271,14 +273,11 @@ def test_core_holds_unresolved_exact_title_instead_of_creating_duplicate():
         "category": "Movies",
     }
 
-    result = asyncio.run(
-        env["_core_movie_processor"](
+    with pytest.raises(AmbiguousMovieIdentity):
+        asyncio.run(env["_core_movie_processor"](
             "Drishyam: The Conclusion 2026 HQ 1080p HDTC Hindi Clean x264 HDHub4u",
             reconciled_data=reconciled,
-        )
-    )
-
-    assert result is None
+        ))
     assert not any(
         "INSERT INTO movies" in query
         for query, _params in connection.cursor_instance.executed

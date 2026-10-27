@@ -1890,7 +1890,7 @@ def register_webapp_routes(
                         img_path = item.get('poster_path') or item.get('backdrop_path')
                         poster_url = f"https://image.tmdb.org/t/p/w500{img_path}" if img_path else '/static/miniapp/poster-placeholder.svg'
                         tmdb_results.append({
-                            'id': 'tmdb_' + str(item['id']),
+                            'id': f"tmdb_{media_type}_{item['id']}",
                             'tmdb_id': item.get('id'),
                             'title': item.get('title') or item.get('name') or 'Unknown',
                             'year': release_date[:4],
@@ -1910,83 +1910,18 @@ def register_webapp_routes(
                 discovery_failed = True
                 logger.error(f"TMDB search error: {e}")
     
-        # Deduplicate: normalize title (remove punctuation, spaces, lowercase)
-        def normalize_title(t):
-            return re.sub(r'[^\w\s]', '', t).lower().replace(" ", "")
-
-        # The user may type "Dhurandra", while TMDB correctly returns
-        # "Dhurandhar". If that TMDB title is effectively the same as a local
-        # title, use the local record and mark it Available—not Request.
-        if catalog_candidates and tmdb_results:
-            candidate_titles = {index: row[1] for index, row in enumerate(catalog_candidates)}
-            already_local_ids = {movie['id'] for movie in local_results}
-            for tmdb_movie in tmdb_results:
-                best = process.extractOne(tmdb_movie['title'], candidate_titles, scorer=fuzz.ratio)
-                if not best:
-                    continue
-                _, score, index = best
-                if score < 88:
-                    continue
-                row = catalog_candidates[index]
-                local_year = str(row[2] or '')[:4]
-                tmdb_year = str(tmdb_movie.get('year') or '')[:4]
-                if local_year.isdigit() and tmdb_year.isdigit() and abs(int(local_year) - int(tmdb_year)) > 1:
-                    continue
-                if row[0] not in already_local_ids:
-                    is_available = bool(row[10]) if len(row) > 10 else False
-                    local_results.append({
-                        'id': row[0], 'title': row[1], 'year': row[2] if row[2] else '',
-                        'image': row[3] or tmdb_movie['image'],
-                        'rating': row[4] if row[4] else 'N/A',
-                        'genre': row[5] if row[5] else 'Unknown',
-                        'category': row[6] if row[6] else 'Movie', 'source': 'local',
-                        'tmdb_id': row[7] if len(row) > 7 else None,
-                        'media_type': tmdb_movie.get('media_type', 'movie'),
-                        'is_available': is_available,
-                        'is_upcoming': False,
-                        'availability_state': 'available' if is_available else 'unavailable',
-                    })
-                    already_local_ids.add(row[0])
-    
-        # Prefer the local row when the provider identity is the same. A title
-        # match alone is never enough to collapse two TMDB records.
-        local_by_tmdb = {
-            str(movie.get('tmdb_id')): movie
-            for movie in local_results
-            if movie.get('tmdb_id') is not None
-        }
-        local_by_title_year_type = {}
+        # Only verified, typed provider IDs identify the same work. A local
+        # title/year match may still be a different film or an unreviewed upload.
+        local_by_tmdb = {}
         for movie in local_results:
-            title_key = normalize_title(movie.get('title', ''))
-            year_key = str(movie.get('year') or '')[:4]
-            type_key = movie.get('media_type') or 'movie'
-            if title_key and year_key.isdigit():
-                local_by_title_year_type.setdefault(
-                    (title_key, year_key, type_key), []
-                ).append(movie)
+            if movie.get('tmdb_id') is not None:
+                key = (movie.get('media_type') or 'movie', str(movie['tmdb_id']))
+                local_by_tmdb.setdefault(key, []).append(movie)
         merged_tmdb_results = []
-        for tmdb_movie in tmdb_results:
-            local_movie = local_by_tmdb.get(str(tmdb_movie.get('tmdb_id')))
-            if not local_movie:
-                candidates = local_by_title_year_type.get(
-                    (
-                        normalize_title(tmdb_movie.get('title', '')),
-                        str(tmdb_movie.get('year') or '')[:4],
-                        tmdb_movie.get('media_type') or 'movie',
-                    ),
-                    [],
-                )
-                # Title/year/type is only safe when it identifies one local row.
-                if len(candidates) == 1:
-                    local_movie = candidates[0]
-            if local_movie:
-                local_movie.update({
-                    key: value for key, value in tmdb_movie.items()
-                    if key in {'release_date', 'description', 'media_type'}
-                    and value
-                })
-                continue
-            merged_tmdb_results.append(tmdb_movie)
+        for movie in tmdb_results:
+            key = (movie.get('media_type') or 'movie', str(movie.get('tmdb_id')))
+            if key not in local_by_tmdb:
+                merged_tmdb_results.append(movie)
 
         seen = set()
         combined = []
@@ -2000,7 +1935,7 @@ def register_webapp_routes(
                 combined.append(m)
         # Then TMDB movies (only if not already seen)
         for m in merged_tmdb_results:
-            key = ('tmdb', m['id'])
+            key = ('tmdb', m.get('media_type') or 'movie', m['id'])
             if key not in seen and len(combined) < 30:
                 seen.add(key)
                 combined.append(m)

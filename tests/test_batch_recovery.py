@@ -34,6 +34,15 @@ class _Connection:
     def rollback(self):
         self.rollbacks += 1
 
+    def cursor(self):
+        return self
+
+    def execute(self, query, params=None):
+        self.query = query
+
+    def fetchone(self):
+        return ('Movie', 2026, 'Movie')
+
 
 class _RetryAfter(Exception):
     def __init__(self, retry_after):

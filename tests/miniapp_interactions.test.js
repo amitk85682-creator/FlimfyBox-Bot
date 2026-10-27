@@ -49,7 +49,7 @@ test('cards preserve quoted titles safely and use keyboard-operable native butto
         section('function artworkUrl', 'function syncSafeArea') +
         section('function escapeHtml', 'window.showSettings') +
         section('function renderCards', '// Hybrid Search'),
-        { POSTER_PLACEHOLDER: '/placeholder.svg' }
+        { POSTER_PLACEHOLDER: '/placeholder.svg', FlimfyUI: require('../static/miniapp/ui-core.js') }
     );
     const title = `A "quote" & <img onerror=alert(1)> 'title'`;
     const html = api.renderCards([{ id: 1, title, image: 'https://image.tmdb.org/t/p/original/poster.jpg' }]);

@@ -27,7 +27,16 @@
     function availabilityLabel(movie) {
         return futureRelease(movie) ? 'Coming soon' : movie.is_available === false || movie.source === 'tmdb' ? 'Request' : 'In your catalogue';
     }
-    const api = { normalize, prefixMatches, futureRelease, themePreference, resolveTheme, availabilityLabel };
+    function contentLabel(movie) {
+        const type = normalize(movie.content_type || movie.media_type || movie.category);
+        if (['tv', 'series', 'web series', 'tv series'].includes(type)) return 'Series';
+        if (type === 'anime') return 'Anime';
+        return 'Movie';
+    }
+    function identityLabel(movie) {
+        return [movie.year || 'Year unknown', contentLabel(movie)].join(' · ');
+    }
+    const api = { normalize, prefixMatches, futureRelease, themePreference, resolveTheme, availabilityLabel, contentLabel, identityLabel };
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     root.FlimfyUI = api;
     if (!root.document) return;

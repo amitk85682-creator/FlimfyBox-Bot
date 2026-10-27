@@ -7,6 +7,14 @@ const UI = require('../static/miniapp/ui-core.js');
 const source = fs.readFileSync(path.join(__dirname, '../static/miniapp/app.js'), 'utf8');
 const movies = [{id:1,title:'Reacher'}, {id:2,title:'Red Notice'}, {id:3,title:'The Red Queen'}, {id:4,title:'Arrival'}];
 
+test('same-name movie and series remain distinct and display their year and type', () => {
+    const namesakes = [{id:6111,title:'Obsession',year:2026,content_type:'Movie'},
+        {id:15499,title:'Obsession',year:2023,media_type:'tv'},
+        {id:16972,title:'Obsession',year:2025,content_type:'Web Series'}];
+    assert.equal(UI.prefixMatches(namesakes,'obs').length,3);
+    assert.deepEqual(namesakes.map(UI.identityLabel),['2026 · Movie','2023 · Series','2025 · Series']);
+});
+
 test('prefix suggestions match re and refine without substring noise or duplicate IDs', () => {
     assert.deepEqual(UI.prefixMatches([...movies, movies[0]], ' RE ').map(m => m.title), ['Reacher', 'Red Notice']);
     assert.deepEqual(UI.prefixMatches(movies, 'rea').map(m => m.title), ['Reacher']);

@@ -15,7 +15,8 @@ def test_batch_id_resolves_identity_collision_without_using_title():
     assert "tmdb_id = await run_async" in section
     assert "if existing_movie_id:" in section
     assert "INSERT INTO movies" in section
-    assert "title = %s" in section
+    assert "SELECT id FROM movies WHERE id = %s" in section
+    assert "UPDATE movies" not in section
 
 
 def test_title_conflicts_are_not_used_as_an_upsert_key():
@@ -34,4 +35,4 @@ def test_mini_app_search_deduplicates_by_record_id_not_title():
         encoding="utf-8"
     )
     assert "key = ('local', m['id'])" in routes
-    assert "key = ('tmdb', m['id'])" in routes
+    assert "key = ('tmdb', m.get('media_type') or 'movie', m['id'])" in routes

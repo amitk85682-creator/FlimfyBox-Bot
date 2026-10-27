@@ -77,7 +77,7 @@ assert.match(template, /id="rowUpcoming"/);
 assert.match(template, /id="upcomingScroll"/);
 assert.match(template, /onclick="showUpcoming\(\)"/);
 assert.doesNotMatch(template, /Upcoming titles/);
-assert.match(template, /app\.js'\) }}\?v=studio-2/);
+assert.match(template, /app\.js'\) }}\?v=identity-3/);
 assert.match(source, /heroSlider\.style\.backgroundImage/);
 assert.match(source, /const heroArtwork = movie\.backdrop \|\| movie\.image/);
 assert.match(source, /const detailsArtwork = movie\.backdrop \|\| movie\.image/);
