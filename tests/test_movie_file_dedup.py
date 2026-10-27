@@ -5,6 +5,7 @@ unique Telegram file identity constraints, including NULL handling, so that
 no real database is needed.
 """
 
+import ast
 import importlib
 import sys
 import threading
@@ -45,6 +46,56 @@ class InMemoryMovieFilesDB:
             row = dict(row, id=self._next_id)
             self._next_id += 1
             self._rows.append(row)
+            return row["id"]
+
+    def insert_do_nothing(self, row: dict):
+        with self._lock:
+            for identity in ("file_unique_id", "file_id"):
+                value = row.get(identity)
+                if value is not None and any(
+                    r.get(identity) == value for r in self._rows
+                ):
+                    return None
+            row = dict(row, id=self._next_id)
+            self._next_id += 1
+            self._rows.append(row)
+            return row["id"]
+
+    def find_by_telegram_identity(self, file_unique_id, file_id):
+        with self._lock:
+            return [
+                (r["id"], r["movie_id"], r["quality"])
+                for r in self._rows
+                if (
+                    file_unique_id is not None
+                    and r.get("file_unique_id") == file_unique_id
+                ) or (
+                    file_id is not None and r.get("file_id") == file_id
+                )
+            ]
+
+    def update_by_id(self, row_id, movie_id, values):
+        with self._lock:
+            row = next(
+                (r for r in self._rows
+                 if r["id"] == row_id and r["movie_id"] == movie_id),
+                None,
+            )
+            if not row:
+                return None
+            next_unique_id = row.get("file_unique_id") or values["file_unique_id"]
+            next_file_id = values["file_id"] or row.get("file_id")
+            for other in self._rows:
+                if other["id"] == row_id:
+                    continue
+                if next_unique_id is not None and other.get("file_unique_id") == next_unique_id:
+                    raise _UniqueViolation("UNIQUE constraint: file_unique_id")
+                if next_file_id is not None and other.get("file_id") == next_file_id:
+                    raise _UniqueViolation("UNIQUE constraint: file_id")
+            row.update(values)
+            row["file_unique_id"] = next_unique_id
+            row["file_id"] = next_file_id
+            return row_id
 
     def update(self, set_dict: dict, where: dict) -> int:
         count = 0
@@ -111,30 +162,35 @@ class FakeCursorForUpsert:
         self._db = db
         self.rowcount = 0
         self._result = None
+        self._results = []
 
     def execute(self, sql, params=None):
         sql_norm = " ".join(sql.split()).upper()
-        if "INSERT INTO MOVIE_FILES" in sql_norm and "ON CONFLICT" in sql_norm:
+        if sql_norm.startswith("SELECT ID, MOVIE_ID, QUALITY FROM MOVIE_FILES"):
+            self._results = self._db.find_by_telegram_identity(
+                params[0], params[2]
+            )
+            self._result = self._results[0] if self._results else None
+            self.rowcount = len(self._results)
+        elif "INSERT INTO MOVIE_FILES" in sql_norm and "ON CONFLICT DO NOTHING" in sql_norm:
             row = self._build_row(params, with_fuid=True)
-            self._result = self._db.upsert(row)
+            self._result = self._db.insert_do_nothing(row)
             self.rowcount = int(self._result is not None)
         elif "INSERT INTO MOVIE_FILES" in sql_norm:
             row = self._build_row(params, with_fuid="NULL" not in sql_norm)
-            self._db.insert(row)
+            self._result = self._db.insert(row)
             self.rowcount = 1
         elif "UPDATE MOVIE_FILES" in sql_norm:
-            # Figure out which UPDATE variant we're in
-            if "FILE_UNIQUE_ID IS NULL" in sql_norm:
-                # NULL-guard fallback UPDATE
-                where = {"movie_id": params[-2], "quality": params[-1], "file_unique_id": None}
-                set_dict = {
-                    "file_size": params[0], "url": params[1],
-                    "backup_map": params[2], "file_id": None,
-                    "languages": params[3], "extra_info": params[4],
-                }
-            else:
-                raise ValueError(f"Unexpected UPDATE SQL: {sql}")
-            self.rowcount = self._db.update(set_dict, where)
+            values = {
+                "quality": params[0], "file_size": params[1],
+                "url": params[2], "backup_map": params[3],
+                "languages": params[4], "extra_info": params[5],
+                "file_unique_id": params[6], "file_id": params[7],
+            }
+            self._result = self._db.update_by_id(
+                params[8], params[9], values
+            )
+            self.rowcount = int(self._result is not None)
         else:
             raise ValueError(f"Unexpected SQL: {sql}")
 
@@ -142,7 +198,12 @@ class FakeCursorForUpsert:
         pass
 
     def fetchone(self):
+        if isinstance(self._result, tuple):
+            return self._result
         return (self._result,) if self._result is not None else None
+
+    def fetchall(self):
+        return list(self._results)
 
     @staticmethod
     def _build_row(params, with_fuid=True):
@@ -194,18 +255,15 @@ def _get_upsert_fn():
     # and exec only the function definition.
     source = (ROOT / "main.py").read_text(encoding="utf-8")
 
-    # Find function boundaries
-    start_marker = "\ndef upsert_movie_file("
-    start = source.index(start_marker)
-    # Find the next top-level def/class after it
-    remaining = source[start + 1:]
-    next_def = remaining.index("\ndef ")
-    func_source = remaining[:next_def]
-
-    # Provide a minimal logger
+    tree = ast.parse(source)
+    nodes = [
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name in {"upsert_movie_file", "_find_existing_movie_file"}
+    ]
     import logging
     ns = {"logger": logging.getLogger("test_upsert")}
-    exec(compile(func_source, "main.py", "exec"), ns)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "main.py", "exec"), ns)
     return ns["upsert_movie_file"]
 
 
@@ -254,6 +312,18 @@ class TestSameTelegramFileProcessedTwice:
         assert db.count() == 1
         assert db.all[0]["url"] == "https://t.me/c/1/99"
         assert db.all[0]["backup_map"] == '{"new":1}'
+
+    def test_postgres_conflict_clause_is_valid(self):
+        source = (ROOT / "main.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.FunctionDef)
+            and item.name == "upsert_movie_file"
+        )
+        function_source = ast.get_source_segment(source, node)
+        assert "ON CONFLICT DO UPDATE" not in function_source
+        assert "ON CONFLICT DO NOTHING" in function_source
 
 
 class TestDifferentFilesSameQualitySameSize:
@@ -403,6 +473,30 @@ class TestConcurrentRetryIdempotency:
 
         assert db.count() == 1
         assert db.all[0]["movie_id"] == 11965
+
+    def test_identifiers_resolving_to_different_rows_are_rejected(self):
+        db = InMemoryMovieFilesDB()
+        conn = FakeConnForUpsert(db)
+        upsert_movie_file(
+            conn, movie_id=11965, label="480p", file_size_str="600 MB",
+            main_url="first", backup_map_json="{}", f_lang="", f_extra="",
+            file_unique_id="IDENTITY_A", file_id="FILE_A",
+        )
+        upsert_movie_file(
+            conn, movie_id=11965, label="720p", file_size_str="900 MB",
+            main_url="second", backup_map_json="{}", f_lang="", f_extra="",
+            file_unique_id="IDENTITY_B", file_id="FILE_B",
+        )
+
+        with pytest.raises(ValueError, match="multiple stored file rows"):
+            upsert_movie_file(
+                conn, movie_id=11965, label="1080p",
+                file_size_str="1.5 GB", main_url="conflict",
+                backup_map_json="{}", f_lang="", f_extra="",
+                file_unique_id="IDENTITY_A", file_id="FILE_B",
+            )
+
+        assert db.count() == 2
 
 
 class TestNullFileUniqueIdDoesNotClobberReal:

@@ -2883,7 +2883,9 @@ def _batch_items_fetch(batch_id, unfinished_only=False):
                 FROM ingestion_batch_items WHERE batch_id = %s
             """
             if unfinished_only:
-                query += " AND state IN ('pending', 'processing', 'failed')"
+                # Failed items are terminal until the admin explicitly runs
+                # /batchretry. Startup recovery must never retry them by itself.
+                query += " AND state IN ('pending', 'processing')"
             cur.execute(query + " ORDER BY update_id, id", (batch_id,))
             return cur.fetchall()
     finally:
@@ -2924,7 +2926,7 @@ def _batch_job_claim(batch_id):
                     lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                  AND status IN ('collecting', 'processing', 'failed', 'completed_with_errors')
+                  AND status IN ('collecting', 'processing', 'failed')
                   AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP
                        OR lease_owner = %s)
                 RETURNING id
@@ -3084,14 +3086,9 @@ def _batch_recovery_jobs_fetch(limit=20):
                      b.start_update_id, b.closing_update_id,
                      b.movie_id, b.movie_metadata
                 FROM ingestion_batches AS b
-                WHERE b.status IN (
-                  'collecting', 'processing', 'failed', 'completed_with_errors'
-                )
+                WHERE b.status IN ('collecting', 'processing', 'failed')
                 AND (b.lease_until IS NULL OR b.lease_until < CURRENT_TIMESTAMP)
-                AND (
-                  b.status = 'collecting'
-                  OR b.status = 'processing'
-                  OR EXISTS (
+                AND EXISTS (
                     SELECT 1
                     FROM ingestion_batch_items AS i
                     WHERE i.batch_id = b.id
@@ -3100,12 +3097,8 @@ def _batch_recovery_jobs_fetch(limit=20):
                             OR (i.state = 'processing'
                                 AND (i.lease_until IS NULL
                                      OR i.lease_until < CURRENT_TIMESTAMP))
-                            OR (i.state = 'failed'
-                                AND (i.retry_after_at IS NULL
-                                     OR i.retry_after_at <= CURRENT_TIMESTAMP))
                         )
                     )
-                  )
                 ORDER BY b.updated_at
                 LIMIT %s
                 """,
@@ -8735,34 +8728,98 @@ def upsert_movie_file(conn, movie_id, label, file_size_str, main_url, backup_map
     file_id = file_id or None
     cur = conn.cursor()
     try:
-        cur.execute("""
-            INSERT INTO movie_files
-                (movie_id, quality, file_size, url, backup_map,
-                 languages, extra_info, file_unique_id, file_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO UPDATE SET
-                quality    = EXCLUDED.quality,
-                file_size  = EXCLUDED.file_size,
-                url        = EXCLUDED.url,
-                backup_map = EXCLUDED.backup_map,
-                languages  = EXCLUDED.languages,
-                extra_info = EXCLUDED.extra_info
-            WHERE movie_files.movie_id = EXCLUDED.movie_id
-            RETURNING id
-        """, (movie_id, label, file_size_str, main_url,
-              backup_map_json, f_lang, f_extra, file_unique_id, file_id))
-        result = cur.fetchone()
-        if not result:
-            raise ValueError(
-                "Telegram file identity is already attached to a different movie"
+        def update_existing(row_id):
+            cur.execute(
+                """
+                UPDATE movie_files
+                SET quality = %s,
+                    file_size = %s,
+                    url = %s,
+                    backup_map = %s,
+                    languages = %s,
+                    extra_info = %s,
+                    file_unique_id = COALESCE(file_unique_id, %s),
+                    file_id = COALESCE(%s, file_id)
+                WHERE id = %s AND movie_id = %s
+                RETURNING id
+                """,
+                (
+                    label, file_size_str, main_url, backup_map_json,
+                    f_lang, f_extra, file_unique_id, file_id,
+                    row_id, movie_id,
+                ),
             )
+            updated = cur.fetchone()
+            if not updated:
+                raise ValueError(
+                    "Telegram file identity is already attached to a different movie"
+                )
+            return updated[0]
+
+        existing = _find_existing_movie_file(
+            conn, movie_id, file_unique_id, file_id
+        )
+        if existing:
+            movie_file_id = update_existing(existing[0])
+        elif not file_unique_id and not file_id:
+            # With no Telegram identity there is no legitimate deduplication
+            # key. Keep distinct files even when their quality/size matches.
+            cur.execute(
+                """
+                INSERT INTO movie_files
+                    (movie_id, quality, file_size, url, backup_map,
+                     languages, extra_info, file_unique_id, file_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    movie_id, label, file_size_str, main_url,
+                    backup_map_json, f_lang, f_extra, None, None,
+                ),
+            )
+            movie_file_id = cur.fetchone()[0]
+        else:
+            # file_unique_id and file_id are independent unique indexes. A
+            # targetless DO NOTHING is valid for either conflict; DO UPDATE
+            # without a conflict target is invalid PostgreSQL syntax.
+            cur.execute(
+                """
+                INSERT INTO movie_files
+                    (movie_id, quality, file_size, url, backup_map,
+                     languages, extra_info, file_unique_id, file_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING id
+                """,
+                (
+                    movie_id, label, file_size_str, main_url,
+                    backup_map_json, f_lang, f_extra,
+                    file_unique_id, file_id,
+                ),
+            )
+            inserted = cur.fetchone()
+            if inserted:
+                movie_file_id = inserted[0]
+            else:
+                # A concurrent worker inserted one of the Telegram identities
+                # while this transaction was waiting. In READ COMMITTED the
+                # next statement sees it; validate ownership before updating.
+                existing = _find_existing_movie_file(
+                    conn, movie_id, file_unique_id, file_id
+                )
+                if not existing:
+                    raise RuntimeError(
+                        "Telegram file conflict could not be reconciled"
+                    )
+                movie_file_id = update_existing(existing[0])
+
         conn.commit()
         cur.close()
         logger.info(
             "✅ upsert_movie_file: Saved '%s' for movie_id=%s (file_unique_id=%s, file_id=%s)",
             label, movie_id, file_unique_id, file_id,
         )
-        return result[0]
+        return movie_file_id
     except Exception as err:
         conn.rollback()
         try:
@@ -10477,7 +10534,10 @@ async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | No
             movie_id=movie_id, storage_map=backup_map,
             storage_pending_chat=uncertain_chat,
             error_class=type(exc).__name__,
-            error_detail="File database upsert or checkpoint failed after storage copy",
+            error_detail=(
+                f"File DB save failed: {type(exc).__name__}: "
+                f"{str(exc)[:300]}"
+            ),
         )
         return None
 
@@ -10686,11 +10746,10 @@ async def _recover_interrupted_batches(application):
         try:
             if not await run_async(_batch_job_claim, batch_id):
                 continue
-            await run_async(_batch_item_retry_failed, batch_id, admin_id)
             rows = await run_async(_batch_items_fetch, batch_id, True)
             deferred_item = False
             for row in rows:
-                if row[12] in ("pending", "failed", "processing"):
+                if row[12] in ("pending", "processing"):
                     resumed = await _resume_batch_item(application.bot, job, row)
                     if row[12] == "processing" and not resumed:
                         current = await run_async(_batch_item_fetch, row[0])

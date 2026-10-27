@@ -487,7 +487,9 @@ def test_recovery_continues_to_later_items_and_restores_movie_session():
         "BATCH_SESSION": {},
         "SUPER_BATCH_SESSION": {},
         "_batch_job_claim": lambda _batch_id: True,
-        "_batch_item_retry_failed": lambda *_args: 0,
+        "_batch_item_retry_failed": lambda *_args: (_ for _ in ()).throw(
+            AssertionError("startup recovery must not retry failed items")
+        ),
         "_batch_items_fetch": lambda _batch_id, unfinished_only=False: rows,
         "_resume_batch_item": resume,
         "_movie_batch_metadata_fetch": lambda _movie_id: (
@@ -517,3 +519,24 @@ def test_recovery_continues_to_later_items_and_restores_movie_session():
     assert namespace["_RECOVERED_BATCH_IDS"] == {batch_id}
     assert job_updates[-1][1]["status"] == "collecting"
     assert job_updates[-1][1]["lease_owner"] == "process-1"
+
+
+def test_startup_recovery_selects_only_nonterminal_items():
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+
+    def function_source(name):
+        node = next(
+            item for item in MAIN_TREE.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name == name
+        )
+        return ast.get_source_segment(source, node)
+
+    jobs_source = function_source("_batch_recovery_jobs_fetch")
+    items_source = function_source("_batch_items_fetch")
+    recovery_source = function_source("_recover_interrupted_batches")
+
+    assert "'completed_with_errors'" not in jobs_source
+    assert "i.state = 'failed'" not in jobs_source
+    assert "state IN ('pending', 'processing')" in items_source
+    assert "_batch_item_retry_failed" not in recovery_source
