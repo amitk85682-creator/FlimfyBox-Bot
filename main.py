@@ -3004,6 +3004,29 @@ def _batch_job_snapshot(batch_id, admin_id):
         close_db_connection(conn)
 
 
+def _batch_latest_job_id(admin_id):
+    """Return the admin's most recently active batch for command shortcuts."""
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while finding latest batch")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM ingestion_batches
+                WHERE admin_id = %s
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                """,
+                (admin_id,),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+    finally:
+        close_db_connection(conn)
+
+
 def _batch_job_finish(batch_id, admin_id):
     snapshot = _batch_job_snapshot(batch_id, admin_id)
     if not snapshot:
@@ -10865,19 +10888,30 @@ async def _batch_lease_heartbeat_loop():
 async def batch_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin(update.effective_user.id):
         return
-    if not context.args:
-        await _safe_batch_reply(
-            update.effective_message,
-            "Usage: /batchstatus <batch_id>",
-        )
-        return
-    batch_id = context.args[0].strip()
+    admin_id = update.effective_user.id
+    batch_id = context.args[0].strip() if context.args else None
+    if not batch_id:
+        try:
+            batch_id = await run_async(_batch_latest_job_id, admin_id)
+        except Exception as exc:
+            logger.error("Latest batch lookup failed (%s)", type(exc).__name__)
+            await _safe_batch_reply(
+                update.effective_message,
+                "❌ Latest batch status is temporarily unavailable.",
+            )
+            return
+        if not batch_id:
+            await _safe_batch_reply(
+                update.effective_message,
+                "Abhi tak koi batch history nahi mili.",
+            )
+            return
     if len(batch_id) > 80:
         await _safe_batch_reply(update.effective_message, "Invalid batch ID.")
         return
     try:
         snapshot = await run_async(
-            _batch_job_snapshot, batch_id, update.effective_user.id
+            _batch_job_snapshot, batch_id, admin_id
         )
     except Exception as exc:
         logger.error("Batch status lookup failed (%s)", type(exc).__name__)
@@ -10891,20 +10925,20 @@ async def batch_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
             update.effective_message, "❌ Batch not found for this admin."
         )
         return
-    await _safe_batch_reply(
-        update.effective_message,
-        (
-            f"Batch: {snapshot[0]}\nStatus: {snapshot[2]}\n"
-            f"Items: {snapshot[5]} | Saved: {snapshot[6]} | "
-            f"Skipped: {snapshot[7]} | Failed: {snapshot[8]} | "
-            f"Unrecoverable: {snapshot[9]} | Pending: {snapshot[10]} | "
-            f"Processing: {snapshot[11]}"
-        ),
+    status_text = (
+        f"Batch: {snapshot[0]}\nStatus: {snapshot[2]}\n"
+        f"Items: {snapshot[5]} | Saved: {snapshot[6]} | "
+        f"Skipped: {snapshot[7]} | Failed: {snapshot[8]} | "
+        f"Unrecoverable: {snapshot[9]} | Pending: {snapshot[10]} | "
+        f"Processing: {snapshot[11]}"
     )
+    if snapshot[8]:
+        status_text += f"\n\nRetry failed files: /batchretry {snapshot[0]}"
+    await _safe_batch_reply(update.effective_message, status_text)
 
     from catalog_identity import pending_identity_reviews
     reviews = await run_async(pending_identity_reviews, get_db_connection, close_db_connection,
-                              batch_id, update.effective_user.id)
+                              batch_id, admin_id)
     if reviews:
         text = "Identity review needed (files retained):\n" + "\n".join(
             f"Item {item_id}: {str(name or '')[:90]}\n{str(reason or '')[:230]}"
