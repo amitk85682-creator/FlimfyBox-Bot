@@ -2276,9 +2276,10 @@ document.addEventListener('keydown', (e) => {
             const raw = String(value || '').trim();
             if (!raw) return '';
             const match = raw.match(
-                /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
+                /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})(?:[?&#/]|$)/
             );
-            return match ? match[1] : raw;
+            const key = match ? match[1] : raw;
+            return /^[A-Za-z0-9_-]{11}$/.test(key) && key.toLowerCase() !== 'not_found' ? key : '';
         }
 
         window.playCurrentTrailer = async function() {
