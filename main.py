@@ -3910,6 +3910,11 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     if not metadata or metadata[4] != identity[0]:
         return False
     _title, year, poster, genre, _imdb, rating, plot, _category, _seasons = metadata
+    poster = normalize_artwork_url(poster)
+    artwork_poster, backdrop = fetch_tmdb_artwork(_title, year, identity[0], identity[2] or "")
+    poster = poster or normalize_artwork_url(artwork_poster)
+    backdrop = normalize_artwork_url(backdrop)
+    trailer = normalize_trailer_key(fetch_tmdb_trailer_key(_title, year, identity[0], identity[2] or ""))
     conn = get_db_connection()
     if not conn:
         return False
@@ -3918,12 +3923,14 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         cur.execute("SET LOCAL statement_timeout = '10s'")
         cur.execute("""UPDATE movies
                        SET genre=COALESCE(NULLIF(genre,''),%s),
-                           poster_url=COALESCE(NULLIF(poster_url,''),%s),
+                           poster_url=CASE WHEN COALESCE(poster_url,'') !~* '^https?://' THEN COALESCE(%s, poster_url) ELSE poster_url END,
+                           backdrop_poster_url=CASE WHEN COALESCE(backdrop_poster_url,'') !~* '^https?://' THEN COALESCE(%s, backdrop_poster_url) ELSE backdrop_poster_url END,
+                           trailer_key=CASE WHEN trailer_key IS NULL OR trailer_key !~ '^[A-Za-z0-9_-]{11}$' OR LOWER(trailer_key)='not_found' THEN %s ELSE trailer_key END,
                            year=COALESCE(NULLIF(year,0),%s),
                            rating=COALESCE(NULLIF(NULLIF(rating,''),'N/A'),%s),
                            description=COALESCE(NULLIF(description,''),%s)
                        WHERE id=%s AND imdb_id=%s""",
-                    (genre, poster if poster != 'N/A' else None, year or None,
+                    (genre, poster, backdrop, trailer, year or None,
                      rating, plot, movie_id, identity[0]))
         conn.commit()
         return True
@@ -4100,7 +4107,7 @@ def extract_tmdb_poster_from_url(tmdb_url: str) -> Optional[str]:
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
     """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
     try:
-        api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+        api_key = TMDB_API_KEY
         find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&external_source=imdb_id"
         resp = requests.get(find_url, timeout=10).json()
         tmdb_results = resp.get('movie_results', [])
@@ -4335,9 +4342,7 @@ def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
     if not imdb_id or not re.match(r"^tt\d{7,8}$", str(imdb_id).strip()):
         return None
 
-    tmdb_api_key = os.environ.get(
-        "TMDB_API_KEY", "9fa44f5e9fbd41415df930ce5b81c4d7"
-    )
+    tmdb_api_key = TMDB_API_KEY
     try:
         response = requests.get(
             f"https://api.themoviedb.org/3/find/{str(imdb_id).strip()}",
@@ -4435,7 +4440,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
     adult_mode=True होने पर TMDb सर्च में include_adult=true भेजेगा और OMDb को बायपास करेगा।
     """
     omdb_api_key = os.environ.get("OMDB_API_KEY")
-    tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+    tmdb_api_key = TMDB_API_KEY
 
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
@@ -10290,6 +10295,34 @@ async def _optional_movie_lookup(function, *args, default=None):
         return default
 
 
+_metadata_refresh_pending = set()
+_metadata_refresh_last_attempt = {}
+
+
+async def _refresh_existing_movie_metadata(movie):
+    """Refresh missing artwork in the background, at most once per hour per title."""
+    movie_id = movie.get('movie_id')
+    if not movie_id or not movie.get('imdb_id'):
+        return
+    if normalize_artwork_url(movie.get('poster_url')) and normalize_trailer_key(movie.get('trailer_key')):
+        return
+    now = time.monotonic()
+    if movie_id in _metadata_refresh_pending or now - _metadata_refresh_last_attempt.get(movie_id, -3600) < 3600:
+        return
+    if len(_metadata_refresh_pending) >= 4:
+        return
+    _metadata_refresh_pending.add(movie_id)
+    if len(_metadata_refresh_last_attempt) >= 4096:
+        _metadata_refresh_last_attempt.clear()
+    _metadata_refresh_last_attempt[movie_id] = now
+    try:
+        await run_async(auto_fetch_and_update_metadata, movie_id, movie.get('title', ''))
+    except Exception as exc:
+        logger.warning("Metadata refresh failed for movie %s: %s", movie_id, type(exc).__name__)
+    finally:
+        _metadata_refresh_pending.discard(movie_id)
+
+
 async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconciled_data: dict = None) -> dict:
     """
     Ek jagah se sab kuch. Returns movie dict ya None agar fail ho.
@@ -10312,6 +10345,7 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     from catalog_identity import find_existing_upload, media_kind, release_year, AmbiguousMovieIdentity
     existing = await run_async(find_existing_upload, get_db_connection, close_db_connection, ai_data)
     if existing:
+        asyncio.create_task(_refresh_existing_movie_metadata(existing))
         return existing
 
     # --- STEP 2: TMDB + IMDb METADATA ---
@@ -13138,7 +13172,7 @@ async def fetch_adult_metadata_combo(
                 elif t_imdb:
                     # IMDB ID se TMDB poster
                     try:
-                        tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+                        tmdb_api_key = TMDB_API_KEY
                         find_url = f"https://api.themoviedb.org/3/find/{t_imdb}?api_key={tmdb_api_key}&external_source=imdb_id"
                         find_resp = await run_async(requests.get, find_url, timeout=8)
                         find_data = find_resp.json()
@@ -13153,7 +13187,7 @@ async def fetch_adult_metadata_combo(
                 else:
                     # Title se TMDB poster search
                     try:
-                        tmdb_api_key = "9fa44f5e9fbd41415df930ce5b81c4d7"
+                        tmdb_api_key = TMDB_API_KEY
                         search_url = f"https://api.themoviedb.org/3/search/multi?api_key={tmdb_api_key}&query={quote(result['title'])}&include_adult=true"
                         search_resp = await run_async(requests.get, search_url, timeout=8)
                         search_data = search_resp.json()

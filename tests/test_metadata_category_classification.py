@@ -21,6 +21,7 @@ def _load_main_functions(names, extra_globals=None):
         "os": os,
         "re": re,
         "quote": quote,
+        "TMDB_API_KEY": "synthetic-test-key",
         "logger": logging.getLogger("test_metadata_category"),
     }
     if extra_globals:

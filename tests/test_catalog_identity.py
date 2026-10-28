@@ -196,9 +196,11 @@ def test_missing_metadata_repair_uses_id_and_preserves_manual_fields():
     def metadata(*args,**kwargs):
         lookups.append((args,kwargs))
         return ('Obsession',2025,None,'Drama','tt39330776','N/A','Plot','Web Series',{})
-    ns=_load_functions({'auto_fetch_and_update_metadata'}, {
+    ns=_load_functions({'auto_fetch_and_update_metadata', 'normalize_artwork_url', 'normalize_trailer_key'}, {
         'get_db_connection':lambda:next(pool), 'close_db_connection':lambda c:c.close(),
-        'fetch_movie_metadata':metadata})
+        'fetch_movie_metadata':metadata,
+        'fetch_tmdb_artwork':lambda *args:(None,None),
+        'fetch_tmdb_trailer_key':lambda *args:None})
     assert ns['auto_fetch_and_update_metadata'](16972,'Obsession')
     assert lookups[0][0][0]=='tt39330776'
     sql,params=writes.queries[-1]

@@ -1677,7 +1677,9 @@ def register_webapp_routes(
                 'language': row[9] if row[9] else '',
                 'content_type': row[10] if row[10] else 'Movie',
                 'cast': row[11] if row[11] else '',
-                'trailer_key': row[12] if row[12] else None,
+                'trailer_key': (row[12] if row[12] and
+                                re.fullmatch(r'[A-Za-z0-9_-]{11}', row[12]) and
+                                row[12].lower() != 'not_found' else None),
                 'seasons_data': row[13] if len(row) > 13 and row[13] else {}
             }
             # Get files

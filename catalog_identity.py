@@ -112,7 +112,7 @@ def find_existing_upload(connect, close, evidence):
         cur.execute("SET LOCAL statement_timeout = '10s'")
         cur.execute('''SELECT id, title, year, genre, rating, description, category,
                               language, poster_url, backdrop_poster_url, imdb_id,
-                              tmdb_id, "cast", content_type, seasons_data
+                              tmdb_id, "cast", content_type, seasons_data, trailer_key
                        FROM movies WHERE LOWER(BTRIM(title)) = LOWER(BTRIM(%s))''',
                     (evidence.get('title'),))
         rows = cur.fetchall()
@@ -134,7 +134,9 @@ def find_existing_upload(connect, close, evidence):
         keys = ('movie_id', 'title', 'year', 'genre', 'rating', 'plot', 'category',
                 'movie_lang', 'poster_url', 'backdrop_poster_url', 'imdb_id',
                 'tmdb_id', 'cast_str', 'content_type')
-        return dict(zip(keys, row))
+        result = dict(zip(keys, row))
+        result['trailer_key'] = row[15] if len(row) > 15 else None
+        return result
     finally:
         close(conn)
 
