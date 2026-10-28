@@ -2839,12 +2839,17 @@ def _batch_active_heartbeat():
             )
             cur.execute(
                 """
-                UPDATE ingestion_batch_items
+                UPDATE ingestion_batch_items AS i
                 SET lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
                     updated_at = CURRENT_TIMESTAMP
-                WHERE lease_owner = %s AND state = 'processing'
+                FROM ingestion_batches AS b
+                WHERE i.batch_id = b.id
+                  AND i.lease_owner = %s
+                  AND i.state = 'processing'
+                  AND b.lease_owner = %s
+                  AND b.status IN ('collecting', 'processing')
                 """,
-                (BATCH_PROCESS_ID,),
+                (BATCH_PROCESS_ID, BATCH_PROCESS_ID),
             )
         conn.commit()
     except Exception:
