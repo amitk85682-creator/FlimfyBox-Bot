@@ -490,6 +490,7 @@ SUPER_BATCH_SESSION = {
     'active': False, 'admin_id': None, 'files': [],
     'batch_id': None, 'status': 'idle',
 }
+_SUPERBATCH_FINALIZATION_LOCK = asyncio.Lock()
 
 
 class BatchUploadCoordinator:
@@ -497,13 +498,32 @@ class BatchUploadCoordinator:
 
     def __init__(self):
         self._sessions = {}
+        self._update_sessions = {}
+
+    @staticmethod
+    def _update_key(admin_id, update_id):
+        return (admin_id, update_id) if update_id is not None else None
+
+    def session_for_update(self, update):
+        user = getattr(update, "effective_user", None)
+        update_id = getattr(update, "update_id", None)
+        if not user:
+            return None
+        key = self._update_key(user.id, update_id)
+        if key and key in self._update_sessions:
+            return self._update_sessions[key]
+        return self._sessions.get(user.id)
 
     def begin(
         self, admin_id, movie_id, start_update_id=None, *,
         kind="movie", batch_id=None, starting=False,
     ):
         previous = self._sessions.get(admin_id)
-        if previous and not previous.get("finalization_started"):
+        if (
+            previous
+            and not previous.get("finalization_started")
+            and previous.get("closing_update_id") is None
+        ):
             previous.update({
                 "movie_id": movie_id if movie_id is not None else previous.get("movie_id"),
                 "kind": kind,
@@ -527,6 +547,9 @@ class BatchUploadCoordinator:
             "closing_update_id": None,
             "finalization_started": False,
             "ready": asyncio.Event(),
+            "active": kind == "super",
+            "files": [],
+            "status": "starting" if starting else "collecting",
         }
         if not starting:
             session["ready"].set()
@@ -535,7 +558,13 @@ class BatchUploadCoordinator:
 
     def reserve_superbatch(self, admin_id, start_update_id):
         session = self._sessions.get(admin_id)
-        if session and session.get("kind") == "super" and not session.get("finalization_started"):
+        if (
+            session
+            and session.get("kind") == "super"
+            and not session.get("finalization_started")
+            and session.get("closing_update_id") is None
+        ):
+            session["duplicate_start_update_id"] = start_update_id
             return session
         return self.begin(
             admin_id, None, start_update_id, kind="super",
@@ -573,8 +602,32 @@ class BatchUploadCoordinator:
         command = self._command(message)
         update_id = getattr(update, "update_id", None)
         if command == "superbatch" and update_id is not None and user.id in ADMIN_IDS:
-            self.reserve_superbatch(user.id, update_id)
-            return None
+            # A normal movie batch still owns the shared manual-save session.
+            # SuperBatch processing does not, so another SuperBatch can safely
+            # be collected while an earlier one is being finalized.
+            if BATCH_SESSION.get("active"):
+                key = self._update_key(user.id, update_id)
+                self._update_sessions[key] = None
+                return (None, update_id, None, user.id)
+            session = self.reserve_superbatch(user.id, update_id)
+            key = self._update_key(user.id, update_id)
+            if key:
+                self._update_sessions[key] = session
+            return (session, update_id, None, user.id)
+        if command == "superdone" and update_id is not None and user.id in ADMIN_IDS:
+            session = self._sessions.get(user.id)
+            if not session or session.get("kind") != "super" or not session.get("active"):
+                session = None
+            else:
+                if session["closing_update_id"] is None:
+                    session["closing_update_id"] = update_id
+                if SUPER_BATCH_SESSION.get("batch_id") == session.get("batch_id"):
+                    SUPER_BATCH_SESSION["closing_update_id"] = update_id
+                    SUPER_BATCH_SESSION["status"] = "closing"
+            key = self._update_key(user.id, update_id)
+            if key:
+                self._update_sessions[key] = session
+            return (session, update_id, None, user.id)
         if command == "batch" and update_id is not None and user.id in ADMIN_IDS:
             existing = self._sessions.get(user.id)
             if (
@@ -622,7 +675,16 @@ class BatchUploadCoordinator:
         if is_done:
             if session["closing_update_id"] is None:
                 session["closing_update_id"] = update_id
-            return None
+            if (
+                session.get("kind") == "super"
+                and SUPER_BATCH_SESSION.get("batch_id") == session.get("batch_id")
+            ):
+                SUPER_BATCH_SESSION["closing_update_id"] = update_id
+                SUPER_BATCH_SESSION["status"] = "closing"
+            key = self._update_key(user.id, update_id)
+            if key:
+                self._update_sessions[key] = session
+            return (session, update_id, None, user.id)
 
         if not self._is_upload(message):
             return None
@@ -634,7 +696,10 @@ class BatchUploadCoordinator:
         if future is None:
             future = asyncio.get_running_loop().create_future()
             session["pending"][update_id] = future
-        return session, update_id, future
+        key = self._update_key(user.id, update_id)
+        if key:
+            self._update_sessions[key] = session
+        return session, update_id, future, user.id
 
     @staticmethod
     def _session_is_active(session, admin_id):
@@ -643,10 +708,7 @@ class BatchUploadCoordinator:
         if session.get("starting"):
             return True
         if session.get("kind") == "super":
-            return bool(
-                SUPER_BATCH_SESSION.get("active")
-                and SUPER_BATCH_SESSION.get("admin_id") == admin_id
-            )
+            return bool(session.get("active"))
         return bool(
             BATCH_SESSION.get("active")
             and BATCH_SESSION.get("admin_id") == admin_id
@@ -666,7 +728,7 @@ class BatchUploadCoordinator:
         message = getattr(update, "effective_message", None)
         if not user or not message:
             return True
-        session = self._sessions.get(user.id)
+        session = self.session_for_update(update)
         if not session or not self._is_upload(message):
             return True
         if not self._session_is_active(session, user.id):
@@ -687,7 +749,7 @@ class BatchUploadCoordinator:
         message = getattr(update, "effective_message", None)
         if not user or not message:
             return False
-        session = self._sessions.get(user.id)
+        session = self.session_for_update(update)
         if not session:
             return False
         is_done = (
@@ -699,8 +761,8 @@ class BatchUploadCoordinator:
             is_done and self._session_is_active(session, user.id)
         )
 
-    async def wait_for_prior_uploads(self, admin_id):
-        session = self._sessions.get(admin_id)
+    async def wait_for_prior_uploads(self, admin_id, session=None):
+        session = session or self._sessions.get(admin_id)
         if not session:
             return
         cutoff = session["closing_update_id"]
@@ -713,38 +775,47 @@ class BatchUploadCoordinator:
         if pending:
             await asyncio.gather(*pending)
 
-    async def wait_until_ready(self, admin_id):
-        session = self._sessions.get(admin_id)
+    async def wait_until_ready(self, admin_id, session=None):
+        session = session or self._sessions.get(admin_id)
         if session and session.get("ready"):
             await session["ready"].wait()
         return session
 
-    def mark_ready(self, admin_id):
-        session = self._sessions.get(admin_id)
+    def mark_ready(self, admin_id, session=None):
+        session = session or self._sessions.get(admin_id)
         if session:
             session["starting"] = False
             if session.get("ready"):
                 session["ready"].set()
         return session
 
-    def claim_finalization(self, admin_id):
-        session = self._sessions.get(admin_id)
+    def claim_finalization(self, admin_id, session=None):
+        session = session or self._sessions.get(admin_id)
         if not session or session["finalization_started"]:
             return False
         session["finalization_started"] = True
         return True
 
-    def finish(self, admin_id):
+    def finish(self, admin_id, session=None):
+        current = self._sessions.get(admin_id)
+        if session is not None and current is not session:
+            return session
         return self._sessions.pop(admin_id, None)
 
     @staticmethod
     def complete_upload(ticket):
         if not ticket:
             return
-        session, update_id, future = ticket
-        if not future.done():
+        session, update_id, future, admin_id = (
+            (*ticket, None) if len(ticket) == 3 else ticket
+        )
+        if future is not None and not future.done():
             future.set_result(None)
-        session["pending"].pop(update_id, None)
+        if session is not None:
+            session["pending"].pop(update_id, None)
+        key = BatchUploadCoordinator._update_key(admin_id, update_id)
+        if key and batch_upload_coordinator._update_sessions.get(key) is session:
+            batch_upload_coordinator._update_sessions.pop(key, None)
 
 
 class BatchAwareUpdateProcessor(BaseUpdateProcessor):
@@ -9700,26 +9771,50 @@ async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Super Batch shuru karega"""
     if update.effective_user.id not in ADMIN_IDS:
         return
-    async with auto_batch_lock:
-        if BATCH_SESSION.get("active") or SUPER_BATCH_SESSION.get("active"):
+    session = batch_upload_coordinator.session_for_update(update)
+    if not session or session.get("kind") != "super":
+        if BATCH_SESSION.get("active"):
             await update.message.reply_text(
-                "❌ A batch is already active. Finish it before starting another."
+                "❌ A normal movie batch is active. Finish it before starting SuperBatch."
+            )
+        else:
+            await update.message.reply_text("❌ SuperBatch session could not be reserved. Try again.")
+        return
+    if session.get("start_update_id") != getattr(update, "update_id", None):
+        await update.message.reply_text(
+            "❌ A SuperBatch is already collecting files. Finish it with `/superdone` first.",
+            parse_mode="Markdown",
+        )
+        return
+
+    async with auto_batch_lock:
+        current_superbatch_id = SUPER_BATCH_SESSION.get("batch_id")
+        if BATCH_SESSION.get("active") or (
+            SUPER_BATCH_SESSION.get("active")
+            and current_superbatch_id != session.get("batch_id")
+            and SUPER_BATCH_SESSION.get("status") != "closing"
+        ):
+            session["start_failed"] = True
+            session["active"] = False
+            batch_upload_coordinator.mark_ready(update.effective_user.id, session)
+            await update.message.reply_text(
+                "❌ Another batch is collecting files. Finish it before starting SuperBatch."
             )
             return
-
-        session = batch_upload_coordinator._sessions.get(update.effective_user.id)
-        if not session or session.get("kind") != "super":
-            session = batch_upload_coordinator.reserve_superbatch(
-                update.effective_user.id,
-                getattr(update, "update_id", None),
-            )
         batch_id = session["batch_id"]
-        SUPER_BATCH_SESSION.update({
+        session.update({
             "active": True,
             "admin_id": update.effective_user.id,
             "files": [],
+            "status": "starting",
+        })
+        SUPER_BATCH_SESSION.update({
+            "active": True,
+            "admin_id": update.effective_user.id,
+            "files": session["files"],
             "batch_id": batch_id,
             "status": "starting",
+            "closing_update_id": None,
         })
         try:
             await run_async(
@@ -9731,12 +9826,15 @@ async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.bot.id,
             )
         except Exception as exc:
-            SUPER_BATCH_SESSION.update({
-                "active": False, "admin_id": None, "files": [],
-                "batch_id": None, "status": "idle",
-            })
+            if SUPER_BATCH_SESSION.get("batch_id") == batch_id:
+                SUPER_BATCH_SESSION.update({
+                    "active": False, "admin_id": None, "files": [],
+                    "batch_id": None, "status": "idle",
+                    "closing_update_id": None,
+                })
             session["start_failed"] = True
-            batch_upload_coordinator.mark_ready(update.effective_user.id)
+            session["active"] = False
+            batch_upload_coordinator.mark_ready(update.effective_user.id, session)
             logger.error(
                 "Batch checkpoint creation failed (error_class=%s)",
                 type(exc).__name__,
@@ -9747,13 +9845,8 @@ async def superbatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         SUPER_BATCH_SESSION["status"] = "collecting"
-        batch_upload_coordinator.begin(
-            update.effective_user.id,
-            None,
-            getattr(update, "update_id", None),
-            kind="super",
-            batch_id=batch_id,
-        )
+        session["status"] = "collecting"
+        batch_upload_coordinator.mark_ready(update.effective_user.id, session)
         await update.message.reply_text(
             "🚀 **SUPER BATCH MODE ON!**\n\n"
             f"🆔 Batch ID: `{batch_id}`\n"
@@ -9820,15 +9913,19 @@ async def _collect_superbatch_file(message):
 
 async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Compatibility listener; active wiring pm_file_listener ko use karti hai."""
-    if not SUPER_BATCH_SESSION.get('active') or update.effective_user.id != SUPER_BATCH_SESSION.get('admin_id'):
+    session = batch_upload_coordinator.session_for_update(update)
+    if not session or session.get("kind") != "super" or not session.get("active"):
         return
+    session = await batch_upload_coordinator.wait_until_ready(
+        update.effective_user.id, session
+    )
     record = await _collect_superbatch_file(update.effective_message)
     if not record:
         return
     try:
         item_id = await run_async(
             _batch_item_create,
-            SUPER_BATCH_SESSION["batch_id"],
+            session["batch_id"],
             getattr(update, "update_id", None),
             update.effective_message,
             record,
@@ -9844,8 +9941,8 @@ async def superbatch_listener(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     record["batch_item_id"] = item_id
     record["update_id"] = update.update_id
-    SUPER_BATCH_SESSION['files'].append(record)
-    count = len(SUPER_BATCH_SESSION['files'])
+    session["files"].append(record)
+    count = len(session["files"])
     if count % 10 == 0:
         await update.effective_message.reply_text(f"📥 Received {count} files so far...")
 
@@ -9854,25 +9951,45 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or update.effective_user.id not in ADMIN_IDS:
         return
     admin_id = update.effective_user.id
-    session = await batch_upload_coordinator.wait_until_ready(admin_id)
+    session = batch_upload_coordinator.session_for_update(update)
+    if not session:
+        await _safe_batch_reply(update.message, "❌ Koi active SuperBatch nahi hai!")
+        return
+    session = await batch_upload_coordinator.wait_until_ready(admin_id, session)
     if (
         not session
         or session.get("kind") != "super"
         or session.get("start_failed")
-        or not SUPER_BATCH_SESSION.get("active")
-        or SUPER_BATCH_SESSION.get("admin_id") != admin_id
+        or not session.get("active")
     ):
         await _safe_batch_reply(update.message, "❌ Koi active SuperBatch nahi hai!")
         return
-    if not batch_upload_coordinator.claim_finalization(admin_id):
+    if not batch_upload_coordinator.claim_finalization(admin_id, session):
         return
 
-    await batch_upload_coordinator.wait_for_prior_uploads(admin_id)
+    await batch_upload_coordinator.wait_for_prior_uploads(admin_id, session)
     batch_id = session.get("batch_id")
     _RECOVERED_BATCH_IDS.discard(batch_id)
     closing_update_id = session.get("closing_update_id")
+    files = list(session.get("files") or [])
+    session["active"] = False
+    session["status"] = "queued"
+    session["files"] = files
+    if SUPER_BATCH_SESSION.get("batch_id") == batch_id:
+        SUPER_BATCH_SESSION.update({
+            "active": False, "admin_id": None, "files": [],
+            "batch_id": None, "status": "idle", "closing_update_id": None,
+        })
+    status_msg = await _safe_batch_reply(
+        update.message,
+        f"✅ Batch `{batch_id}` accepted with {len(files)} files. "
+        "It will process after the current batch finishes.",
+        parse_mode="Markdown",
+    )
     succeeded = False
     try:
+        # Mark queued finalizations durable before waiting on the processing
+        # lock. The heartbeat keeps this lease alive if the current batch is large.
         await run_async(
             _batch_job_update,
             batch_id,
@@ -9880,9 +9997,20 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
             closing_update_id=closing_update_id,
             lease_owner=BATCH_PROCESS_ID,
         )
-        SUPER_BATCH_SESSION["status"] = "processing"
-        await _superbatch_done_impl(update, context)
-        succeeded = True
+        async with _SUPERBATCH_FINALIZATION_LOCK:
+            await run_async(
+                _batch_job_update,
+                batch_id,
+                status="processing",
+                closing_update_id=closing_update_id,
+                lease_owner=BATCH_PROCESS_ID,
+            )
+            session["status"] = "processing"
+            await _superbatch_done_impl(
+                update, context, batch_id=batch_id, files=files,
+                status_msg=status_msg,
+            )
+            succeeded = True
     except Exception as exc:
         logger.error(
             "SuperBatch finalization failed (batch_id=%s, error_class=%s)",
@@ -9928,17 +10056,12 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Could not finalize SuperBatch checkpoint (error_class=%s)",
                 type(exc).__name__,
             )
-        SUPER_BATCH_SESSION.update({
-            "active": False, "admin_id": None, "files": [],
-            "batch_id": None, "status": "idle",
-        })
-        if BATCH_SESSION.get("batch_id") == batch_id:
-            BATCH_SESSION.update({
-                "active": False, "movie_id": None, "movie_title": None,
-                "file_count": 0, "admin_id": None, "batch_id": None,
-                "year": "", "category": "", "language": "",
+        if SUPER_BATCH_SESSION.get("batch_id") == batch_id:
+            SUPER_BATCH_SESSION.update({
+                "active": False, "admin_id": None, "files": [],
+                "batch_id": None, "status": "idle", "closing_update_id": None,
             })
-        batch_upload_coordinator.finish(admin_id)
+        batch_upload_coordinator.finish(admin_id, session)
 
 
 async def _mark_superbatch_item_failed(item_id, exc, stage=None):
@@ -9987,7 +10110,8 @@ async def _prepare_superbatch_movie(representative, display_name):
     ), timeout=SUPERBATCH_MOVIE_TIMEOUT_SECONDS)
 
 
-async def _save_one_superbatch_file(item, context, movie_id):
+async def _save_one_superbatch_file(item, context, movie_state):
+    movie_id = movie_state["movie_id"]
     item_id = item.get("batch_item_id")
     if item_id and not await run_async(_batch_item_claim, item_id):
         item_state = await run_async(_batch_item_fetch, item_id)
@@ -10008,10 +10132,12 @@ async def _save_one_superbatch_file(item, context, movie_id):
             movie_id=movie_id,
         ) if item_id else None
 
-    return await _pm_save_file(item["message_obj"], context, item_id)
+    return await _pm_save_file(
+        item["message_obj"], context, item_id, batch_state=movie_state
+    )
 
 
-async def _save_superbatch_files(movie_files, context, movie_id, progress=None):
+async def _save_superbatch_files(movie_files, context, movie_state, progress=None):
     saved_labels = []
     for index, item in enumerate(movie_files, 1):
         item_id = item.get("batch_item_id")
@@ -10025,7 +10151,7 @@ async def _save_superbatch_files(movie_files, context, movie_id, progress=None):
                 )
         try:
             label = await asyncio.wait_for(
-                _save_one_superbatch_file(item, context, movie_id),
+                _save_one_superbatch_file(item, context, movie_state),
                 timeout=SUPERBATCH_FILE_TIMEOUT_SECONDS,
             )
             if label:
@@ -10041,29 +10167,28 @@ async def _save_superbatch_files(movie_files, context, movie_id, progress=None):
     return saved_labels
 
 
-async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _superbatch_done_impl(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    batch_id,
+    files,
+    status_msg=None,
+):
     """
     Superbatch ka kaam:
       1. Files ko movie ke hisaab se group karo
-      2. Har movie ke liye _core_movie_processor (Phase 1) → BATCH_SESSION set karo
+      2. Har movie ke liye _core_movie_processor (Phase 1) → local movie state banao
       3. Har file ke liye _pm_save_file (Phase 2) — pm_file_listener ka exact same code
       4. Post karo channel pe
     """
-    if not SUPER_BATCH_SESSION['active'] or update.effective_user.id != SUPER_BATCH_SESSION['admin_id']:
-        return
-
-    batch_id = SUPER_BATCH_SESSION.get("batch_id")
-    SUPER_BATCH_SESSION['active'] = False
-    files = SUPER_BATCH_SESSION['files']
-    SUPER_BATCH_SESSION['files'] = []
-
     if not files:
-        await _safe_batch_reply(update.message, "❌ Koi file nahi mili!")
+        await _safe_batch_status_edit(status_msg, "❌ Koi file nahi mili!")
         return
 
-    status_msg = await _safe_batch_reply(
-        update.message,
-        f"🔄 **{len(files)} files group ho rahi hain...**", parse_mode='Markdown'
+    await _safe_batch_status_edit(
+        status_msg, f"🔄 **{len(files)} files group ho rahi hain...**",
+        parse_mode='Markdown',
     )
 
     # ── STEP 1: CONSERVATIVE LOCAL GROUPING ─────────────────────────────
@@ -10158,18 +10283,20 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
             poster_url = result['poster_url']
             imdb_id    = result['imdb_id']
 
-            # ── STEP 2: BATCH_SESSION set karo (Phase 1 jaisa) ──────────────────
-            BATCH_SESSION.update({
+            # Each finalizer owns its own state; concurrent batches must never
+            # change the shared manual `/batch` session used by the PM listener.
+            movie_state = {
                 'active':      True,
                 'movie_id':    movie_id,
                 'movie_title': title,
                 'file_count':  0,
                 'admin_id':    update.effective_user.id,
-                'batch_id':    SUPER_BATCH_SESSION.get("batch_id"),
+                'batch_id':    batch_id,
                 'year':        str(year) if year else '',
                 'category':    category,
                 'language':    movie_lang,
-            })
+                'extracted_thumb': None,
+            }
 
             # ── STEP 3: Har file ke liye unified Phase 2 saver ───────────────
             async def file_progress(index, total):
@@ -10180,15 +10307,9 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                         f"🎬 Name: {title}\n📁 Saving file {index}/{total}",
                     )
 
-            try:
-                saved_labels = await _save_superbatch_files(
-                    movie_files, context, movie_id, progress=file_progress
-                )
-            finally:
-                # Koi file error kare tab bhi next movie ke liye session leak na ho.
-                BATCH_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None,
-                                      'file_count': 0, 'admin_id': None, 'year': '',
-                                      'category': '', 'language': ''})
+            saved_labels = await _save_superbatch_files(
+                movie_files, context, movie_state, progress=file_progress
+            )
 
             if not saved_labels:
                 logger.warning(f"Superbatch: '{display_name}' — koi file save nahi ho paya")
@@ -10379,9 +10500,6 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not await _safe_batch_status_edit(status_msg, final_text, parse_mode='HTML'):
         await _safe_batch_reply(update.message, final_text, parse_mode='HTML')
-
-    SUPER_BATCH_SESSION.update({'active': False, 'admin_id': None, 'files': []})
-
 
 def _superbatch_posted_summary(titles):
     """Keep completion below Telegram's limit, even for hundreds of movies."""
@@ -10698,7 +10816,9 @@ def _commit_batch_file(movie_id, label, file_size, url, backups, language, extra
         close_db_connection(conn)
 
 
-async def _pm_save_file(message, context, batch_item_id=None) -> str | None:
+async def _pm_save_file(
+    message, context, batch_item_id=None, *, batch_state=None
+) -> str | None:
     media = getattr(message, "document", None) or getattr(message, "video", None)
     identity = (
         getattr(media, "file_unique_id", None)
@@ -10706,7 +10826,9 @@ async def _pm_save_file(message, context, batch_item_id=None) -> str | None:
         or (f"batch-item:{batch_item_id}" if batch_item_id else None)
     )
     if not identity:
-        return await _pm_save_file_locked(message, context, batch_item_id)
+        return await _pm_save_file_locked(
+            message, context, batch_item_id, batch_state=batch_state
+        )
 
     async with _FILE_SAVE_LOCKS_GUARD:
         slot = _FILE_SAVE_LOCKS.get(identity)
@@ -10716,7 +10838,9 @@ async def _pm_save_file(message, context, batch_item_id=None) -> str | None:
         slot["users"] += 1
     try:
         async with slot["lock"]:
-            return await _pm_save_file_locked(message, context, batch_item_id)
+            return await _pm_save_file_locked(
+                message, context, batch_item_id, batch_state=batch_state
+            )
     finally:
         async with _FILE_SAVE_LOCKS_GUARD:
             slot["users"] -= 1
@@ -10724,12 +10848,15 @@ async def _pm_save_file(message, context, batch_item_id=None) -> str | None:
                 _FILE_SAVE_LOCKS.pop(identity, None)
 
 
-async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | None:
+async def _pm_save_file_locked(
+    message, context, batch_item_id=None, *, batch_state=None
+) -> str | None:
     """
     Unified Phase 2 saver. Gemini bilkul use nahi hota.
     Caption aur raw filename separately parse hote hain, field-wise merge hota hai,
     downgrade upload se PEHLE block hota hai, phir storage copy + DB upsert hota hai.
     """
+    session_state = batch_state if batch_state is not None else BATCH_SESSION
     media = message.document or message.video
     if not media:
         logger.error("_pm_save_file: Unsupported media type")
@@ -10742,7 +10869,7 @@ async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | No
             )
         return None
 
-    movie_id = BATCH_SESSION.get('movie_id')
+    movie_id = session_state.get('movie_id')
     if not movie_id:
         logger.error("_pm_save_file: BATCH_SESSION movie_id missing")
         if batch_item_id:
@@ -10759,7 +10886,7 @@ async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | No
     file_unique_id = getattr(media, 'file_unique_id', None)
     file_id = getattr(media, 'file_id', None)
     file_size_str = get_readable_file_size(file_size)
-    current_lang = BATCH_SESSION.get('language', '')
+    current_lang = session_state.get('language', '')
     raw_caption = message.caption or message.text or ""
 
     # Independent local extraction; no Gemini in Phase 2.
@@ -10998,14 +11125,14 @@ async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | No
 
     thumb = getattr(media, 'thumbnail', None) or getattr(media, 'thumb', None)
     if thumb:
-        BATCH_SESSION['extracted_thumb'] = getattr(thumb, 'file_id', None)
+        session_state['extracted_thumb'] = getattr(thumb, 'file_id', None)
 
     try:
         movie_file_id, deleted = await run_async(
             _commit_batch_file, movie_id, label, file_size_str, main_url,
             json.dumps(backup_map), f_lang, f_extra, file_unique_id, file_id,
         )
-        BATCH_SESSION['file_count'] = BATCH_SESSION.get('file_count', 0) + 1
+        session_state['file_count'] = session_state.get('file_count', 0) + 1
         await checkpoint(
             state="processing", stage="file_db_committed",
             movie_id=movie_id, movie_file_id=movie_file_id,
@@ -11021,11 +11148,11 @@ async def _pm_save_file_locked(message, context, batch_item_id=None) -> str | No
         )
         logger.info(
             "_pm_save_file saved: %s — %s [%s]",
-            BATCH_SESSION.get('movie_title'), label, file_size_str,
+            session_state.get('movie_title'), label, file_size_str,
         )
 
         if deleted:
-            BATCH_SESSION['file_count'] = max(0, BATCH_SESSION.get('file_count', 0) - deleted)
+            session_state['file_count'] = max(0, session_state.get('file_count', 0) - deleted)
 
         await checkpoint(
             state="succeeded", stage="completed",
@@ -11343,19 +11470,26 @@ async def _recover_interrupted_batches(application):
                 continue
 
             if kind == "super":
+                recovered_files = [
+                    _recovered_batch_record(application.bot, row)
+                    for row in all_rows
+                ]
                 SUPER_BATCH_SESSION.update({
                     "active": True,
                     "admin_id": admin_id,
-                    "files": [
-                        _recovered_batch_record(application.bot, row)
-                        for row in all_rows
-                    ],
+                    "files": recovered_files,
                     "batch_id": batch_id,
                     "status": "collecting",
+                    "closing_update_id": None,
                 })
-                batch_upload_coordinator.begin(
+                recovered_session = batch_upload_coordinator.begin(
                     admin_id, None, job[5], kind="super", batch_id=batch_id
                 )
+                recovered_session.update({
+                    "active": True,
+                    "files": recovered_files,
+                    "status": "collecting",
+                })
             else:
                 movie_id = job[7]
                 if not movie_id:
@@ -11572,10 +11706,9 @@ async def batch_retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = getattr(update, "effective_user", None)
-    reserved = batch_upload_coordinator._sessions.get(user.id) if user else None
+    reserved = batch_upload_coordinator.session_for_update(update) if user else None
     if reserved and reserved.get("kind") == "super" and reserved.get("starting"):
-        await batch_upload_coordinator.wait_until_ready(user.id)
-        reserved = batch_upload_coordinator._sessions.get(user.id)
+        reserved = await batch_upload_coordinator.wait_until_ready(user.id, reserved)
     if reserved and reserved.get("start_failed"):
         return
 
@@ -11596,19 +11729,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and BATCH_SESSION.get("admin_id") != getattr(user, "id", None)
     ):
         return
-    if (
-        SUPER_BATCH_SESSION.get("active")
-        and SUPER_BATCH_SESSION.get("admin_id") != getattr(user, "id", None)
-    ):
-        return
-
     # ==========================================
     # 🚀 SUPERBATCH: PM FILE LISTENER HI MUH HAI
     # Jab Superbatch active ho, files yahan se hi andar jayengi
     # Alag superbatch_listener ki zaroorat nahi — ek hi entry point
     # ==========================================
-    if SUPER_BATCH_SESSION.get('active'):
-        if not (update.effective_user and update.effective_user.id == SUPER_BATCH_SESSION.get('admin_id')):
+    if reserved and reserved.get("kind") == "super":
+        if not reserved.get("active"):
             return
 
         record = await _collect_superbatch_file(update.effective_message)
@@ -11616,7 +11743,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 item_id = await run_async(
                     _batch_item_create,
-                    SUPER_BATCH_SESSION["batch_id"],
+                    reserved["batch_id"],
                     getattr(update, "update_id", None),
                     update.effective_message,
                     record,
@@ -11650,13 +11777,13 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if record:
-            record["batch_id"] = SUPER_BATCH_SESSION["batch_id"]
+            record["batch_id"] = reserved["batch_id"]
             if not any(
                 existing.get("update_id") == record.get("update_id")
-                for existing in SUPER_BATCH_SESSION["files"]
+                for existing in reserved["files"]
             ):
-                SUPER_BATCH_SESSION['files'].append(record)
-            count = len(SUPER_BATCH_SESSION['files'])
+                reserved["files"].append(record)
+            count = len(reserved["files"])
             if count % 10 == 0:
                 await update.effective_message.reply_text(
                     f"📥 **{count} files mil gayi hain!**\nJab sab bhej do, `/superdone` karo.",
