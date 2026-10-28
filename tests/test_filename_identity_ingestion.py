@@ -203,6 +203,8 @@ def _core_namespace(connection, metadata, identity_rows=None):
             "run_async": run_async,
             "fetch_movie_metadata": lambda *args: metadata,
             "normalize_catalog_labels": lambda **_kwargs: ("Bollywood", "Movie"),
+            "normalize_artwork_url": lambda value: value if str(value or "").startswith("http") else None,
+            "normalize_trailer_key": lambda value: value if value and len(str(value)) == 11 else None,
             "fetch_cast_from_imdb": lambda *_args: "cast",
             "resolve_trailer_key": lambda *_args: None,
             "fetch_tmdb_artwork": lambda *_args: (None, None),
@@ -218,7 +220,7 @@ def _core_namespace(connection, metadata, identity_rows=None):
     return env
 
 
-def test_core_reuses_provider_identity_and_saves_file_under_canonical_id():
+def test_core_reuses_provider_identity_and_enriches_canonical_record():
     connection = _MovieConnection()
     metadata = (
         "Drishyam: The Conclusion", 2026, None, "Crime, Drama",
@@ -245,7 +247,10 @@ def test_core_reuses_provider_identity_and_saves_file_under_canonical_id():
 
     assert result["movie_id"] == 15634
     statements = [query for query, _params in connection.cursor_instance.executed]
-    assert not any("UPDATE movies" in query for query in statements)
+    update = next(query for query in statements if "UPDATE movies" in query)
+    assert "poster_url = CASE" in update
+    assert "trailer_key = CASE" in update
+    assert "content_type = COALESCE" in update
     assert not any("INSERT INTO movies" in query for query in statements)
 
     helpers_path = ROOT / "tests" / "test_movie_file_dedup.py"

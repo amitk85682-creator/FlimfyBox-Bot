@@ -103,11 +103,57 @@ def test_known_imdb_missing_from_tmdb_never_borrows_another_titles_trailer_or_ar
         return SimpleNamespace(json=lambda:{'movie_results':[],'tv_results':[]})
     from urllib.parse import quote
     from typing import Optional
-    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key'},
+    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key',
+        'normalize_artwork_url','normalize_trailer_key'},
         {'requests':SimpleNamespace(get=get),'TMDB_API_KEY':'test','quote':quote,'Optional':Optional})
     assert ns['fetch_tmdb_artwork']('Obsession','2025','tt39330776','Web Series')==(None,None)
     assert ns['fetch_tmdb_trailer_key']('Obsession','2025','tt39330776','Web Series') is None
     assert len(calls)==2 and all('/find/tt39330776' in url for url in calls)
+
+
+def test_tmdb_find_uses_requested_media_type_and_rejects_sentinel_trailer_keys():
+    calls=[]
+    def get(url,**kwargs):
+        calls.append(url)
+        if '/find/' in url:
+            return SimpleNamespace(json=lambda:{
+                'movie_results':[{'id':10,'title':'Obsession','release_date':'2025-01-01','poster_path':'/movie.jpg'}],
+                'tv_results':[{'id':20,'name':'Obsession','first_air_date':'2025-01-01','poster_path':'/tv.jpg'}],
+            })
+        if '/tv/20/videos' in url:
+            return SimpleNamespace(json=lambda:{'results':[
+                {'site':'YouTube','key':'NOT_FOUND','type':'Trailer','official':True},
+                {'site':'YouTube','key':'AbCdEf12345','type':'Trailer','official':True},
+            ]})
+        if '/tv/20' in url:
+            return SimpleNamespace(json=lambda:{'id':20,'poster_path':'/tv.jpg'})
+        raise AssertionError(url)
+    from urllib.parse import quote
+    from typing import Optional
+    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key',
+        'normalize_artwork_url','normalize_trailer_key'},
+        {'requests':SimpleNamespace(get=get),'TMDB_API_KEY':'test','quote':quote,'Optional':Optional})
+    assert ns['fetch_tmdb_artwork']('Obsession','2025','tt39330776','Web Series') == (
+        'https://image.tmdb.org/t/p/original/tv.jpg', None
+    )
+    assert ns['fetch_tmdb_trailer_key']('Obsession','2025','tt39330776','Web Series') == 'AbCdEf12345'
+    assert any('/tv/20/videos' in url for url in calls)
+
+
+def test_tmdb_find_never_uses_movie_art_or_trailer_for_a_verified_series():
+    def get(url,**kwargs):
+        assert '/find/' in url
+        return SimpleNamespace(json=lambda:{
+            'movie_results':[{'id':10,'title':'Obsession','release_date':'2025-01-01','poster_path':'/wrong.jpg'}],
+            'tv_results':[],
+        })
+    from urllib.parse import quote
+    from typing import Optional
+    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key',
+        'normalize_artwork_url','normalize_trailer_key'},
+        {'requests':SimpleNamespace(get=get),'TMDB_API_KEY':'test','quote':quote,'Optional':Optional})
+    assert ns['fetch_tmdb_artwork']('Obsession','2025','tt39330776','Web Series') == (None,None)
+    assert ns['fetch_tmdb_trailer_key']('Obsession','2025','tt39330776','Web Series') is None
 
 
 def test_omdb_search_disambiguates_before_fetching_by_id():

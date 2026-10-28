@@ -58,7 +58,7 @@ class _ProviderRequests:
 def _fetch_by_imdb(omdb_payload, monkeypatch):
     monkeypatch.setenv("OMDB_API_KEY", "synthetic-test-key")
     env = _load_main_functions(
-        {"fetch_movie_metadata"},
+        {"fetch_movie_metadata", "normalize_artwork_url"},
         {"requests": _ProviderRequests(omdb_payload)},
     )
     return env["fetch_movie_metadata"]("tt34866681")
@@ -127,6 +127,37 @@ def test_missing_provider_origin_stays_neutral_despite_hindi_batch_default(monke
 
     assert metadata[7] == "Movies"
     assert _normalize_provider_category(metadata[7]) == "Movies"
+
+
+def test_animation_genre_is_not_automatically_mislabeled_as_anime():
+    env = _load_main_functions({"normalize_catalog_labels"})
+    category, content_type = env["normalize_catalog_labels"](
+        category="Hollywood",
+        content_type="Movie",
+        genre="Animation, Adventure, Family",
+        title="Toy Story",
+    )
+    assert (category, content_type) == ("Hollywood", "Movie")
+
+
+def test_anime_region_keeps_real_movie_or_series_content_type():
+    env = _load_main_functions({"normalize_catalog_labels"})
+    normalize = env["normalize_catalog_labels"]
+    assert normalize(category="Anime", title="Your Name") == ("Anime", "Movie")
+    assert normalize(category="Anime", extra_info="S01 E03") == (
+        "Anime", "Web Series"
+    )
+
+
+def test_regional_series_signal_preserves_region_and_series_type(monkeypatch):
+    payload = _omdb_payload(country="India", language="Hindi")
+    payload["Type"] = "series"
+    metadata = _fetch_by_imdb(payload, monkeypatch)
+    assert metadata[7] == "Bollywood Web Series"
+    env = _load_main_functions({"normalize_catalog_labels"})
+    assert env["normalize_catalog_labels"](category=metadata[7]) == (
+        "Bollywood", "Web Series"
+    )
 
 
 def test_batchid_response_uses_normalized_metadata_category():

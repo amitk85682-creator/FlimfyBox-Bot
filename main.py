@@ -3825,28 +3825,53 @@ def is_valid_imdb_id(imdb_id: str) -> bool:
     return bool(re.match(r'^tt\d{7,8}$', imdb_id.strip()))
 
 
+def normalize_artwork_url(value):
+    """Return only a real HTTP artwork URL; provider sentinels are missing data."""
+    text = str(value or "").strip()
+    if text.casefold() in {"", "n/a", "na", "none", "null", "not_found", "unknown"}:
+        return None
+    if not re.match(r"^https?://", text, re.I):
+        return None
+    return text
+
+
+def normalize_trailer_key(value):
+    """Return a bare, valid YouTube video key and reject legacy sentinels/URLs."""
+    text = str(value or "").strip()
+    if text.casefold() in {"", "n/a", "na", "none", "null", "not_found", "unknown"}:
+        return None
+    return text if re.fullmatch(r"[A-Za-z0-9_-]{11}", text) else None
+
+
 def normalize_catalog_labels(category="", content_type=None, language="", extra_info="", genre="", title=""):
     """Return stable regional category and media content type for catalogue rows."""
     category_text = str(category or "").strip()
-    signal = " ".join(
-        str(value or "").lower()
-        for value in (category_text, content_type, language, extra_info, genre, title)
+    category_lower = category_text.casefold()
+    content_lower = str(content_type or "").strip().casefold()
+    structural_signal = " ".join(
+        str(value or "").casefold()
+        for value in (category_text, content_type, extra_info, title)
     )
-    if any(token in signal for token in ("anime", "cartoon", "animation")):
-        media_type = "Anime"
-    elif any(token in signal for token in ("web series", "tv series", "television", "season", "episode", " s01", " s02")):
+    explicit_anime = (
+        category_lower in {"anime", "cartoon"}
+        or content_lower in {"anime", "cartoon"}
+        or " anime" in f" {category_lower}"
+    )
+    if (
+        content_lower in {"web series", "tv series", "tv", "series", "television"}
+        or any(token in structural_signal for token in ("web series", "tv series", "television", "season", "episode", " s01", " s02"))
+    ):
         media_type = "Web Series"
     else:
         media_type = "Movie"
 
-    category_lower = category_text.lower()
     if "bollywood" in category_lower:
         region = "Bollywood"
     elif "south" in category_lower:
         region = "South"
     elif "hollywood" in category_lower:
         region = "Hollywood"
-    elif category_lower == "anime" or category_lower == "cartoon":
+    elif explicit_anime:
         region = "Anime"
     elif category_text and category_lower not in {"movies", "movie", "web series", "tv series"}:
         region = category_text
@@ -4098,7 +4123,12 @@ def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
 def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, category: str = "") -> Optional[str]:
     """Resolve and return a YouTube trailer key while metadata is being saved."""
     api_key = TMDB_API_KEY
-    media_type = 'tv' if any(token in str(category).lower() for token in ('tv', 'series', 'web')) else 'movie'
+    category_lower = str(category).lower()
+    media_type = 'tv' if any(token in category_lower for token in ('tv', 'series', 'web')) else 'movie'
+    type_is_explicit = bool(
+        any(token in category_lower for token in ('tv', 'series', 'web', 'movie', 'film'))
+        or category_lower.strip() in {'bollywood', 'hollywood', 'south'}
+    )
     candidates = []
     try:
         if imdb_id and str(imdb_id).startswith('tt'):
@@ -4127,6 +4157,24 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
                 [item for item, _kind in candidates], title, str(year or ""), category
             )
             candidates = [(match, match.get('media_type', media_type))] if match else []
+        if candidates:
+            preferred = [item for item in candidates if item[1] == media_type]
+            if len(preferred) == 1:
+                candidates = preferred
+            elif type_is_explicit:
+                candidates = []
+            elif len(candidates) == 1:
+                candidates = candidates
+            else:
+                strict_match = _find_best_tmdb_match(
+                    [dict(item, media_type=kind) for item, kind in candidates],
+                    title,
+                    str(year or ""),
+                    category,
+                )
+                candidates = [
+                    (strict_match, strict_match.get("media_type", media_type))
+                ] if strict_match else []
         if len(candidates) != 1:
             return None
 
@@ -4138,7 +4186,7 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
             ).json()
             youtube_videos = [
                 video for video in videos.get('results', [])
-                if video.get('site') == 'YouTube' and video.get('key')
+                if video.get('site') == 'YouTube' and normalize_trailer_key(video.get('key'))
             ]
             preferred = [
                 video for video in youtube_videos
@@ -4147,7 +4195,7 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
                 )
             ] or [video for video in youtube_videos if video.get('type') == 'Trailer']
             if preferred:
-                return preferred[0]['key']
+                return normalize_trailer_key(preferred[0]['key'])
     except Exception as exc:
         logger.warning("TMDb trailer lookup failed for '%s': %s", title, exc)
     return None
@@ -4161,10 +4209,18 @@ def resolve_trailer_key(
     fallback_title: str = "",
 ) -> Optional[str]:
     """Resolve a trailer using canonical metadata, then original file identity."""
-    trailer_key = fetch_tmdb_trailer_key(title, year, imdb_id, category)
+    trailer_key = normalize_trailer_key(
+        fetch_tmdb_trailer_key(title, year, imdb_id, category)
+    )
     if trailer_key or not fallback_title or fallback_title.strip().casefold() == str(title or "").strip().casefold():
         return trailer_key
-    return fetch_tmdb_trailer_key(fallback_title, year, imdb_id, category)
+    # A second title-only guess can attach an unrelated namesake's trailer. Only
+    # use the fallback when the same provider identity is still constraining it.
+    if not imdb_id:
+        return None
+    return normalize_trailer_key(
+        fetch_tmdb_trailer_key(fallback_title, year, imdb_id, category)
+    )
 
 def fetch_tmdb_artwork(
     title: str,
@@ -4191,6 +4247,31 @@ def fetch_tmdb_artwork(
                 (item, "tv") for item in found.get("tv_results", [])
             ]
 
+        if candidates:
+            category_lower = str(category).lower()
+            expected_type = (
+                "tv" if any(token in category_lower for token in ("tv", "series", "web"))
+                else "movie"
+            )
+            type_is_explicit = bool(
+                any(token in category_lower for token in ("tv", "series", "web", "movie", "film"))
+                or category_lower.strip() in {"bollywood", "hollywood", "south"}
+            )
+            preferred = [item for item in candidates if item[1] == expected_type]
+            if len(preferred) == 1:
+                candidates = preferred
+            elif type_is_explicit:
+                candidates = []
+            elif len(candidates) > 1:
+                strict_match = _find_best_tmdb_match(
+                    [dict(item, media_type=kind) for item, kind in candidates],
+                    title,
+                    str(year or ""),
+                    category,
+                )
+                candidates = [
+                    (strict_match, strict_match.get("media_type", expected_type))
+                ] if strict_match else []
         if len(candidates) > 1:
             return None, None
         if candidates:
@@ -4234,7 +4315,7 @@ def fetch_tmdb_artwork(
             f"https://image.tmdb.org/t/p/original{backdrop_path}"
             if backdrop_path else None
         )
-        return poster_url, backdrop_url
+        return normalize_artwork_url(poster_url), normalize_artwork_url(backdrop_url)
     except Exception as exc:
         logger.warning("TMDb artwork lookup failed for '%s': %s", title, exc)
         return None, None
@@ -4268,7 +4349,7 @@ def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
         ).json()
         preferred = (
             ["tv_results", "movie_results"]
-            if "series" in str(hint_category).lower()
+            if any(token in str(hint_category).lower() for token in ("series", "tv", "web"))
             else ["movie_results", "tv_results"]
         )
         for result_type in preferred:
@@ -4431,32 +4512,44 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             country = omdb_resp.get('Country', '')
             lang = omdb_resp.get('Language', '').lower()
 
-            # Smart category detection
+            # Region and media type are separate database fields. Encode both in
+            # this provider signal so normalize_catalog_labels can preserve each.
             category = "Movies"
             omdb_type = omdb_resp.get('Type', '').lower()
             g_low = genre.lower()
-            
-            if omdb_type == 'series':
-                category = "Web Series"
-            elif "animation" in g_low or "anime" in g_low:
+            country_low = country.casefold()
+
+            if "anime" in g_low or ("japan" in country_low and "animation" in g_low):
                 category = "Anime"
-            elif "india" in country.lower():
+            elif "india" in country_low:
                 if any(x in lang for x in ['telugu', 'tamil', 'kannada', 'malayalam']):
                     category = "South"
                 else:
                     category = "Bollywood"
-            elif country.strip():
+            elif any(origin in country_low for origin in (
+                "united states", "usa", "united kingdom", "canada",
+                "australia", "new zealand",
+            )):
                 category = "Hollywood"
             else:
                 category = "Movies"
+            if omdb_type == 'series' and category != "Anime":
+                category = (
+                    "Web Series" if category == "Movies"
+                    else f"{category} Web Series"
+                )
 
             # TMDb se HD poster laao
-            poster_url = omdb_resp.get('Poster')
+            poster_url = normalize_artwork_url(omdb_resp.get('Poster'))
             if imdb_id and imdb_id != 'N/A':
                 try:
                     tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
                     t_resp = requests.get(tmdb_find, timeout=10).json()
-                    results = t_resp.get('movie_results', []) + t_resp.get('tv_results', [])
+                    results = (
+                        t_resp.get('tv_results', [])
+                        if omdb_type == 'series'
+                        else t_resp.get('movie_results', [])
+                    )
                     if results:
                         path = results[0].get('poster_path')
                         if path:
@@ -4512,7 +4605,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 logger.error(f"Seasons Fetch Error: {e}")
                 
             logger.info(f"✅ OMDb Success: '{title}' ({year}) [{category}]")
-            return title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data
+            return title, year, normalize_artwork_url(poster_url), genre, imdb_id, rating, plot, category, seasons_data
 
         # ━━━━━ STEP 3: OMDb fail — TMDb SMART FALLBACK ━━━━━
         logger.info(f"⚠️ OMDb miss for '{search_query}', trying TMDb smart search...")
@@ -4563,7 +4656,9 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
         
         # TMDb poster
         path = best_match.get('poster_path')
-        poster_url = f"https://image.tmdb.org/t/p/original{path}" if path else None
+        poster_url = normalize_artwork_url(
+            f"https://image.tmdb.org/t/p/original{path}" if path else None
+        )
 
         # IMDb ID nikalo TMDb se
         imdb_id = None
@@ -9155,8 +9250,10 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 3. DB Insertion (All Fields)
         trailer_key = await run_async(
-            resolve_trailer_key, title, year, imdb_id_f, category, title
+            resolve_trailer_key, title, year, imdb_id_f, content_type, title
         )
+        trailer_key = normalize_trailer_key(trailer_key)
+        poster = normalize_artwork_url(poster)
         conn = get_db_connection()
         if not conn:
             raise RuntimeError("Database unavailable while creating /batchid batch")
@@ -9174,7 +9271,23 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur, imdb_id_f, tmdb_id, content_type
         )
         if existing_movie_id:
-            cur.execute("SELECT id FROM movies WHERE id = %s", (existing_movie_id,))
+            cur.execute(
+                """
+                UPDATE movies
+                SET poster_url = COALESCE(%s, NULLIF(NULLIF(poster_url, ''), 'N/A')),
+                    category = %s,
+                    content_type = %s,
+                    trailer_key = COALESCE(%s, NULLIF(NULLIF(trailer_key, ''), 'NOT_FOUND')),
+                    tmdb_id = COALESCE(%s, tmdb_id),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (
+                    poster, category, content_type, trailer_key,
+                    tmdb_id, existing_movie_id,
+                ),
+            )
         else:
             cur.execute("""
                 INSERT INTO movies
@@ -9330,9 +9443,11 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         trailer_key = await run_async(
-            resolve_trailer_key, title, year, imdb_id, category, title
+            resolve_trailer_key, title, year, imdb_id, content_type, title
         )
-        tmdb_id = await run_async(resolve_tmdb_id_from_imdb, imdb_id, category)
+        trailer_key = normalize_trailer_key(trailer_key)
+        poster_url = normalize_artwork_url(poster_url)
+        tmdb_id = await run_async(resolve_tmdb_id_from_imdb, imdb_id, content_type)
     except Exception as exc:
         coordinator_session["start_failed"] = True
         batch_upload_coordinator.mark_ready(user_id)
@@ -9368,11 +9483,11 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 UPDATE movies
                 SET title = %s, imdb_id = COALESCE(%s, movies.imdb_id),
                     tmdb_id = COALESCE(%s, movies.tmdb_id),
-                    poster_url = COALESCE(%s, poster_url), year = %s,
+                    poster_url = COALESCE(%s, NULLIF(NULLIF(poster_url, ''), 'N/A')), year = %s,
                     genre = %s, rating = %s, description = %s,
                     category = %s, content_type = %s, language = %s,
                     "cast" = COALESCE(%s, "cast"),
-                    trailer_key = COALESCE(%s, trailer_key)
+                    trailer_key = COALESCE(%s, NULLIF(NULLIF(trailer_key, ''), 'NOT_FOUND'))
                 WHERE id = %s
                 RETURNING id
                 """,
@@ -10220,10 +10335,10 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
     if not imdb_id:
         raise AmbiguousMovieIdentity("Provider identity is missing. Review the title before attaching files.")
 
-    # 👇 NAYA LOGIC: Gemini Category Priority for Anime 👇
+    # Gemini may explicitly identify anime/cartoon, but a generic Animation
+    # genre is not sufficient evidence (Disney/Pixar must not become Anime).
     cat_lower = str(gemini_category or "").lower()
-    genre_lower = str(genre or "").lower()
-    if "anime" in cat_lower or "cartoon" in cat_lower or "animation" in cat_lower or "anime" in genre_lower or "animation" in genre_lower:
+    if "anime" in cat_lower or "cartoon" in cat_lower:
         category = "Anime"
     category, content_type = normalize_catalog_labels(
         category=category,
@@ -10239,9 +10354,13 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
         if imdb_id else asyncio.sleep(0, result=""),
         _optional_movie_lookup(resolve_trailer_key, title, year, imdb_id, content_type, movie_name),
         _optional_movie_lookup(fetch_tmdb_artwork, title, year, imdb_id, content_type, default=(None, None)),
-        _optional_movie_lookup(resolve_tmdb_id_from_imdb, imdb_id, category),
+        _optional_movie_lookup(resolve_tmdb_id_from_imdb, imdb_id, content_type),
     )
     artwork_poster_url, backdrop_poster_url = artwork
+    poster_url = normalize_artwork_url(poster_url)
+    artwork_poster_url = normalize_artwork_url(artwork_poster_url)
+    backdrop_poster_url = normalize_artwork_url(backdrop_poster_url)
+    trailer_key = normalize_trailer_key(trailer_key)
     if artwork_poster_url and not poster_url:
         poster_url = artwork_poster_url
 
@@ -10275,7 +10394,50 @@ async def _core_movie_processor(raw_text: str, image_bytes: bytes = None, reconc
                 extra_info, cast_str, trailer_key,
             )
             if existing_id:
-                cur.execute("SELECT id FROM movies WHERE id = %s", (existing_id,))
+                cur.execute(
+                    """
+                    UPDATE movies
+                    SET imdb_id = COALESCE(%s, imdb_id),
+                        tmdb_id = COALESCE(%s, tmdb_id),
+                        poster_url = CASE
+                            WHEN %s IS NOT NULL AND (
+                                poster_url IS NULL OR BTRIM(poster_url) = '' OR
+                                LOWER(BTRIM(poster_url)) IN ('n/a','na','none','null','not_found','unknown') OR
+                                poster_url !~* '^https?://'
+                            ) THEN %s ELSE poster_url END,
+                        backdrop_poster_url = CASE
+                            WHEN %s IS NOT NULL AND (
+                                backdrop_poster_url IS NULL OR BTRIM(backdrop_poster_url) = '' OR
+                                LOWER(BTRIM(backdrop_poster_url)) IN ('n/a','na','none','null','not_found','unknown') OR
+                                backdrop_poster_url !~* '^https?://'
+                            ) THEN %s ELSE backdrop_poster_url END,
+                        trailer_key = CASE
+                            WHEN %s IS NOT NULL THEN %s
+                            WHEN LOWER(BTRIM(COALESCE(trailer_key, ''))) IN
+                                 ('n/a','na','none','null','not_found','unknown')
+                                THEN NULL
+                            WHEN trailer_key !~ '^[A-Za-z0-9_-]{11}$' THEN NULL
+                            ELSE trailer_key END,
+                        category = CASE
+                            WHEN %s IS NULL THEN category
+                            WHEN LOWER(BTRIM(%s)) IN ('movie','movies','web series','tv series')
+                                 AND NULLIF(BTRIM(category), '') IS NOT NULL
+                                THEN category
+                            ELSE %s END,
+                        content_type = COALESCE(%s, content_type),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (
+                        imdb_id, tmdb_id,
+                        poster_url, poster_url,
+                        backdrop_poster_url, backdrop_poster_url,
+                        trailer_key, trailer_key,
+                        category, category, category,
+                        content_type, existing_id,
+                    ),
+                )
             else:
                 cur.execute(
                     """
@@ -13334,9 +13496,18 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data_source = combo["source"]
         evidence_sources = combo.get("evidence_sources", [])
         identity_status = combo.get("identity_status", "Unverified")
-        trailer_key = await run_async(
-            resolve_trailer_key, title, year, imdb_id, category, movie_name
+        _adult_region, trailer_content_type = normalize_catalog_labels(
+            category=category,
+            language=movie_lang,
+            extra_info=movie_extra,
+            genre=genre,
+            title=title,
         )
+        trailer_key = await run_async(
+            resolve_trailer_key, title, year, imdb_id, trailer_content_type, movie_name
+        )
+        trailer_key = normalize_trailer_key(trailer_key)
+        poster_url = normalize_artwork_url(poster_url)
 
         # IMDB cast fetch (extra — agar imdb_id mila ho)
         if imdb_id and not cast_str:
@@ -13355,7 +13526,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur = conn.cursor()
             
             tmdb_id = await run_async(
-                resolve_tmdb_id_from_imdb, imdb_id, category
+                resolve_tmdb_id_from_imdb, imdb_id, trailer_content_type
             )
             existing = None
             existing_id = _find_movie_by_provider_identity(cur, imdb_id, tmdb_id, evidence_category)
@@ -13369,7 +13540,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if existing:
                 # Update existing with better data if available
                 existing_id, existing_poster, existing_year = existing
-                final_poster = poster_url if poster_url else existing_poster
+                final_poster = poster_url or normalize_artwork_url(existing_poster)
                 final_year = year if (year and year > 0) else existing_year
                 normalized_category, content_type = normalize_catalog_labels(
                     category=category,
@@ -13379,8 +13550,25 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     title=title,
                 )
                 
-                # Uploading more files is not an instruction to replace curated metadata.
-                cur.execute("SELECT id FROM movies WHERE id = %s", (existing_id,))
+                cur.execute(
+                    """
+                    UPDATE movies
+                    SET imdb_id = COALESCE(%s, imdb_id),
+                        tmdb_id = COALESCE(%s, tmdb_id),
+                        poster_url = COALESCE(%s, NULLIF(NULLIF(poster_url, ''), 'N/A')),
+                        year = COALESCE(NULLIF(%s, 0), year),
+                        category = %s,
+                        content_type = %s,
+                        trailer_key = COALESCE(%s, NULLIF(NULLIF(trailer_key, ''), 'NOT_FOUND')),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (
+                        imdb_id, tmdb_id, final_poster, final_year,
+                        normalized_category, content_type, trailer_key, existing_id,
+                    ),
+                )
                 movie_id = cur.fetchone()[0]
                 logger.info(f"🔄 Updated existing movie: {title} (ID: {movie_id})")
                 

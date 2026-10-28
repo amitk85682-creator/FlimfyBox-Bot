@@ -15,9 +15,9 @@ def test_content_type_column_and_index_are_migrated():
 
 def test_ingestion_normalizes_region_and_media_type():
     assert "def normalize_catalog_labels(" in MAIN
-    assert 'media_type = "Anime"' in MAIN
     assert 'media_type = "Web Series"' in MAIN
     assert 'media_type = "Movie"' in MAIN
+    assert 'region = "Anime"' in MAIN
     assert 'region = "Bollywood"' in MAIN
     assert 'region = "Hollywood"' in MAIN
     assert "category, content_type = normalize_catalog_labels(" in MAIN
