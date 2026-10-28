@@ -19,7 +19,7 @@ def media_kind(value='', extra=''):
     value = str(value or '').strip().casefold()
     if value in {'tv', 'series', 'web series', 'tv series', 'television'}:
         return 'tv'
-    if re.search(r'\b(?:s\d{1,2}(?:e\d+)?|season\s*\d+|episode\s*\d+)\b', str(extra), re.I):
+    if re.search(r'\b(?:s\d{1,2}(?:e\d+)?|season\s*\d+|episode\s*\d+|ep\s*\d+)\b', str(extra), re.I):
         return 'tv'
     if value in {'movie', 'movies', 'film', 'bollywood', 'hollywood', 'south'}:
         return 'movie'
@@ -93,6 +93,16 @@ def evidence_conflict(first, second):
         return 'Filename and caption have different years'
     a = media_kind(first.get('category'), first.get('extra_info'))
     b = media_kind(second.get('category'), second.get('extra_info'))
+    # A bare Movies label is often only the parser's default. Explicit season or
+    # episode structure in the other source is stronger evidence of a series.
+    first_extra = str(first.get('extra_info') or '')
+    second_extra = str(second.get('extra_info') or '')
+    explicit_first_tv = media_kind('', first_extra) == 'tv'
+    explicit_second_tv = media_kind('', second_extra) == 'tv'
+    if a == 'movie' and b == 'tv' and explicit_second_tv and not explicit_first_tv:
+        a = 'tv'
+    elif b == 'movie' and a == 'tv' and explicit_first_tv and not explicit_second_tv:
+        b = 'tv'
     if a and b and a != b:
         return 'Filename and caption disagree on Movie / Series'
     return ''
@@ -120,16 +130,17 @@ def find_existing_upload(connect, close, evidence):
             return None
         year = release_year(evidence.get('year'))
         kind = media_kind(evidence.get('category'), evidence.get('extra_info'))
+        explicit_episode_identity = media_kind('', evidence.get('extra_info')) == 'tv'
         compatible = [row for row in rows
                       if (not year or not release_year(row[2]) or year == release_year(row[2]))
                       and (not kind or not stored_kind(row) or kind == stored_kind(row))]
         if not compatible and year and kind:
             return None  # A genuinely different year/type can establish its own provider ID.
-        if not year or not kind or len(compatible) != 1:
+        if not kind or len(compatible) != 1 or (not year and not explicit_episode_identity):
             options = ', '.join(f'#{r[0]} ({r[2] or "?"}, {r[13] or "?"})' for r in rows[:8])
             raise AmbiguousMovieIdentity(f'Ambiguous {evidence.get("title")}: {options}. Use /batchresolve <item ID> <catalogue ID> after reviewing the file.')
         row = compatible[0]
-        if not release_year(row[2]) or not stored_kind(row) or not (row[10] or row[11]):
+        if (year and not release_year(row[2])) or not stored_kind(row) or not (row[10] or row[11]):
             raise AmbiguousMovieIdentity(f'Catalogue #{row[0]} needs identity review; use /batchresolve <item ID> {row[0]} only after reviewing the file.')
         keys = ('movie_id', 'title', 'year', 'genre', 'rating', 'plot', 'category',
                 'movie_lang', 'poster_url', 'backdrop_poster_url', 'imdb_id',

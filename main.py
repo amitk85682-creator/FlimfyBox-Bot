@@ -1954,6 +1954,19 @@ async def fallback_extraction(caption_text):
         text = re.sub(r'^\{[^}]+\}\s*', '', text)           # {@Royal_Backup2} ko udayega
         text = re.sub(r'^@\w+\s+', '', text)                # @MRKUPDATES4U6 ko udayega
         text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
+
+        # SubsPlease releases encode episodes as "- 01v2" without S01.
+        # Normalize that distinctive prefix format before generic movie parsing.
+        subsplease_episode = re.match(
+            r'(?i)^\[SubsPlease\].*?[\s._-]+(\d{1,3})(?:v\d+|\s*\(\d+)',
+            original,
+        )
+        if subsplease_episode:
+            episode_number = int(subsplease_episode.group(1))
+            prefix = re.match(r'(?i)^\[SubsPlease\]\s*', original).group(0)
+            insert_at = subsplease_episode.start(1) - len(prefix)
+            text = text[:insert_at] + f"EP{episode_number:02d} " + text[
+                insert_at + len(subsplease_episode.group(1)):]
         
         # A movie split into Part 1/Part 2 is still a movie. Only real
         # season/episode evidence may switch the catalogue type to series.
@@ -3142,7 +3155,6 @@ def _batch_item_retry_failed(batch_id, admin_id):
                 FROM ingestion_batches AS b
                 WHERE i.batch_id = b.id AND i.batch_id = %s AND b.admin_id = %s
                   AND i.state = 'failed'
-                  AND i.error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
                   AND i.stage IN (
                       'accepted', 'identity_reconciliation', 'metadata_lookup',
                         'movie_db_committed', 'storage_copying', 'storage_copied',
@@ -11016,12 +11028,17 @@ async def _resume_batch_item(bot, job, row):
                 "movie_lang": language,
             }
         else:
-            caption_evidence = record["caption_evidence"]
-            filename_evidence = record["filename_evidence"]
-            if not filename_evidence and record["file_name"]:
-                filename_evidence = await fallback_extraction(record["file_name"])
-            if not caption_evidence and record["caption"]:
-                caption_evidence = await fallback_extraction(record["caption"])
+            # A retry must use current parser rules against the preserved raw
+            # strings; persisted parsed evidence may contain the bug that caused
+            # the first attempt to be held.
+            filename_evidence = (
+                await fallback_extraction(record["file_name"])
+                if record["file_name"] else record["filename_evidence"]
+            )
+            caption_evidence = (
+                await fallback_extraction(record["caption"])
+                if record["caption"] else record["caption_evidence"]
+            )
             reconciled = await reconcile_evidence_with_gemini(
                 caption_evidence,
                 filename_evidence,
