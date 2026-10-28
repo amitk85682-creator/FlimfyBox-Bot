@@ -72,6 +72,7 @@ GEMINI_RECONCILIATION_TIMEOUT_SECONDS = 25
 SUPERBATCH_IDENTITY_TIMEOUT_SECONDS = 35
 SUPERBATCH_MOVIE_TIMEOUT_SECONDS = 100
 SUPERBATCH_FILE_TIMEOUT_SECONDS = 180
+SUPERBATCH_MOVIE_TOTAL_TIMEOUT_SECONDS = 300
 AUTO_BATCH_MAX_ATTEMPTS = 5
 AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS = 2
 BATCH_RECOVERY_ITEM_TIMEOUT_SECONDS = 180
@@ -484,6 +485,7 @@ messages_to_auto_delete = defaultdict(list)
 BATCH_SESSION = {
     'active': False, 'movie_id': None, 'movie_title': None,
     'file_count': 0, 'admin_id': None, 'batch_id': None,
+    'movie_deadline': None,
 }
 SUPER_BATCH_SESSION = {
     'active': False, 'admin_id': None, 'files': [],
@@ -10007,14 +10009,40 @@ async def _save_one_superbatch_file(item, context, movie_id):
 
 async def _save_superbatch_files(movie_files, context, movie_id, progress=None):
     saved_labels = []
+    deadline = BATCH_SESSION.get("movie_deadline")
     for index, item in enumerate(movie_files, 1):
         item_id = item.get("batch_item_id")
-        if progress:
-            await progress(index, len(movie_files))
+        remaining = deadline - asyncio.get_running_loop().time() if deadline else None
+        if remaining is not None and remaining <= 0:
+            logger.warning(
+                "SuperBatch movie time budget reached; leaving remaining files "
+                "for automatic recovery (movie_id=%s)", movie_id,
+            )
+            break
         try:
+            if progress:
+                try:
+                    if remaining is None:
+                        await progress(index, len(movie_files))
+                    else:
+                        await asyncio.wait_for(
+                            progress(index, len(movie_files)),
+                            timeout=min(10, remaining),
+                        )
+                except Exception as progress_exc:
+                    logger.warning(
+                        "SuperBatch progress update failed (error_class=%s)",
+                        type(progress_exc).__name__,
+                    )
+            remaining = deadline - asyncio.get_running_loop().time() if deadline else None
+            if remaining is not None and remaining <= 0:
+                break
             label = await asyncio.wait_for(
                 _save_one_superbatch_file(item, context, movie_id),
-                timeout=SUPERBATCH_FILE_TIMEOUT_SECONDS,
+                timeout=(
+                    min(SUPERBATCH_FILE_TIMEOUT_SECONDS, remaining)
+                    if remaining is not None else SUPERBATCH_FILE_TIMEOUT_SECONDS
+                ),
             )
             if label:
                 saved_labels.append(label)
@@ -10024,8 +10052,26 @@ async def _save_superbatch_files(movie_files, context, movie_id, progress=None):
                 item_id,
                 type(exc).__name__,
             )
-            await _mark_superbatch_item_failed(item_id, exc)
-        await asyncio.sleep(0.5)
+            remaining = deadline - asyncio.get_running_loop().time() if deadline else None
+            if remaining is None:
+                await _mark_superbatch_item_failed(item_id, exc)
+            elif remaining > 0:
+                try:
+                    await asyncio.wait_for(
+                        _mark_superbatch_item_failed(item_id, exc),
+                        timeout=min(20, remaining),
+                    )
+                except Exception as checkpoint_exc:
+                    logger.warning(
+                        "SuperBatch file checkpoint delayed (item_id=%s, error_class=%s)",
+                        item_id, type(checkpoint_exc).__name__,
+                    )
+            if deadline and asyncio.get_running_loop().time() >= deadline:
+                break
+        remaining = deadline - asyncio.get_running_loop().time() if deadline else None
+        if remaining is not None and remaining <= 0:
+            break
+        await asyncio.sleep(min(0.5, remaining) if remaining is not None else 0.5)
     return saved_labels
 
 
@@ -10071,13 +10117,54 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
     total_files_saved = 0           # 👈 NAYA: Kitni files save hui uski ginti
     movies_posted_list = []         # 👈 NAYA: Jo movies post hui unki list
     channels = get_storage_channels()
+    movie_time_budget = globals().get(
+        "SUPERBATCH_MOVIE_TOTAL_TIMEOUT_SECONDS", 300
+    )
 
     for i, (group_key, movie_files) in enumerate(grouped_movies.items(), 1):
+        movie_deadline = (
+            asyncio.get_running_loop().time()
+            + movie_time_budget
+        )
+
+        async def update_movie_status(text, **kwargs):
+            remaining = movie_deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            try:
+                return await asyncio.wait_for(
+                    _safe_batch_status_edit(status_msg, text, **kwargs),
+                    timeout=min(10, remaining),
+                )
+            except Exception as status_exc:
+                logger.warning(
+                    "Movie progress update failed (error_class=%s)",
+                    type(status_exc).__name__,
+                )
+                return False
+
+        async def mark_movie_files_failed(exc, stage=None):
+            for item in movie_files:
+                remaining = movie_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        _mark_superbatch_item_failed(
+                            item.get("batch_item_id"), exc, stage
+                        ),
+                        timeout=min(20, remaining),
+                    )
+                except Exception as checkpoint_exc:
+                    logger.warning(
+                        "Movie failure checkpoint delayed (error_class=%s)",
+                        type(checkpoint_exc).__name__,
+                    )
+
         try:
             representative = _select_representative_file(movie_files)
             display_name = representative.get('display_title', group_key)
-            await _safe_batch_status_edit(
-                status_msg,
+            await update_movie_status(
                 f"⚙️ Processing Movie {i}/{total_movies}...\n"
                 f"🎬 Name: {display_name}\nStage: identity & metadata",
             )
@@ -10092,15 +10179,17 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
 
             # Exactly ONE Gemini reconciliation per finalized group, using the
             # most complete same-file caption+filename evidence packet.
-            result = await _prepare_superbatch_movie(representative, display_name)
+            remaining = movie_deadline - asyncio.get_running_loop().time()
+            result = await asyncio.wait_for(
+                _prepare_superbatch_movie(representative, display_name),
+                timeout=max(0.01, remaining),
+            )
 
             if not result:
                 logger.warning(f"Superbatch: '{display_name}' process nahi ho paya, skip kar raha hoon.")
-                for item in movie_files:
-                    item_id = item.get("batch_item_id")
-                    await _mark_superbatch_item_failed(
-                        item_id, ValueError("Movie identity unresolved"), "identity_reconciliation"
-                    )
+                await mark_movie_files_failed(
+                    ValueError("Movie identity unresolved"), "identity_reconciliation"
+                )
                 continue
 
             movie_id   = result['movie_id']
@@ -10125,14 +10214,14 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                 'year':        str(year) if year else '',
                 'category':    category,
                 'language':    movie_lang,
+                'movie_deadline': movie_deadline,
             })
 
             # ── STEP 3: Har file ke liye unified Phase 2 saver ───────────────
             async def file_progress(index, total):
                 # Avoid a Telegram edit per file on large episode collections.
                 if index == 1 or index % 5 == 0 or index == total:
-                    await _safe_batch_status_edit(
-                        status_msg,
+                    await update_movie_status(
                         f"⚙️ Processing Movie {i}/{total_movies}...\n"
                         f"🎬 Name: {title}\n📁 Saving file {index}/{total}",
                     )
@@ -10145,12 +10234,19 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                 # Koi file error kare tab bhi next movie ke liye session leak na ho.
                 BATCH_SESSION.update({'active': False, 'movie_id': None, 'movie_title': None,
                                       'file_count': 0, 'admin_id': None, 'year': '',
-                                      'category': '', 'language': ''})
+                                      'category': '', 'language': '',
+                                      'movie_deadline': None})
 
             if not saved_labels:
                 logger.warning(f"Superbatch: '{display_name}' — koi file save nahi ho paya")
                 continue
             total_files_saved += len(saved_labels)
+            if asyncio.get_running_loop().time() >= movie_deadline:
+                logger.info(
+                    "Movie %s reached its time budget; skipping channel post and "
+                    "continuing with the next movie", title,
+                )
+                continue
 
             # 🚫 AI Alias Generation OFF — Flask Web App mein Google Suggest + pg_trgm handles typos
             # generate_basic_aliases() bhi hata diya — DB clean rahega
@@ -10169,10 +10265,18 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                 continue  # 'continue' का मतलब है ये चैनल/फोरम में पोस्ट किए बिना अगली मूवी पर चला जायेगा
                 
             # अगर असली इमेज है, तभी लैंडस्केप पोस्टर बनाओ
-            await _safe_batch_status_edit(
-                status_msg, f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: {title}\nStage: channel post"
+            remaining = movie_deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                continue
+            await update_movie_status(
+                f"⚙️ Processing Movie {i}/{total_movies}...\n🎬 Name: {title}\nStage: channel post"
             )
-            photo_to_send = await asyncio.wait_for(make_landscape_poster(raw_photo), timeout=15)
+            remaining = movie_deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                continue
+            photo_to_send = await asyncio.wait_for(
+                make_landscape_poster(raw_photo), timeout=min(15, remaining)
+            )
 
             # 🛑 100% SAFE HTML CAPTION + RANDOM STYLES
             safe_rating = rating if rating else "N/A"
@@ -10234,12 +10338,27 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
             posted_any = False
 
             # 👇 GLOBAL DUPLICATE CHECK — Agar kisi bhi channel me 7 din me post ho chuki hai to skip 👇
-            if await asyncio.wait_for(run_async(is_movie_posted_recently, movie_id, days=7), timeout=15):
+            remaining = movie_deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                continue
+            if await asyncio.wait_for(
+                run_async(is_movie_posted_recently, movie_id, days=7),
+                timeout=min(15, remaining),
+            ):
                 logger.info(f"⏭️ Skipping '{title}' (already posted within the last 7 days in some channel).")
                 continue
             
             if target_channels:
                 for chat_id_str in target_channels: 
+                    remaining = movie_deadline - asyncio.get_running_loop().time()
+                    # Reserve time for Telegram's send plus saving the post
+                    # record, so a successful send is not left untracked.
+                    if remaining < 57:
+                        logger.info(
+                            "Movie %s reached its post budget; remaining channels skipped",
+                            title,
+                        )
+                        break
                     try:
                         chat_id = int(chat_id_str)
 
@@ -10253,7 +10372,7 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                                 caption=caption,
                                 parse_mode='HTML',
                                 reply_markup=post_keyboard
-                            ), timeout=35)
+                            ), timeout=min(35, remaining - 22))
                         else:
                             # Pehli baar upload karna hai (Bytes se)
                             if is_bytes:
@@ -10265,7 +10384,7 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                                 caption=caption,
                                 parse_mode='HTML',
                                 reply_markup=post_keyboard
-                            ), timeout=35)
+                            ), timeout=min(35, remaining - 22))
                             # Ek baar upload hone ke baad, Telegram se permanent File ID save karlo
                             if sent_msg and sent_msg.photo:
                                 uploaded_file_id = sent_msg.photo[-1].file_id 
@@ -10274,12 +10393,21 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
                         if sent_msg:
                             posted_any = True
                             ch_name = sent_msg.chat.title if sent_msg.chat else "Unknown"
+                            remaining = movie_deadline - asyncio.get_running_loop().time()
+                            if remaining < 1.5:
+                                logger.error(
+                                    "Movie %s posted but post checkpoint missed its time budget",
+                                    title,
+                                )
+                                break
                             await asyncio.wait_for(run_async(save_post_to_db,
                                 movie_id, chat_id, sent_msg.message_id, "FlimfyBoxBot", caption, 
                                 uploaded_file_id or poster_url, "photo", post_keyboard.to_dict(), None, "movies",
                                 movie_name=title, imdb_id=imdb_id, tmdb_id=None, channel_name=ch_name
-                            ), timeout=20)
-                            await asyncio.sleep(1.5)
+                            ), timeout=min(20, remaining - 1.5))
+                            remaining = movie_deadline - asyncio.get_running_loop().time()
+                            if remaining > 0:
+                                await asyncio.sleep(min(1.5, remaining))
                             
                     except Exception as e:
                         logger.error(f"❌ Failed to post in channel {chat_id_str}: {e}")
@@ -10287,16 +10415,16 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
             if posted_any:
                 success_movies += 1
                 movies_posted_list.append(title)
-            await asyncio.sleep(2) # Flood limit se bachne ke liye delay
+            remaining = movie_deadline - asyncio.get_running_loop().time()
+            if remaining > 0:
+                await asyncio.sleep(min(2, remaining)) # Flood limit se bachne ke liye delay
 
         except Exception as exc:
             logger.error(
                 "SuperBatch movie failed (error_class=%s)",
                 type(exc).__name__,
             )
-            for item in movie_files:
-                item_id = item.get("batch_item_id")
-                await _mark_superbatch_item_failed(item_id, exc)
+            await mark_movie_files_failed(exc)
             continue
 
     # 📝 NAYA: List format banana
@@ -10313,6 +10441,11 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
     failed_count = batch_snapshot[8] if batch_snapshot else "unknown"
     unrecoverable_count = batch_snapshot[9] if batch_snapshot else "unknown"
     skipped_count = batch_snapshot[7] if batch_snapshot else "unknown"
+    pending_count = (
+        batch_snapshot[10] + batch_snapshot[11]
+        if batch_snapshot and len(batch_snapshot) > 11 else "unknown"
+    )
+    automatic_retry_count = globals().get("AUTO_BATCH_MAX_ATTEMPTS", 5)
 
     # 🎉 NAYA: Final Message (HTML format me)
     final_text = (
@@ -10321,10 +10454,12 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
         f"💾 <b>Total Files Saved in DB:</b> {saved_count}\n"
         f"⏭️ <b>Skipped:</b> {skipped_count} | "
         f"❌ <b>Failed:</b> {failed_count} | "
+        f"⏳ <b>Queued auto-resume:</b> {pending_count} | "
         f"⚠️ <b>Unrecoverable:</b> {unrecoverable_count}\n"
         f"🚀 <b>Movies/Series Auto-Posted:</b> {len(movies_posted_list)}/{total_movies}\n\n"
         f"<b>📑 Posted List:</b>\n{posted_names}\n\n"
-        f"Temporary failures retry automatically (up to {AUTO_BATCH_MAX_ATTEMPTS} attempts).\n"
+        f"Temporary failures retry automatically (up to {automatic_retry_count} attempts); "
+        "pending files resume automatically.\n"
         f"Inspect: <code>/batchstatus {batch_id}</code>\n"
         f"Optional manual retry: <code>/batchretry {batch_id}</code>"
     )
