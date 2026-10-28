@@ -1644,7 +1644,7 @@ function renderSearchMatches(query, results, { pending = false, committed = fals
         results.length ? `${results.length} matching title${results.length === 1 ? '' : 's'}` :
         committed ? 'No matching titles found.' : 'No titles start with this yet. Keep typing or search all titles.';
     dropdown.innerHTML = `<div class="search-dropdown-label" role="status">${escapeHtml(status)}</div>` + results.slice(0, 8).map((movie, index) => {
-        const prefix = FlimfyUI.normalize(movie.title).startsWith(FlimfyUI.normalize(query));
+        const prefix = FlimfyUI.searchKey(movie.title).startsWith(FlimfyUI.searchKey(query));
         const title = prefix
             ? `<mark>${escapeHtml(movie.title.slice(0, query.length))}</mark>${escapeHtml(movie.title.slice(query.length))}`
             : escapeHtml(movie.title);
@@ -1691,7 +1691,7 @@ async function runTitleSearch(query, committed = false) {
         document.getElementById('searchInput').setAttribute('aria-expanded', 'true');
         return;
     }
-    const key = `${committed ? 'full' : 'prefix'}:${FlimfyUI.normalize(q)}`;
+    const key = `${committed ? 'full' : 'prefix'}:${FlimfyUI.searchKey(q)}`;
     const cached = searchResultCache.get(key);
     const immediate = cached?.results || FlimfyUI.prefixMatches(allMovies, q);
     if (committed) addRecentSearch(q);

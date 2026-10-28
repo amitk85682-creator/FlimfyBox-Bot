@@ -22,6 +22,12 @@ test('prefix suggestions match re and refine without substring noise or duplicat
     assert.equal(UI.prefixMatches(movies, 're', 1).length, 1);
 });
 
+test('prefix suggestions ignore punctuation in movie titles', () => {
+    const spider = [{id:6815,title:'Spider-Man: Brand New Day'}];
+    assert.deepEqual(UI.prefixMatches(spider, 'Spider Man').map(m => m.title), ['Spider-Man: Brand New Day']);
+    assert.deepEqual(UI.prefixMatches(spider, 'Spider Man Brand New Day').map(m => m.title), ['Spider-Man: Brand New Day']);
+});
+
 test('upcoming excludes past, today, malformed dates and already available files in India calendar', () => {
     const now = new Date('2026-10-25T20:00:00Z'); // October 26 in India.
     for (const release_date of ['2026-10-25', '2026-10-26', '2026-02-30', '2026', '']) {

@@ -40,9 +40,10 @@ class Connection:
 
     def fetchall(self):
         query, params = self.queries[-1]
-        if 'WHERE LOWER(title) LIKE %s' in query:
-            prefix = params[0][:-1].replace('\\%', '%').replace('\\_', '_').replace('\\\\', '\\')
-            return sorted((r for r in self.rows if r[1].lower().startswith(prefix)), key=lambda r: r[1].lower())[:params[1]]
+        if len(params or ()) == 2 and "regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s" in query:
+            prefix = params[0][:-1]
+            key = lambda value: ''.join(ch for ch in value.lower() if ch.isalnum())
+            return sorted((r for r in self.rows if key(r[1]).startswith(prefix)), key=lambda r: r[1].lower())[:params[1]]
         if 'WHERE title %% %s' in query:
             return self.fuzzy_rows
         return self.rows
@@ -105,7 +106,7 @@ def test_prefix_search_only_returns_matching_titles_without_external_work(monkey
     assert [m['title'] for m in response.json['results']] == ['Reacher', 'Red Notice']
     assert response.json['results'][0]['is_available'] is True
     assert len(connection.queries) == 1
-    assert 'WHERE LOWER(title) LIKE %s' in connection.queries[0][0]
+    assert "regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s" in connection.queries[0][0]
     assert connection.queries[0][1][-1] == 20
     assert closed == [connection]
 
@@ -116,17 +117,24 @@ def test_autocomplete_long_prefix_is_not_reused_as_full_search_cache(monkeypatch
     assert client.get('/api/search?q=reach&autocomplete=1').json['results'][0]['title'] == 'Reacher'
     assert client.get('/api/search?q=reach').status_code == 200
     assert len(conn.queries) == 2
-    assert 'WHERE LOWER(title) LIKE %s' in conn.queries[0][0]
+    assert "regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s" in conn.queries[0][0]
     assert 'WHERE title ILIKE %s' in conn.queries[1][0]
 
 
-def test_prefix_limit_and_literal_wildcards(monkeypatch):
+def test_prefix_limit_and_punctuation_normalization(monkeypatch):
     monkeypatch.setattr(route_requests, 'get', no_external)
     client, conn, _, _ = make_app(Connection([row(1, '100%_Real'), row(2, '100other')]))
     response = client.get('/api/search', query_string={'q': '100%_', 'autocomplete': 1, 'limit': 999})
-    assert [m['title'] for m in response.json['results']] == ['100%_Real']
-    assert conn.queries[0][1] == ('100\\%\\_%', 20)
+    assert [m['title'] for m in response.json['results']] == ['100%_Real', '100other']
+    assert conn.queries[0][1] == ('100%', 20)
     assert len(client.get('/api/search?q=100&autocomplete=1&limit=1').json['results']) == 1
+
+
+def test_prefix_search_ignores_hyphens_and_colons(monkeypatch):
+    monkeypatch.setattr(route_requests, 'get', no_external)
+    client, _, _, _ = make_app(Connection([row(6815, 'Spider-Man: Brand New Day')]))
+    response = client.get('/api/search?q=Spider%20Man%20Brand%20New&autocomplete=1')
+    assert [m['title'] for m in response.json['results']] == ['Spider-Man: Brand New Day']
 
 
 def test_empty_prefix_match_skips_fuzzy_scan_and_network(monkeypatch):

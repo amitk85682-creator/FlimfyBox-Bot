@@ -1736,6 +1736,8 @@ def register_webapp_routes(
             r"'s\b|’s\b", "", query.lower()
         )
         normalized_query = re.sub(r"[^a-z0-9]", "", normalized_query)
+        if not normalized_query:
+            return jsonify({'status': 'success', 'results': []})
     
         cache_key = f"api-search:v3:{'prefix' if autocomplete else 'full'}:{limit}:{query.casefold()}"
         cached = search_cache.get(cache_key)
@@ -1776,12 +1778,12 @@ def register_webapp_routes(
                     # The matching expression has a text_pattern_ops B-tree
                     # index (migration 13). Escape SQL wildcard characters so
                     # typing '%' or '_' still means that literal title prefix.
-                    prefix = query.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+                    normalized_prefix = normalized_query + '%'
                     cur.execute(select_sql + """
-                        WHERE LOWER(title) LIKE %s
-                        ORDER BY LOWER(title), year DESC NULLS LAST, id DESC
+                        WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s
+                        ORDER BY year DESC NULLS LAST, LOWER(title), id DESC
                         LIMIT %s
-                    """, (prefix, limit))
+                    """, (normalized_prefix, limit))
                 else:
                     cur.execute(select_sql + """
                     WHERE title ILIKE %s

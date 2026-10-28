@@ -1,13 +1,14 @@
 /* Shared, deterministic UI rules. Also loaded before paint to restore appearance. */
 (function (root) {
     const normalize = value => String(value || '').normalize('NFKC').trim().toLocaleLowerCase();
+    const searchKey = value => normalize(value).replace(/[’']s\b/g, '').replace(/[^a-z0-9]/g, '');
     function prefixMatches(movies, query, limit = 20) {
-        const prefix = normalize(query);
+        const prefix = searchKey(query);
         if (!prefix) return [];
         const seen = new Set();
         return movies.filter(movie => {
             const id = String(movie.id);
-            if (seen.has(id) || !normalize(movie.title).startsWith(prefix)) return false;
+            if (seen.has(id) || !searchKey(movie.title).startsWith(prefix)) return false;
             seen.add(id);
             return true;
         }).sort((a, b) => normalize(a.title).localeCompare(normalize(b.title))).slice(0, limit);
@@ -36,7 +37,7 @@
     function identityLabel(movie) {
         return [movie.year || 'Year unknown', contentLabel(movie)].join(' · ');
     }
-    const api = { normalize, prefixMatches, futureRelease, themePreference, resolveTheme, availabilityLabel, contentLabel, identityLabel };
+    const api = { normalize, searchKey, prefixMatches, futureRelease, themePreference, resolveTheme, availabilityLabel, contentLabel, identityLabel };
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     root.FlimfyUI = api;
     if (!root.document) return;

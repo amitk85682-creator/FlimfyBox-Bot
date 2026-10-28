@@ -1378,6 +1378,51 @@ def normalize_episodes(text):
 
 _EVIDENCE_KEYS = ("title", "year", "language", "extra_info", "category")
 
+_CATALOG_RELEASE_SPLIT_RE = re.compile(
+    r"(?ix)(?:[\s._()\[\]-]+)(?:"
+    r"(?:2160|1080|720|576|480|360)p?|4k|uhd|"
+    r"ds4k|pre[\s._-]*dvd|hq[\s._-]*rip|"
+    r"blu[\s._-]*ray|br[\s._-]*rip|bd[\s._-]*rip|remux|"
+    r"web[\s._-]*dl|web[\s._-]*rip|hd[\s._-]*rip|hdtv|"
+    r"dvd[\s._-]*rip|dvd[\s._-]*scr|bd|"
+    r"cam[\s._-]*rip|hd[\s._-]*tc|hd[\s._-]*ts|hd[\s._-]*cam|"
+    r"hall[\s._-]*print|screen[\s._-]*recording|recording|"
+    r"x264|x265|h[\s._-]*264|h[\s._-]*265|hevc|avc|10bit"
+    r")\b.*$"
+)
+_CATALOG_SERIES_SCOPE_RE = re.compile(
+    r"(?ix)(?:[\s._()\[\]-]+)(?:"
+    r"s[\s._-]*0*\d{1,2}(?:[\s._-]*(?:e|ep)\s*0*\d{1,3})?|"
+    r"season[\s._-]*0*\d{1,2}|"
+    r"(?:e|ep|episode)[\s._-]*0*\d{1,3}"
+    r")(?:[\s._()\[\]-].*)?$"
+)
+_CATALOG_TRAILING_JUNK_RE = re.compile(
+    r"(?ix)(?:[\s._()\[\]-]+(?:"
+    r"hindi|english|tamil|telugu|malayalam|kannada|bengali|marathi|"
+    r"punjabi|gujarati|korean|japanese|dual(?:[\s._-]+audio)?|multi(?:[\s._-]+audio)?|"
+    r"dubbed|uncut|extended|unrated|remastered|imax|open[\s._-]+matte|"
+    r"combined|complete|hq|true|south[\s._-]+movie|lionsgateplay|"
+    r"hdmovie4|netflix|jiohotstar|hungama"
+    r"))+$"
+)
+
+
+def clean_catalog_title(value, year="", category=""):
+    """Remove release/file metadata without damaging punctuation in real titles."""
+    title = clean_telegram_text(str(value or "")).strip()
+    title = re.sub(r"\.(?:mkv|mp4|avi|m4v)\s*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"[._]+", " ", title)
+    title = _CATALOG_RELEASE_SPLIT_RE.sub("", title).strip(" ._-:")
+    title = _CATALOG_SERIES_SCOPE_RE.sub("", title).strip(" ._-:")
+    clean_year = re.sub(r"\D", "", str(year or ""))
+    if len(clean_year) == 4:
+        title = re.sub(rf"\s+{re.escape(clean_year)}$", "", title).strip(" ._-:")
+    title = _CATALOG_TRAILING_JUNK_RE.sub("", title).strip(" ._-:")
+    if len(clean_year) == 4:
+        title = re.sub(rf"\s+{re.escape(clean_year)}$", "", title).strip(" ._-:")
+    return re.sub(r"\s+", " ", title).strip()
+
 
 def _valid_evidence_title(value):
     value = str(value or "").strip()
@@ -1408,6 +1453,11 @@ def _normalize_evidence_dict(data):
         normalized[key] = str(value).strip()
     if not normalized["category"]:
         normalized["category"] = "Movies"
+    cleaned_title = clean_catalog_title(
+        normalized["title"], normalized["year"], normalized["category"]
+    )
+    if cleaned_title:
+        normalized["title"] = cleaned_title
     return normalized
 
 
@@ -1505,21 +1555,39 @@ def _title_contains_filename_metadata(title, filename_title, filename_year=""):
 def _reconcile_filename_metadata_title(final_data, filename_evidence):
     """Prefer the local filename parse when a model absorbed release tags as title."""
     filename = _normalize_evidence_dict(filename_evidence)
-    if not _title_contains_filename_metadata(
-        final_data.get("title"), filename.get("title"), filename.get("year")
-    ):
-        return final_data
-
     corrected = dict(final_data)
-    corrected["title"] = filename["title"]
-    corrected["year"] = filename.get("year") or corrected.get("year", "")
-    corrected["extra_info"] = filename.get("extra_info", "")
-    corrected["category"] = filename.get("category") or "Movies"
-    logger.warning(
-        "Replaced filename-metadata title with local parse: '%s' -> '%s'",
-        final_data.get("title"),
-        corrected["title"],
+    original_title = corrected.get("title", "")
+    corrected["title"] = clean_catalog_title(
+        original_title,
+        corrected.get("year") or filename.get("year"),
+        corrected.get("category"),
+    ) or original_title
+    filename_matches = (
+        _valid_evidence_title(filename.get("title"))
+        and re.sub(r"[^a-z0-9]", "", filename.get("title", "").casefold())
+        == re.sub(r"[^a-z0-9]", "", corrected.get("title", "").casefold())
     )
+    absorbed_metadata = _title_contains_filename_metadata(
+        original_title, filename.get("title"), filename.get("year")
+    )
+    if absorbed_metadata or filename_matches:
+        corrected["title"] = filename["title"]
+        corrected["year"] = filename.get("year") or corrected.get("year", "")
+        corrected["extra_info"] = filename.get("extra_info", "") or corrected.get("extra_info", "")
+        filename_category = filename.get("category") or "Movies"
+        if filename_category.casefold() == "movies" and not re.search(
+            r"(?i)\b(?:s\d{1,2}|season\s*\d+|e\d{1,3}|ep(?:isode)?\s*\d+)\b",
+            filename.get("extra_info", ""),
+        ):
+            corrected["category"] = "Movies"
+        elif absorbed_metadata:
+            corrected["category"] = filename_category
+    if corrected.get("title") != original_title:
+        logger.warning(
+            "Replaced filename-metadata title with clean title: '%s' -> '%s'",
+            original_title,
+            corrected["title"],
+        )
     return corrected
 
 
@@ -3460,15 +3528,28 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
         # Keep the common title lookup independent from fuzzy matching. An OR
         # with SIMILARITY forces PostgreSQL to score every row even when the
         # indexed ILIKE branch already has an exact/partial match.
-        exact_sql = """
+        normalized_query = _normalize_search_text(query)
+        if not normalized_query:
+            cur.close()
+            return []
+        normalized_title_sql = "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g')"
+        exact_sql = f"""
             SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
                    0.0 as sim_score
             FROM movies m
-            WHERE m.title ILIKE %s
-            ORDER BY m.title
+            WHERE {normalized_title_sql} LIKE %s
+            ORDER BY
+                CASE
+                    WHEN {normalized_title_sql} = %s THEN 0
+                    WHEN {normalized_title_sql} LIKE %s THEN 1
+                    ELSE 2
+                END,
+                m.year DESC NULLS LAST, LENGTH(m.title), m.title
             LIMIT %s
         """
-        cur.execute(exact_sql, (f'%{query}%', limit))
+        cur.execute(exact_sql, (
+            f'%{normalized_query}%', normalized_query, f'{normalized_query}%', limit
+        ))
         results = cur.fetchall()
 
         if not results:

@@ -27,7 +27,8 @@ def test_fast_search_separates_indexed_lookup_from_similarity_fallback():
         MAIN_SOURCE.index("def get_movie_by_imdb_id", MAIN_SOURCE.index("def _get_movies_fast_sql_nocache"))
     ]
     assert "exact_sql = " in search_source
-    assert "WHERE m.title ILIKE %s" in search_source
+    assert "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g')" in search_source
+    assert "normalized_query = _normalize_search_text(query)" in search_source
     assert "if not results:" in search_source
     assert "fuzzy_sql = " in search_source
     assert "OR SIMILARITY" not in search_source
@@ -91,11 +92,32 @@ def test_fast_typo_lookup_uses_trigram_operator_and_returns_movie_rows():
         def close(self):
             pass
 
-    ns = load_functions('_get_movies_fast_sql_nocache',
+    ns = load_functions('_normalize_search_text', '_get_movies_fast_sql_nocache',
                         get_db_connection=lambda: SimpleNamespace(cursor=Cursor),
                         close_db_connection=lambda _: None)
     assert ns['_get_movies_fast_sql_nocache']('rechar') == [movie]
     assert queries[-1][1] == ('rechar', 'rechar', 5)
+
+
+def test_fast_search_ignores_title_punctuation():
+    movie = (6815, 'Spider-Man: Brand New Day', '', '', 'tt22084616', '', 2026, '')
+    queries = []
+
+    class Cursor:
+        def execute(self, query, params=None):
+            queries.append((query, params))
+
+        def fetchall(self):
+            return [movie + (0.0,)]
+
+        def close(self):
+            pass
+
+    ns = load_functions('_normalize_search_text', '_get_movies_fast_sql_nocache',
+                        get_db_connection=lambda: SimpleNamespace(cursor=Cursor),
+                        close_db_connection=lambda _: None)
+    assert ns['_get_movies_fast_sql_nocache']('Spider Man Brand New Day') == [movie]
+    assert queries[0][1][0] == '%spidermanbrandnewday%'
 
 
 def test_delete_queue_write_does_not_block_other_users_or_fetch_bot_again():

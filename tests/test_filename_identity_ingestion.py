@@ -33,6 +33,15 @@ def _load_functions(names, namespace=None):
         "unicodedata": unicodedata,
         "logger": logging.getLogger("test_filename_identity"),
         "_EVIDENCE_KEYS": ("title", "year", "language", "extra_info", "category"),
+        "_CATALOG_RELEASE_SPLIT_RE": re.compile(
+            r"(?ix)(?:[\s._()\[\]-]+)(?:(?:2160|1080|720|576|480|360)p?|4k|uhd|ds4k|pre[\s._-]*dvd|hq[\s._-]*rip|blu[\s._-]*ray|br[\s._-]*rip|bd[\s._-]*rip|remux|web[\s._-]*dl|web[\s._-]*rip|hd[\s._-]*rip|hdtv|dvd[\s._-]*rip|dvd[\s._-]*scr|bd|cam[\s._-]*rip|hd[\s._-]*tc|hd[\s._-]*ts|hd[\s._-]*cam|hall[\s._-]*print|screen[\s._-]*recording|recording|x264|x265|h[\s._-]*264|h[\s._-]*265|hevc|avc|10bit)\b.*$"
+        ),
+        "_CATALOG_SERIES_SCOPE_RE": re.compile(
+            r"(?ix)(?:[\s._()\[\]-]+)(?:s[\s._-]*0*\d{1,2}(?:[\s._-]*(?:e|ep)\s*0*\d{1,3})?|season[\s._-]*0*\d{1,2}|(?:e|ep|episode)[\s._-]*0*\d{1,3})(?:[\s._()\[\]-].*)?$"
+        ),
+        "_CATALOG_TRAILING_JUNK_RE": re.compile(
+            r"(?ix)(?:[\s._()\[\]-]+(?:hindi|english|tamil|telugu|malayalam|kannada|bengali|marathi|punjabi|gujarati|korean|japanese|dual(?:[\s._-]+audio)?|multi(?:[\s._-]+audio)?|dubbed|uncut|extended|unrated|remastered|imax|open[\s._-]+matte|combined|complete|hq|true|south[\s._-]+movie|lionsgateplay|hdmovie4|netflix|jiohotstar|hungama))+$"
+        ),
     }
     if namespace:
         env.update(namespace)
@@ -42,6 +51,7 @@ def _load_functions(names, namespace=None):
 
 PARSER_FUNCTIONS = {
     "clean_telegram_text",
+    "clean_catalog_title",
     "normalize_episodes",
     "_extract_web_series",
     "fallback_extraction",
@@ -126,6 +136,18 @@ def test_series_ranges_and_legitimate_title_words_are_preserved():
     assert numbered_title["title"] == "2001: A Space Odyssey"
     assert quality_like_title["title"] == "The Hindi Medium"
     assert hd_title["title"] == "The HD Movie"
+
+
+def test_catalog_title_cleaner_removes_release_tags_but_keeps_real_numbers():
+    env = _load_functions(PARSER_FUNCTIONS)
+    clean = env["clean_catalog_title"]
+
+    assert clean("The Amazing Spider Man Blu-ray 1080 x264", 2012, "Movies") == "The Amazing Spider Man"
+    assert clean("Spider-Man: Brand New Day 2026 1080p WEB-DL", 2026, "Movies") == "Spider-Man: Brand New Day"
+    assert clean("Wonder Woman 1984 2020 1080p WEB-DL", 2020, "Movies") == "Wonder Woman 1984"
+    assert clean("Heartbreak High S03 COMBINED 720p WEB-DL", "", "Web Series") == "Heartbreak High"
+    assert clean("KANNAPPA Hindi 2025 1080p WEB-DL", 2025, "Movies") == "KANNAPPA"
+    assert clean("Oppenheimer IMAX 1080p BluRay", 2023, "Movies") == "Oppenheimer"
 
 
 class _MovieCursor:
