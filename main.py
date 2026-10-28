@@ -1492,7 +1492,8 @@ def _title_contains_filename_metadata(title, filename_title, filename_year=""):
         bool(re.search(r"\b(?:360|480|576|720|1080|1440|2160)p\b", suffix)),
         bool(re.search(
             r"\b(?:HDTC|HDTS|HDRip|WEB[- ]?DL|WEBRip|BluRay|BRRip|DVDRip|"
-            r"HDTV|DS4K|PreDVD|DVDScr|HDCAM|CAMRip)\b",
+            r"HDTV|DS4K|PreDVD|DVDScr|HDCAM|CAMRip|Hall[- ]?Print|"
+            r"Screen[- ]?Recording|Recording)\b",
             suffix,
             re.IGNORECASE,
         )),
@@ -1843,13 +1844,16 @@ def _split_quality_label(label):
             resolution = match.group(1).lower()
 
     source = ""
-    for candidate in (
-        "WEB-DL", "BluRay", "Remux", "WEBRip", "HDRip", "HDTV",
-        "HDTC", "HDTS", "PreDVD", "DVDScr", "HDCAM", "CAMRip",
-    ):
-        if candidate.casefold() in lower:
-            source = candidate
-            break
+    if re.search(r"(?:hall[\s._-]*print|screen[\s._-]*recording|\brecording\b)", lower):
+        source = "CAMRip"
+    else:
+        for candidate in (
+            "WEB-DL", "BluRay", "Remux", "WEBRip", "HDRip", "HDTV",
+            "HDTC", "HDTS", "PreDVD", "DVDScr", "HDCAM", "CAMRip",
+        ):
+            if candidate.casefold() in lower:
+                source = candidate
+                break
     return resolution, source
 
 
@@ -1883,8 +1887,9 @@ async def fallback_extraction(caption_text):
         text = re.sub(r'^@\w+\s+', '', text)                # @MRKUPDATES4U6 ko udayega
         text = re.sub(r'^\[[^\]]+\]\s*', '', text)          # [Group] ko udayega
         
-        # 2. Detect if it's a web series (contains season/episode indicators)
-        season_pattern = re.compile(r'\b(S\d{1,2}|Season\s*\d+|S\d{1,2}E\d{1,3}|\[?E\d{1,3}\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3}\]?|EP\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3})?|Episode\s*\d+|Part\s*\d+|P\d+)\b', re.IGNORECASE)
+        # A movie split into Part 1/Part 2 is still a movie. Only real
+        # season/episode evidence may switch the catalogue type to series.
+        season_pattern = re.compile(r'\b(S\d{1,2}(?:E\d{1,3})?|Season\s*\d+|\[?E\d{1,3}\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3}\]?|EP\s*\d{1,3}(?:\s*(?:[-~_]|to)\s*(?:e|ep)?\d{1,3})?|Episode\s*\d+)\b', re.IGNORECASE)
         season_match = season_pattern.search(text)
         if season_match:
             # Use existing web series logic (kept from original)
@@ -1909,7 +1914,8 @@ async def fallback_extraction(caption_text):
             # Look for first quality/resolution tag
             quality_patterns = [
                 r'\b\d{3,4}p\b',                     # 480p, 720p, 1080p
-                r'\b(HDRip|WEB-DL|BluRay|DVDRip|BRRip|HDTV|WEBRip|DS4K)\b',
+                r'\b(HDRip|WEB-DL|BluRay|DVDRip|BRRip|HDTV|WEBRip|DS4K|'
+                r'HDTC|HDTS|HDCAM|CAMRip|Hall[- ]?Print|Recording)\b',
                 r'\.(mkv|mp4|avi|m4v)$'              # file extension at end
             ]
             for pat in quality_patterns:
@@ -1979,10 +1985,16 @@ async def fallback_extraction(caption_text):
         language = ', '.join(dict.fromkeys(languages)) if languages else ""
 
         # 5. Extra info (for movies, we might capture edition like UNCUT, EXTENDED)
-        extra_info = ""
+        extra_parts = []
         edition_match = re.search(r'\b(UNCUT|EXTENDED|DIRECTOR\'?S?\s*CUT|THEATRICAL|UNRATED|REMASTERED)\b', text, re.IGNORECASE)
         if edition_match:
-            extra_info = edition_match.group(0).upper()
+            extra_parts.append(edition_match.group(0).upper())
+        part_match = re.search(
+            r'(?i)\b(?:PART|P)[\s._-]*0*(\d{1,3})\b', text
+        )
+        if part_match:
+            extra_parts.append(f"PART{int(part_match.group(1)):03d}")
+        extra_info = " ".join(extra_parts)
 
         # 6. Category
         category = "Movies"
@@ -8546,7 +8558,8 @@ def get_storage_channels():
 _SOURCE_LEVELS = {
     # Level 1 — Camera Prints (सबसे घटिया)
     1: ['cam', 'camrip', 'hdcam', 'hd-cam', 'hqcam', 'hq-cam',
-        'telecine', 'tc', 'telesync', 'ts'],
+        'telecine', 'tc', 'telesync', 'ts', 'hallprint', 'hall-print',
+        'hall print', 'screen recording', 'screen-recording', 'recording'],
     # Level 2 — Theater Prints with Better Audio
     2: ['hdts', 'hd-ts', 'predvd', 'pre-dvd', 'dvdscr', 'dvdscreener',
         'scr', 'screener', 'line', 'line audio', 'hdtc', 'hd-tc', 'hq-hdtc'],
@@ -8577,14 +8590,15 @@ def get_source_level(text):
         return 0
     text_lower = text.lower()
 
-    # Longer keywords pehle check karo (e.g., 'web-dl' before 'web')
-    # Sorted by length descending for greedy matching
+    matches = []
     for kw in sorted(_KEYWORD_TO_LEVEL.keys(), key=len, reverse=True):
-        # Word boundary check using regex for accuracy
         if re.search(r'(?:^|[\s._\-\[\(])' + re.escape(kw) + r'(?:$|[\s._\-\]\)])', text_lower):
-            return _KEYWORD_TO_LEVEL[kw]
+            matches.append(_KEYWORD_TO_LEVEL[kw])
 
-    return 0  # Unknown source
+    # Contradictory legacy labels such as "CamRip HDRip" must remain dirty.
+    # Choosing the lowest detected level prevents a theatre print from being
+    # preserved merely because a better-source word also appears in its label.
+    return min(matches) if matches else 0
 
 
 def get_resolution(text):
@@ -8628,6 +8642,57 @@ def get_file_content_scope(extra_info):
     return "movie"
 
 
+def _content_scope_is_replaced(new_extra_info, old_extra_info):
+    """Whether the new digital file fully covers the older content unit."""
+    new_scope = get_file_content_scope(new_extra_info)
+    old_scope = get_file_content_scope(old_extra_info)
+    if new_scope == old_scope:
+        return True
+
+    # A complete movie supersedes split theatre-print parts.
+    if new_scope == "movie" and old_scope.startswith("part:"):
+        return True
+
+    new_season = re.fullmatch(r"series:s(\d{2}):season-pack", new_scope)
+    old_episode = re.fullmatch(
+        r"series:s(\d{2}):e(\d{3})-(\d{3})", old_scope
+    )
+    if new_season and old_episode:
+        return new_season.group(1) == old_episode.group(1)
+
+    new_episode = re.fullmatch(
+        r"series:s(\d{2}):e(\d{3})-(\d{3})", new_scope
+    )
+    if new_episode and old_episode and new_episode.group(1) == old_episode.group(1):
+        return (
+            int(new_episode.group(2)) <= int(old_episode.group(2))
+            and int(new_episode.group(3)) >= int(old_episode.group(3))
+        )
+    return False
+
+
+def _language_set(value):
+    return {
+        item.strip().casefold()
+        for item in re.split(r"\s*(?:,|\+|\||/)\s*", str(value or ""))
+        if item.strip()
+    }
+
+
+def _legacy_source_is_replaced(old_label, old_languages, new_label, new_languages):
+    """Safely prune old resolution-only rows when an explicit digital equivalent exists."""
+    if get_source_level(old_label) != 0:
+        return False
+    old_resolution = get_resolution(old_label)
+    if old_resolution == "unknown" or old_resolution != get_resolution(new_label):
+        return False
+    old_langs = _language_set(old_languages)
+    new_langs = _language_set(new_languages)
+    if not old_langs:
+        return not new_langs
+    return old_langs.issubset(new_langs)
+
+
 def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
     """
     Theatre-print shield, scoped to the exact movie/episode.
@@ -8640,8 +8705,6 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
     if new_level == 0 or new_level >= 3:
         return False, None
 
-    new_scope = get_file_content_scope(new_extra_info)
-
     cur = None
     try:
         cur = conn.cursor()
@@ -8652,7 +8715,7 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
         existing_files = cur.fetchall()
         for row in existing_files:
             old_label, old_extra_info = row
-            if get_file_content_scope(old_extra_info) != new_scope:
+            if not _content_scope_is_replaced(old_extra_info, new_extra_info):
                 continue
             old_level = get_source_level(old_label)
 
@@ -8662,7 +8725,8 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
                 logger.info(
                     f"🛡️ Anti-Downgrade BLOCKED: movie_id={movie_id} | "
                     f"Tried='{new_quality_label}' (L{new_level}) | "
-                    f"DB has='{old_label}' (L{old_level}) | scope={new_scope}"
+                    f"DB has='{old_label}' (L{old_level}) | "
+                    f"scope={get_file_content_scope(new_extra_info)}"
                 )
                 return True, old_label
 
@@ -8678,7 +8742,7 @@ def is_downgrade(movie_id, new_quality_label, new_extra_info, conn):
             cur.close()
 
 
-def auto_upgrade_delete(movie_id, new_quality_label, new_extra_info, conn):
+def auto_upgrade_delete(movie_id, new_quality_label, new_extra_info, conn, new_languages=""):
     """
     Digital-release cleanup, scoped to the exact movie/episode.
     When HDRip/WEBRip/WEB-DL/BluRay arrives, remove only CAM/HDTC/HDTS-style
@@ -8695,22 +8759,27 @@ def auto_upgrade_delete(movie_id, new_quality_label, new_extra_info, conn):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id, quality, extra_info FROM movie_files WHERE movie_id = %s",
-            (movie_id,)
+            "SELECT id, quality, extra_info, languages "
+            "FROM movie_files WHERE movie_id = %s",
+            (movie_id,),
         )
         existing_files = cur.fetchall()
 
         ids_to_delete = []
         labels_to_delete = []
         for row in existing_files:
-            file_row_id, old_label, old_extra_info = row
-            if get_file_content_scope(old_extra_info) != new_scope:
+            file_row_id, old_label, old_extra_info, old_languages = row
+            if not _content_scope_is_replaced(new_extra_info, old_extra_info):
                 continue
             old_level = get_source_level(old_label)
 
             # Theatre prints are disposable only after a digital release for
-            # this exact movie/season/episode has been saved.
-            if old_level in (1, 2):
+            # the same/covered movie, part, season or episode scope. Legacy
+            # resolution-only rows are removed only with a same-resolution,
+            # language-compatible explicit digital replacement.
+            if old_level in (1, 2) or _legacy_source_is_replaced(
+                old_label, old_languages, new_quality_label, new_languages
+            ):
                 ids_to_delete.append(file_row_id)
                 labels_to_delete.append(old_label)
 
@@ -8901,7 +8970,12 @@ def generate_quality_label(file_name, file_size_str="", ai_language=""):
     elif "576p" in name_lower:  quality = "576p"
     elif "480p" in name_lower:  quality = "480p"
     elif "360p" in name_lower:  quality = "360p"
-    elif "cam" in name_lower or "rip" in name_lower: quality = "CamRip"
+    elif re.search(
+        r"(?:^|[\s._\-\[(])(?:cam|hdcam|hqcam|hall[\s._-]*print|"
+        r"screen[\s._-]*recording|recording)(?:$|[\s._\-\])])",
+        name_lower,
+    ):
+        quality = "CamRip"
 
     # 2. Detect Source (ALL levels — Level 4 to Level 1, longest keywords first)
     source_tag = ""
@@ -8924,6 +8998,9 @@ def generate_quality_label(file_name, file_size_str="", ai_language=""):
     # Level 1 — Camera Prints (सबसे घटिया)
     elif "hdcam" in name_lower or "hd-cam" in name_lower: source_tag = " HDCAM"
     elif "hqcam" in name_lower or "hq-cam" in name_lower: source_tag = " HDCAM"
+    elif re.search(r"hall[\s._-]*print", name_lower):       source_tag = " CAMRip"
+    elif re.search(r"screen[\s._-]*recording", name_lower): source_tag = " CAMRip"
+    elif re.search(r"(?:^|[\s._-])recording(?:$|[\s._-])", name_lower): source_tag = " CAMRip"
     elif "camrip" in name_lower:                           source_tag = " CAMRip"
     elif "telecine" in name_lower or "tc" in name_lower.split(): source_tag = " CAMRip"
     elif "telesync" in name_lower or "ts" in name_lower.split(): source_tag = " CAMRip"
@@ -10198,7 +10275,9 @@ def _commit_batch_file(movie_id, label, file_size, url, backups, language, extra
         deleted = 0
         try:
             _set_batch_db_limits(conn)
-            deleted, _labels = auto_upgrade_delete(movie_id, label, extra, conn)
+            deleted, _labels = auto_upgrade_delete(
+                movie_id, label, extra, conn, new_languages=language
+            )
         except Exception as exc:
             logger.warning("Batch quality cleanup skipped (%s)", type(exc).__name__)
         return movie_file_id, deleted
@@ -13394,7 +13473,10 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 🔄 Auto-Upgrade: पुरानी घटिया prints delete करो
             upgrade_msg = ""
             try:
-                deleted, deleted_labels = auto_upgrade_delete(BATCH_18_SESSION['movie_id'], label, f_extra, conn)
+                deleted, deleted_labels = auto_upgrade_delete(
+                    BATCH_18_SESSION['movie_id'], label, f_extra, conn,
+                    new_languages=f_lang,
+                )
                 if deleted > 0:
                     BATCH_18_SESSION['file_count'] = max(0, BATCH_18_SESSION['file_count'] - deleted)
                     upgrade_msg = f"\n🔄 Upgraded! {deleted} पुरानी print(s) auto-deleted"
