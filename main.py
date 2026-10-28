@@ -72,6 +72,9 @@ GEMINI_RECONCILIATION_TIMEOUT_SECONDS = 25
 SUPERBATCH_IDENTITY_TIMEOUT_SECONDS = 35
 SUPERBATCH_MOVIE_TIMEOUT_SECONDS = 100
 SUPERBATCH_FILE_TIMEOUT_SECONDS = 180
+AUTO_BATCH_MAX_ATTEMPTS = 5
+AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS = 2
+BATCH_RECOVERY_ITEM_TIMEOUT_SECONDS = 180
 
 # ==================== 2. AB IMDB CHECK KAREIN (AB YE SAFE HAI) ====================
 try:
@@ -2976,8 +2979,8 @@ def _batch_items_fetch(batch_id, unfinished_only=False):
                 FROM ingestion_batch_items WHERE batch_id = %s
             """
             if unfinished_only:
-                # Failed items are terminal until the admin explicitly runs
-                # /batchretry. Startup recovery must never retry them by itself.
+                # Background recovery requeues bounded safe failures first;
+                # this query returns the active work it can now claim.
                 query += " AND state IN ('pending', 'processing')"
             cur.execute(query + " ORDER BY update_id, id", (batch_id,))
             return cur.fetchall()
@@ -3019,7 +3022,9 @@ def _batch_job_claim(batch_id):
                     lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
-                  AND status IN ('collecting', 'processing', 'failed')
+                  AND status IN (
+                      'collecting', 'processing', 'failed', 'completed_with_errors'
+                  )
                   AND (lease_until IS NULL OR lease_until < CURRENT_TIMESTAMP
                        OR lease_owner = %s)
                 RETURNING id
@@ -3189,6 +3194,55 @@ def _batch_item_retry_failed(batch_id, admin_id):
         close_db_connection(conn)
 
 
+def _batch_items_retry_due(batch_id):
+    """Requeue bounded failures that can safely be retried without an admin."""
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database unavailable while scheduling batch retries")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ingestion_batch_items
+                SET state = 'pending', error_class = NULL, error_detail = NULL,
+                    retry_after_at = NULL, lease_owner = NULL, lease_until = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE batch_id = %s
+                  AND state = 'failed'
+                  AND attempts < %s
+                  AND storage_pending_chat IS NULL
+                  AND stage IN (
+                      'accepted', 'identity_reconciliation', 'metadata_lookup',
+                      'movie_db_committed', 'storage_copying', 'storage_copied',
+                      'file_db_committed'
+                  )
+                  AND (retry_after_at IS NULL OR retry_after_at <= CURRENT_TIMESTAMP)
+                  AND COALESCE(error_class, '') NOT IN (
+                      'UnsupportedMedia', 'QualityDowngrade', 'NoStorageChannels',
+                      'StorageCopyOutcomeUnknown', 'PartialStorageCopyOutcomeUnknown'
+                  )
+                  AND (error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
+                       OR attempts < %s)
+                """,
+                (batch_id, AUTO_BATCH_MAX_ATTEMPTS,
+                 AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS),
+            )
+            retried = cur.rowcount
+        conn.commit()
+        return retried
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _batch_retry_after(attempts):
+    """Exponential backoff for retries, capped at fifteen minutes."""
+    delay_seconds = min(30 * (2 ** max(0, int(attempts or 1) - 1)), 900)
+    return datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+
+
 def _batch_recovery_jobs_fetch(limit=20):
     conn = get_db_connection()
     if not conn:
@@ -3201,7 +3255,9 @@ def _batch_recovery_jobs_fetch(limit=20):
                      b.start_update_id, b.closing_update_id,
                      b.movie_id, b.movie_metadata
                 FROM ingestion_batches AS b
-                WHERE b.status IN ('collecting', 'processing', 'failed')
+                WHERE b.status IN (
+                    'collecting', 'processing', 'failed', 'completed_with_errors'
+                )
                 AND (b.lease_until IS NULL OR b.lease_until < CURRENT_TIMESTAMP)
                 AND EXISTS (
                     SELECT 1
@@ -3212,12 +3268,30 @@ def _batch_recovery_jobs_fetch(limit=20):
                             OR (i.state = 'processing'
                                 AND (i.lease_until IS NULL
                                      OR i.lease_until < CURRENT_TIMESTAMP))
+                            OR (i.state = 'failed'
+                                AND i.attempts < %s
+                                AND i.storage_pending_chat IS NULL
+                                AND i.stage IN (
+                                    'accepted', 'identity_reconciliation', 'metadata_lookup',
+                                    'movie_db_committed', 'storage_copying', 'storage_copied',
+                                    'file_db_committed'
+                                )
+                                AND (i.retry_after_at IS NULL
+                                     OR i.retry_after_at <= CURRENT_TIMESTAMP)
+                                AND COALESCE(i.error_class, '') NOT IN (
+                                    'UnsupportedMedia', 'QualityDowngrade',
+                                    'NoStorageChannels', 'StorageCopyOutcomeUnknown',
+                                    'PartialStorageCopyOutcomeUnknown'
+                                )
+                                AND (i.error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
+                                     OR i.attempts < %s))
                         )
                     )
                 ORDER BY b.updated_at
                 LIMIT %s
                 """,
-                (max(1, min(int(limit), 100)),),
+                (AUTO_BATCH_MAX_ATTEMPTS, AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS,
+                 max(1, min(int(limit), 100))),
             )
             return cur.fetchall()
     finally:
@@ -9789,6 +9863,7 @@ async def superbatch_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await batch_upload_coordinator.wait_for_prior_uploads(admin_id)
     batch_id = session.get("batch_id")
+    _RECOVERED_BATCH_IDS.discard(batch_id)
     closing_update_id = session.get("closing_update_id")
     succeeded = False
     try:
@@ -10249,8 +10324,9 @@ async def _superbatch_done_impl(update: Update, context: ContextTypes.DEFAULT_TY
         f"⚠️ <b>Unrecoverable:</b> {unrecoverable_count}\n"
         f"🚀 <b>Movies/Series Auto-Posted:</b> {len(movies_posted_list)}/{total_movies}\n\n"
         f"<b>📑 Posted List:</b>\n{posted_names}\n\n"
+        f"Temporary failures retry automatically (up to {AUTO_BATCH_MAX_ATTEMPTS} attempts).\n"
         f"Inspect: <code>/batchstatus {batch_id}</code>\n"
-        f"Retry failed files: <code>/batchretry {batch_id}</code>"
+        f"Optional manual retry: <code>/batchretry {batch_id}</code>"
     )
 
     if not await _safe_batch_status_edit(status_msg, final_text, parse_mode='HTML'):
@@ -11006,7 +11082,19 @@ def _movie_batch_metadata_fetch(movie_id):
 
 async def _resume_batch_item(bot, job, row):
     item_id = row[0]
-    if not await run_async(_batch_item_claim, item_id):
+    try:
+        claimed = await asyncio.wait_for(
+            run_async(_batch_item_claim, item_id), timeout=15
+        )
+    except Exception as exc:
+        # A claim failure belongs to this file. Let the caller continue to the
+        # next item; the persisted pending/expired lease is safe to retry later.
+        logger.error(
+            "Batch item claim failed (batch_id=%s, item_id=%s, error_class=%s)",
+            row[1], item_id, type(exc).__name__,
+        )
+        return False
+    if not claimed:
         return False
 
     batch_id, admin_id, kind = job[0], job[1], job[3]
@@ -11088,7 +11176,19 @@ async def _resume_batch_item(bot, job, row):
             stage="movie_db_committed",
             movie_id=movie_id,
         )
-        await _pm_save_file(message, type("RecoveredContext", (), {"bot": bot})(), item_id)
+        saved_label = await _pm_save_file(
+            message, type("RecoveredContext", (), {"bot": bot})(), item_id
+        )
+        if not saved_label:
+            current = await run_async(_batch_item_fetch, item_id)
+            if (
+                current and current[12] == "failed"
+                and current[18] is None and current[19] is None
+            ):
+                await run_async(
+                    _batch_item_update, item_id,
+                    retry_after_at=_batch_retry_after(current[14]),
+                )
         return True
     except Exception as exc:
         logger.error(
@@ -11097,14 +11197,23 @@ async def _resume_batch_item(bot, job, row):
             item_id,
             type(exc).__name__,
         )
-        await run_async(
-            _batch_item_update,
-            item_id,
-            state="failed",
-            stage=row[13] or "identity_reconciliation",
-            error_class=type(exc).__name__,
-            error_detail=str(exc)[:500] if type(exc).__name__ == "AmbiguousMovieIdentity" else "Persisted batch item could not be resumed",
-        )
+        retry_after = _batch_retry_after((row[14] or 0) + 1)
+        try:
+            await run_async(
+                _batch_item_update,
+                item_id,
+                state="failed",
+                stage=row[13] or "identity_reconciliation",
+                error_class=type(exc).__name__,
+                error_detail=str(exc)[:500] if type(exc).__name__ == "AmbiguousMovieIdentity" else "Persisted batch item could not be resumed",
+                retry_after_at=retry_after,
+            )
+        except Exception as checkpoint_exc:
+            logger.error(
+                "Batch item failure checkpoint unavailable "
+                "(batch_id=%s, item_id=%s, error_class=%s)",
+                batch_id, item_id, type(checkpoint_exc).__name__,
+            )
         return False
     finally:
         BATCH_SESSION.update({
@@ -11142,17 +11251,49 @@ async def _recover_interrupted_batches(application):
         try:
             if not await run_async(_batch_job_claim, batch_id):
                 continue
+            await run_async(_batch_items_retry_due, batch_id)
             rows = await run_async(_batch_items_fetch, batch_id, True)
             deferred_item = False
             for row in rows:
                 if row[12] in ("pending", "processing"):
-                    resumed = await _resume_batch_item(application.bot, job, row)
+                    try:
+                        resumed = await asyncio.wait_for(
+                            _resume_batch_item(application.bot, job, row),
+                            timeout=BATCH_RECOVERY_ITEM_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        logger.error(
+                            "Batch recovery item timed out "
+                            "(batch_id=%s, item_id=%s)", batch_id, row[0],
+                        )
+                        await _mark_superbatch_item_failed(row[0], exc)
+                        resumed = False
+                    except Exception as exc:
+                        logger.error(
+                            "Batch recovery item failed "
+                            "(batch_id=%s, item_id=%s, error_class=%s)",
+                            batch_id, row[0], type(exc).__name__,
+                        )
+                        await _mark_superbatch_item_failed(row[0], exc)
+                        resumed = False
                     if row[12] == "processing" and not resumed:
                         current = await run_async(_batch_item_fetch, row[0])
                         if current and current[12] == "processing":
                             deferred_item = True
 
             all_rows = await run_async(_batch_items_fetch, batch_id, False)
+            if kind == "super" and job[6] is not None:
+                # /superdone was already received before the interruption.
+                # Resume from persisted per-file checkpoints and close the job
+                # automatically instead of restoring a session that needs the
+                # admin to send /superdone again.
+                await run_async(_batch_job_finish, batch_id, admin_id)
+                logger.info(
+                    "Automatically resumed finalized SuperBatch %s (%s files)",
+                    batch_id, len(all_rows),
+                )
+                continue
+
             if kind == "super":
                 SUPER_BATCH_SESSION.update({
                     "active": True,
@@ -11306,7 +11447,10 @@ async def batch_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Processing: {snapshot[11]}"
     )
     if snapshot[8]:
-        status_text += f"\n\nRetry failed files: /batchretry {snapshot[0]}"
+        status_text += (
+            "\n\nTemporary failures retry automatically. "
+            f"Optional manual retry: /batchretry {snapshot[0]}"
+        )
     await _safe_batch_reply(update.effective_message, status_text)
 
     from catalog_identity import pending_identity_reviews
