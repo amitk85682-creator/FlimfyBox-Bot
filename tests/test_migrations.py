@@ -141,6 +141,22 @@ def test_migration_12_defines_durable_batch_and_item_recovery_schema():
     assert "idx_ingestion_batch_items_recovery" in joined
 
 
+def test_migration_15_creates_first_party_movie_reviews():
+    migrations = dict(db_migrations.MIGRATIONS)
+    assert 15 in migrations
+
+    connection = MigrationConnection()
+    migrations[15](connection)
+    statements = [query for query, _ in connection.queries]
+    joined = "\n".join(statements)
+
+    assert "CREATE TABLE IF NOT EXISTS movie_reviews" in joined
+    assert "REFERENCES miniapp_users(user_id) ON DELETE CASCADE" in joined
+    assert "UNIQUE (movie_id, user_id)" in joined
+    assert "char_length(btrim(review)) BETWEEN 20 AND 800" in joined
+    assert "idx_movie_reviews_movie_updated" in joined
+
+
 def test_already_applied_migrations_are_skipped(monkeypatch):
     connection = MigrationConnection()
     called = []

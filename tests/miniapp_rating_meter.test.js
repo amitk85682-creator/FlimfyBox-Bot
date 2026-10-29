@@ -9,6 +9,17 @@ test('Flimfy Verdict is the one-decimal mean of available IMDb and TMDb scores',
     );
 });
 
+test('Flimfy community stars are scaled to ten and join the two external sources', () => {
+    assert.deepEqual(meter.summarize({
+        imdb: { score: 7.1, votes: 84000 },
+        tmdb: { score: 7.4, votes: 2100 },
+        flimfy: { score: 4.5, votes: 30 }
+    }), { score: 7.8, sourceCount: 3, providers: ['IMDb', 'TMDb', 'FlimfyBox'] });
+    assert.equal(meter.audienceRead({
+        imdb: { score: 7.1 }, tmdb: { score: 7.4 }, flimfy: { score: 4.5, votes: 30 }
+    }), 'A split verdict · sources span 1.9 points.');
+});
+
 test('Flimfy Verdict gives a memorable watch cue without hiding its numeric score', () => {
     assert.deepEqual(meter.verdictForSummary(meter.summarize({
         imdb: { score: 7.1 }, tmdb: { score: 7.4 }
@@ -24,7 +35,7 @@ test('source comparison rewards real agreement and calls out real disagreement',
     assert.equal(meter.audienceRead({ imdb: { score: 6.1 }, tmdb: { score: 8.0 } }),
         'A split verdict · scores differ by 1.9.');
     assert.equal(meter.audienceRead({ imdb: { score: 7.1 }, tmdb: { score: null } }),
-        'TMDb score is unavailable · showing IMDb alone.');
+        'IMDb is the only rating available so far.');
 });
 
 test('a single available provider stays attributable and is not treated as a blend', () => {
@@ -59,16 +70,10 @@ test('TMDb-only result routing never confuses a TMDb ID with a local catalogue I
     );
 });
 
-test('provider review links are restricted to TMDb review pages', () => {
-    assert.equal(meter.isTrustedReviewUrl('https://www.themoviedb.org/review/abc'), true);
-    assert.equal(meter.isTrustedReviewUrl('javascript:alert(1)'), false);
-    assert.equal(meter.isTrustedReviewUrl('https://evil.example/review/abc'), false);
-});
-
-test('an unknown TMDb review count is not presented as zero reviews', () => {
+test('Flimfy community review text stays plain text and never receives a TMDb attribution', () => {
     const previousDocument = global.document;
     class Element {
-        constructor(tag) { this.tag = tag; this.className = ''; this.textContent = ''; this.children = []; }
+        constructor(tag) { this.tag = tag; this.className = ''; this.textContent = ''; this.children = []; this.style = {}; }
         append(...children) { this.children.push(...children); }
         replaceChildren(...children) { this.children = children; }
         setAttribute() {}
@@ -83,8 +88,48 @@ test('an unknown TMDb review count is not presented as zero reviews', () => {
     global.document = { createElement: tag => new Element(tag) };
     try {
         const reviews = new Element('section');
-        meter.render(null, reviews, { reviews: [], review_count: null });
-        assert.equal(reviews.querySelector('.review-count').textContent, 'TMDb');
+        meter.renderReviews(reviews, {
+            status: 'success',
+            reviews: [{ author: 'Mahi', content: '<img src=x onerror=alert(1)>', rating: 5 }],
+            review_count: 1,
+            can_review: false
+        });
+        assert.equal(reviews.querySelector('.section-kicker').textContent, 'FROM THE FLIMFYBOX COMMUNITY');
+        assert.equal(reviews.querySelector('.review-count').textContent, '1 review');
+        assert.equal(reviews.querySelector('.flimfy-review-copy').textContent, '<img src=x onerror=alert(1)>');
+        const hasLink = item => item.tag === 'a' || item.children.some(hasLink);
+        assert.equal(reviews.children.some(hasLink), false);
+    } finally {
+        global.document = previousDocument;
+    }
+});
+
+test('FlimfyBox source explains an empty community score without implying an outage', () => {
+    const previousDocument = global.document;
+    class Element {
+        constructor(tag) { this.tag = tag; this.className = ''; this.textContent = ''; this.children = []; this.style = {}; }
+        append(...children) { this.children.push(...children); }
+        replaceChildren(...children) { this.children = children; }
+        setAttribute() {}
+        querySelector(selector) {
+            const className = selector.startsWith('.') ? selector.slice(1) : '';
+            const visit = item => item.className.split(/\s+/).includes(className)
+                ? item
+                : item.children.map(visit).find(Boolean);
+            return this.children.map(visit).find(Boolean) || null;
+        }
+    }
+    global.document = { createElement: tag => new Element(tag) };
+    try {
+        const meterContainer = new Element('section');
+        meter.render(meterContainer, null, {
+            imdb: { score: 7.1, votes: 84000 },
+            tmdb: { score: 7.4, votes: 2100 },
+            flimfy: { score: null, votes: 0 }
+        });
+        const flimfyCard = meterContainer.children[4].children.find(card => card.className.includes('flimfy'));
+        const votes = flimfyCard.children.find(child => child.className === 'verdict-source-votes');
+        assert.equal(votes.textContent, 'No member ratings yet');
     } finally {
         global.document = previousDocument;
     }

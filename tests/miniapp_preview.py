@@ -40,6 +40,8 @@ def public_query_keys(path):
         return {'type'}
     if re.fullmatch(r'movie/[1-9][0-9]*(?:/rating)?', path):
         return set()
+    if re.fullmatch(r'movie/[1-9][0-9]*/reviews', path):
+        return set()
     if re.fullmatch(r'movie/[1-9][0-9]*/rating-sources', path):
         return set()
     if re.fullmatch(r'tmdb/(?:movie|tv)/[1-9][0-9]*/rating-sources', path):
@@ -149,6 +151,8 @@ def create_preview(catalogue=None):
         if path == 'upcoming':
             upcoming = [m for m in movies if release_day(m) and release_day(m) > today and not m.get('is_available')]
             return jsonify(status='success', movies=sorted(upcoming, key=release_day))
+        if re.fullmatch(r'movie/[1-9][0-9]*/reviews', path):
+            return jsonify(status='unavailable', message='Community reviews are not included in this offline snapshot')
         if path == 'search':
             query = request.args.get('q', '').strip().casefold()
             autocomplete = request.args.get('autocomplete') == '1'

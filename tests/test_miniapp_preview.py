@@ -21,7 +21,9 @@ def test_default_proxy_forwards_only_public_query_fields(monkeypatch):
 
 
 @pytest.mark.parametrize('path', [
+    '/api/movie/12/rating',
     '/api/movie/12/rating-sources',
+    '/api/movie/12/reviews',
     '/api/tmdb/movie/77/rating-sources',
     '/api/tmdb/tv/77/rating-sources',
 ])
@@ -81,6 +83,7 @@ def test_offline_snapshot_preserves_metadata_and_filters_real_dates():
     assert {m['id'] for m in client.get('/api/home/new-releases').json['movies']} == {1, 7}
     assert client.post('/api/request', json={'title': 'X'}).status_code == 403
     assert client.get('/api/movie/1/rating').status_code == 404
+    assert client.get('/api/movie/1/reviews').json['status'] == 'unavailable'
 
 
 def test_snapshot_prefix_search_and_real_genre_membership():

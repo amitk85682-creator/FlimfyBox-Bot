@@ -1,4 +1,4 @@
-"""Public provider ratings/reviews used by the mini-app movie detail page."""
+"""IMDb and TMDb ratings used by the mini-app movie detail page."""
 
 import pytest
 
@@ -28,21 +28,7 @@ def tmdb_detail(identifier, *, score=7.6, votes=2100, imdb_id='tt1234567'):
     }
 
 
-def tmdb_reviews(*, url='https://www.themoviedb.org/review/review-1'):
-    return {
-        'page': 1,
-        'total_results': 1,
-        'results': [{
-            'author': 'A Reviewer',
-            'content': '<b>Great film</b>',
-            'created_at': '2026-01-02T03:04:05.000Z',
-            'url': url,
-            'author_details': {'rating': 8.0},
-        }],
-    }
-
-
-def test_local_movie_scores_and_reviews_are_cached(webapp_factory, monkeypatch):
+def test_local_movie_scores_are_cached_without_fetching_tmdb_reviews(webapp_factory, monkeypatch):
     monkeypatch.setenv('OMDB_API_KEY', 'synthetic-omdb-key')
     connection = FakeConnection(fetchone_result=('tt1234567', 42, 'Movie', 'Movie'))
     app, _, _ = webapp_factory(connection=connection)
@@ -54,8 +40,6 @@ def test_local_movie_scores_and_reviews_are_cached(webapp_factory, monkeypatch):
             return ProviderResponse({
                 'Response': 'True', 'imdbRating': '8.2', 'imdbVotes': '125,500'
             })
-        if '/movie/42/reviews' in url:
-            return ProviderResponse(tmdb_reviews())
         if '/movie/42' in url:
             return ProviderResponse(tmdb_detail(42))
         raise AssertionError(f'unexpected provider request: {url}')
@@ -69,11 +53,10 @@ def test_local_movie_scores_and_reviews_are_cached(webapp_factory, monkeypatch):
     assert first.status_code == 200
     assert first.json['imdb'] == {'score': 8.2, 'votes': '125,500'}
     assert first.json['tmdb'] == {'score': 7.6, 'votes': 2100}
-    assert first.json['review_count'] == 1
-    assert first.json['reviews'][0]['content'] == 'Great film'
-    assert first.json['reviews'][0]['url'] == 'https://www.themoviedb.org/review/review-1'
+    assert 'reviews' not in first.json
     assert second.json == first.json
-    assert len(calls) == 3
+    assert len(calls) == 2
+    assert not any('/reviews' in url for url, _kwargs in calls)
 
 
 def test_tmdb_only_detail_uses_explicit_media_type_and_external_imdb_id(webapp_factory, monkeypatch):
@@ -87,8 +70,6 @@ def test_tmdb_only_detail_uses_explicit_media_type_and_external_imdb_id(webapp_f
             return ProviderResponse({
                 'Response': 'True', 'imdbRating': '7.1', 'imdbVotes': '4,321'
             })
-        if '/tv/77/reviews' in url:
-            return ProviderResponse({'results': [], 'total_results': 0})
         if '/tv/77' in url:
             return ProviderResponse(tmdb_detail(77, score=7.4, votes=990, imdb_id='tt7654321'))
         raise AssertionError(f'unexpected provider request: {url}')
@@ -100,7 +81,7 @@ def test_tmdb_only_detail_uses_explicit_media_type_and_external_imdb_id(webapp_f
     assert response.status_code == 200
     assert response.json['imdb']['score'] == 7.1
     assert response.json['tmdb'] == {'score': 7.4, 'votes': 990}
-    assert response.json['reviews'] == []
+    assert 'reviews' not in response.json
     assert connection.queries == []
     assert any('/tv/77' in url for url, _kwargs in calls)
     assert any(kwargs.get('params', {}).get('i') == 'tt7654321'
@@ -115,8 +96,6 @@ def test_one_provider_timeout_returns_partial_ratings(webapp_factory, monkeypatc
     def provider_get(url, **kwargs):
         if 'omdbapi.com' in url:
             raise route_requests.Timeout('OMDb is unavailable')
-        if '/reviews' in url:
-            raise route_requests.Timeout('TMDb reviews are unavailable')
         if '/movie/42' in url:
             return ProviderResponse(tmdb_detail(42, score=7.4, votes=88))
         raise AssertionError(f'unexpected provider request: {url}')
@@ -128,7 +107,7 @@ def test_one_provider_timeout_returns_partial_ratings(webapp_factory, monkeypatc
     assert response.status_code == 200
     assert response.json['imdb']['score'] is None
     assert response.json['tmdb'] == {'score': 7.4, 'votes': 88}
-    assert response.json['reviews'] == []
+    assert 'reviews' not in response.json
 
 
 def test_tmdb_zero_votes_does_not_create_a_zero_star_score(webapp_factory, monkeypatch):
@@ -136,8 +115,6 @@ def test_tmdb_zero_votes_does_not_create_a_zero_star_score(webapp_factory, monke
     app, _, _ = webapp_factory(connection=connection)
 
     def provider_get(url, **kwargs):
-        if '/reviews' in url:
-            return ProviderResponse({'results': [], 'total_results': 0})
         return ProviderResponse(tmdb_detail(42, score=0, votes=0))
 
     monkeypatch.setattr(route_requests, 'get', provider_get)
@@ -202,13 +179,11 @@ def test_local_db_connection_is_released_before_provider_lookups(monkeypatch):
 
     def provider_get(url, **_kwargs):
         provider_observations.append(bool(released_connections))
-        if '/reviews' in url:
-            return ProviderResponse({'results': [], 'total_results': 0})
         return ProviderResponse(tmdb_detail(42))
 
     monkeypatch.setattr(route_requests, 'get', provider_get)
     response = app.test_client().get('/api/movie/12/rating-sources')
 
     assert response.status_code == 200
-    assert provider_observations == [True, True]
+    assert provider_observations == [True]
 

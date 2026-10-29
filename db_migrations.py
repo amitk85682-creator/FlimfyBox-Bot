@@ -529,6 +529,26 @@ def _migration_14(conn):
         """)
 
 
+def _migration_15(conn):
+    """Store one editable, first-party FlimfyBox review per member and title."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_reviews (
+                id BIGSERIAL PRIMARY KEY,
+                movie_id INTEGER NOT NULL REFERENCES movies(id) ON DELETE CASCADE,
+                user_id BIGINT NOT NULL REFERENCES miniapp_users(user_id) ON DELETE CASCADE,
+                review TEXT NOT NULL CHECK (char_length(btrim(review)) BETWEEN 20 AND 800),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (movie_id, user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_movie_reviews_movie_updated
+            ON movie_reviews (movie_id, updated_at DESC, id DESC)
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -544,6 +564,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (12, _migration_12),
     (13, _migration_13),
     (14, _migration_14),
+    (15, _migration_15),
 )
 
 

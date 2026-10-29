@@ -18,7 +18,6 @@ import hmac
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from fuzzywuzzy import process, fuzz
-from urllib.parse import urlparse
 
 _RATING_SOURCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=8, thread_name_prefix='miniapp-rating-source'
@@ -314,32 +313,6 @@ def register_webapp_routes(
         text = str(value).strip()
         return text[:32] if text and text.lower() not in {'n/a', 'na', 'none'} else None
 
-    def clean_tmdb_review(review):
-        if not isinstance(review, dict):
-            return None
-        content = re.sub(r'<[^>]*>', ' ', str(review.get('content') or ''))
-        content = re.sub(r'\s+', ' ', content).strip()[:1200]
-        if not content:
-            return None
-        raw_url = str(review.get('url') or '').strip()
-        parsed_url = urlparse(raw_url)
-        safe_url = (
-            raw_url[:500]
-            if parsed_url.scheme == 'https'
-            and parsed_url.hostname == 'www.themoviedb.org'
-            and parsed_url.path.startswith('/review/')
-            else ''
-        )
-        author_details = review.get('author_details') or {}
-        author_rating = rating_number(author_details.get('rating')) if isinstance(author_details, dict) else None
-        return {
-            'author': re.sub(r'\s+', ' ', str(review.get('author') or 'TMDb member')).strip()[:100],
-            'content': content,
-            'rating': author_rating,
-            'created_at': str(review.get('created_at') or '')[:40],
-            'url': safe_url,
-        }
-
     def fetch_omdb_rating(imdb_id, api_key):
         if not api_key or not re.fullmatch(r'tt\d{7,8}', str(imdb_id or '')):
             return None
@@ -386,13 +359,6 @@ def register_webapp_routes(
                 f'movie-rating-details:{media_type}:{tmdb_id}',
                 False, 6 * 60 * 60, 1, (1, 1.5),
             )
-            futures['reviews'] = _RATING_SOURCE_EXECUTOR.submit(
-                tmdb_cached_request,
-                f'{media_type}/{tmdb_id}/reviews',
-                {'language': 'en-US', 'page': 1},
-                f'movie-rating-reviews:{media_type}:{tmdb_id}',
-                False, 6 * 60 * 60, 1, (1, 1.5),
-            )
         if omdb_key and imdb_id:
             futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
                 fetch_omdb_rating, imdb_id, omdb_key
@@ -402,7 +368,6 @@ def register_webapp_routes(
             wait(tuple(futures.values()), timeout=max(0, deadline - time.monotonic()))
 
         detail_data = None
-        review_data = None
         tmdb_score = None
         if futures.get('tmdb') and futures['tmdb'].done():
             try:
@@ -410,13 +375,6 @@ def register_webapp_routes(
                 detail_data = detail_result if isinstance(detail_result, dict) else None
             except Exception as error:
                 logger.debug('TMDb score future failed (%s)', type(error).__name__)
-        if futures.get('reviews') and futures['reviews'].done():
-            try:
-                review_result, _cache_hit = futures['reviews'].result()
-                review_data = review_result if isinstance(review_result, dict) else None
-            except Exception as error:
-                logger.debug('TMDb review future failed (%s)', type(error).__name__)
-
         if detail_data:
             vote_count = detail_data.get('vote_count')
             try:
@@ -446,26 +404,12 @@ def register_webapp_routes(
             except Exception as error:
                 logger.debug('IMDb score future failed (%s)', type(error).__name__)
 
-        raw_reviews = review_data.get('results') if isinstance(review_data, dict) else []
-        reviews = [
-            cleaned for cleaned in (clean_tmdb_review(item) for item in (raw_reviews or [])[:3])
-            if cleaned
-        ]
-        review_count = None
-        if review_data is not None:
-            try:
-                review_count = max(0, int(review_data.get('total_results', len(raw_reviews or []))))
-            except (TypeError, ValueError):
-                review_count = len(raw_reviews or [])
-
         result = {
             'status': 'success',
             'imdb': imdb_score or {'score': None, 'votes': None},
             'tmdb': tmdb_score or {'score': None, 'votes': None},
-            'reviews': reviews,
-            'review_count': review_count,
         }
-        has_data = bool(imdb_score or tmdb_score or reviews)
+        has_data = bool(imdb_score or tmdb_score)
         has_pending = any(not future.done() for future in futures.values())
         ttl = rating_source_cache_ttl if has_data and not has_pending else rating_source_failure_ttl
         with rating_source_cache_lock:
@@ -1797,9 +1741,7 @@ def register_webapp_routes(
     
     @flask_app.route('/api/movie/<int:movie_id>/rating', methods=['GET'])
     def get_movie_rating(movie_id):
-        user, error = require_telegram_user()
-        if error:
-            return error
+        user = telegram_user_from_request()
         conn = get_db_connection()
         if not conn:
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
@@ -1815,7 +1757,9 @@ def register_webapp_routes(
                     'user_rating': None, 'can_rate': False,
                     'is_upcoming': True, 'rating_locked': True
                 })
-            result = rating_summary(cur, movie_id, user['id'])
+            result = rating_summary(cur, movie_id, user['id'] if user else None)
+            if not user:
+                result['can_rate'] = False
             conn.commit()
             cur.close()
             return jsonify({'status': 'success', **result})
@@ -1824,6 +1768,119 @@ def register_webapp_routes(
             conn.rollback()
             return jsonify({'status': 'error', 'message': 'Rating temporarily unavailable'}), 500
         finally:
+            close_db_connection(conn)
+
+    @flask_app.route('/api/movie/<int:movie_id>/reviews', methods=['GET'])
+    def get_movie_reviews(movie_id):
+        if movie_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        cur = None
+        try:
+            cur = conn.cursor()
+            cur.execute('SELECT is_unreleased FROM movies WHERE id = %s', (movie_id,))
+            movie_row = cur.fetchone()
+            if not movie_row:
+                return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+
+            user = telegram_user_from_request()
+            cur.execute("""
+                SELECT r.review,
+                       COALESCE(NULLIF(u.first_name, ''), 'FlimfyBox member'),
+                       r.created_at,
+                       mr.rating
+                FROM movie_reviews r
+                LEFT JOIN miniapp_users u ON u.user_id = r.user_id
+                LEFT JOIN movie_ratings mr
+                  ON mr.movie_id = r.movie_id AND mr.user_id = r.user_id
+                WHERE r.movie_id = %s
+                ORDER BY r.updated_at DESC, r.id DESC
+                LIMIT 10
+            """, (movie_id,))
+            reviews = [
+                {
+                    'content': row[0],
+                    'author': row[1],
+                    'created_at': row[2],
+                    'rating': row[3],
+                }
+                for row in cur.fetchall()
+            ]
+            cur.execute('SELECT COUNT(*) FROM movie_reviews WHERE movie_id = %s', (movie_id,))
+            count_row = cur.fetchone()
+            review_count = int(count_row[0] or 0) if count_row else 0
+            user_review = None
+            if user:
+                cur.execute(
+                    'SELECT review FROM movie_reviews WHERE movie_id = %s AND user_id = %s',
+                    (movie_id, user['id']),
+                )
+                own_row = cur.fetchone()
+                user_review = own_row[0] if own_row else None
+            conn.commit()
+            return jsonify({
+                'status': 'success',
+                'reviews': reviews,
+                'review_count': review_count,
+                'user_review': user_review,
+                'can_review': bool(user and not movie_row[0]),
+                'is_upcoming': bool(movie_row[0]),
+            })
+        except Exception as exc:
+            logger.error('FlimfyBox review list failed for movie %s (%s)', movie_id, type(exc).__name__)
+            conn.rollback()
+            return jsonify({'status': 'error', 'message': 'Community reviews are temporarily unavailable'}), 500
+        finally:
+            if cur is not None:
+                cur.close()
+            close_db_connection(conn)
+
+    @flask_app.route('/api/movie/<int:movie_id>/reviews', methods=['POST'])
+    def submit_movie_review(movie_id):
+        user, error = require_telegram_user()
+        if error:
+            return error
+        if movie_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        data = request.get_json(silent=True) or {}
+        raw_review = data.get('review')
+        if not isinstance(raw_review, str):
+            return jsonify({'status': 'error', 'message': 'Write a review between 20 and 800 characters.'}), 400
+        review = '\n'.join(line.rstrip() for line in raw_review.replace('\r\n', '\n').replace('\r', '\n').split('\n')).strip()
+        if not 20 <= len(review) <= 800:
+            return jsonify({'status': 'error', 'message': 'Write a review between 20 and 800 characters.'}), 400
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        cur = None
+        try:
+            cur = conn.cursor()
+            cur.execute('SELECT is_unreleased FROM movies WHERE id = %s', (movie_id,))
+            movie_row = cur.fetchone()
+            if not movie_row:
+                return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            if movie_row[0]:
+                return jsonify({'status': 'error', 'message': 'Reviews open after release.'}), 409
+            upsert_miniapp_user(cur, user)
+            cur.execute("""
+                INSERT INTO movie_reviews (movie_id, user_id, review)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (movie_id, user_id) DO UPDATE SET
+                    review = EXCLUDED.review,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (movie_id, user['id'], review))
+            conn.commit()
+            return jsonify({'status': 'success', 'review': review, 'message': 'Your FlimfyBox review is saved.'})
+        except Exception as exc:
+            logger.error('FlimfyBox review submission failed for movie %s (%s)', movie_id, type(exc).__name__)
+            conn.rollback()
+            return jsonify({'status': 'error', 'message': 'Could not save your review'}), 500
+        finally:
+            if cur is not None:
+                cur.close()
             close_db_connection(conn)
 
     @flask_app.route('/api/movie/<int:movie_id>/rating-sources', methods=['GET'])

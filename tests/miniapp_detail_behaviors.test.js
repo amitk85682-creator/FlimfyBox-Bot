@@ -120,3 +120,57 @@ test('Find a version scrolls to the download panel without relying on a stale no
     assert.doesNotThrow(() => api.scrollToDetailDownloads());
     assert.equal(scrollOptions, null);
 });
+
+test('Rate this scrolls smoothly to the FlimfyBox rating controls', () => {
+    let scrollOptions = null;
+    const target = { scrollIntoView: options => { scrollOptions = options; } };
+    const api = runtime(sourceSection('window.scrollToDetailDownloads = function()', 'window.openDetails = function'), {
+        document: { getElementById: id => id === 'communityRating' ? target : null }
+    });
+
+    api.scrollToCommunityRating();
+    assert.equal(scrollOptions.behavior, 'smooth');
+    assert.equal(scrollOptions.block, 'start');
+});
+
+test('member review form saves through the authenticated FlimfyBox endpoint and reloads', async () => {
+    const listeners = {};
+    const input = { value: 'A warm, funny story with a great ending.' };
+    const status = { textContent: '' };
+    const submit = { disabled: false };
+    const form = {
+        addEventListener: (type, callback) => { listeners[type] = callback; },
+        querySelector: selector => ({
+            '.flimfy-review-input': input,
+            '.flimfy-review-status': status,
+            '.flimfy-review-submit': submit
+        })[selector]
+    };
+    const container = { querySelector: selector => selector === '.flimfy-review-form' ? form : null };
+    let fetchArgs = null;
+    let reloadArgs = null;
+    const toasts = [];
+    const api = runtime(sourceSection('function bindFlimfyReviewForm', 'function loadFlimfyCommunityReviews'), {
+        activeMovie: { id: 12 },
+        detailsRequestId: 4,
+        fetchWithTimeout: async (...args) => {
+            fetchArgs = args;
+            return { ok: true, json: async () => ({ status: 'success' }) };
+        },
+        telegramAuthHeaders: () => ({ 'X-Telegram-Init-Data': 'signed' }),
+        showToast: message => toasts.push(message),
+        loadFlimfyCommunityReviews: (...args) => { reloadArgs = args; }
+    });
+    const movie = { id: 12, title: 'Sample film' };
+    api.bindFlimfyReviewForm(container, '12', movie, 4, {});
+    let prevented = false;
+    await listeners.submit({ preventDefault: () => { prevented = true; } });
+
+    assert.equal(prevented, true);
+    assert.equal(fetchArgs[0], '/api/movie/12/reviews');
+    assert.equal(fetchArgs[1].method, 'POST');
+    assert.equal(fetchArgs[1].headers['X-Telegram-Init-Data'], 'signed');
+    assert.deepEqual(JSON.parse(fetchArgs[1].body), { review: input.value });
+    assert.deepEqual(reloadArgs, [movie, 4, {}]);
+    assert.deepEqual(toasts, ['✓ FlimfyBox review saved']);
+});

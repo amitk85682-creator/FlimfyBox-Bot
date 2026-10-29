@@ -1900,12 +1900,11 @@ document.addEventListener('keydown', (e) => {
         }
         function loadMovieRatingSources(movie, isTMDB, requestId, signal) {
             const meterContainer = document.getElementById('flimfyVerdict');
-            const reviewsContainer = document.getElementById('tmdbReviews');
             if (!window.FlimfyVerdict) return;
-            window.FlimfyVerdict.renderLoading(meterContainer, reviewsContainer);
+            window.FlimfyVerdict.renderLoading(meterContainer);
             const endpoint = window.FlimfyVerdict.endpointFor(movie, isTMDB);
             if (!endpoint) {
-                window.FlimfyVerdict.renderUnavailable(meterContainer, reviewsContainer);
+                window.FlimfyVerdict.renderUnavailable(meterContainer);
                 return;
             }
             fetchWithTimeout(endpoint, { signal })
@@ -1918,15 +1917,91 @@ document.addEventListener('keydown', (e) => {
                 })
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
-                    window.FlimfyVerdict.render(meterContainer, reviewsContainer, data);
+                    window.FlimfyVerdict.render(meterContainer, null, data);
                 })
                 .catch(error => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id) || isAbortError(error)) return;
-                    window.FlimfyVerdict.renderUnavailable(meterContainer, reviewsContainer);
+                    window.FlimfyVerdict.renderUnavailable(meterContainer);
+                });
+        }
+        function bindFlimfyReviewForm(container, movieId, movie, requestId, signal) {
+            const form = container?.querySelector('.flimfy-review-form');
+            if (!form) return;
+            const input = form.querySelector('.flimfy-review-input');
+            const status = form.querySelector('.flimfy-review-status');
+            const submit = form.querySelector('.flimfy-review-submit');
+            form.addEventListener('submit', async event => {
+                event.preventDefault();
+                if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
+                const review = String(input?.value || '').trim();
+                if (review.length < 20 || review.length > 800) {
+                    if (status) status.textContent = 'Write between 20 and 800 characters.';
+                    return;
+                }
+                if (submit) submit.disabled = true;
+                if (status) status.textContent = 'Saving your review…';
+                try {
+                    const response = await fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/reviews`, {
+                        method: 'POST',
+                        signal,
+                        headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
+                        body: JSON.stringify({ review })
+                    });
+                    const data = await response.json();
+                    if (!response.ok || data.status !== 'success') {
+                        throw new Error(data.message || 'Could not save your review.');
+                    }
+                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
+                    showToast('✓ FlimfyBox review saved');
+                    loadFlimfyCommunityReviews(movie, requestId, signal);
+                } catch (error) {
+                    if (requestId !== detailsRequestId || isAbortError(error)) return;
+                    if (status) status.textContent = error.message || 'Could not save your review.';
+                    if (submit) submit.disabled = false;
+                }
+            });
+        }
+        function loadFlimfyCommunityReviews(movie, requestId, signal) {
+            const container = document.getElementById('flimfyReviews');
+            if (!container || !window.FlimfyVerdict) return;
+            const movieId = String(movie?.id || '');
+            const isCatalogued = /^\d+$/.test(movieId) && movie.source !== 'tmdb';
+            if (!isCatalogued) {
+                window.FlimfyVerdict.renderReviews(container, {
+                    status: 'success', reviews: [], review_count: 0, can_review: false,
+                    is_upcoming: Boolean(movie?.is_upcoming)
+                });
+                return;
+            }
+            window.FlimfyVerdict.renderReviews(container, { status: 'loading' });
+            fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/reviews`, {
+                signal,
+                headers: telegramAuthHeaders()
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || data.status !== 'success') {
+                        throw new Error(data.message || 'Community reviews are temporarily unavailable.');
+                    }
+                    return data;
+                })
+                .then(data => {
+                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== movieId) return;
+                    window.FlimfyVerdict.renderReviews(container, data);
+                    bindFlimfyReviewForm(container, movieId, movie, requestId, signal);
+                })
+                .catch(error => {
+                    if (requestId !== detailsRequestId || isAbortError(error)) return;
+                    window.FlimfyVerdict.renderReviews(container, { status: 'unavailable' });
                 });
         }
         window.scrollToDetailDownloads = function() {
             const target = document.getElementById('dpLinks');
+            if (!target) return;
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+        window.scrollToCommunityRating = function() {
+            const target = document.getElementById('communityRating');
             if (!target) return;
             target.scrollIntoView({ behavior: 'smooth', block: 'start' });
         };
@@ -1973,12 +2048,13 @@ document.addEventListener('keydown', (e) => {
             } else if (movie.is_upcoming) {
                 renderLockedCommunityRating(movie.title || 'this title');
             } else {
-                renderCommunityRating(movie.id, movie.title || 'this title');
+                renderCommunityRating(movie.id, movie.title || 'this title', requestId, detailsController.signal);
             }
             document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
             loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
+            loadFlimfyCommunityReviews(movie, requestId, detailsController.signal);
             // The card already contains the title, poster, year, rating and genre.
             // Show that immediately while files/cast finish loading in the background.
             detailsDescription.innerText = movie.description || 'Details and availability are loading…';
@@ -2053,8 +2129,7 @@ document.addEventListener('keydown', (e) => {
                         document.getElementById('dpTrailerBtn').innerHTML = '';
                         if (m.is_upcoming) {
                             renderLockedCommunityRating(m.title || movie.title || 'this title');
-                        } else {
-                            renderCommunityRating(m.id, m.title || movie.title || 'this title');
+                            loadFlimfyCommunityReviews(m, requestId, detailsController.signal);
                         }
 
                         const seasonsContainer = document.getElementById('dpSeasons');
@@ -2280,10 +2355,11 @@ document.addEventListener('keydown', (e) => {
                 <div class="community-rating-summary"><strong>Community Rating</strong><br>Rating available after release.</div>
             `;
         }
-        window.renderCommunityRating = function(movieId, title) {
+        window.renderCommunityRating = function(movieId, title, requestId = detailsRequestId, signal = detailsController?.signal) {
                 const container = document.getElementById('communityRating');
                 if (!container) return;
-                container.innerHTML = '<div class="community-rating-heading"><div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title"></h2></div><span class="community-rating-mark"><i class="fas fa-star"></i></span></div><div class="community-rating-intro">Leave a quick rating for this title.</div><div class="community-rating-stars"></div><button type="button" class="community-rating-submit" disabled>Save my rating <i class="fas fa-arrow-right"></i></button><div class="community-rating-summary">Loading community score…</div>';
+                container.dataset.movieId = String(movieId);
+                container.innerHTML = '<div class="community-rating-heading"><div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title"></h2></div><span class="community-rating-mark"><i class="fas fa-star"></i></span></div><div class="community-rating-intro">Your rating joins the FlimfyBox community score.</div><div class="community-rating-stars"></div><button type="button" class="community-rating-submit" disabled>Save my rating <i class="fas fa-arrow-right"></i></button><div class="community-rating-summary">Loading FlimfyBox ratings…</div>';
                 container.dataset.selectedRating = '';
                 container.querySelector('.community-rating-title').textContent = `Rate ${title}`;
                 const stars = container.querySelector('.community-rating-stars');
@@ -2304,14 +2380,17 @@ document.addEventListener('keydown', (e) => {
                     () => submitCommunityRating(movieId, container)
                 );
                 fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
+                    signal,
                     headers: telegramAuthHeaders()
                 })
                     .then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
                         if (!ok || data.status !== 'success') throw new Error(data.message || 'Rating unavailable');
+                        if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movieId)) return;
                         updateCommunityRating(container, data);
                     })
-                    .catch(() => {
+                    .catch(error => {
+                        if (requestId !== detailsRequestId || isAbortError(error)) return;
                         container.querySelector('.community-rating-summary').textContent = 'Rating temporarily unavailable';
                     });
         };
@@ -2328,7 +2407,7 @@ document.addEventListener('keydown', (e) => {
                 const submit = container.querySelector('.community-rating-submit');
                 if (submit) submit.disabled = false;
                 const summary = container.querySelector('.community-rating-summary');
-                if (summary) summary.textContent = `You selected ${value} / 5. Tap Submit rating to save it.`;
+                if (summary) summary.textContent = `You selected ${value} / 5. Tap Save my rating to submit it.`;
         }
         function updateCommunityRating(container, data) {
                 const own = data.user_rating;
@@ -2345,6 +2424,10 @@ document.addEventListener('keydown', (e) => {
                 summary.innerHTML = data.count
                     ? `<strong>${Number(data.average).toFixed(1)} <span>/ 5</span></strong><span> · ${data.count} community rating${data.count === 1 ? '' : 's'}${own ? ` · Your rating ${own}/5` : ''}</span>`
                     : '<strong>No ratings yet</strong><span> · Be the first to rate this title.</span>';
+                const meter = document.getElementById('flimfyVerdict');
+                if (meter && String(container.dataset.movieId || '') === String(activeMovie?.id || '')) {
+                    window.FlimfyVerdict?.setCommunityRating(meter, data);
+                }
         }
         function submitCommunityRating(movieId, container) {
                 if (container.dataset.submitting === 'true') return;
@@ -2368,10 +2451,14 @@ document.addEventListener('keydown', (e) => {
                 }).then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
                         if (!ok || data.status !== 'success') throw new Error(data.message || 'Could not save rating');
+                        if (String(container.dataset.movieId || '') !== String(movieId)
+                            || String(activeMovie?.id || '') !== String(movieId)) return;
                         trackRecommendationEvent('rating_submitted', movieId, { rating: value });
                         updateCommunityRating(container, data);
                     })
                     .catch(error => {
+                        if (String(container.dataset.movieId || '') !== String(movieId)
+                            || String(activeMovie?.id || '') !== String(movieId)) return;
                         container.querySelector('.community-rating-summary').textContent = error.message;
                         container.querySelectorAll('.community-rating-star').forEach(button => { button.disabled = false; });
                         const submit = container.querySelector('.community-rating-submit');

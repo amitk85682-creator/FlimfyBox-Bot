@@ -9,7 +9,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=identity-3"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=flimfy-verdict-2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=flimfy-verdict-3">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -245,6 +245,7 @@
                 <div class="detail-actions">
                     <button class="detail-play" type="button" onclick="playCurrentTrailer()"><i class="fas fa-play"></i> Play trailer</button>
                     <button class="detail-download-jump" type="button" onclick="scrollToDetailDownloads()"><i class="fas fa-arrow-down-to-line"></i> Find a version</button>
+                    <button class="detail-rating-jump" type="button" onclick="scrollToCommunityRating()"><i class="fas fa-star"></i> Rate this</button>
                     <button class="detail-icon-button" id="detailMyListButton" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
                     <button class="detail-icon-button" type="button" aria-label="Share movie" onclick="shareCurrentMovie()"><i class="fas fa-share-alt"></i></button>
                 </div>
@@ -259,7 +260,7 @@
                         </section>
                         <div id="castSection" class="cast-list"></div>
                         <section class="community-rating" id="communityRating" aria-live="polite"></section>
-                        <section class="tmdb-reviews-panel" id="tmdbReviews" aria-live="polite"></section>
+                        <section class="flimfy-reviews-panel" id="flimfyReviews" aria-live="polite"></section>
                     </main>
                     <aside class="dp-side-column" aria-label="Ratings and available versions">
                         <section class="verdict-meter-panel" id="flimfyVerdict" aria-live="polite" aria-label="Flimfy Verdict"></section>
@@ -329,7 +330,7 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-verdict-2"></script>
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=flimfy-verdict-2"></script>
+    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-verdict-3"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=flimfy-verdict-3"></script>
 </body>
 </html>
