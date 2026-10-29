@@ -9,7 +9,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=identity-3"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=studio-2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=reliability-1">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -194,7 +194,7 @@
         <div class="explore-search-wrap">
             <div class="search-box genre-search-box">
                 <i class="fas fa-search"></i>
-                <input type="text" id="genreSearchInput" placeholder="Search genres, subgenres, mood">
+                <input type="text" id="genreSearchInput" placeholder="Search genres, subgenres, mood" aria-label="Search genres, subgenres, and moods">
             </div>
         </div>
         <div class="explore-body" id="exploreBody"></div>
@@ -204,7 +204,7 @@
     <div class="details-page genre-detail-page" id="genreDetailPage">
         <div class="dp-header">
             <button class="btn-back details-back-button" type="button" onclick="closeGenreDetail()" aria-label="Back to browse"><i class="fas fa-chevron-left"></i><span>Back</span></button>
-            <button class="btn-more" type="button" aria-label="Explore more" onclick="showToast('Browse more genres from the Explore hub')"><i class="fas fa-compass"></i></button>
+            <button class="btn-more" type="button" aria-label="Back to genres" onclick="closeGenreDetail()"><i class="fas fa-chevron-left"></i></button>
         </div>
         <div class="genre-detail-hero" id="genreDetailHero">
             <div class="genre-detail-overlay">
@@ -265,14 +265,14 @@
         <div class="trailer-wrapper">
             <iframe id="trailerIframe" title="Movie trailer" src="" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
         </div>
-        <button class="close-trailer-btn" onclick="closeTrailer()"><i class="fas fa-times"></i> Close</button>
+        <button class="close-trailer-btn" type="button" aria-label="Close trailer" onclick="closeTrailer()"><i class="fas fa-times"></i> Close</button>
     </div>
 
     <!-- Web Player Modal -->
     <div class="web-player-modal" id="webPlayerModal">
         <div class="wp-header">
             <div class="wp-title" id="wpTitle">Loading...</div>
-            <button class="wp-close" onclick="closeWebPlayer()"><i class="fas fa-times"></i></button>
+            <button class="wp-close" type="button" aria-label="Close web player" onclick="closeWebPlayer()"><i class="fas fa-times"></i></button>
         </div>
         <div class="wp-iframe-container" id="wpIframeContainer">
             <!-- Iframe dynamically inserted here -->
@@ -315,6 +315,6 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=identity-3"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=reliability-1"></script>
 </body>
 </html>

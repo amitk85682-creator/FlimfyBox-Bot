@@ -71,7 +71,6 @@ SEARCH_POSTER_TIMEOUT_SECONDS = 2.0
 GEMINI_RECONCILIATION_TIMEOUT_SECONDS = 25
 SUPERBATCH_IDENTITY_TIMEOUT_SECONDS = 35
 SUPERBATCH_MOVIE_TIMEOUT_SECONDS = 100
-SUPERBATCH_FILE_TIMEOUT_SECONDS = 180
 SUPERBATCH_IDENTIFICATION_TOTAL_TIMEOUT_SECONDS = 300
 AUTO_BATCH_MAX_ATTEMPTS = 5
 AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS = 2
@@ -2787,6 +2786,79 @@ def close_db_connection(conn):
             db_pool.putconn(conn)
         except Exception:
             pass
+
+
+def _get_user_request_stats(user_id):
+    """Read user-facing stats in a worker thread, never on the bot event loop."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM user_requests WHERE user_id = %s",
+            (user_id,),
+        )
+        requested = cur.fetchone()[0]
+        cur.execute(
+            "SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE",
+            (user_id,),
+        )
+        fulfilled = cur.fetchone()[0]
+        cur.close()
+        return requested, fulfilled
+    except Exception as exc:
+        logger.error("User stats lookup failed (%s)", type(exc).__name__)
+        return None
+    finally:
+        close_db_connection(conn)
+
+
+def _get_movie_file_count(movie_id):
+    """Fetch the existing file count without blocking Telegram updates."""
+    conn = get_db_connection()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM movie_files WHERE movie_id = %s",
+            (movie_id,),
+        )
+        count = cur.fetchone()[0]
+        cur.close()
+        return count
+    except Exception as exc:
+        logger.error("Existing movie file count lookup failed (%s)", type(exc).__name__)
+        return 0
+    finally:
+        close_db_connection(conn)
+
+
+def _update_movie_poster(movie_id, public_url):
+    """Persist a poster URL in a worker thread and report whether it changed."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE movies SET poster_url = %s WHERE id = %s",
+            (public_url, movie_id),
+        )
+        updated = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return updated
+    except Exception as exc:
+        logger.error("Poster update failed (%s)", type(exc).__name__)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        close_db_connection(conn)
 
 
 BATCH_PROCESS_ID = str(uuid.uuid4())
@@ -10150,10 +10222,11 @@ async def _save_superbatch_files(movie_files, context, movie_state, progress=Non
                     type(progress_exc).__name__,
                 )
         try:
-            label = await asyncio.wait_for(
-                _save_one_superbatch_file(item, context, movie_state),
-                timeout=SUPERBATCH_FILE_TIMEOUT_SECONDS,
-            )
+            # The five-minute limit is for identity/metadata only. Saving has
+            # its own Telegram and database I/O timeouts, so do not cancel the
+            # whole save and mark it failed while an underlying worker can
+            # still finish a copy or commit.
+            label = await _save_one_superbatch_file(item, context, movie_state)
             if label:
                 saved_labels.append(label)
         except Exception as exc:
@@ -11830,19 +11903,11 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_poster_update:
             if public_url:
                 movie_id = BATCH_SESSION['movie_id']
-                conn = get_db_connection()
-                if conn:
-                    try:
-                        cur = conn.cursor()
-                        cur.execute("UPDATE movies SET poster_url = %s WHERE id = %s", (public_url, movie_id))
-                        conn.commit()
-                        cur.close()
-                    except Exception as e:
-                        logger.error(f"Poster Update Error: {e}")
-                    finally:
-                        close_db_connection(conn)
-
-                await status_msg.edit_text("✅ **Poster Successfully Updated!**\nAb aap files bhej sakte hain ya `/done` kar sakte hain.", parse_mode='Markdown')
+                updated = await run_async(_update_movie_poster, movie_id, public_url)
+                if updated:
+                    await status_msg.edit_text("✅ **Poster Successfully Updated!**\nAb aap files bhej sakte hain ya `/done` kar sakte hain.", parse_mode='Markdown')
+                else:
+                    await status_msg.edit_text("❌ Poster database update failed. Please retry.")
             else:
                 await status_msg.edit_text("❌ Poster upload fail ho gaya. Kripya image ya URL dobara bhejein.")
             
@@ -11983,21 +12048,7 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movie_lang = result['movie_lang']
 
             # File count check (existing files)
-            file_count = 0
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cur = conn.cursor()
-                    cur.execute("SELECT COUNT(*) FROM movie_files WHERE movie_id = %s", (movie_id,))
-                    file_count = cur.fetchone()[0]
-                    cur.close()
-                except Exception as exc:
-                    logger.error(
-                        "Existing movie file count lookup failed (%s)",
-                        type(exc).__name__,
-                    )
-                finally:
-                    close_db_connection(conn)
+            file_count = await run_async(_get_movie_file_count, movie_id)
 
             BATCH_SESSION.update({
                 'active': True, 'movie_id': movie_id, 'movie_title': title,
@@ -16584,24 +16635,19 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     elif query_text == '📊 My Stats':
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s", (user_id,))
-                req = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM user_requests WHERE user_id = %s AND notified = TRUE", (user_id,))
-                ful = cur.fetchone()[0]
-                
-                stats_msg = await update.message.reply_text(
-                    f"📊 **Your Stats**\n\n📝 Total Requests: {req}\n✅ Fulfilled: {ful}",
-                    parse_mode='Markdown'
-                )
-                track_message_for_deletion(context, chat_id, stats_msg.message_id, USER_TEXT_DELETE_SECONDS)
-            except Exception as e:
-                logger.error(f"Stats Error: {e}")
-            finally:
-                close_db_connection(conn)
+        stats = await run_interactive(_get_user_request_stats, user_id)
+        if stats is None:
+            stats_text = "📊 Stats are temporarily unavailable. Please try again."
+        else:
+            requested, fulfilled = stats
+            stats_text = (
+                f"📊 **Your Stats**\n\n📝 Total Requests: {requested}"
+                f"\n✅ Fulfilled: {fulfilled}"
+            )
+        stats_msg = await update.message.reply_text(stats_text, parse_mode='Markdown')
+        track_message_for_deletion(
+            context, chat_id, stats_msg.message_id, USER_TEXT_DELETE_SECONDS
+        )
         return
 
     elif query_text == '❓ Help':

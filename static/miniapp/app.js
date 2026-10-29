@@ -70,6 +70,7 @@ const tg = window.Telegram?.WebApp || {
         let heroIndex = 0;
         let newReleaseRequestId = 0;
         let trendingRequestId = 0;
+        let upcomingRequestId = 0;
         let genreCatalog = null;
         let genreCatalogType = null;
         let genreCatalogRequestId = 0;
@@ -1134,15 +1135,15 @@ const tg = window.Telegram?.WebApp || {
                     const posters = [GENRE_ARTWORK[genre.id]];
                     const palette = getGenreVisualPalette(genre.group);
                     return `
-                        <button class="genre-card genre-${genre.id} ${count === 0 ? 'empty' : ''}" type="button" data-genre-group="${genre.group}" onclick="openGenreDetail('${genre.id}')" style="--genre-from: ${palette.from}; --genre-to: ${palette.to}; --genre-glow: ${palette.glow};">
+                        <button class="genre-card genre-${genre.id} ${count === 0 ? 'empty' : ''}" type="button" data-genre-id="${escapeHtml(genre.id)}" data-genre-group="${escapeHtml(genre.group)}" style="--genre-from: ${palette.from}; --genre-to: ${palette.to}; --genre-glow: ${palette.glow};">
                             <span class="genre-card-posters poster-count-${Math.min(posters.length, 3)}" aria-hidden="true">
-                                ${posters.slice(0, 3).map((poster, index) => `<img class="genre-card-poster genre-card-poster-${index + 1}" src="${poster}" alt="" loading="lazy" decoding="async">`).join('')}
+                                ${posters.slice(0, 3).map((poster, index) => `<img class="genre-card-poster genre-card-poster-${index + 1}" src="${escapeHtml(poster)}" alt="" loading="lazy" decoding="async" onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback')">`).join('')}
                             </span>
                             <div class="genre-card-meta">
                                 <span>${count} ${count === 1 ? 'title' : 'titles'}</span>
-                                <span>${genre.group}</span>
+                                <span>${escapeHtml(genre.group)}</span>
                             </div>
-                            <div class="genre-card-name">${genre.label}</div>
+                            <div class="genre-card-name">${escapeHtml(genre.label)}</div>
                         </button>
                     `;
                 }).join('');
@@ -1192,7 +1193,7 @@ const tg = window.Telegram?.WebApp || {
                     <p>${genre.description}</p>
                     <div class="genre-detail-actions">
                     <button class="btn-request" type="button" onclick="showHome();">Browse all</button>
-                    ${count === 0 ? `<button class="btn-request btn-sm-outline" type="button" onclick="requestMovie('${genre.label.replace(/'/g, "\\'")}')">Request title</button>` : ''}
+                    ${count === 0 ? `<button class="btn-request btn-sm-outline" type="button" data-action="request-genre-title" data-request-title="${escapeHtml(genre.label)}">Request title</button>` : ''}
                     </div>
                 </div>
             `;
@@ -1415,10 +1416,12 @@ const tg = window.Telegram?.WebApp || {
             const upcomingRow = ensureHomeSectionRow('rowUpcoming', 'Upcoming', 'calendar-plus', 'Coming soon');
             const upcomingScroll = upcomingRow ? upcomingRow.querySelector('#upcomingScroll') : document.getElementById('upcomingScroll');
             if (upcomingRow && upcomingScroll) {
+                const requestId = ++upcomingRequestId;
                 upcomingRow.style.display = '';
                 upcomingScroll.innerHTML = '<div class="loader">Loading upcoming…</div>';
                 loadHomeSection('/api/upcoming?limit=18', 'upcoming')
                     .then(data => {
+                        if (requestId !== upcomingRequestId) return;
                         if (data.status !== 'success') throw new Error(data.message || 'Could not load upcoming');
                         const upcoming = (Array.isArray(data.movies) ? data.movies : []).filter(movie => FlimfyUI.futureRelease(movie));
                         upcoming.forEach(item => {
@@ -1426,12 +1429,19 @@ const tg = window.Telegram?.WebApp || {
                                 tmdbMoviesMap[item.id] = { ...item, source: 'tmdb', id: item.id };
                             }
                         });
-                        upcomingScroll.innerHTML = upcoming.length
-                            ? renderCards(upcoming, 'card', true)
+                        const partialNotice = data.partial
+                            ? '<div class="upcoming-partial-note" role="status">Some release data is temporarily unavailable. This list may be incomplete.</div>'
+                            : '';
+                        const emptyState = data.partial
+                            ? '<div class="search-empty-state">Upcoming titles are temporarily unavailable.<br><span>Please check again shortly.</span></div>'
                             : '<div class="search-empty-state">No upcoming titles right now.<br><span>Check back soon.</span></div>';
+                        upcomingScroll.innerHTML = partialNotice + (upcoming.length
+                            ? renderCards(upcoming, 'card', true)
+                            : emptyState);
                         upcomingRow.style.display = '';
                     })
                     .catch(error => {
+                        if (requestId !== upcomingRequestId) return;
                         console.error('Upcoming load failed:', error);
                         upcomingScroll.innerHTML = '<div class="search-empty-state">Upcoming is temporarily unavailable.</div>';
                         upcomingRow.style.display = '';
@@ -1771,6 +1781,16 @@ document.getElementById('searchInput').addEventListener('keydown', event => {
 
 // Hide dropdown if clicked outside
 document.addEventListener('click', (e) => {
+    const genreAction = e.target.closest('[data-action="request-genre-title"]');
+    if (genreAction) {
+        requestMovie(genreAction.dataset.requestTitle || '');
+        return;
+    }
+    const genreCard = e.target.closest('[data-genre-id]');
+    if (genreCard) {
+        openGenreDetail(genreCard.dataset.genreId);
+        return;
+    }
     const dropdown = document.getElementById('searchDropdown');
     const container = document.querySelector('.search-section');
     if (!container.contains(e.target)) {
@@ -2003,7 +2023,7 @@ document.addEventListener('keydown', (e) => {
                                 const seasonNumbers = Object.keys(seasonsMap).map(Number).sort((a, b) => a - b);
                                 let seasonsHtml = `<div class="season-scroll-wrapper"><div class="season-pill-container" id="seasonPillContainer">`;
                                 seasonNumbers.forEach(sn => {
-                                    seasonsHtml += `<div class="season-pill" data-season="${sn}" onclick="selectSeason(${m.id}, ${sn})">Season ${sn}</div>`;
+                                    seasonsHtml += `<button type="button" class="season-pill" data-season="${sn}" aria-pressed="false" onclick="selectSeason(${m.id}, ${sn})">Season ${sn}</button>`;
                                 });
                                 seasonsHtml += `</div></div>`;
                                 seasonsContainer.innerHTML = seasonsHtml;
@@ -2325,7 +2345,9 @@ document.addEventListener('keydown', (e) => {
         window.selectSeason = function(movieId, seasonNum) {
             // Update Active Pill
             document.querySelectorAll('.season-pill').forEach(el => {
-                if (parseInt(el.getAttribute('data-season')) === seasonNum) {
+                const selected = parseInt(el.getAttribute('data-season')) === seasonNum;
+                el.setAttribute('aria-pressed', String(selected));
+                if (selected) {
                     el.classList.add('active');
                     // Scroll into view
                     el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });

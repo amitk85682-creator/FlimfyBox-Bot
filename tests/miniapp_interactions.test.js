@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../static/miniapp/app.js'), 'utf8');
+const template = fs.readFileSync(path.join(__dirname, '../templates/mini_app.html'), 'utf8');
 
 function section(start, end) {
     const from = source.indexOf(start);
@@ -59,6 +60,27 @@ test('cards preserve quoted titles safely and use keyboard-operable native butto
     assert.match(html, /\/w342\/poster.jpg/);
     assert.equal(JSON.parse(decodeURIComponent(html.match(/data-movie="([^"]+)"/)[1])).title, title);
     assert.equal(api.artworkUrl('javascript:alert(1)'), '/placeholder.svg');
+});
+
+test('mini app detail controls are real, named, and keyboard operable', () => {
+    assert.match(template, /id="genreSearchInput"[^>]*aria-label=/);
+    assert.match(template, /class="btn-more"[^>]*aria-label="Back to genres"[^>]*onclick="closeGenreDetail\(\)"/);
+    assert.doesNotMatch(template, /Browse more genres from the Explore hub/);
+    assert.match(template, /class="close-trailer-btn"[^>]*type="button"[^>]*aria-label="Close trailer"/);
+    assert.match(template, /class="wp-close"[^>]*type="button"[^>]*aria-label="Close web player"/);
+    assert.match(source, /<button type="button" class="season-pill"[^>]*aria-pressed="false"/);
+    assert.match(source, /el\.setAttribute\('aria-pressed', String\(selected\)\)/);
+});
+
+test('genre poster failures replace broken artwork with the local placeholder', () => {
+    const genreSection = section('function renderExploreScreen()', 'window.openGenreDetail = async function');
+    assert.match(genreSection, /onerror="this\.onerror=null;\s*this\.src='\$\{POSTER_PLACEHOLDER\}'/);
+});
+
+test('a stale upcoming response cannot overwrite a newer home render', () => {
+    const upcoming = section('const upcomingRow = ensureHomeSectionRow', 'const catalogueRows = [');
+    assert.match(upcoming, /const requestId = \+\+upcomingRequestId/);
+    assert.match(upcoming, /if \(requestId !== upcomingRequestId\) return;/);
 });
 
 test('both request actions authenticate, deduplicate concurrent clicks, and allow retry', async () => {

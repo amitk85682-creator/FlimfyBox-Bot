@@ -86,6 +86,7 @@ h1,h2,h3{font-family:'Manrope',sans-serif}
 .row-tools button{width:30px;height:30px;border:1px solid var(--border-strong);border-radius:50%;color:var(--muted)}
 .horizontal-scroll{display:flex;gap:14px;padding:0 var(--gutter) 10px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;scroll-snap-type:x proximity}
 .horizontal-scroll::-webkit-scrollbar,.home-categories::-webkit-scrollbar{display:none}
+.upcoming-partial-note{flex:0 0 230px;align-self:center;padding:14px;border:1px solid var(--border-strong);border-radius:13px;background:var(--surface);color:var(--muted);font-size:12px;line-height:1.5}
 .card,.grid-card{display:block;position:relative;padding:0;min-width:0;text-align:left;border-radius:13px;align-self:start}
 .card{flex:0 0 140px;scroll-snap-align:start}
 .card-img{display:block;width:100%;height:auto;aspect-ratio:2/3;object-fit:cover;border-radius:13px;border:1px solid var(--border);background:var(--surface-2);transition:box-shadow .3s,filter .3s}

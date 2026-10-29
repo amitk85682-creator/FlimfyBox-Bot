@@ -21,7 +21,6 @@ def load(*names, **dependencies):
         'asyncio': asyncio, 'logger': logging.getLogger(__name__), 'html_escape': escape,
         'SUPERBATCH_IDENTITY_TIMEOUT_SECONDS': 0.01,
         'SUPERBATCH_MOVIE_TIMEOUT_SECONDS': 0.01,
-        'SUPERBATCH_FILE_TIMEOUT_SECONDS': 0.01,
     }
     namespace.update(dependencies)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'main.py', 'exec',
@@ -105,25 +104,23 @@ def test_movie_49_timeout_does_not_stop_movies_50_to_110():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('stuck_stage', ['claim', 'save'])
-def test_stuck_file_or_claim_does_not_block_later_files_even_if_checkpoint_fails(stuck_stage):
+@pytest.mark.parametrize('failed_stage', ['claim', 'save'])
+def test_failed_claim_or_save_does_not_block_later_files(failed_stage):
     async def scenario():
-        saved = []
+        saved, updates = [], []
 
-        async def io(function, *args, **kwargs):
-            if stuck_stage == 'claim' and function is claim and args == (1,):
-                await asyncio.Event().wait()
-            return function(*args, **kwargs)
+        def claim(item_id):
+            return not (failed_stage == 'claim' and item_id == 1)
 
-        def claim(_):
-            return True
-
-        def fetch(_):
-            raise RuntimeError('checkpoint unavailable')
+        def fetch(_item_id):
+            row = [None] * 20
+            row[12] = 'processing'
+            row[13] = 'storage_copying'
+            return row
 
         async def save(message, context, item_id):
-            if item_id == 1:
-                await asyncio.Event().wait()
+            if failed_stage == 'save' and item_id == 1:
+                raise TimeoutError('bounded storage request timed out')
             saved.append(item_id)
             return '1080p'
 
@@ -131,12 +128,16 @@ def test_stuck_file_or_claim_does_not_block_later_files_even_if_checkpoint_fails
             pass
 
         ns = load('_save_one_superbatch_file', '_save_superbatch_files', '_mark_superbatch_item_failed',
-                  run_async=io, _batch_item_claim=claim, _batch_item_fetch=fetch,
-                  _batch_item_update=lambda *args, **kwargs: None, _pm_save_file=save)
+                  run_async=immediate, _batch_item_claim=claim, _batch_item_fetch=fetch,
+                  _batch_item_update=lambda item_id, **fields: updates.append((item_id, fields)),
+                  _pm_save_file=save)
         ns['asyncio'] = SimpleNamespace(wait_for=asyncio.wait_for, sleep=no_sleep)
         files = [{'batch_item_id': i, 'message_obj': object()} for i in (1, 2)]
         assert await ns['_save_superbatch_files'](files, None, 7) == ['1080p']
         assert saved == [2]
+        if failed_stage == 'save':
+            assert any(item_id == 1 and fields.get('state') == 'failed'
+                       for item_id, fields in updates)
 
     asyncio.run(scenario())
 

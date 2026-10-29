@@ -186,39 +186,55 @@ def register_webapp_routes(
     new_releases_refresh_lock = threading.Lock()
     release_success_ttl = 7 * 24 * 60 * 60
     release_negative_ttl = 6 * 60 * 60
+    release_failure_ttl = 60
+    release_stale_retry_ttl = 30
     release_discovery_ttl = 6 * 60 * 60
     home_response_cache = {}
     home_response_cache_lock = threading.Lock()
     home_response_ttl = int(os.environ.get('MINIAPP_HOME_CACHE_SECONDS', '600'))
 
-    def tmdb_cached_request(path, params, cache_key, negative=False, ttl_seconds=None):
+    def tmdb_cached_request(
+        path, params, cache_key, negative=False, ttl_seconds=None,
+        attempts=2, request_timeout=6,
+    ):
         now = time.time()
         with release_cache_lock:
             cached = release_cache.get(cache_key)
             if cached and cached[0] > now:
                 return cached[1], True
+            stale_data = cached[1] if cached else None
         request_params = dict(params)
         request_params['api_key'] = TMDB_API_KEY
         response_data = None
-        for attempt in range(2):
+        attempt_limit = max(1, int(attempts))
+        for attempt in range(attempt_limit):
             try:
                 response = requests.get(
                     f'https://api.themoviedb.org/3/{path}',
                     params=request_params,
                     headers={'User-Agent': 'FlimfyBox/1.0'},
-                    timeout=6
+                    timeout=request_timeout,
                 )
                 if response.status_code in (429, 500, 502, 503, 504):
-                    if attempt == 0:
+                    if attempt + 1 < attempt_limit:
                         continue
                     response.raise_for_status()
                 response.raise_for_status()
                 response_data = response.json()
                 break
             except (requests.RequestException, ValueError) as error:
-                if attempt == 1:
+                if attempt + 1 == attempt_limit:
                     logger.warning('TMDB release lookup failed for %s: %s', cache_key, error)
-        ttl = release_negative_ttl if negative or response_data is None else (ttl_seconds or release_success_ttl)
+        if response_data is None and stale_data is not None:
+            # Keep the last usable response and allow a quick retry instead of
+            # caching an upstream outage as an empty catalogue for hours.
+            with release_cache_lock:
+                release_cache[cache_key] = (now + release_stale_retry_ttl, stale_data)
+            return stale_data, True
+        if response_data is None:
+            ttl = release_negative_ttl if negative else release_failure_ttl
+        else:
+            ttl = ttl_seconds or release_success_ttl
         with release_cache_lock:
             release_cache[cache_key] = (now + ttl, response_data)
         return response_data, False
@@ -937,6 +953,7 @@ def register_webapp_routes(
         results = []
         seen = set()
         end_date = today + timedelta(days=180)
+        failed_sources = 0
         for media_type in ('movie', 'tv'):
             params = {
                 'page': 1,
@@ -955,9 +972,15 @@ def register_webapp_routes(
             data, _ = tmdb_cached_request(
                 f'discover/{media_type}', params,
                 f'upcoming:{media_type}:{today.isoformat()}',
-                ttl_seconds=6 * 60 * 60
+                ttl_seconds=6 * 60 * 60,
+                attempts=1,
+                request_timeout=(1, 3),
             )
-            for item in (data or {}).get('results', []):
+            source_items = data.get('results') if isinstance(data, dict) else None
+            if not isinstance(source_items, list):
+                failed_sources += 1
+                continue
+            for item in source_items:
                 tmdb_id = item.get('id')
                 release_date = item.get('release_date' if media_type == 'movie' else 'first_air_date') or ''
                 if not tmdb_id or not release_date or (media_type, tmdb_id) in seen:
@@ -994,9 +1017,20 @@ def register_webapp_routes(
                     'availability_state': 'upcoming' if is_unreleased else 'released',
                     'release_state': 'released' if not is_unreleased else 'upcoming'
                 })
+        if failed_sources == 2:
+            return jsonify({
+                'status': 'error',
+                'message': 'Upcoming titles are temporarily unavailable. Please retry.',
+            }), 503
         results.sort(key=lambda item: item['release_date'])
-        response = {'status': 'success', 'movies': results[:limit], 'updated_at': datetime.now(timezone.utc).isoformat()}
-        api_movies_cache.set(cache_key, response)
+        response = {
+            'status': 'success',
+            'movies': results[:limit],
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+            'partial': failed_sources > 0,
+        }
+        if not failed_sources:
+            api_movies_cache.set(cache_key, response)
         return jsonify(response)
 
     @flask_app.route('/api/upcoming/reminder', methods=['GET', 'POST'])
