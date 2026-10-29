@@ -18,8 +18,7 @@ import concurrent.futures
 from html import escape as html_escape
 from PIL import Image, ImageOps
 from db_migrations import run_migrations
-from telegram import WebAppInfo
-from telegram import MenuButtonWebApp, WebAppInfo
+from telegram import BotCommand, MenuButtonWebApp, WebAppInfo
 import aiohttp
 # import anthropic  # Agar zaroorat ho toh uncomment karein
 from flask import jsonify
@@ -140,6 +139,12 @@ DEFAULT_POSTER = os.environ.get(
 # ==================== CONVERSATION STATES (YEH MISSING HAI) ====================
 WAITING_FOR_NAME, CONFIRMATION = range(2)
 SEARCHING, REQUESTING, MAIN_MENU, REQUESTING_FROM_BUTTON = range(2, 6)
+PUBLIC_BOT_COMMANDS = [
+    BotCommand('start', 'Open the FlimfyBox menu'),
+    BotCommand('search', 'Find a movie or series'),
+    BotCommand('genres', 'Browse by genre'),
+    BotCommand('help', 'How to use FlimfyBox'),
+]
 # ================= CONFIGURATION =================
 # ================= CONFIGURATION =================
 ANIME_CHANNEL_ID = "-1003523910286"
@@ -6351,6 +6356,109 @@ from collections import defaultdict
 
 user_processing_locks = defaultdict(Lock)
 
+
+def _configured_donation_upi():
+    upi_id = os.environ.get('UPI_ID', '').strip()
+    placeholders = {'default_id@ybl', 'your_upi_id@upi', 'example@upi', 'test@upi'}
+    if upi_id.casefold() in placeholders:
+        return ''
+    return upi_id if re.fullmatch(r'[A-Za-z0-9._-]{2,100}@[A-Za-z0-9.-]{2,64}', upi_id) else ''
+
+
+def build_premium_start_menu(user, bot_info):
+    """Return a safe, honest welcome card and compact Telegram action menu."""
+    user_id = getattr(user, 'id', None)
+    user_name = html_escape(str(getattr(user, 'first_name', None) or 'there'))
+    greeting_name = (
+        f"<a href='tg://user?id={int(user_id)}'>{user_name}</a>"
+        if user_id else user_name
+    )
+    bot_name = html_escape(str(getattr(bot_info, 'first_name', None) or 'FlimfyBox'))
+    username = str(getattr(bot_info, 'username', '') or '').strip().lstrip('@')
+    local_hour = datetime.now(timezone(timedelta(hours=5, minutes=30))).hour
+    greeting = (
+        'Good morning' if 5 <= local_hour < 12 else
+        'Good afternoon' if 12 <= local_hour < 17 else
+        'Good evening' if 17 <= local_hour < 21 else 'Good night'
+    )
+    caption = (
+        f"<b>🎬 {bot_name}</b> · your movie finder\n\n"
+        f"{greeting}, {greeting_name}.\n\n"
+        "Search movies and series from Telegram, choose an available version, "
+        "or explore the catalogue in the Mini App.\n\n"
+        "<b>Quick start</b>\n"
+        "🔎 Type a title here or use <code>/search Reacher</code>\n"
+        "🎞 Choose a match and then pick a file\n"
+        "🌐 Browse filters, details and availability in the app\n\n"
+        "<i>Search results reflect files currently listed in the catalogue.</i>"
+    )
+    keyboard = [
+        [
+            InlineKeyboardButton('🔎 Search in chat', callback_data='start_search'),
+            InlineKeyboardButton('🌐 Browse catalogue', web_app=WebAppInfo(url=WEB_APP_URL)),
+        ],
+        [InlineKeyboardButton('❔ Help', callback_data='start_help'), InlineKeyboardButton('ℹ️ About', callback_data='start_about')],
+    ]
+    if username:
+        keyboard.append([InlineKeyboardButton('➕ Add to your group', url=f'https://t.me/{username}?startgroup=true')])
+    if _configured_donation_upi():
+        keyboard.append([InlineKeyboardButton('💛 Support FlimfyBox', callback_data='start_donate')])
+    return caption, InlineKeyboardMarkup(keyboard)
+
+
+def build_premium_help_message():
+    return (
+        "<b>FlimfyBox · quick guide</b>\n\n"
+        "<b>Search in chat</b>\n"
+        "Type a movie or series name, or use <code>/search Reacher</code>. "
+        "Add a year when titles share a name.\n\n"
+        "<b>Get a listed version</b>\n"
+        "Open the matching title, choose the quality you want, and use its file button.\n\n"
+        "<b>Explore</b>\n"
+        "Use <code>/genres</code> to browse by genre or tap <b>Browse catalogue</b> "
+        "for filters, title details and available versions.\n\n"
+        "<b>Can’t find it?</b>\n"
+        "Open the catalogue and use its request option. Search only includes titles "
+        "and files currently listed in FlimfyBox."
+    )
+
+
+async def _send_premium_start_menu(context, chat_id, user):
+    bot_info = await context.bot.get_me()
+    caption, keyboard = build_premium_start_menu(user, bot_info)
+    try:
+        message = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=START_GIF_CHANNEL_ID,
+            message_id=START_GIF_MESSAGE_ID,
+            caption=caption,
+            parse_mode='HTML',
+            reply_markup=keyboard,
+        )
+    except TelegramError as error:
+        logger.info('Welcome media unavailable; sending the text menu (%s)', type(error).__name__)
+        message = await context.bot.send_message(
+            chat_id=chat_id, text=caption, parse_mode='HTML', reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    track_message_for_deletion(context, chat_id, message.message_id, delay=300)
+    return message
+
+
+async def _edit_start_menu_panel(query, context, text, keyboard):
+    """Keep help/about transitions on the current welcome message when possible."""
+    try:
+        if getattr(query.message, 'caption', None) is not None:
+            await query.edit_message_caption(
+                caption=text, parse_mode='HTML', reply_markup=keyboard
+            )
+        else:
+            await query.edit_message_text(text, parse_mode='HTML', reply_markup=keyboard)
+    except TelegramError as error:
+        logger.info('Could not edit welcome panel; sending a new one (%s)', type(error).__name__)
+        message = await query.message.reply_text(text, parse_mode='HTML', reply_markup=keyboard)
+        track_user_message_for_deletion(context, query.message.chat_id, message)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -6640,91 +6748,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         track_user_message_for_deletion(context, chat_id, msg)
         return
 
-    # --- NORMAL WELCOME MESSAGE (WITH GIF & DYNAMIC GREETING) ---
     user = update.effective_user
-    user_name = user.first_name
-    user_id_val = user.id
-    user_uname = user.username  # Telegram username
-    
-    # 🌟 Mention banao: Clickable Name (Direct Profile Link without Web Preview)
-    user_display = f"<a href='tg://user?id={user_id_val}'>{user_name}</a>"
-    
-    # 🌟 NAYA: Bot ka actual naam aur username nikalo
-    bot_info = await context.bot.get_me()
-    bot_name = bot_info.first_name  # Ye har bot ka apna alag naam uthayega!
-    
-    # 1. Dynamic Greeting Logic
     try:
-        import pytz
-        tz = pytz.timezone('Asia/Kolkata')
-        hour = datetime.now(tz).hour
-    except ImportError:
-        hour = datetime.now().hour # Fallback agar pytz na ho
-        
-    if 5 <= hour < 12: greeting = "Good Morning ☀️"
-    elif 12 <= hour < 17: greeting = "Good Afternoon 🌤️"
-    elif 17 <= hour < 21: greeting = "Good Evening 🌆"
-    else: greeting = "Good Night 🌙"
-
-    # 2. Premium Caption (Dynamic Bot Name ke sath)
-    caption_text = (
-        f"<b>━━━━━━━ 🚩 𝐉𝐀𝐈 𝐒𝐇𝐑𝐈 𝐑𝐀𝐌 🚩 ━━━━━━━</b>\n\n"
-        f"✦ {greeting}, {user_display}!\n\n"
-        f"╭─── ❖ 𝗔𝗕𝗢𝗨𝗧 𝗠𝗘 ❖ ───╮\n"
-        f"│\n"
-        f"│  🤖 Main hoon <b>{bot_name}</b>\n"
-        f"│  𝗧𝗵𝗲 𝗠𝗼𝘀𝘁 𝗣𝗼𝘄𝗲𝗿𝗳𝘂𝗹 𝗔𝘂𝘁𝗼 𝗙𝗶𝗹𝘁𝗲𝗿 𝗕𝗼𝘁\n"
-        f"│\n"
-        f"╰──────────────────╯\n\n"
-        f"<b>⟐ 𝗠𝘆 𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:</b>\n"
-        f"  ◈ ⚡ 𝗟𝗶𝗴𝗵𝘁𝗻𝗶𝗻𝗴-𝗳𝗮𝘀𝘁 Auto Filtering\n"
-        f"  ◈ 🛡️ 𝟮𝟰/𝟳 Premium Uptime\n"
-        f"  ◈ 🎬 HD/4K File Processing\n"
-        f"  ◈ 🔍 𝗦𝗺𝗮𝗿𝘁 𝗦𝗲𝗮𝗿𝗰𝗵 + AI Matching\n\n"
-        f"<b>━━━━━━━━━━━━━━━━━━━━━</b>\n"
-        f"👇 <b>𝗧𝗮𝗽 𝘁𝗵𝗲 𝗯𝘂𝘁𝘁𝗼𝗻𝘀 𝗯𝗲𝗹𝗼𝘄 𝘁𝗼 𝗲𝘅𝗽𝗹𝗼𝗿𝗲!</b> 👇"
-    )
-
-    # 3. Inline Buttons
-    inline_buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_info.username}?startgroup=true")],
-        [InlineKeyboardButton("HELP 📢", callback_data="start_help"), InlineKeyboardButton("ABOUT 📖", callback_data="start_about")],
-        [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
-    ])
-
-    try:
-        # Web App button set karna
-        web_app_url = WEB_APP_URL
         await context.bot.set_chat_menu_button(
             chat_id=chat_id,
-            menu_button=MenuButtonWebApp(text="🎬 Web Version", web_app=WebAppInfo(url=web_app_url))
+            menu_button=MenuButtonWebApp(text='🎬 FlimfyBox', web_app=WebAppInfo(url=WEB_APP_URL)),
         )
-        
-        # Bottom Keyboard ('Search', 'Request') lane ke liye ek chhota silent message
-        # Bottom keyboard bhej kar turant delete kar do (chat clean rahegi)
-        menu_msg = await context.bot.send_message(chat_id=chat_id, text="🔄 Loading Menu...", reply_markup=get_main_keyboard())
-        try:
-            await menu_msg.delete()
-        except: 
-            pass
-
-        # This exact channel message is the approved Start GIF source.
-        msg = await context.bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=START_GIF_CHANNEL_ID,
-            message_id=START_GIF_MESSAGE_ID,
-            caption=caption_text,
-            parse_mode='HTML',
-            reply_markup=inline_buttons
+    except TelegramError as error:
+        logger.info('Could not set the Mini App menu button for %s (%s)', chat_id, type(error).__name__)
+    try:
+        # Remove a legacy reply keyboard from users who opened an older bot version.
+        menu_msg = await context.bot.send_message(
+            chat_id=chat_id, text='Updating menu…', reply_markup=get_main_keyboard()
         )
-        track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
-        
-    except Exception as e:
-        logger.error(f"Start Menu Error: {e}")
-        # If the approved GIF cannot be copied, keep the menu text-only.
-        msg = await context.bot.send_message(chat_id=chat_id, text=caption_text, parse_mode='HTML', reply_markup=inline_buttons)
-        track_message_for_deletion(context, chat_id, msg.message_id, delay=300)
-        
+        await menu_msg.delete()
+    except TelegramError as error:
+        logger.debug('Legacy reply keyboard cleanup skipped (%s)', type(error).__name__)
+    await _send_premium_start_menu(context, chat_id, user)
     return
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle main menu options"""
@@ -6985,7 +7025,7 @@ async def remove_search_progress(progress_message):
         logger.debug(f"Search progress message could not be deleted: {exc}")
 
 
-async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, query_text: str = None):
     """Search for movies in the database"""
     progress_message = None
     try:
@@ -7000,7 +7040,7 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.message or not update.message.text:
             return 
 
-        query = update.message.text.strip()
+        query = str(query_text if query_text is not None else update.message.text).strip()
         
         # Safety check
         if query in ['🔍 Search Movies', '📊 My Stats', '❓ Help']:
@@ -7561,60 +7601,65 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # === START MENU BUTTONS LOGIC ===
     if data.startswith("start_"):
-        await query.answer()
+        if data == "start_search":
+            await query.answer('Send a movie or series title in this chat.')
+            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Back to menu', callback_data='start_back')]])
+            await _edit_start_menu_panel(
+                query, context,
+                '<b>Search FlimfyBox</b>\n\n'
+                'Type a movie or series name in this chat, or use '
+                '<code>/search Reacher</code>. Add a year when titles share a name.',
+                back_btn,
+            )
+            return
 
         if data == "start_help":
-            text = (
-                "<b>━━━━━ 🛠 𝗗𝗲𝗹𝗽 𝗠𝗲𝗻𝘂 ━━━━━</b>\n\n"
-                "╭─── ❖ 𝗗𝗼𝘄 𝘁𝗼 𝗨𝘀𝗲 ❖ ───╮\n"
-                "│\n"
-                "│  ◈ Mujhe apne group me add karo\n"
-                "│  ◈ Admin bana do\n"
-                "│  ◈ Main auto files filter karunga!\n"
-                "│\n"
-                "╰─────────────────╯"
-            )
-            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
-            # Purani GIF delete karke naya message bhejenge (sabse safe tareeka)
-            try: await query.message.delete()
-            except: pass
-            msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
-            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
+            await query.answer()
+            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to menu", callback_data="start_back")]])
+            await _edit_start_menu_panel(query, context, build_premium_help_message(), back_btn)
             return
 
         elif data == "start_about":
+            await query.answer()
+            bot_info = await context.bot.get_me()
+            bot_name = html_escape(str(bot_info.first_name or 'FlimfyBox'))
             text = (
-                f"<b>━━━━━ 📖 𝗔𝗯𝗼𝘂𝘁 𝗠𝗲 ━━━━━</b>\n\n"
-                f"╭─── ❖ 𝗗𝗲𝘁𝗮𝗶𝗹𝘀 ❖ ───╮\n"
-                f"│\n"
-                f"│  ◈ <b>Developer:</b> @{ADMIN_USERNAME}\n"
-                f"│  ◈ <b>Language:</b> Python 3\n"
-                f"│  ◈ <b>Library:</b> python-telegram-bot\n"
-                f"│\n"
-                f"╰─────────────────╯"
+                f"<b>About {bot_name}</b>\n\n"
+                "FlimfyBox helps you find titles in the catalogue, compare listed versions, "
+                "and open richer details in the Mini App.\n\n"
+                f"Support: @{html_escape(str(ADMIN_USERNAME).lstrip('@'))}"
             )
-            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
-            try: await query.message.delete()
-            except: pass
-            msg = await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
-            track_message_for_deletion(context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS)
+            back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to menu", callback_data="start_back")]])
+            await _edit_start_menu_panel(query, context, text, back_btn)
             return
             
         elif data == "start_donate":
-            # Yahan se tumhara purana start_donate wala code shuru hoga...
             await query.answer()
             user = update.effective_user
-            amount = 10  # Tumhara VIP amount
-            upi_id = os.environ.get("UPI_ID", "default_id@ybl")
+            upi_id = _configured_donation_upi()
+            if not upi_id:
+                back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to menu", callback_data="start_back")]])
+                await _edit_start_menu_panel(
+                    query, context,
+                    '<b>Support FlimfyBox</b>\n\nPayment support is not configured right now.',
+                    back_btn,
+                )
+                return
+            try:
+                amount = max(1, int(os.environ.get('DONATION_AMOUNT_INR', '10')))
+            except (TypeError, ValueError):
+                amount = 10
             
             try:
                 import qrcode
                 from io import BytesIO
-                from urllib.parse import quote
                 
-                # QR Code Generate karna
                 note = f"TG-{user.id}"
-                upi_url = f"upi://pay?pa={upi_id}&pn=VIP+Subscription&am={amount}&tn={note}&cu=INR"
+                upi_url = (
+                    f"upi://pay?pa={quote(upi_id, safe='')}"
+                    f"&pn={quote('FlimfyBox Support', safe='')}"
+                    f"&am={amount}&tn={quote(note, safe='')}&cu=INR"
+                )
                 
                 qr = qrcode.QRCode(version=1, box_size=10, border=4)
                 qr.add_data(upi_url)
@@ -7652,88 +7697,26 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 track_user_message_for_deletion(context, chat_id, donation_msg)
             except Exception as e:
-                # Agar qrcode install nahi hai toh normal text bhejega
-                text = f"<b>💰 DONATION</b>\n\nAgar aapko mera kaam pasand aaya, toh aap UPI pe support kar sakte hain: <code>{upi_id}</code>"
-                back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="start_back")]])
-                await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=back_btn)
+                logger.warning('Donation QR could not be generated (%s)', type(e).__name__)
+                text = (
+                    f"<b>FlimfyBox support · ₹{amount}</b>\n\n"
+                    f"UPI ID: <code>{html_escape(upi_id)}</code>"
+                )
+                back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to menu", callback_data="start_back")]])
+                try:
+                    await query.edit_message_caption(caption=text, parse_mode='HTML', reply_markup=back_btn)
+                except TelegramError:
+                    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML', reply_markup=back_btn)
             return
 
     if data == "start_back":
         await query.answer()
         chat_id = query.message.chat_id
-        
-        # Pehle wala message delete karo (chahe wo Help ho, About ho ya QR code ho)
         try:
             await query.message.delete()
-        except: pass
-
-        # Wapas Start Menu Banane ka logic
-        user = update.effective_user
-        user_name = user.first_name
-        user_id_val = user.id
-        user_uname = user.username
-        
-        ## 🌟 Mention banao (Direct Profile Link without Web Preview)
-        user_display = f"<a href='tg://user?id={user_id_val}'>{user_name}</a>"
-        
-        bot_info = await context.bot.get_me()
-        bot_name = bot_info.first_name
-        
-        try:
-            import pytz
-            tz = pytz.timezone('Asia/Kolkata')
-            hour = datetime.now(tz).hour
-        except ImportError:
-            hour = datetime.now().hour
-            
-        if 5 <= hour < 12: greeting = "Good Morning ☀️"
-        elif 12 <= hour < 17: greeting = "Good Afternoon 🌤️"
-        elif 17 <= hour < 21: greeting = "Good Evening 🌆"
-        else: greeting = "Good Night 🌙"
-
-        caption_text = (
-            f"<b>━━━━━━━ 🚩 𝐉𝐀𝐈 𝐒𝐇𝐑𝐈 𝐑𝐀𝐌 🚩 ━━━━━━━</b>\n\n"
-            f"✦ {greeting}, {user_display}!\n\n"
-            f"╭─── ❖ 𝗔𝗕𝗢𝗨𝗧 𝗠𝗘 ❖ ───╮\n"
-            f"│\n"
-            f"│  🤖 Main hoon <b>{bot_name}</b>\n"
-            f"│  𝗧𝗵𝗲 𝗠𝗼𝘀𝘁 𝗣𝗼𝘄𝗲𝗿𝗳𝘂𝗹 𝗔𝘂𝘁𝗼 𝗙𝗶𝗹𝘁𝗲𝗿 𝗕𝗼𝘁\n"
-            f"│\n"
-            f"╰──────────────────╯\n\n"
-            f"<b>⟐ 𝗠𝘆 𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:</b>\n"
-            f"  ◈ ⚡ 𝗟𝗶𝗴𝗵𝘁𝗻𝗶𝗻𝗴-𝗳𝗮𝘀𝘁 Auto Filtering\n"
-            f"  ◈ 🛡️ 𝟮𝟰/𝟳 Premium Uptime\n"
-            f"  ◈ 🎬 HD/4K File Processing\n"
-            f"  ◈ 🔍 𝗦𝗺𝗮𝗿𝘁 𝗦𝗲𝗮𝗿𝗰𝗵 + AI Matching\n\n"
-            f"<b>━━━━━━━━━━━━━━━━━━━━━</b>\n"
-            f"👇 <b>𝗧𝗮𝗽 𝘁𝗵𝗲 𝗯𝘂𝘁𝘁𝗼𝗻𝘀 𝗯𝗲𝗹𝗼𝘄 𝘁𝗼 𝗲𝘅𝗽𝗹𝗼𝗿𝗲!</b> 👇"
-        )
-
-        inline_buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔰 ADD ME TO YOUR GROUP 🔰", url=f"https://t.me/{bot_info.username}?startgroup=true")],
-            [InlineKeyboardButton("HELP 📢", callback_data="start_help"), InlineKeyboardButton("ABOUT 📖", callback_data="start_about")],
-            [InlineKeyboardButton("DONATION 💰", callback_data="start_donate")]
-        ])
-
-        # Restore the exact approved GIF from the requested channel message.
-        try:
-            msg = await context.bot.copy_message(
-                chat_id=chat_id,
-                from_chat_id=START_GIF_CHANNEL_ID,
-                message_id=START_GIF_MESSAGE_ID,
-                caption=caption_text,
-                parse_mode='HTML',
-                reply_markup=inline_buttons
-            )
-        except TelegramError as exc:
-            logger.error(f"Could not restore start menu media: {exc}")
-            msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=caption_text,
-                parse_mode='HTML',
-                reply_markup=inline_buttons
-            )
-        track_user_message_for_deletion(context, chat_id, msg)
+        except TelegramError as error:
+            logger.info('Welcome panel was already removed (%s)', type(error).__name__)
+        await _send_premium_start_menu(context, chat_id, update.effective_user)
         return
         
     # =======================================================
@@ -16588,7 +16571,39 @@ async def timeout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         track_message_for_deletion(context, update.effective_chat.id, msg.message_id, USER_TEXT_DELETE_SECONDS)
     return ConversationHandler.END
 
-async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton('🌐 Browse catalogue', web_app=WebAppInfo(url=WEB_APP_URL))],
+    ])
+    response = await message.reply_text(
+        build_premium_help_message(),
+        parse_mode='HTML',
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+    if update.effective_chat and update.effective_chat.type == 'private':
+        track_user_message_for_deletion(context, update.effective_chat.id, response)
+
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = ' '.join(str(part) for part in (context.args or [])).strip()
+    message = update.effective_message
+    if not query:
+        if message:
+            await message.reply_text(
+                "Send a title after the command, for example <code>/search Reacher</code>.\n"
+                "You can also type the title directly in chat.",
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+            )
+        return
+    await main_menu_or_search(update, context, search_query=query)
+
+async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE, search_query: str = None):
     # 👇 SABSE PEHLE SAFEGUARD LAGAYEIN: Ignore channel posts or anonymous updates
     if not update.effective_user:
         return
@@ -16598,7 +16613,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    pre_search_query = (
+    pre_search_query = str(search_query).strip() if search_query is not None else (
         update.message.text.strip()
         if update.message and update.message.text
         else ""
@@ -16630,7 +16645,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         if not check['is_member']:
             if update.message and update.message.text:
-                context.user_data['pending_search_query'] = update.message.text.strip()
+                context.user_data['pending_search_query'] = pre_search_query
 
             msg = await update.message.reply_text(
                 get_join_message(check['channel'], check['group']),
@@ -16646,7 +16661,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message or not update.message.text:
         return
 
-    query_text = update.message.text.strip()
+    query_text = pre_search_query
     
     # === 2. Menu Button Logic ===
     if query_text == '🔍 Search Movies':
@@ -16695,7 +16710,7 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     # === 3. If no button matched, Search for the Movie ===
-    await search_movies(update, context)
+    await search_movies(update, context, query_text=query_text)
 
 # 👇👇👇 IS FUNCTION KO REPLACE KARO (Line ~1665) 👇👇👇
 
@@ -17142,6 +17157,8 @@ def register_handlers(application: Application):
     
     
     application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('search', search_command, filters=filters.ChatType.PRIVATE))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, main_menu_or_search))
     
     # Button Callback
@@ -17313,6 +17330,13 @@ async def main():
             register_handlers(app)
 
             await app.initialize()
+            try:
+                await asyncio.wait_for(
+                    app.bot.set_my_commands(PUBLIC_BOT_COMMANDS),
+                    timeout=5,
+                )
+            except Exception as error:
+                logger.warning('Bot command menu setup skipped for bot %s (%s)', i + 1, type(error).__name__)
             await app.start()
             await _recover_interrupted_batches(app)
             await app.updater.start_polling(drop_pending_updates=False)

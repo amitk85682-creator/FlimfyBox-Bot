@@ -28,6 +28,75 @@ def tmdb_detail(identifier, *, score=7.6, votes=2100, imdb_id='tt1234567'):
     }
 
 
+def test_local_movie_audience_reviews_keep_tmdb_attribution_and_safe_source_links(webapp_factory, monkeypatch):
+    connection = FakeConnection(fetchone_result=(42, 'Movie', 'Movie'))
+    app, _, _ = webapp_factory(connection=connection)
+    calls = []
+    reviews = {
+        'results': [{
+            'author': 'A TMDb reviewer',
+            'content': '<p>Sharp, tense &amp; beautifully acted.</p>',
+            'author_details': {'rating': 8.5},
+            'created_at': '2026-09-20T11:00:00.000Z',
+            'url': 'https://www.themoviedb.org/review/rev-123',
+        }, {
+            'author': 'Unsafe link reviewer',
+            'content': '<b>Still just plain text.</b>',
+            'url': 'https://evil.example/review/fake',
+        }, {
+            'author': 'Nonstandard port reviewer',
+            'content': 'Source URL must stay on the official web origin.',
+            'url': 'https://www.themoviedb.org:444/review/rev-456',
+        }],
+        'total_results': 23,
+    }
+
+    def provider_get(url, **kwargs):
+        calls.append((url, kwargs))
+        assert '/movie/42/reviews' in url
+        return ProviderResponse(reviews)
+
+    monkeypatch.setattr(route_requests, 'get', provider_get)
+    response = app.test_client().get('/api/movie/12/audience-reviews')
+
+    assert response.status_code == 200
+    assert response.json['source'] == 'TMDb'
+    assert response.json['review_count'] == 23
+    assert response.json['linked'] is True
+    assert response.json['reviews'][0] == {
+        'author': 'A TMDb reviewer',
+        'content': 'Sharp, tense & beautifully acted.',
+        'rating': 8.5,
+        'created_at': '2026-09-20T11:00:00.000Z',
+        'url': 'https://www.themoviedb.org/review/rev-123',
+        'source': 'TMDb',
+    }
+    assert response.json['reviews'][1]['source'] == 'TMDb'
+    assert response.json['reviews'][1]['url'] == ''
+    assert response.json['reviews'][2]['url'] == ''
+    assert len(calls) == 1
+
+
+def test_tmdb_series_audience_reviews_use_the_tv_review_endpoint(webapp_factory, monkeypatch):
+    app, _, connection = webapp_factory()
+    calls = []
+
+    def provider_get(url, **kwargs):
+        calls.append(url)
+        return ProviderResponse({'results': [], 'total_results': 0})
+
+    monkeypatch.setattr(route_requests, 'get', provider_get)
+    response = app.test_client().get('/api/tmdb/tv/77/audience-reviews')
+
+    assert response.status_code == 200
+    assert response.json == {
+        'status': 'success', 'source': 'TMDb', 'reviews': [],
+        'review_count': 0, 'linked': True,
+    }
+    assert calls and '/tv/77/reviews' in calls[0]
+    assert connection.queries == []
+
+
 def test_local_movie_scores_are_cached_without_fetching_tmdb_reviews(webapp_factory, monkeypatch):
     monkeypatch.setenv('OMDB_API_KEY', 'synthetic-omdb-key')
     connection = FakeConnection(fetchone_result=('tt1234567', 42, 'Movie', 'Movie'))

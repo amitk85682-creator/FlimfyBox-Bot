@@ -9,7 +9,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=identity-3"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=flimfy-verdict-3">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=flimfy-verdict-5">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -260,6 +260,7 @@
                         </section>
                         <div id="castSection" class="cast-list"></div>
                         <section class="community-rating" id="communityRating" aria-live="polite"></section>
+                        <section class="tmdb-audience-reviews-panel" id="tmdbAudienceReviews" aria-live="polite"></section>
                         <section class="flimfy-reviews-panel" id="flimfyReviews" aria-live="polite"></section>
                     </main>
                     <aside class="dp-side-column" aria-label="Ratings and available versions">
@@ -318,6 +319,7 @@
             <button type="button" onclick="showGlobalChat()"><i class="far fa-comment"></i><span>Global Chat</span></button>
             <button type="button" onclick="showSettings()"><i class="fas fa-gear"></i><span>Settings</span></button>
             <button type="button" onclick="showInfoPanel('DMCA & Copyright', '<p>If you believe content violates your copyright, send the title, source URL and proof of ownership to the FlimfyBox administrator.</p><p class=&quot;info-note&quot;>Requests are reviewed and handled as quickly as possible.</p>', 'circle-info')"><i class="fas fa-circle-info"></i><span>DMCA</span></button>
+            <button type="button" onclick="showCredits()"><i class="fas fa-award"></i><span>About & Credits</span></button>
             <button type="button" onclick="showMyList()"><i class="far fa-bookmark"></i><span>Watchlist</span></button>
         </div>
     </section>
@@ -330,7 +332,7 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-verdict-3"></script>
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=flimfy-verdict-3"></script>
+    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-verdict-5"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=flimfy-verdict-5"></script>
 </body>
 </html>

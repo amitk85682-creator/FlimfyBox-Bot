@@ -135,3 +135,57 @@ test('FlimfyBox source explains an empty community score without implying an out
     }
 });
 
+test('public TMDb reviews stay labeled as TMDb and only link to real TMDb review pages', () => {
+    const previousDocument = global.document;
+    class Element {
+        constructor(tag) { this.tag = tag; this.className = ''; this.textContent = ''; this.children = []; this.style = {}; }
+        append(...children) { this.children.push(...children); }
+        replaceChildren(...children) { this.children = children; }
+        setAttribute() {}
+        querySelector(selector) {
+            const className = selector.startsWith('.') ? selector.slice(1) : '';
+            const visit = item => item.className.split(/\s+/).includes(className)
+                ? item
+                : item.children.map(visit).find(Boolean);
+            return this.children.map(visit).find(Boolean) || null;
+        }
+    }
+    global.document = { createElement: tag => new Element(tag) };
+    try {
+        const reviews = new Element('section');
+        meter.renderAudienceReviews(reviews, {
+            status: 'success', source: 'TMDb', linked: true, review_count: 9,
+            reviews: [{
+                author: 'TMDb reviewer', content: 'A terrific film.', rating: 8.4,
+                url: 'https://www.themoviedb.org/review/review-1'
+            }, {
+                author: 'Another reviewer', content: 'An untrusted link is omitted.',
+                url: 'https://evil.example/review/fake'
+            }]
+        });
+        const heading = reviews.children[0].children.find(child => child.tag === 'h2');
+        assert.equal(heading.textContent, 'TMDb member reviews');
+        assert.equal(reviews.querySelector('.tmdb-source-pill').textContent, 'TMDb');
+        assert.equal(reviews.querySelector('.review-count').textContent, '9 on TMDb');
+        const links = [];
+        const collectLinks = item => {
+            if (item.tag === 'a') links.push(item);
+            item.children.forEach(collectLinks);
+        };
+        reviews.children.forEach(collectLinks);
+        assert.equal(links.length, 1);
+        assert.equal(links[0].href, 'https://www.themoviedb.org/review/review-1');
+        assert.equal(links[0].rel, 'noopener noreferrer');
+        assert.equal(reviews.querySelector('.flimfy-review-author').textContent, 'TMDb reviewer');
+
+        const unlinked = new Element('section');
+        meter.renderAudienceReviews(unlinked, {
+            status: 'success', linked: false, review_count: 0, reviews: []
+        });
+        assert.equal(unlinked.querySelector('.review-count').textContent, 'TMDb source');
+        assert.match(unlinked.querySelector('.review-empty').textContent, /not linked to a TMDb entry/);
+    } finally {
+        global.document = previousDocument;
+    }
+});
+

@@ -8,6 +8,8 @@ import psycopg2
 from datetime import datetime, timedelta, timezone
 import requests
 import time
+from html import unescape as html_unescape
+from urllib.parse import urlparse
 from urllib.parse import quote
 from urllib.parse import parse_qsl
 import random
@@ -312,6 +314,68 @@ def register_webapp_routes(
             return None
         text = str(value).strip()
         return text[:32] if text and text.lower() not in {'n/a', 'na', 'none'} else None
+
+    def clean_tmdb_audience_review(review):
+        if not isinstance(review, dict):
+            return None
+        content = html_unescape(str(review.get('content') or ''))
+        content = re.sub(r'<[^>]*>', ' ', content)
+        content = re.sub(r'\s+', ' ', content).strip()
+        if not content:
+            return None
+        author = html_unescape(str(review.get('author') or 'TMDb member'))
+        author = re.sub(r'\s+', ' ', author).strip()[:100] or 'TMDb member'
+        raw_url = str(review.get('url') or '').strip()
+        parsed_url = urlparse(raw_url)
+        safe_url = (
+            raw_url[:500]
+            if parsed_url.scheme == 'https'
+            and parsed_url.hostname == 'www.themoviedb.org'
+            and parsed_url.port in (None, 443)
+            and parsed_url.username is None
+            and parsed_url.password is None
+            and re.fullmatch(r'/review/[A-Za-z0-9_-]+/?', parsed_url.path)
+            else ''
+        )
+        author_details = review.get('author_details') or {}
+        review_rating = rating_number(author_details.get('rating')) if isinstance(author_details, dict) else None
+        return {
+            'author': author,
+            'content': content[:1200],
+            'rating': review_rating,
+            'created_at': str(review.get('created_at') or '')[:40],
+            'url': safe_url,
+            'source': 'TMDb',
+        }
+
+    def load_tmdb_audience_reviews(media_type, tmdb_id):
+        if not TMDB_API_KEY:
+            return None
+        payload, _cache_hit = tmdb_cached_request(
+            f'{media_type}/{tmdb_id}/reviews',
+            {'language': 'en-US', 'page': 1},
+            f'movie-audience-reviews:{media_type}:{tmdb_id}',
+            False, 6 * 60 * 60, 1, (1, 1.5),
+        )
+        if not isinstance(payload, dict):
+            return None
+        raw_reviews = payload.get('results')
+        raw_reviews = raw_reviews if isinstance(raw_reviews, list) else []
+        reviews = [
+            safe_review
+            for safe_review in (clean_tmdb_audience_review(item) for item in raw_reviews[:5])
+            if safe_review
+        ]
+        try:
+            review_count = max(0, int(payload.get('total_results', len(raw_reviews))))
+        except (TypeError, ValueError):
+            review_count = len(raw_reviews)
+        return {
+            'status': 'success',
+            'source': 'TMDb',
+            'reviews': reviews,
+            'review_count': review_count,
+        }
 
     def fetch_omdb_rating(imdb_id, api_key):
         if not api_key or not re.fullmatch(r'tt\d{7,8}', str(imdb_id or '')):
@@ -1919,6 +1983,52 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Invalid TMDb title'}), 404
         key = ('tmdb', media_type, tmdb_id)
         return jsonify(load_rating_sources(key, media_type, tmdb_id))
+
+    @flask_app.route('/api/movie/<int:movie_id>/audience-reviews', methods=['GET'])
+    def get_local_movie_audience_reviews(movie_id):
+        if movie_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT tmdb_id, category, content_type FROM movies WHERE id = %s',
+                (movie_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            tmdb_id, category, content_type = row
+            media_type = 'tv' if is_catalogue_tv(category, None, content_type) else 'movie'
+            close_db_connection(conn)
+            conn = None
+            if not re.fullmatch(r'\d+', str(tmdb_id or '')):
+                return jsonify({
+                    'status': 'success', 'source': 'TMDb', 'reviews': [],
+                    'review_count': 0, 'linked': False,
+                })
+            result = load_tmdb_audience_reviews(media_type, str(tmdb_id))
+            if result is None:
+                return jsonify({'status': 'error', 'message': 'TMDb reviews are temporarily unavailable'}), 503
+            return jsonify({**result, 'linked': True})
+        except Exception as error:
+            logger.warning('Could not load TMDb audience reviews for movie %s (%s)', movie_id, type(error).__name__)
+            return jsonify({'status': 'error', 'message': 'TMDb reviews are temporarily unavailable'}), 503
+        finally:
+            if conn is not None:
+                close_db_connection(conn)
+
+    @flask_app.route('/api/tmdb/<media_type>/<int:tmdb_id>/audience-reviews', methods=['GET'])
+    def get_tmdb_title_audience_reviews(media_type, tmdb_id):
+        if media_type not in {'movie', 'tv'} or tmdb_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Invalid TMDb title'}), 404
+        result = load_tmdb_audience_reviews(media_type, tmdb_id)
+        if result is None:
+            return jsonify({'status': 'error', 'message': 'TMDb reviews are temporarily unavailable'}), 503
+        return jsonify({**result, 'linked': True})
 
     @flask_app.route('/api/movie/<int:movie_id>/rating', methods=['POST'])
     def submit_movie_rating(movie_id):

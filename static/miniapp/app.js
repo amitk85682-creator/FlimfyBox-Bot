@@ -830,6 +830,19 @@ const tg = window.Telegram?.WebApp || {
             `, 'sliders', '<button type="button" class="primary-action" onclick="closeInfoModal()">Done</button>');
         };
 
+        window.showCredits = function() {
+            showInfoPanel('About & Credits', `
+                <div class="credits-source-card">
+                    <a class="credits-tmdb-logo-link" href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer" aria-label="Visit TMDb">
+                        <img class="credits-tmdb-logo" src="https://www.themoviedb.org/assets/2/v4/logos/primary-green.svg" alt="TMDb">
+                    </a>
+                    <div><strong>Movie and TV data</strong><p>TMDb provides catalogue details, audience ratings, artwork and public review excerpts shown in FlimfyBox.</p></div>
+                </div>
+                <p class="credits-disclaimer">This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+                <p class="info-note">TMDb audience reviews and scores are labeled by their source. FlimfyBox member ratings and reviews are shown separately.</p>
+            `, 'circle-info', '<button type="button" class="primary-action" onclick="closeInfoModal()">Done</button>');
+        };
+
         document.addEventListener('keydown', event => {
             if (event.key === 'Escape') closeInfoModal();
         });
@@ -1995,6 +2008,44 @@ document.addEventListener('keydown', (e) => {
                     window.FlimfyVerdict.renderReviews(container, { status: 'unavailable' });
                 });
         }
+        function loadTmdbAudienceReviews(movie, isTMDB, requestId, signal) {
+            const container = document.getElementById('tmdbAudienceReviews');
+            if (!container || !window.FlimfyVerdict) return;
+            const rawId = String(movie?.id || '').trim();
+            const tmdbId = String(movie?.tmdb_id || rawId.replace(/^tmdb_/, '')).trim();
+            const typeHint = [movie?.media_type, movie?.content_type, movie?.category]
+                .filter(Boolean).join(' ').toLowerCase();
+            const mediaType = /\b(tv|series|web\s*series)\b/.test(typeHint) ? 'tv' : 'movie';
+            const isExternalTitle = isTMDB || movie?.source === 'tmdb' || /^tmdb_\d+$/.test(rawId);
+            const endpoint = isExternalTitle && /^\d+$/.test(tmdbId)
+                ? `/api/tmdb/${mediaType}/${encodeURIComponent(tmdbId)}/audience-reviews`
+                : /^\d+$/.test(rawId)
+                    ? `/api/movie/${encodeURIComponent(rawId)}/audience-reviews`
+                    : null;
+            if (!endpoint) {
+                window.FlimfyVerdict.renderAudienceReviews(container, {
+                    status: 'success', linked: false, reviews: [], review_count: 0
+                });
+                return;
+            }
+            window.FlimfyVerdict.renderAudienceReviews(container, { status: 'loading' });
+            fetchWithTimeout(endpoint, { signal })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || data.status !== 'success') {
+                        throw new Error(data.message || 'TMDb reviews are temporarily unavailable.');
+                    }
+                    return data;
+                })
+                .then(data => {
+                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== rawId) return;
+                    window.FlimfyVerdict.renderAudienceReviews(container, data);
+                })
+                .catch(error => {
+                    if (requestId !== detailsRequestId || isAbortError(error)) return;
+                    window.FlimfyVerdict.renderAudienceReviews(container, { status: 'unavailable' });
+                });
+        }
         window.scrollToDetailDownloads = function() {
             const target = document.getElementById('dpLinks');
             if (!target) return;
@@ -2054,6 +2105,7 @@ document.addEventListener('keydown', (e) => {
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
             loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
+            loadTmdbAudienceReviews(movie, isTMDB, requestId, detailsController.signal);
             loadFlimfyCommunityReviews(movie, requestId, detailsController.signal);
             // The card already contains the title, poster, year, rating and genre.
             // Show that immediately while files/cast finish loading in the background.

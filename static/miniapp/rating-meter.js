@@ -113,6 +113,21 @@
         return new Intl.DateTimeFormat(undefined, { month: 'short', year: 'numeric' }).format(date);
     }
 
+    function trustedTmdbReviewUrl(value) {
+        try {
+            const url = new URL(String(value || ''));
+            return url.protocol === 'https:'
+                && url.hostname === 'www.themoviedb.org'
+                && (!url.port || url.port === '443')
+                && !url.username && !url.password
+                && /^\/review\/[A-Za-z0-9_-]+\/?$/.test(url.pathname)
+                ? url.href
+                : '';
+        } catch (_error) {
+            return '';
+        }
+    }
+
     function renderSources(container, payload) {
         const sourceGrid = node('div', 'verdict-source-grid');
         providerDefinitions.forEach(provider => {
@@ -266,6 +281,63 @@
         }
     }
 
+    function renderAudienceReviews(container, payload = {}) {
+        const reviews = Array.isArray(payload?.reviews) ? payload.reviews.slice(0, 5) : [];
+        const heading = node('div', 'detail-section-heading');
+        heading.append(
+            node('span', 'section-kicker', 'PUBLIC AUDIENCE VOICES'),
+            node('h2', '', 'TMDb member reviews')
+        );
+        const count = Number(payload?.review_count);
+        heading.append(node('span', 'review-count', payload?.linked === false
+            ? 'TMDb source'
+            : Number.isFinite(count) && count >= 0
+            ? `${count.toLocaleString()} on TMDb`
+            : 'TMDb source'));
+        container.append(heading);
+
+        if (payload?.status === 'loading') {
+            container.append(node('p', 'review-empty', 'Loading public reviews from TMDb…'));
+            return;
+        }
+        if (payload?.status !== 'success' && payload?.status !== undefined) {
+            container.append(node('p', 'review-empty', 'TMDb reviews are temporarily unavailable.'));
+            return;
+        }
+        if (payload?.linked === false) {
+            container.append(node('p', 'review-empty', 'This catalogue title is not linked to a TMDb entry yet.'));
+            return;
+        }
+        if (!reviews.length) {
+            container.append(node('p', 'review-empty', 'No public TMDb review excerpts are available for this title yet.'));
+            return;
+        }
+
+        const list = node('div', 'flimfy-review-list tmdb-audience-review-list');
+        reviews.forEach(review => {
+            const card = node('article', 'flimfy-review-card tmdb-audience-review-card');
+            const meta = node('div', 'flimfy-review-meta');
+            meta.append(node('strong', 'flimfy-review-author', review.author || 'TMDb member'));
+            meta.append(node('span', 'tmdb-source-pill', 'TMDb'));
+            const date = formatReviewDate(review.created_at);
+            if (date) meta.append(node('span', 'flimfy-review-date', date));
+            const reviewRating = normalizedScore(review.rating);
+            if (reviewRating !== null) meta.append(node('span', 'flimfy-review-rating', `★ ${reviewRating.toFixed(1)} / 10`));
+            const copy = node('p', 'flimfy-review-copy', review.content || '');
+            card.append(meta, copy);
+            const url = trustedTmdbReviewUrl(review.url);
+            if (url) {
+                const sourceLink = node('a', 'tmdb-review-source-link', 'Read full review on TMDb');
+                sourceLink.href = url;
+                sourceLink.target = '_blank';
+                sourceLink.rel = 'noopener noreferrer';
+                card.append(sourceLink);
+            }
+            list.append(card);
+        });
+        container.append(list);
+    }
+
     const api = {
         summarize,
         verdictForSummary,
@@ -289,6 +361,11 @@
             if (!reviewContainer) return;
             reviewContainer.replaceChildren();
             renderReviews(reviewContainer, payload || {});
+        },
+        renderAudienceReviews(reviewContainer, payload) {
+            if (!reviewContainer) return;
+            reviewContainer.replaceChildren();
+            renderAudienceReviews(reviewContainer, payload || {});
         },
         setCommunityRating(meterContainer, data) {
             if (!meterContainer) return;
