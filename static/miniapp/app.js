@@ -1845,6 +1845,92 @@ document.addEventListener('keydown', (e) => {
         };
 
         // Details
+        function resolutionRank(value) {
+            const text = String(value || '').toLowerCase();
+            if (/\b(?:2160p|4k|uhd)\b/.test(text)) return 4;
+            if (/\b1440p\b/.test(text)) return 3;
+            if (/\b1080p\b/.test(text)) return 2;
+            if (/\b720p\b/.test(text)) return 1;
+            if (/\b(?:480p|360p)\b/.test(text)) return 0;
+            return -1;
+        }
+        function sortMovieFilesForDisplay(files) {
+            return (Array.isArray(files) ? files : []).slice().sort((left, right) => {
+                const qualityOrder = resolutionRank(right?.quality) - resolutionRank(left?.quality);
+                if (qualityOrder) return qualityOrder;
+                const labelOrder = String(right?.quality || '').localeCompare(String(left?.quality || ''), undefined, { numeric: true });
+                return labelOrder || Number(left?.id || 0) - Number(right?.id || 0);
+            });
+        }
+        function renderMovieDownloadOptions(movieId, files) {
+            const sortedFiles = sortMovieFilesForDisplay(files).filter(file =>
+                Number.isSafeInteger(Number(movieId)) && Number(movieId) > 0
+                && Number.isSafeInteger(Number(file?.id)) && Number(file.id) > 0
+            );
+            if (!sortedFiles.length) {
+                return '<div class="download-empty"><i class="fas fa-folder-open"></i><span>No downloadable versions are listed yet.</span></div>';
+            }
+            const highestRank = Math.max(...sortedFiles.map(file => resolutionRank(file.quality)));
+            let html = `<div class="download-panel-heading">
+                <span class="section-kicker">YOUR WATCH OPTIONS</span>
+                <h2>Choose a version</h2>
+                <p>${sortedFiles.length} available ${sortedFiles.length === 1 ? 'file' : 'files'} · pick the quality that works best for you</p>
+            </div><div class="download-file-list">`;
+            sortedFiles.forEach(file => {
+                const quality = formatMiniAppQuality(file.quality) || 'Available file';
+                const extraInfo = String(file.extra_info || '').trim();
+                const fileMeta = extraInfo || 'Available in catalogue';
+                const size = String(file.size || '').trim();
+                const isBest = highestRank >= 0 && resolutionRank(file.quality) === highestRank;
+                html += `<button class="download-option" type="button" aria-label="Download ${escapeHtml(quality)} version" onclick="downloadMovie(${Number(movieId)}, ${Number(file.id)})">
+                    <span class="download-option-quality"><i class="fas fa-film"></i><span>${escapeHtml(quality)}</span>${isBest ? '<span class="download-best-tag">BEST AVAILABLE</span>' : ''}</span>
+                    <span class="download-option-meta">${escapeHtml(fileMeta)}${size ? ` <span class="download-file-size">${escapeHtml(size)}</span>` : ''}</span>
+                    <span class="download-option-action"><span>Get file</span><i class="fas fa-arrow-down"></i></span>
+                </button>`;
+            });
+            return html + '</div>';
+        }
+        function setMovieDetailsMeta(movie) {
+            const year = movie.year || String(movie.release_date || movie.first_air_date || '').slice(0, 4);
+            const yearNode = document.getElementById('dpYear');
+            if (yearNode) yearNode.textContent = year && String(year) !== '0' ? String(year) : 'Year unavailable';
+            document.getElementById('dpGenre').textContent = [FlimfyUI.identityLabel(movie), movie.genre]
+                .filter(Boolean).join(' • ') || 'Genre unavailable';
+            document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
+        }
+        function loadMovieRatingSources(movie, isTMDB, requestId, signal) {
+            const meterContainer = document.getElementById('moctaleMeter');
+            const reviewsContainer = document.getElementById('tmdbReviews');
+            if (!window.MoctaleMeter) return;
+            window.MoctaleMeter.renderLoading(meterContainer, reviewsContainer);
+            const endpoint = window.MoctaleMeter.endpointFor(movie, isTMDB);
+            if (!endpoint) {
+                window.MoctaleMeter.renderUnavailable(meterContainer, reviewsContainer);
+                return;
+            }
+            fetchWithTimeout(endpoint, { signal })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || data.status !== 'success') {
+                        throw new Error(data.message || 'Ratings are temporarily unavailable');
+                    }
+                    return data;
+                })
+                .then(data => {
+                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
+                    window.MoctaleMeter.render(meterContainer, reviewsContainer, data);
+                })
+                .catch(error => {
+                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id) || isAbortError(error)) return;
+                    window.MoctaleMeter.renderUnavailable(meterContainer, reviewsContainer);
+                });
+        }
+        window.scrollToDetailDownloads = function() {
+            const target = document.getElementById('dpLinks');
+            if (!target) return;
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+
         window.openDetails = function(id, isTMDB) {
             const movie = isTMDB ? tmdbMoviesMap[id] : allMovies.find(m => m.id == id);
             if (!movie) return;
@@ -1865,10 +1951,8 @@ document.addEventListener('keydown', (e) => {
             const detailsBackdrop = document.getElementById('dpBackdrop');
             const detailsPoster = document.getElementById('dpFloatPoster');
             const detailsTitle = document.getElementById('dpTitle');
-            const detailsRating = document.getElementById('dpRating');
-            const detailsGenre = document.getElementById('dpGenre');
             const detailsDescription = document.getElementById('dpDesc');
-            document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
+            setMovieDetailsMeta(movie);
             detailsPage.scrollTop = 0;
             document.getElementById('searchDropdown').classList.remove('active');
             const detailsArtwork = movie.backdrop || movie.image;
@@ -1881,12 +1965,12 @@ document.addEventListener('keydown', (e) => {
                 detailsPoster.src = POSTER_PLACEHOLDER;
             };
             detailsTitle.innerText = movie.title || 'Loading details…';
-            detailsRating.innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
-            detailsGenre.innerText = [FlimfyUI.identityLabel(movie), movie.genre].filter(Boolean).join(' • ');
             detailsDescription.innerText = 'Loading story and availability…';
             document.getElementById('castSection').innerHTML = '';
             document.getElementById('dpTrailerBtn').innerHTML = '';
-            if (movie.is_upcoming) {
+            if (isTMDB || movie.source === 'tmdb') {
+                renderUnavailableCommunityRating(movie.title || 'this title');
+            } else if (movie.is_upcoming) {
                 renderLockedCommunityRating(movie.title || 'this title');
             } else {
                 renderCommunityRating(movie.id, movie.title || 'this title');
@@ -1894,6 +1978,7 @@ document.addEventListener('keydown', (e) => {
             document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
+            loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
             // The card already contains the title, poster, year, rating and genre.
             // Show that immediately while files/cast finish loading in the background.
             detailsDescription.innerText = movie.description || 'Details and availability are loading…';
@@ -1905,8 +1990,7 @@ document.addEventListener('keydown', (e) => {
                     : IMAGE_FALLBACK_GRADIENT;
                 document.getElementById('dpFloatPoster').src = artworkUrl(movie.image);
                 document.getElementById('dpTitle').innerText = movie.title;
-                document.getElementById('dpRating').innerText = movie.rating && movie.rating !== 'N/A' ? movie.rating : '—';
-                document.getElementById('dpGenre').innerText = [FlimfyUI.identityLabel(movie), movie.genre].filter(Boolean).join(' • ');
+                setMovieDetailsMeta(movie);
                 document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
                 document.getElementById('castSection').innerHTML = '';
                 // Only show "upcoming" UI if the movie is genuinely pre-release.
@@ -1945,7 +2029,7 @@ document.addEventListener('keydown', (e) => {
                         const m = data.movie;
                         movieDetailsCache.set(String(id), m);
                         activeMovie = { ...movie, ...m, source: 'local' };
-                        document.getElementById('dpLanguage').textContent = m.language || movie.language || 'Audio details below';
+                        setMovieDetailsMeta({ ...movie, ...m });
                         addRecentlyViewed(activeMovie);
                         const backdropUrl = m.backdrop ? m.backdrop : m.image;
                         document.getElementById('dpBackdrop').style.backgroundImage = backdropUrl
@@ -1953,8 +2037,6 @@ document.addEventListener('keydown', (e) => {
                             : IMAGE_FALLBACK_GRADIENT;
                         document.getElementById('dpFloatPoster').src = artworkUrl(m.image);
                         document.getElementById('dpTitle').innerText = m.title;
-                        document.getElementById('dpRating').innerText = m.rating && m.rating !== 'N/A' ? m.rating : '—';
-                        document.getElementById('dpGenre').innerText = [FlimfyUI.identityLabel(m), m.genre].filter(Boolean).join(' • ');
                         document.getElementById('dpDesc').innerText = m.description || 'Story details are not available yet.';
                         if (m.cast && m.cast.trim().length > 0) {
                             const actors = m.cast.split(',');
@@ -2030,19 +2112,10 @@ document.addEventListener('keydown', (e) => {
                                 window.currentMovieSeasons = seasonsMap;
                                 selectSeason(m.id, seasonNumbers[0]);
                             } else {
-                                let links = '<div class="dl-heading">Available qualities</div>';
-                                m.files.forEach(f => {
-                                    links += `
-                                        <button class="dl-btn" onclick="downloadMovie(${Number(m.id)}, ${Number(f.id)})">
-                                            <span class="quality-text"><i class="fas fa-download"></i> ${escapeHtml(f.quality)} <span class="file-size">${escapeHtml(f.size || 'N/A')}</span></span>
-                                            <span class="action">Download</span>
-                                        </button>
-                                    `;
-                                });
-                                linksContainer.innerHTML = links;
+                                linksContainer.innerHTML = renderMovieDownloadOptions(m.id, movieFiles);
                             }
                         } else if (m.is_available) {
-                            linksContainer.innerHTML = `<div class="dl-heading">Available file</div><button class="dl-btn" type="button" onclick="downloadMovie(${Number(m.id)})"><span class="quality-text"><i class="fas fa-download"></i> Open available file</span><span class="action">Open</span></button>`;
+                            linksContainer.innerHTML = '<div class="download-panel-heading"><span class="section-kicker">YOUR WATCH OPTIONS</span><h2>Available file</h2><p>One file is ready in the catalogue.</p></div><button class="download-option" type="button" onclick="downloadMovie(' + Number(m.id) + ')"><span class="download-option-quality"><i class="fas fa-film"></i><span>Open available file</span></span><span class="download-option-action"><span>Get file</span><i class="fas fa-arrow-down"></i></span></button>';
                         } else {
                             renderUnavailableAction(activeMovie);
                         }
@@ -2179,13 +2252,27 @@ document.addEventListener('keydown', (e) => {
                 .catch(error => showToast(error.message))
                 .finally(() => { button.disabled = false; });
         };
+        function renderUnavailableCommunityRating(title) {
+            const container = document.getElementById('communityRating');
+            if (!container) return;
+            container.dataset.selectedRating = '';
+            container.dataset.submitting = 'false';
+            container.innerHTML = `
+                <div class="community-rating-heading">
+                    <div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title">Your take on ${escapeHtml(title)}</h2></div>
+                    <span class="community-rating-mark"><i class="fas fa-star"></i></span>
+                </div>
+                <p class="community-rating-note">Community ratings appear when this title is part of the FlimfyBox catalogue.</p>
+                <div class="community-rating-summary">This discovery title is not yet rateable here.</div>
+            `;
+        }
         function renderLockedCommunityRating(title) {
             const container = document.getElementById('communityRating');
             if (!container) return;
             container.dataset.selectedRating = '';
             container.dataset.submitting = 'false';
             container.innerHTML = `
-                <h2 class="community-rating-title">Rate ${escapeHtml(title)}</h2>
+                <div class="community-rating-heading"><div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title">Rate ${escapeHtml(title)}</h2></div><span class="community-rating-mark"><i class="fas fa-lock"></i></span></div>
                 <div class="community-rating-stars is-locked" aria-label="Rating locked">
                     <span class="rating-lock"><i class="fas fa-lock"></i></span>
                     <span class="community-rating-locked-copy">Rating available after release</span>
@@ -2196,7 +2283,7 @@ document.addEventListener('keydown', (e) => {
         window.renderCommunityRating = function(movieId, title) {
                 const container = document.getElementById('communityRating');
                 if (!container) return;
-                container.innerHTML = '<h2 class="community-rating-title"></h2><div class="community-rating-stars"></div><button type="button" class="community-rating-submit" disabled>Submit rating</button><div class="community-rating-summary">Loading rating…</div>';
+                container.innerHTML = '<div class="community-rating-heading"><div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title"></h2></div><span class="community-rating-mark"><i class="fas fa-star"></i></span></div><div class="community-rating-intro">Leave a quick rating for this title.</div><div class="community-rating-stars"></div><button type="button" class="community-rating-submit" disabled>Save my rating <i class="fas fa-arrow-right"></i></button><div class="community-rating-summary">Loading community score…</div>';
                 container.dataset.selectedRating = '';
                 container.querySelector('.community-rating-title').textContent = `Rate ${title}`;
                 const stars = container.querySelector('.community-rating-stars');
@@ -2256,8 +2343,8 @@ document.addEventListener('keydown', (e) => {
                 if (submit) submit.disabled = !data.can_rate || !data.user_rating;
                 const summary = container.querySelector('.community-rating-summary');
                 summary.innerHTML = data.count
-                    ? `<strong>FlimfyBox Rating</strong><br>${Number(data.average).toFixed(1)} / 5 · ${data.count} rating${data.count === 1 ? '' : 's'}${own ? `<br>Your rating: ${own} / 5` : ''}`
-                    : '<strong>FlimfyBox Rating</strong><br>No ratings yet';
+                    ? `<strong>${Number(data.average).toFixed(1)} <span>/ 5</span></strong><span> · ${data.count} community rating${data.count === 1 ? '' : 's'}${own ? ` · Your rating ${own}/5` : ''}</span>`
+                    : '<strong>No ratings yet</strong><span> · Be the first to rate this title.</span>';
         }
         function submitCommunityRating(movieId, container) {
                 if (container.dataset.submitting === 'true') return;
@@ -2400,7 +2487,7 @@ document.addEventListener('keydown', (e) => {
                     </div>
                     <div class="ep-qualities">`;
                 
-                ep.qualities.forEach(q => {
+                sortMovieFilesForDisplay(ep.qualities).forEach(q => {
                     const qualityLabel = escapeHtml(formatMiniAppQuality(q.quality) || 'Download');
                     const fileSize = escapeHtml(q.size || '');
                     html += `

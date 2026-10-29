@@ -233,27 +233,41 @@
                     <div class="dp-poster-float" id="dpPosterFloat">
                         <img id="dpFloatPoster" src="" alt="Poster">
                     </div>
-                    <h1 class="dp-title" id="dpTitle">Title</h1>
-                </div>
-                <div class="rich-info-box" id="dpRichInfo">
-                    <div class="info-pill highlight"><i class="fas fa-star"></i> <span id="dpRating">—</span></div>
-                    <div class="info-pill"><span id="dpGenre">—</span></div>
-                    <div class="info-pill"><i class="fas fa-volume-up"></i> <span id="dpLanguage">Audio details below</span></div>
+                    <div class="dp-title-copy">
+                        <h1 class="dp-title" id="dpTitle">Title</h1>
+                        <div class="rich-info-box" id="dpRichInfo">
+                            <div class="info-pill"><i class="far fa-calendar"></i> <span id="dpYear">—</span></div>
+                            <div class="info-pill"><i class="fas fa-film"></i> <span id="dpGenre">—</span></div>
+                            <div class="info-pill"><i class="fas fa-volume-up"></i> <span id="dpLanguage">Audio details below</span></div>
+                        </div>
+                    </div>
                 </div>
                 <div class="detail-actions">
                     <button class="detail-play" type="button" onclick="playCurrentTrailer()"><i class="fas fa-play"></i> Play trailer</button>
+                    <button class="detail-download-jump" type="button" onclick="scrollToDetailDownloads()"><i class="fas fa-arrow-down-to-line"></i> Find a version</button>
                     <button class="detail-icon-button" id="detailMyListButton" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
                     <button class="detail-icon-button" type="button" aria-label="Share movie" onclick="shareCurrentMovie()"><i class="fas fa-share-alt"></i></button>
                 </div>
-                <section class="overview-section">
-                    <h2>Overview</h2>
-                    <div class="rich-desc" id="dpDesc">Loading story...</div>
-                </section>
-                <div id="castSection" class="cast-list"></div>
-                <div id="dpTrailerBtn"></div>
-                <section class="community-rating" id="communityRating" aria-live="polite"></section>
-                <div id="dpSeasons" class="seasons-container"></div>
-                <div class="dl-section" id="dpLinks"></div>
+                <div class="dp-content-grid">
+                    <main class="dp-main-column">
+                        <section class="overview-section">
+                            <div class="detail-section-heading">
+                                <span class="section-kicker">THE STORY</span>
+                                <h2>Overview</h2>
+                            </div>
+                            <div class="rich-desc" id="dpDesc">Loading story...</div>
+                        </section>
+                        <div id="castSection" class="cast-list"></div>
+                        <section class="community-rating" id="communityRating" aria-live="polite"></section>
+                        <section class="tmdb-reviews-panel" id="tmdbReviews" aria-live="polite"></section>
+                    </main>
+                    <aside class="dp-side-column" aria-label="Ratings and available versions">
+                        <section class="moctale-meter-panel" id="moctaleMeter" aria-live="polite" aria-label="Moctale Meter"></section>
+                        <div id="dpTrailerBtn" class="detail-request-actions"></div>
+                        <div id="dpSeasons" class="seasons-container"></div>
+                        <section class="dl-section" id="dpLinks" aria-live="polite"></section>
+                    </aside>
+                </div>
             </div>
         </div>
         <div class="detail-bottom-actions">
@@ -315,6 +329,7 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=reliability-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=moctale-meter-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=moctale-detail-1"></script>
 </body>
 </html>

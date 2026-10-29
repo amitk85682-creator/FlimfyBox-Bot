@@ -20,6 +20,21 @@ def test_default_proxy_forwards_only_public_query_fields(monkeypatch):
     assert 'Deployed catalogue API' in client.get('/preview').text
 
 
+@pytest.mark.parametrize('path', [
+    '/api/movie/12/rating-sources',
+    '/api/tmdb/movie/77/rating-sources',
+    '/api/tmdb/tv/77/rating-sources',
+])
+def test_rating_source_endpoints_are_available_in_read_only_proxy(monkeypatch, path):
+    calls = []
+    payload = {'status': 'success', 'imdb': {'score': None}, 'tmdb': {'score': 7.8}}
+    monkeypatch.setattr(preview, 'deployed_json', lambda upstream, params: calls.append((upstream, params)) or payload)
+    response = preview.create_preview().test_client().get(path + '?token=must-not-forward')
+    assert response.status_code == 200
+    assert response.json == payload
+    assert calls == [(path.removeprefix('/api/'), {})]
+
+
 @pytest.mark.parametrize('method,path', [
     ('post', '/api/request'), ('post', '/api/movie/1/rating'),
     ('delete', '/api/my-list/1'), ('get', '/api/my-list'),

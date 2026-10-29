@@ -351,3 +351,147 @@ body{padding-left:var(--sidebar-width);padding-bottom:35px}
 #searchResultsContent,#myListContent{padding-top:20px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Cinematic title detail: source-aware ratings and a calm download hierarchy. */
+.dp-layout{max-width:1500px}
+.dp-backdrop{height:clamp(390px,45vw,590px);background-position:center 24%;isolation:isolate}
+.dp-backdrop::before{position:absolute;z-index:0;inset:0;content:'';background:linear-gradient(90deg,#090b16c7 0%,#090b1645 56%,#090b1610 100%),linear-gradient(0deg,var(--bg) 1%,transparent 72%)}
+.dp-backdrop::after{z-index:0;background:linear-gradient(0deg,var(--bg),transparent 77%)}
+.dp-info{width:min(100%,1320px);max-width:1320px;margin:-132px auto 0;padding:0 clamp(20px,4vw,58px) 100px}
+.dp-title-row{align-items:flex-end;gap:26px;margin-bottom:20px}
+.dp-poster-float{width:clamp(112px,13vw,168px);flex:0 0 clamp(112px,13vw,168px)}
+.dp-poster-float img{border-radius:17px;border-color:#ffffff28;box-shadow:0 22px 54px #0008}
+.dp-title-copy{min-width:0;flex:1;padding-bottom:5px}
+.dp-title{max-width:950px;margin:0 0 14px;font-size:clamp(32px,5.2vw,64px);line-height:1.02;letter-spacing:-2.4px;text-wrap:balance}
+.rich-info-box{gap:8px;margin:0}
+.info-pill{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;background:#101320a8;backdrop-filter:blur(10px);color:#e7e9f3;font-size:10px}
+.info-pill i{color:#d7c18b;font-size:10px}
+.detail-actions{position:relative;z-index:2;gap:10px;margin:20px 0 28px}
+.detail-actions .detail-play,.detail-download-jump{min-height:46px;border-radius:12px;padding:0 17px;font-size:12px}
+.detail-actions .detail-play{background:linear-gradient(120deg,#e9d8a5,#d2aa63);color:#20190f;box-shadow:0 8px 28px #e2bb6c20}
+.detail-download-jump{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font-weight:700}
+.detail-icon-button{width:46px;height:46px;border-radius:14px;background:var(--surface);color:var(--text)}
+.dp-content-grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,.88fr);align-items:start;gap:30px}
+.dp-main-column{display:flex;min-width:0;flex-direction:column;gap:22px}
+.dp-side-column{position:sticky;top:70px;display:flex;min-width:0;flex-direction:column;gap:16px}
+.overview-section{padding:4px 2px 2px}
+.detail-section-heading{position:relative;display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px 14px;margin-bottom:14px}
+.detail-section-heading .section-kicker{flex:0 0 100%}
+.detail-section-heading h2{margin:0;font:800 21px/1.25 'Manrope',sans-serif;letter-spacing:-.5px}
+.rich-desc{max-width:780px;color:var(--muted);font-size:13px;line-height:1.85;white-space:pre-line}
+.cast-list{gap:8px;margin:0}
+.cast-chip{padding:8px 12px;border-radius:999px;background:var(--surface);color:var(--text)}
+.moctale-meter-panel,.community-rating,.tmdb-reviews-panel,.dl-section,.seasons-container{min-width:0;border:1px solid var(--border-strong);border-radius:20px;background:linear-gradient(145deg,var(--surface),color-mix(in srgb,var(--surface) 78%,var(--primary) 22%));box-shadow:0 14px 40px #0002}
+.moctale-meter-panel{position:relative;overflow:hidden;padding:21px 20px 16px;border-color:#d9bc7940;background:radial-gradient(ellipse at 92% 0,#daba7020,transparent 48%),linear-gradient(145deg,var(--surface),color-mix(in srgb,var(--surface) 86%,#b48d4933))}
+.moctale-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.moctale-heading .section-kicker{color:#e0c37f}
+.moctale-live-tag{padding:4px 7px;border:1px solid #dabb7040;border-radius:999px;color:#d9bd79;font-size:8px;font-weight:800;letter-spacing:1px}
+.moctale-meter-body{display:flex;align-items:center;gap:17px;padding:20px 0 18px}
+.moctale-score-ring{position:relative;display:grid;width:112px;height:112px;flex:0 0 112px;place-items:center}
+.moctale-score-ring svg{width:100%;height:100%;overflow:visible}
+.moctale-ring-track,.moctale-ring-progress{fill:none;stroke-width:7}
+.moctale-ring-track{stroke:var(--border-strong)}
+.moctale-ring-progress{stroke:#e3bd6d;stroke-linecap:round;filter:drop-shadow(0 0 6px #e6bf6870);transition:stroke-dashoffset .7s cubic-bezier(.2,.8,.2,1)}
+.moctale-score-copy{position:absolute;display:flex;align-items:baseline;gap:3px}
+.moctale-score-value{font:800 30px/1 'Manrope',sans-serif;letter-spacing:-1.5px}
+.moctale-score-scale{color:var(--muted);font-size:10px}
+.moctale-context{display:grid;gap:6px;min-width:0}
+.moctale-context-title{font:700 13px/1.35 'Manrope',sans-serif}
+.moctale-context-copy{color:var(--muted);font-size:10px;line-height:1.55}
+.moctale-source-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.moctale-source-card{display:grid;gap:4px;padding:10px 11px;border:1px solid var(--border);border-radius:12px;background:color-mix(in srgb,var(--surface-2) 88%,transparent)}
+.moctale-source-name{color:var(--muted);font-size:9px;font-weight:800;letter-spacing:.7px;text-transform:uppercase}
+.moctale-source-score{font:800 18px/1.2 'Manrope',sans-serif}
+.moctale-source-votes{color:var(--muted);font-size:9px}
+.moctale-method{margin:11px 0 0;color:var(--muted);font-size:9px;line-height:1.5}
+.moctale-loading{min-height:54px;margin:20px 0 4px;color:var(--muted);font-size:12px}
+.community-rating{padding:20px}
+.community-rating-heading{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.community-rating-title{margin:4px 0 0;font:800 17px/1.3 'Manrope',sans-serif;letter-spacing:-.4px}
+.community-rating-mark{display:grid;width:38px;height:38px;flex:0 0 38px;place-items:center;border:1px solid #dabb7040;border-radius:12px;background:#dabb7014;color:#e1bd70}
+.community-rating-intro,.community-rating-note{margin:11px 0;color:var(--muted);font-size:11px;line-height:1.55}
+.community-rating-stars{display:flex;gap:6px;margin:12px 0 10px}
+.community-rating-star{display:grid;width:40px;height:40px;place-items:center;border:1px solid var(--border-strong);border-radius:11px;background:var(--surface-2);font-size:21px}
+.community-rating-star.selected,.community-rating-star.preview{border-color:#e1bd7066;background:#e1bd701b;color:#e5c271}
+.community-rating-submit{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:40px;margin:2px 0 10px;padding:0 14px;border-radius:11px;background:var(--primary);font-size:11px;font-weight:800}
+.community-rating-summary{min-height:18px;margin-top:5px;color:var(--muted);font-size:10px;line-height:1.6}
+.community-rating-summary strong{color:var(--text);font:800 14px 'Manrope',sans-serif}
+.community-rating-summary strong span{color:var(--muted);font-size:10px;font-weight:500}
+.tmdb-reviews-panel{padding:20px}
+.tmdb-reviews-panel .detail-section-heading{margin-bottom:14px}
+.tmdb-reviews-panel .detail-section-heading h2{font-size:17px}
+.review-count{margin-left:auto;color:var(--muted);font-size:9px}
+.tmdb-review-list{display:grid;gap:9px}
+.tmdb-review-card{padding:13px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2)}
+.tmdb-review-meta{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-bottom:8px}
+.tmdb-review-author{font-size:10px}
+.tmdb-review-date,.tmdb-review-rating{color:var(--muted);font-size:9px}
+.tmdb-review-rating{margin-left:auto;color:#e2bd72}
+.tmdb-review-copy{display:-webkit-box;overflow:hidden;margin:0;color:var(--muted);font-size:10px;line-height:1.7;-webkit-box-orient:vertical;-webkit-line-clamp:5;overflow-wrap:anywhere}
+.tmdb-review-link{display:inline-block;margin-top:9px;color:var(--accent);font-size:9px;font-weight:700;text-decoration:none}
+.tmdb-review-link:hover{text-decoration:underline}
+.review-empty{margin:0;color:var(--muted);font-size:11px;line-height:1.65}
+.detail-request-actions{display:grid;gap:8px}
+.detail-request-actions .btn-request{display:flex;align-items:center;justify-content:center;gap:9px;margin:0;padding:12px 14px;border:1px solid var(--border-strong);border-radius:12px;background:var(--surface);color:var(--text);font-size:11px;font-weight:700}
+.seasons-container:empty{display:none}
+.seasons-container:not(:empty){padding:15px}
+.season-scroll-wrapper{margin:0}
+.season-pill-container{gap:7px}
+.season-pill{padding:9px 12px;border-radius:999px;background:var(--surface-2);font-size:10px}
+.dl-section{scroll-margin-top:90px;padding:18px}
+.download-panel-heading{margin:0 0 13px}
+.download-panel-heading .section-kicker{margin-bottom:7px}
+.download-panel-heading h2{margin:4px 0;font:800 18px/1.25 'Manrope',sans-serif;letter-spacing:-.4px}
+.download-panel-heading p{margin:6px 0 0;color:var(--muted);font-size:10px;line-height:1.55}
+.download-file-list,.episodes-list{display:grid;gap:8px}
+.download-option{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;width:100%;padding:12px;border:1px solid var(--border);border-radius:13px;background:var(--surface-2);text-align:left;transition:border-color .2s,background .2s,transform .2s var(--ease)}
+.download-option:hover{border-color:#c8b27b80;background:color-mix(in srgb,var(--surface-2) 83%,#c8b27b 17%);transform:translateY(-1px)}
+.download-option-quality{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0;font-size:11px;font-weight:800}
+.download-option-quality>i{color:#d7b96f}
+.download-best-tag{padding:3px 6px;border-radius:5px;background:#dabb7020;color:#dfc078;font-size:7px;letter-spacing:.6px}
+.download-option-meta{grid-column:1;overflow:hidden;color:var(--muted);font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.download-file-size{margin-left:5px;color:var(--text);font-weight:700}
+.download-option-action{grid-column:2;grid-row:1/3;display:flex;align-items:center;gap:8px;color:var(--accent);font-size:9px;font-weight:800;white-space:nowrap}
+.download-empty{display:grid;justify-items:center;gap:9px;padding:20px 8px;color:var(--muted);font-size:10px;text-align:center}
+.download-empty i{color:var(--accent);font-size:17px}
+.episode-card{padding:13px;border-radius:14px;background:var(--surface-2)}
+.ep-header{margin-bottom:11px}
+.ep-quality,.ep-qtext{font-size:10px}
+.ep-dl-btn{padding:11px;border-radius:11px;background:var(--surface)}
+.pre-release-note{padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--surface-2);font-size:10px;line-height:1.6}
+@media(max-width:699px){
+    .dp-backdrop{height:360px;background-position:center 22%}
+    .dp-info{margin-top:-74px;padding-inline:var(--gutter);padding-bottom:90px}
+    .dp-title-row{gap:15px;margin-bottom:15px}
+    .dp-poster-float{width:92px;flex-basis:92px}
+    .dp-poster-float img{border-radius:12px}
+    .dp-title{margin-bottom:10px;font-size:clamp(25px,8vw,38px);letter-spacing:-1.3px}
+    .rich-info-box{gap:6px}
+    .info-pill{padding:6px 8px;font-size:9px}
+    .detail-actions{flex-wrap:wrap;gap:7px;margin:16px 0 20px}
+    .detail-actions .detail-play,.detail-download-jump{min-height:42px;padding-inline:12px;font-size:10px}
+    .detail-icon-button{width:42px;height:42px}
+    .dp-content-grid{display:flex;flex-direction:column;gap:18px}
+    .dp-main-column{gap:19px;width:100%}
+    .dp-side-column{position:static;order:-1;width:100%;gap:12px}
+    .moctale-meter-panel{padding:17px}
+    .moctale-meter-body{gap:14px;padding:16px 0 14px}
+    .moctale-score-ring{width:94px;height:94px;flex-basis:94px}
+    .moctale-score-value{font-size:26px}
+    .moctale-context-title{font-size:12px}
+    .moctale-context-copy{font-size:9px}
+    .community-rating,.tmdb-reviews-panel{padding:16px;border-radius:16px}
+    .detail-section-heading h2{font-size:18px}
+    .rich-desc{font-size:12px;line-height:1.75}
+    .dl-section{padding:15px;border-radius:16px}
+    .download-option{padding:11px}
+}
+@media(max-width:380px){
+    .dp-info{padding-inline:16px}
+    .dp-poster-float{width:78px;flex-basis:78px}
+    .dp-title{font-size:24px}
+    .detail-download-jump{gap:6px}
+    .moctale-meter-panel{padding:14px}
+    .moctale-source-card{padding:9px}
+}
+@media(prefers-reduced-motion:reduce){.moctale-ring-progress,.download-option{transition:none!important}}

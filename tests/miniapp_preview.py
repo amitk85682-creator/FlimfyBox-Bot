@@ -40,6 +40,10 @@ def public_query_keys(path):
         return {'type'}
     if re.fullmatch(r'movie/[1-9][0-9]*(?:/rating)?', path):
         return set()
+    if re.fullmatch(r'movie/[1-9][0-9]*/rating-sources', path):
+        return set()
+    if re.fullmatch(r'tmdb/(?:movie|tv)/[1-9][0-9]*/rating-sources', path):
+        return set()
     if re.fullmatch(r'imdb_id/[1-9][0-9]*', path):
         return set()
     return None

@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import logging
 import json
+import math
 import psycopg2
 from datetime import datetime, timedelta, timezone
 import requests
@@ -15,8 +16,13 @@ import secrets
 import hashlib
 import hmac
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from fuzzywuzzy import process, fuzz
+from urllib.parse import urlparse
+
+_RATING_SOURCE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix='miniapp-rating-source'
+)
 
 CANONICAL_GENRES = [
     ('action', 'Action', 'Action & Adventure', 'Fast, explosive, and high-stakes viewing.'),
@@ -183,6 +189,10 @@ def register_webapp_routes(
 ):
     release_cache = {}
     release_cache_lock = threading.Lock()
+    rating_source_cache = {}
+    rating_source_cache_lock = threading.Lock()
+    rating_source_cache_ttl = 6 * 60 * 60
+    rating_source_failure_ttl = 60
     new_releases_refresh_lock = threading.Lock()
     release_success_ttl = 7 * 24 * 60 * 60
     release_negative_ttl = 6 * 60 * 60
@@ -224,7 +234,8 @@ def register_webapp_routes(
                 break
             except (requests.RequestException, ValueError) as error:
                 if attempt + 1 == attempt_limit:
-                    logger.warning('TMDB release lookup failed for %s: %s', cache_key, error)
+                    # requests errors can include the full URL (and api_key query).
+                    logger.warning('TMDB lookup failed for %s (%s)', cache_key, type(error).__name__)
         if response_data is None and stale_data is not None:
             # Keep the last usable response and allow a quick retry instead of
             # caching an upstream outage as an empty catalogue for hours.
@@ -285,6 +296,181 @@ def register_webapp_routes(
             'release_date': release_date[:10],
             'release_type': release_type
         }
+
+    def rating_number(value):
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(score) or not 0 <= score <= 10:
+            return None
+        return round(score, 1)
+
+    def rating_vote_text(value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text[:32] if text and text.lower() not in {'n/a', 'na', 'none'} else None
+
+    def clean_tmdb_review(review):
+        if not isinstance(review, dict):
+            return None
+        content = re.sub(r'<[^>]*>', ' ', str(review.get('content') or ''))
+        content = re.sub(r'\s+', ' ', content).strip()[:1200]
+        if not content:
+            return None
+        raw_url = str(review.get('url') or '').strip()
+        parsed_url = urlparse(raw_url)
+        safe_url = (
+            raw_url[:500]
+            if parsed_url.scheme == 'https'
+            and parsed_url.hostname == 'www.themoviedb.org'
+            and parsed_url.path.startswith('/review/')
+            else ''
+        )
+        author_details = review.get('author_details') or {}
+        author_rating = rating_number(author_details.get('rating')) if isinstance(author_details, dict) else None
+        return {
+            'author': re.sub(r'\s+', ' ', str(review.get('author') or 'TMDb member')).strip()[:100],
+            'content': content,
+            'rating': author_rating,
+            'created_at': str(review.get('created_at') or '')[:40],
+            'url': safe_url,
+        }
+
+    def fetch_omdb_rating(imdb_id, api_key):
+        if not api_key or not re.fullmatch(r'tt\d{7,8}', str(imdb_id or '')):
+            return None
+        try:
+            response = requests.get(
+                'https://www.omdbapi.com/',
+                params={'i': imdb_id, 'apikey': api_key},
+                headers={'User-Agent': 'FlimfyBox/1.0'},
+                timeout=(1, 1.5),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError, TypeError) as error:
+            # Never include the requests error text: it can contain OMDb's key.
+            logger.info('IMDb score lookup unavailable for %s (%s)', imdb_id, type(error).__name__)
+            return None
+        if not isinstance(payload, dict) or payload.get('Response') != 'True':
+            return None
+        score = rating_number(payload.get('imdbRating'))
+        if score is None:
+            return None
+        return {'score': score, 'votes': rating_vote_text(payload.get('imdbVotes'))}
+
+    def load_rating_sources(cache_key, media_type, tmdb_id=None, imdb_id=None):
+        now = time.time()
+        with rating_source_cache_lock:
+            cached = rating_source_cache.get(cache_key)
+            if cached and cached[0] > now:
+                return cached[1]
+
+        tmdb_id = str(tmdb_id or '').strip()
+        imdb_id = str(imdb_id or '').strip()
+        tmdb_id = tmdb_id if re.fullmatch(r'\d+', tmdb_id) else ''
+        imdb_id = imdb_id if re.fullmatch(r'tt\d{7,8}', imdb_id) else ''
+        omdb_key = os.environ.get('OMDB_API_KEY', '').strip()
+        deadline = time.monotonic() + 2.35
+        futures = {}
+
+        if TMDB_API_KEY and tmdb_id:
+            futures['tmdb'] = _RATING_SOURCE_EXECUTOR.submit(
+                tmdb_cached_request,
+                f'{media_type}/{tmdb_id}',
+                {'append_to_response': 'external_ids'},
+                f'movie-rating-details:{media_type}:{tmdb_id}',
+                False, 6 * 60 * 60, 1, (1, 1.5),
+            )
+            futures['reviews'] = _RATING_SOURCE_EXECUTOR.submit(
+                tmdb_cached_request,
+                f'{media_type}/{tmdb_id}/reviews',
+                {'language': 'en-US', 'page': 1},
+                f'movie-rating-reviews:{media_type}:{tmdb_id}',
+                False, 6 * 60 * 60, 1, (1, 1.5),
+            )
+        if omdb_key and imdb_id:
+            futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
+                fetch_omdb_rating, imdb_id, omdb_key
+            )
+
+        if futures:
+            wait(tuple(futures.values()), timeout=max(0, deadline - time.monotonic()))
+
+        detail_data = None
+        review_data = None
+        tmdb_score = None
+        if futures.get('tmdb') and futures['tmdb'].done():
+            try:
+                detail_result, _cache_hit = futures['tmdb'].result()
+                detail_data = detail_result if isinstance(detail_result, dict) else None
+            except Exception as error:
+                logger.debug('TMDb score future failed (%s)', type(error).__name__)
+        if futures.get('reviews') and futures['reviews'].done():
+            try:
+                review_result, _cache_hit = futures['reviews'].result()
+                review_data = review_result if isinstance(review_result, dict) else None
+            except Exception as error:
+                logger.debug('TMDb review future failed (%s)', type(error).__name__)
+
+        if detail_data:
+            vote_count = detail_data.get('vote_count')
+            try:
+                vote_count = int(vote_count) if vote_count is not None else 0
+            except (TypeError, ValueError):
+                vote_count = 0
+            score = rating_number(detail_data.get('vote_average'))
+            if score is not None and vote_count > 0:
+                tmdb_score = {'score': score, 'votes': vote_count}
+
+        if not imdb_id and detail_data:
+            external_ids = detail_data.get('external_ids') or {}
+            if isinstance(external_ids, dict):
+                imdb_id = str(external_ids.get('imdb_id') or '').strip()
+        if omdb_key and imdb_id and not futures.get('imdb'):
+            futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
+                fetch_omdb_rating, imdb_id, omdb_key
+            )
+            remaining = max(0, deadline - time.monotonic())
+            if remaining:
+                wait((futures['imdb'],), timeout=remaining)
+
+        imdb_score = None
+        if futures.get('imdb') and futures['imdb'].done():
+            try:
+                imdb_score = futures['imdb'].result()
+            except Exception as error:
+                logger.debug('IMDb score future failed (%s)', type(error).__name__)
+
+        raw_reviews = review_data.get('results') if isinstance(review_data, dict) else []
+        reviews = [
+            cleaned for cleaned in (clean_tmdb_review(item) for item in (raw_reviews or [])[:3])
+            if cleaned
+        ]
+        review_count = None
+        if review_data is not None:
+            try:
+                review_count = max(0, int(review_data.get('total_results', len(raw_reviews or []))))
+            except (TypeError, ValueError):
+                review_count = len(raw_reviews or [])
+
+        result = {
+            'status': 'success',
+            'imdb': imdb_score or {'score': None, 'votes': None},
+            'tmdb': tmdb_score or {'score': None, 'votes': None},
+            'reviews': reviews,
+            'review_count': review_count,
+        }
+        has_data = bool(imdb_score or tmdb_score or reviews)
+        has_pending = any(not future.done() for future in futures.values())
+        ttl = rating_source_cache_ttl if has_data and not has_pending else rating_source_failure_ttl
+        with rating_source_cache_lock:
+            rating_source_cache[cache_key] = (time.time() + ttl, result)
+        return result
 
     def get_release_discovery_pool(media_type, days, today, metrics):
         """Load the complete TMDB release window once, then reuse its candidates."""
@@ -1639,6 +1825,43 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Rating temporarily unavailable'}), 500
         finally:
             close_db_connection(conn)
+
+    @flask_app.route('/api/movie/<int:movie_id>/rating-sources', methods=['GET'])
+    def get_local_movie_rating_sources(movie_id):
+        if movie_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT imdb_id, tmdb_id, category, content_type FROM movies WHERE id = %s',
+                (movie_id,),
+            )
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            imdb_id, tmdb_id, category, content_type = row
+            media_type = 'tv' if is_catalogue_tv(category, None, content_type) else 'movie'
+            key = ('local', movie_id, str(tmdb_id or ''), str(imdb_id or ''), media_type)
+            close_db_connection(conn)
+            conn = None
+            return jsonify(load_rating_sources(key, media_type, tmdb_id, imdb_id))
+        except Exception as error:
+            logger.warning('Could not load provider ratings for movie %s: %s', movie_id, error)
+            return jsonify({'status': 'error', 'message': 'Ratings are temporarily unavailable'}), 503
+        finally:
+            if conn is not None:
+                close_db_connection(conn)
+
+    @flask_app.route('/api/tmdb/<media_type>/<int:tmdb_id>/rating-sources', methods=['GET'])
+    def get_tmdb_movie_rating_sources(media_type, tmdb_id):
+        if media_type not in {'movie', 'tv'} or tmdb_id <= 0:
+            return jsonify({'status': 'error', 'message': 'Invalid TMDb title'}), 404
+        key = ('tmdb', media_type, tmdb_id)
+        return jsonify(load_rating_sources(key, media_type, tmdb_id))
 
     @flask_app.route('/api/movie/<int:movie_id>/rating', methods=['POST'])
     def submit_movie_rating(movie_id):
