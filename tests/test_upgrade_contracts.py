@@ -110,6 +110,27 @@ def build_upcoming_route(provider):
 
 
 class UpgradeContracts(unittest.TestCase):
+    def test_autocomplete_has_an_index_matching_its_normalized_prefix_expression(self):
+        routes_source = (ROOT / 'webapp_routes.py').read_text(encoding='utf-8')
+        search_node = next(
+            node for node in ast.walk(ast.parse(routes_source))
+            if isinstance(node, ast.FunctionDef) and node.name == 'search_movies_api'
+        )
+        search_source = ast.unparse(search_node)
+        migrations_source = (ROOT / 'db_migrations.py').read_text(encoding='utf-8')
+
+        self.assertIn(
+            "regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s",
+            search_source,
+        )
+        self.assertIn('def _migration_14(conn):', migrations_source)
+        self.assertIn('(14, _migration_14)', migrations_source)
+        self.assertIn('idx_movies_title_norm_prefix', migrations_source)
+        self.assertIn(
+            "regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') text_pattern_ops",
+            migrations_source,
+        )
+
     def test_superbatch_save_has_no_aggregate_wall_clock_deadline(self):
         source = (ROOT / 'main.py').read_text(encoding='utf-8')
         node = function_node(source, '_save_superbatch_files')

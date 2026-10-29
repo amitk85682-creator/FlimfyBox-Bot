@@ -518,6 +518,17 @@ def _migration_13(conn):
         """)
 
 
+def _migration_14(conn):
+    """Index the punctuation-insensitive title expression used by autocomplete."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_movies_title_norm_prefix
+            ON movies (
+                regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') text_pattern_ops
+            )
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -532,6 +543,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (11, _migration_11),
     (12, _migration_12),
     (13, _migration_13),
+    (14, _migration_14),
 )
 
 

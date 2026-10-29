@@ -1811,9 +1811,9 @@ def register_webapp_routes(
                     FROM movies
                 """
                 if autocomplete:
-                    # The matching expression has a text_pattern_ops B-tree
-                    # index (migration 13). Escape SQL wildcard characters so
-                    # typing '%' or '_' still means that literal title prefix.
+                    # The punctuation-insensitive matching expression has a
+                    # text_pattern_ops B-tree index (migration 14). Normalizing
+                    # first also strips SQL wildcard characters from user input.
                     normalized_prefix = normalized_query + '%'
                     cur.execute(select_sql + """
                         WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s
