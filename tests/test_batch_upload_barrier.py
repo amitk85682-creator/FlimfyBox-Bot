@@ -292,3 +292,129 @@ def test_search_is_admitted_while_all_upload_slots_are_busy():
             await task
 
     asyncio.run(scenario())
+
+
+def test_second_superbatch_is_collected_while_first_finalizes_then_runs_in_order():
+    async def scenario():
+        class FakeBot:
+            id = 77
+
+        context = SimpleNamespace(bot=FakeBot())
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        started_batches = []
+        created_batches = []
+        finished_batches = []
+        accepted_messages = []
+
+        async def run_async(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        def batch_create(batch_id, *_args):
+            created_batches.append(batch_id)
+
+        def batch_finish(batch_id, *_args):
+            finished_batches.append(batch_id)
+
+        async def safe_reply(_message, text, **_kwargs):
+            accepted_messages.append(text)
+            return SimpleNamespace(text=text)
+
+        async def finalize(_update, _context, *, batch_id, files, status_msg):
+            assert files == []
+            assert status_msg is not None
+            started_batches.append(batch_id)
+            if batch_id == "batch-1":
+                first_started.set()
+                await release_first.wait()
+
+        coordinator_node = next(
+            item for item in MAIN_TREE.body
+            if isinstance(item, ast.ClassDef) and item.name == "BatchUploadCoordinator"
+        )
+        handler_nodes = [
+            item for item in MAIN_TREE.body
+            if isinstance(item, ast.AsyncFunctionDef)
+            and item.name in {"superbatch_start", "superbatch_done"}
+        ]
+        namespace = {
+            "asyncio": asyncio,
+            "re": re,
+            "ADMIN_IDS": {42},
+            "BATCH_SESSION": {"active": False},
+            "SUPER_BATCH_SESSION": {
+                "active": False, "admin_id": None, "files": [],
+                "batch_id": None, "status": "idle", "closing_update_id": None,
+            },
+            "BATCH_PROCESS_ID": "test-worker",
+            "_RECOVERED_BATCH_IDS": set(),
+            "auto_batch_lock": asyncio.Lock(),
+            "_SUPERBATCH_FINALIZATION_LOCK": asyncio.Lock(),
+            "uuid": SimpleNamespace(uuid4=lambda: next(batch_ids)),
+            "Update": object,
+            "ContextTypes": SimpleNamespace(DEFAULT_TYPE=object),
+            "run_async": run_async,
+            "_batch_job_create": batch_create,
+            "_batch_job_update": lambda *_args, **_kwargs: None,
+            "_batch_job_finish": batch_finish,
+            "_safe_batch_reply": safe_reply,
+            "_safe_batch_status_edit": safe_reply,
+            "_superbatch_done_impl": finalize,
+            "logger": logging.getLogger("test_concurrent_superbatch"),
+        }
+        batch_ids = iter(("batch-1", "batch-2"))
+        nodes = [coordinator_node, *handler_nodes]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(MAIN_PATH), "exec"), namespace)
+        coordinator = namespace["BatchUploadCoordinator"]()
+        namespace["batch_upload_coordinator"] = coordinator
+
+        def command_update(update_id, text):
+            message = SimpleNamespace(
+                text=text,
+                chat=SimpleNamespace(type="private"),
+            )
+            async def reply_text(reply, **_kwargs):
+                accepted_messages.append(reply)
+                return SimpleNamespace(text=reply)
+            message.reply_text = reply_text
+            return SimpleNamespace(
+                update_id=update_id,
+                effective_user=SimpleNamespace(id=42),
+                effective_message=message,
+                message=message,
+            )
+
+        start_first = command_update(100, "/superbatch")
+        assert coordinator.admit_update(start_first)[0] is not None
+        await namespace["superbatch_start"](start_first, context)
+
+        done_first = command_update(110, "/superdone")
+        coordinator.admit_update(done_first)
+        first_task = asyncio.create_task(namespace["superbatch_done"](done_first, context))
+        await asyncio.wait_for(first_started.wait(), timeout=0.2)
+
+        # A new command during finalization reserves a separate collecting session.
+        start_second = command_update(120, "/superbatch")
+        assert coordinator.admit_update(start_second)[0] is not None
+        await namespace["superbatch_start"](start_second, context)
+        assert namespace["SUPER_BATCH_SESSION"]["batch_id"] == "batch-2"
+        assert coordinator.session_for_update(start_second)["batch_id"] == "batch-2"
+
+        done_second = command_update(130, "/superdone")
+        coordinator.admit_update(done_second)
+        second_task = asyncio.create_task(namespace["superbatch_done"](done_second, context))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert started_batches == ["batch-1"]
+        assert not second_task.done()
+
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=1)
+
+        assert created_batches == ["batch-1", "batch-2"]
+        assert started_batches == ["batch-1", "batch-2"]
+        assert sorted(finished_batches) == ["batch-1", "batch-2"]
+        assert coordinator._sessions == {}
+        assert any("accepted with 0 files" in message for message in accepted_messages)
+
+    asyncio.run(scenario())
