@@ -110,6 +110,15 @@ def build_upcoming_route(provider):
 
 
 class UpgradeContracts(unittest.TestCase):
+    def test_closed_batches_are_recovered_even_when_every_item_is_terminal(self):
+        source = (ROOT / 'main.py').read_text(encoding='utf-8')
+        query = ast.unparse(function_node(source, '_batch_recovery_jobs_fetch'))
+
+        self.assertIn('b.closing_update_id IS NOT NULL', query)
+        self.assertIn("b.status IN ('collecting', 'processing', 'failed')", query)
+        self.assertIn('i.state = \'pending\'', query)
+        self.assertIn('i.state = \'failed\'', query)
+
     def test_autocomplete_has_an_index_matching_its_normalized_prefix_expression(self):
         routes_source = (ROOT / 'webapp_routes.py').read_text(encoding='utf-8')
         search_node = next(

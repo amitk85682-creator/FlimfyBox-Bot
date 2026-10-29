@@ -3408,38 +3408,71 @@ def _batch_recovery_jobs_fetch(limit=20):
                     'collecting', 'processing', 'failed', 'completed_with_errors'
                 )
                 AND (b.lease_until IS NULL OR b.lease_until < CURRENT_TIMESTAMP)
-                AND EXISTS (
-                    SELECT 1
-                    FROM ingestion_batch_items AS i
-                    WHERE i.batch_id = b.id
-                        AND (
-                            i.state = 'pending'
-                            OR (i.state = 'processing'
-                                AND (i.lease_until IS NULL
-                                     OR i.lease_until < CURRENT_TIMESTAMP))
-                            OR (i.state = 'failed'
-                                AND i.attempts < %s
-                                AND i.storage_pending_chat IS NULL
-                                AND i.stage IN (
-                                    'accepted', 'identity_reconciliation', 'metadata_lookup',
-                                    'movie_db_committed', 'storage_copying', 'storage_copied',
-                                    'file_db_committed'
-                                )
-                                AND (i.retry_after_at IS NULL
-                                     OR i.retry_after_at <= CURRENT_TIMESTAMP)
-                                AND COALESCE(i.error_class, '') NOT IN (
-                                    'UnsupportedMedia', 'QualityDowngrade',
-                                    'NoStorageChannels', 'StorageCopyOutcomeUnknown',
-                                    'PartialStorageCopyOutcomeUnknown'
-                                )
-                                AND (i.error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
-                                     OR i.attempts < %s))
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM ingestion_batch_items AS i
+                        WHERE i.batch_id = b.id
+                            AND (
+                                i.state = 'pending'
+                                OR (i.state = 'processing'
+                                    AND (i.lease_until IS NULL
+                                         OR i.lease_until < CURRENT_TIMESTAMP))
+                                OR (i.state = 'failed'
+                                    AND i.attempts < %s
+                                    AND i.storage_pending_chat IS NULL
+                                    AND i.stage IN (
+                                        'accepted', 'identity_reconciliation', 'metadata_lookup',
+                                        'movie_db_committed', 'storage_copying', 'storage_copied',
+                                        'file_db_committed'
+                                    )
+                                    AND (i.retry_after_at IS NULL
+                                         OR i.retry_after_at <= CURRENT_TIMESTAMP)
+                                    AND COALESCE(i.error_class, '') NOT IN (
+                                        'UnsupportedMedia', 'QualityDowngrade',
+                                        'NoStorageChannels', 'StorageCopyOutcomeUnknown',
+                                        'PartialStorageCopyOutcomeUnknown'
+                                    )
+                                    AND (i.error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
+                                         OR i.attempts < %s))
+                            )
+                    )
+                    OR (
+                        -- A received closing command must be swept when every
+                        -- item is terminal. Keep retryable/backoff items open;
+                        -- completed batches must not be claimed repeatedly.
+                        b.closing_update_id IS NOT NULL
+                        AND b.status IN ('collecting', 'processing', 'failed')
+                        AND NOT EXISTS (
+                            SELECT 1 FROM ingestion_batch_items AS i
+                            WHERE i.batch_id=b.id
+                              AND i.state IN ('pending','processing')
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM ingestion_batch_items AS i
+                            WHERE i.batch_id=b.id
+                              AND i.state='failed'
+                              AND i.attempts < %s
+                              AND i.storage_pending_chat IS NULL
+                              AND i.stage IN (
+                                  'accepted', 'identity_reconciliation', 'metadata_lookup',
+                                  'movie_db_committed', 'storage_copying', 'storage_copied',
+                                  'file_db_committed'
+                              )
+                              AND COALESCE(i.error_class, '') NOT IN (
+                                  'UnsupportedMedia', 'QualityDowngrade', 'NoStorageChannels',
+                                  'StorageCopyOutcomeUnknown', 'PartialStorageCopyOutcomeUnknown'
+                              )
+                              AND (i.error_class IS DISTINCT FROM 'AmbiguousMovieIdentity'
+                                   OR i.attempts < %s)
                         )
                     )
+                )
                 ORDER BY b.updated_at
                 LIMIT %s
                 """,
                 (AUTO_BATCH_MAX_ATTEMPTS, AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS,
+                 AUTO_BATCH_MAX_ATTEMPTS, AUTO_BATCH_AMBIGUOUS_MAX_ATTEMPTS,
                  max(1, min(int(limit), 100))),
             )
             return cur.fetchall()
