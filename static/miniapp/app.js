@@ -1899,13 +1899,13 @@ document.addEventListener('keydown', (e) => {
             document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
         }
         function loadMovieRatingSources(movie, isTMDB, requestId, signal) {
-            const meterContainer = document.getElementById('moctaleMeter');
+            const meterContainer = document.getElementById('flimfyVerdict');
             const reviewsContainer = document.getElementById('tmdbReviews');
-            if (!window.MoctaleMeter) return;
-            window.MoctaleMeter.renderLoading(meterContainer, reviewsContainer);
-            const endpoint = window.MoctaleMeter.endpointFor(movie, isTMDB);
+            if (!window.FlimfyVerdict) return;
+            window.FlimfyVerdict.renderLoading(meterContainer, reviewsContainer);
+            const endpoint = window.FlimfyVerdict.endpointFor(movie, isTMDB);
             if (!endpoint) {
-                window.MoctaleMeter.renderUnavailable(meterContainer, reviewsContainer);
+                window.FlimfyVerdict.renderUnavailable(meterContainer, reviewsContainer);
                 return;
             }
             fetchWithTimeout(endpoint, { signal })
@@ -1918,11 +1918,11 @@ document.addEventListener('keydown', (e) => {
                 })
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
-                    window.MoctaleMeter.render(meterContainer, reviewsContainer, data);
+                    window.FlimfyVerdict.render(meterContainer, reviewsContainer, data);
                 })
                 .catch(error => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id) || isAbortError(error)) return;
-                    window.MoctaleMeter.renderUnavailable(meterContainer, reviewsContainer);
+                    window.FlimfyVerdict.renderUnavailable(meterContainer, reviewsContainer);
                 });
         }
         window.scrollToDetailDownloads = function() {

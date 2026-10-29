@@ -9,7 +9,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=identity-3"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=reliability-1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=flimfy-verdict-2">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -262,7 +262,7 @@
                         <section class="tmdb-reviews-panel" id="tmdbReviews" aria-live="polite"></section>
                     </main>
                     <aside class="dp-side-column" aria-label="Ratings and available versions">
-                        <section class="moctale-meter-panel" id="moctaleMeter" aria-live="polite" aria-label="Moctale Meter"></section>
+                        <section class="verdict-meter-panel" id="flimfyVerdict" aria-live="polite" aria-label="Flimfy Verdict"></section>
                         <div id="dpTrailerBtn" class="detail-request-actions"></div>
                         <div id="dpSeasons" class="seasons-container"></div>
                         <section class="dl-section" id="dpLinks" aria-live="polite"></section>
@@ -329,7 +329,7 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=moctale-meter-1"></script>
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=moctale-detail-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-verdict-2"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=flimfy-verdict-2"></script>
 </body>
 </html>

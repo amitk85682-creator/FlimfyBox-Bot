@@ -34,8 +34,8 @@ test('late rating-source response cannot overwrite the movie that is currently o
         renderUnavailable() { rendered += 10; }
     };
     const api = runtime(sourceSection('function loadMovieRatingSources', 'window.scrollToDetailDownloads'), {
-        document: { getElementById: id => id === 'moctaleMeter' ? meterContainer : reviewContainer },
-        MoctaleMeter: meter,
+        document: { getElementById: id => id === 'flimfyVerdict' ? meterContainer : reviewContainer },
+        FlimfyVerdict: meter,
         fetchWithTimeout: () => new Promise(resolve => { finishFetch = resolve; }),
         detailsRequestId: 1,
         activeMovie: { id: 77 },

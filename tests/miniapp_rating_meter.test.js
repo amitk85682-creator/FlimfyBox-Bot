@@ -2,11 +2,29 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const meter = require('../static/miniapp/rating-meter.js');
 
-test('Moctale Meter is the one-decimal mean of available IMDb and TMDb scores', () => {
+test('Flimfy Verdict is the one-decimal mean of available IMDb and TMDb scores', () => {
     assert.deepEqual(
         meter.summarize({ imdb: { score: 8.2 }, tmdb: { score: 7.6 } }),
         { score: 7.9, sourceCount: 2, providers: ['IMDb', 'TMDb'] }
     );
+});
+
+test('Flimfy Verdict gives a memorable watch cue without hiding its numeric score', () => {
+    assert.deepEqual(meter.verdictForSummary(meter.summarize({
+        imdb: { score: 7.1 }, tmdb: { score: 7.4 }
+    })), { label: 'Worth your night', tone: 'positive' });
+    assert.deepEqual(meter.verdictForSummary(meter.summarize({
+        imdb: { score: 5.8 }, tmdb: { score: 5.9 }
+    })), { label: 'For a specific mood', tone: 'niche' });
+});
+
+test('source comparison rewards real agreement and calls out real disagreement', () => {
+    assert.equal(meter.audienceRead({ imdb: { score: 7.1 }, tmdb: { score: 7.4 } }),
+        'IMDb + TMDb are in sync · 0.3 apart.');
+    assert.equal(meter.audienceRead({ imdb: { score: 6.1 }, tmdb: { score: 8.0 } }),
+        'A split verdict · scores differ by 1.9.');
+    assert.equal(meter.audienceRead({ imdb: { score: 7.1 }, tmdb: { score: null } }),
+        'TMDb score is unavailable · showing IMDb alone.');
 });
 
 test('a single available provider stays attributable and is not treated as a blend', () => {

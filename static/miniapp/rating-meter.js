@@ -1,4 +1,4 @@
-(function attachMoctaleMeter(root) {
+(function attachFlimfyVerdict(root) {
     'use strict';
 
     const providerDefinitions = [
@@ -32,6 +32,27 @@
             ? Math.round((scores.reduce((total, value) => total + value, 0) / scores.length) * 10) / 10
             : null;
         return { score, sourceCount: scores.length, providers };
+    }
+
+    function verdictForSummary(summary) {
+        const score = summary?.score;
+        if (!Number.isFinite(score)) return { label: 'Too early to call', tone: 'quiet' };
+        if (score >= 8) return { label: 'A standout pick', tone: 'excellent' };
+        if (score >= 7) return { label: 'Worth your night', tone: 'positive' };
+        if (score >= 6) return { label: 'See the trailer first', tone: 'curious' };
+        return { label: 'For a specific mood', tone: 'niche' };
+    }
+
+    function audienceRead(payload = {}) {
+        const imdb = providerScore(payload, 'imdb');
+        const tmdb = providerScore(payload, 'tmdb');
+        if (imdb === null && tmdb === null) return 'Verified IMDb and TMDb scores will appear here when available.';
+        if (imdb === null) return 'IMDb score is unavailable · showing TMDb alone.';
+        if (tmdb === null) return 'TMDb score is unavailable · showing IMDb alone.';
+        const gap = Math.round(Math.abs(imdb - tmdb) * 10) / 10;
+        if (gap <= 0.5) return `IMDb + TMDb are in sync · ${gap.toFixed(1)} apart.`;
+        if (gap >= 1.5) return `A split verdict · scores differ by ${gap.toFixed(1)}.`;
+        return `Close scores · ${gap.toFixed(1)} apart.`;
     }
 
     function endpointFor(movie, isTMDB = false) {
@@ -85,77 +106,78 @@
         return new Intl.DateTimeFormat(undefined, { month: 'short', year: 'numeric' }).format(date);
     }
 
-    function renderSources(container, payload, summary) {
-        const sourceGrid = node('div', 'moctale-source-grid');
+    function renderSources(container, payload) {
+        const sourceGrid = node('div', 'verdict-source-grid');
         providerDefinitions.forEach(provider => {
             const rating = payload?.[provider.key] || {};
             const score = providerScore(payload, provider.key);
-            const card = node('div', `moctale-source-card ${provider.key}`);
-            const name = node('span', 'moctale-source-name', provider.label);
-            const value = node('strong', 'moctale-source-score', score === null ? '—' : score.toFixed(1));
-            const votes = node('span', 'moctale-source-votes', score === null
+            const card = node('div', `verdict-source-card ${provider.key}`);
+            const meta = node('div', 'verdict-source-meta');
+            meta.append(node('span', 'verdict-source-mark', provider.key === 'imdb' ? 'i' : 'T'));
+            meta.append(node('span', 'verdict-source-name', provider.label));
+            const value = node('strong', 'verdict-source-score', score === null ? '—' : score.toFixed(1));
+            const votes = node('span', 'verdict-source-votes', score === null
                 ? 'Not available'
                 : formatVotes(rating.votes));
-            card.append(name, value, votes);
+            const rail = node('span', 'verdict-source-rail');
+            const fill = node('span', 'verdict-source-fill');
+            fill.style.width = score === null ? '0%' : `${score * 10}%`;
+            rail.append(fill);
+            card.append(meta, value, votes, rail);
             sourceGrid.append(card);
         });
         container.append(sourceGrid);
-        const explanation = summary.sourceCount === 2
-            ? 'Equal blend of IMDb + TMDb'
-            : summary.sourceCount === 1
-                ? `Based on ${summary.providers[0]} only`
-                : 'No verified provider scores yet';
-        container.append(node('p', 'moctale-method', explanation));
+        container.append(node('p', 'verdict-method', 'Simple mean of available scores · vote totals stay separate.'));
     }
 
     function renderMeter(container, payload) {
         const summary = summarize(payload?.scores || payload || {});
-        const heading = node('div', 'moctale-heading');
-        heading.append(node('span', 'section-kicker', 'MOCTALE METER'));
-        heading.append(node('span', 'moctale-live-tag', 'SOURCE BLEND'));
+        const scores = payload?.scores || payload || {};
+        const verdict = verdictForSummary(summary);
+        const heading = node('div', 'verdict-heading');
+        const brand = node('span', 'verdict-brand');
+        brand.append(node('span', 'verdict-brand-icon', 'F'), node('span', '', 'FLIMFY VERDICT'));
+        heading.append(brand);
+        heading.append(node('span', 'verdict-source-count', `${summary.sourceCount} ${summary.sourceCount === 1 ? 'SOURCE' : 'SOURCES'}`));
         container.append(heading);
 
-        const body = node('div', 'moctale-meter-body');
-        const ring = node('div', 'moctale-score-ring');
-        ring.setAttribute('role', 'img');
-        ring.setAttribute('aria-label', summary.score === null
-            ? 'Moctale Meter: not enough data'
-            : `Moctale Meter: ${summary.score.toFixed(1)} out of 10`);
-        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-        svg.setAttribute('viewBox', '0 0 120 120');
-        svg.setAttribute('aria-hidden', 'true');
-        const track = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        track.setAttribute('class', 'moctale-ring-track');
-        track.setAttribute('cx', '60'); track.setAttribute('cy', '60'); track.setAttribute('r', '52');
-        const progress = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        progress.setAttribute('class', 'moctale-ring-progress');
-        progress.setAttribute('cx', '60'); progress.setAttribute('cy', '60'); progress.setAttribute('r', '52');
-        progress.setAttribute('transform', 'rotate(-90 60 60)');
-        const circumference = 2 * Math.PI * 52;
-        progress.setAttribute('stroke-dasharray', `${circumference.toFixed(2)} ${circumference.toFixed(2)}`);
-        progress.setAttribute('stroke-dashoffset', summary.score === null
-            ? String(circumference)
-            : String(circumference * (1 - summary.score / 10)));
-        svg.append(track, progress);
-        const scoreCopy = node('span', 'moctale-score-copy');
-        scoreCopy.append(
-            node('strong', 'moctale-score-value', summary.score === null ? '—' : summary.score.toFixed(1)),
-            node('span', 'moctale-score-scale', '/ 10')
+        const hero = node('div', 'verdict-hero');
+        const scoreLockup = node('div', 'verdict-score-lockup');
+        scoreLockup.setAttribute('role', 'img');
+        scoreLockup.setAttribute('aria-label', summary.score === null
+            ? 'Flimfy Verdict: not enough data'
+            : `Flimfy Verdict: ${summary.score.toFixed(1)} out of 10`);
+        scoreLockup.append(
+            node('strong', 'verdict-score', summary.score === null ? '—' : summary.score.toFixed(1)),
+            node('span', 'verdict-score-scale', '/10')
         );
-        ring.append(svg, scoreCopy);
+        const answer = node('div', `verdict-answer tone-${verdict.tone}`);
+        answer.append(
+            node('span', 'verdict-question', 'Worth your night?'),
+            node('strong', 'verdict-answer-label', verdict.label),
+            node('span', 'verdict-identity', summary.score === null ? 'Waiting for verified ratings' : 'A quick read of the ratings')
+        );
+        hero.append(scoreLockup, answer);
+        container.append(hero);
 
-        const context = node('div', 'moctale-context');
-        context.append(
-            node('strong', 'moctale-context-title', summary.score === null ? 'Waiting for ratings' : 'One clear signal'),
-            node('span', 'moctale-context-copy', summary.sourceCount === 2
-                ? 'A transparent blend across two independent movie databases.'
-                : summary.sourceCount === 1
-                    ? 'One provider score is available. The Meter updates when another source is found.'
-                    : 'IMDb and TMDb scores will appear here when available.')
-        );
-        body.append(ring, context);
-        container.append(body);
-        renderSources(container, payload?.scores || payload || {}, summary);
+        const read = node('div', 'verdict-audience-read');
+        read.append(node('span', 'verdict-audience-dot'), node('span', 'verdict-audience-read-copy', audienceRead(scores)));
+        container.append(read);
+
+        const scale = node('div', 'verdict-scale');
+        const track = node('div', 'verdict-scale-track');
+        const fill = node('span', 'verdict-scale-fill');
+        const marker = node('span', 'verdict-scale-marker');
+        const percentage = summary.score === null ? 0 : summary.score * 10;
+        fill.style.width = `${percentage}%`;
+        marker.style.left = `${percentage}%`;
+        track.append(fill, marker);
+        scale.append(track);
+        const labels = node('div', 'verdict-scale-labels');
+        labels.append(node('span', '', 'LOW'), node('span', '', 'GOOD'), node('span', '', 'GREAT'));
+        scale.append(labels);
+        container.append(scale);
+        renderSources(container, scores);
     }
 
     function renderReviews(container, payload) {
@@ -202,6 +224,8 @@
 
     const api = {
         summarize,
+        verdictForSummary,
+        audienceRead,
         endpointFor,
         isTrustedReviewUrl,
         render(meterContainer, reviewsContainer, payload) {
@@ -217,8 +241,8 @@
         renderLoading(meterContainer, reviewsContainer) {
             if (meterContainer) {
                 meterContainer.replaceChildren();
-                meterContainer.append(node('span', 'section-kicker', 'MOCTALE METER'));
-                meterContainer.append(node('p', 'moctale-loading', 'Gathering IMDb + TMDb scores…'));
+                meterContainer.append(node('span', 'section-kicker', 'FLIMFY VERDICT'));
+                meterContainer.append(node('p', 'verdict-loading', 'Reading IMDb + TMDb scores…'));
             }
             if (reviewsContainer) {
                 reviewsContainer.replaceChildren();
@@ -233,11 +257,11 @@
                 reviews: [],
                 review_count: null
             });
-            const copy = meterContainer?.querySelector('.moctale-context-copy');
+            const copy = meterContainer?.querySelector('.verdict-audience-read-copy');
             if (copy) copy.textContent = 'Ratings are temporarily unavailable. Your movie details and downloads are still ready.';
         }
     };
 
-    root.MoctaleMeter = api;
+    root.FlimfyVerdict = api;
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

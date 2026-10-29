@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Upgrade the movie detail page with source-aware IMDb/TMDb ratings, a transparent Moctale Meter, a tidy download chooser, and sourced review excerpts.
+**Goal:** Upgrade the movie detail page with source-aware IMDb/TMDb ratings, a transparent Flimfy Verdict, a tidy download chooser, and sourced review excerpts.
 
 **Architecture:** Add a bounded, cached public endpoint for provider scores and TMDb reviews; keep its request asynchronous from the existing detail response. Add a small pure frontend rating module and use it in the existing detail page while retaining current actions and APIs.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Never label the database `rating` value as IMDb or TMDb.
-- Blend only valid source scores on a 0–10 scale and identify the contributing providers.
+- Blend only valid source scores on a 0–10 scale and identify the contributing providers. Make the title cue deterministic and explain real provider agreement/disagreement; never imply votes or popularity we do not have.
 - Provider data is optional and must never block the existing movie detail/download response.
 - Local movie IDs and TMDb movie/TV IDs use distinct route parameters; never infer one ID namespace from another.
 - Preserve the existing movie/file IDs and actions for every download row.
@@ -43,7 +43,7 @@
 - [ ] Implement the route with parallel provider calls, short network deadlines, and bounded cache TTLs.
 - [ ] Run the route tests and the existing webapp route/auth tests.
 
-### Task 2: Moctale Meter calculation
+### Task 2: Flimfy Verdict calculation
 
 **Files:**
 - Create: `static/miniapp/rating-meter.js`
@@ -51,8 +51,8 @@
 - Create: `tests/miniapp_rating_meter.test.js`
 
 **Interfaces:**
-- `window.MoctaleMeter.summarize({ imdb, tmdb })` returns `score`, `sourceCount`, and contributing source names.
-- `window.MoctaleMeter.render(container, payload)` fills the meter, source cards, and review list without interpreting arbitrary HTML.
+- `window.FlimfyVerdict.summarize({ imdb, tmdb })` returns `score`, `sourceCount`, and contributing source names; `verdictForSummary` adds a short watch cue and `audienceRead` explains provider agreement or disagreement.
+- `window.FlimfyVerdict.render(container, payload)` fills the meter, source cards, and review list without interpreting arbitrary HTML.
 
 - [ ] Add tests for two-source mean, single-source fallback, and malformed/missing input.
 - [ ] Run the new Node tests and confirm the missing module fails.
