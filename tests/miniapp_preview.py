@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_ORIGIN = 'https://flimfybox-bot-yht0.onrender.com'
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 PUBLIC_GETS = {
-    'movies': {'page', 'limit'},
+    'movies': {'page', 'limit', 'availability'},
     'home/trending': {'limit'},
     'home/new-releases': {'limit', 'days'},
     'home/catalogue-rows': {'limit'},
@@ -139,10 +139,18 @@ def create_preview(catalogue=None):
 
         typed = [movie for movie in movies if matches_type(movie)]
         if path == 'movies':
+            availability = request.args.get('availability', 'all').strip().lower()
+            if availability not in {'all', 'available', 'request'}:
+                return jsonify(status='error', message='Availability must be all, available, or request'), 400
+            filtered = movies
+            if availability == 'available':
+                filtered = [movie for movie in movies if movie.get('is_available') is True or movie.get('availability_state') == 'available']
+            elif availability == 'request':
+                filtered = [movie for movie in movies if movie.get('is_available') is False or movie.get('availability_state') in {'unavailable', 'upcoming'}]
             page = max(1, request.args.get('page', 1, type=int))
             limit = min(100, max(1, request.args.get('limit', 40, type=int)))
             offset = (page - 1) * limit
-            return jsonify(status='success', movies=movies[offset:offset + limit], has_more=offset + limit < len(movies))
+            return jsonify(status='success', movies=filtered[offset:offset + limit], has_more=offset + limit < len(filtered))
         if path == 'home/trending':
             return jsonify(status='success', results=movies[:12], hero_limit=5, source='offline-snapshot')
         if path == 'home/new-releases':

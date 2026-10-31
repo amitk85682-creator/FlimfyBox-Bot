@@ -41,7 +41,8 @@ test('upcoming excludes past, today, malformed dates and already available files
 test('availability labels distinguish missing files from a known catalogue title', () => {
     assert.equal(UI.availabilityLabel({is_available:false}), 'Request');
     assert.equal(UI.availabilityLabel({source:'tmdb',release_date:'2000-01-01',is_upcoming:true}), 'Request');
-    assert.equal(UI.availabilityLabel({is_available:true}), 'In your catalogue');
+    assert.equal(UI.availabilityLabel({is_available:true}), 'Available');
+    assert.equal(UI.availabilityLabel({title:'Unknown'}), 'Checking availability');
 });
 
 test('appearance persists and follows OS changes only when System is selected', () => {

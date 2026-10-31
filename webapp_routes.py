@@ -203,6 +203,29 @@ def register_webapp_routes(
     home_response_cache = {}
     home_response_cache_lock = threading.Lock()
     home_response_ttl = int(os.environ.get('MINIAPP_HOME_CACHE_SECONDS', '600'))
+    availability_response_ttl = min(home_response_ttl, 60)
+
+    def local_movie_has_file_sql(alias='m'):
+        return f"""(
+            COALESCE(NULLIF({alias}.url, ''), NULLIF({alias}.file_id, '')) IS NOT NULL
+            OR EXISTS (
+                SELECT 1
+                FROM movie_files availability_file
+                WHERE availability_file.movie_id = {alias}.id
+                  AND (
+                      NULLIF(availability_file.url, '') IS NOT NULL
+                      OR NULLIF(availability_file.file_id, '') IS NOT NULL
+                  )
+            )
+        )"""
+
+    def local_movie_availability_filter_sql(availability, alias='m'):
+        has_file = local_movie_has_file_sql(alias)
+        if availability == 'available':
+            return has_file
+        if availability == 'request':
+            return f'NOT {has_file}'
+        return 'TRUE'
 
     def tmdb_cached_request(
         path, params, cache_key, negative=False, ttl_seconds=None,
@@ -664,7 +687,7 @@ def register_webapp_routes(
         source = request.args.get('source', 'day')
         if source not in {'day', 'week', 'popular'}:
             source = 'day'
-        cache_key = f'home_trending_v3:{source}'
+        cache_key = f'home_trending_v4:{source}'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(cache_key)
@@ -677,10 +700,12 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, imdb_id
-                FROM movies
-                WHERE poster_url IS NOT NULL AND poster_url <> ''
+            cur.execute(f"""
+                SELECT m.id, m.title, m.year, m.poster_url, m.backdrop_poster_url,
+                       m.rating, m.genre, m.category, m.language, m.imdb_id,
+                       {local_movie_has_file_sql('m')} AS is_available
+                FROM movies m
+                WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
             """)
             local_rows = cur.fetchall()
         finally:
@@ -725,6 +750,8 @@ def register_webapp_routes(
                 'tmdb_id': item.get('id'),
                 'tmdb_rank': len(results) + 1,
                 'tmdb_source': source,
+                'is_available': bool(local_row[10]),
+                'availability_state': 'available' if local_row[10] else 'unavailable',
                 'cached': cache_state in {'cached', 'stale'},
                 'fetched_at': fetched_at,
             })
@@ -743,13 +770,13 @@ def register_webapp_routes(
             'hero_limit': hero_limit,
         }
         with home_response_cache_lock:
-            home_response_cache[cache_key] = (time.time() + home_response_ttl, result)
+            home_response_cache[cache_key] = (time.time() + availability_response_ttl, result)
         return jsonify(result)
 
     @flask_app.route('/api/home/new-releases', methods=['GET'])
     def get_home_new_releases():
         cache_key = 'home_new_releases_v1'
-        home_cache_key = 'home_new_releases_v3'
+        home_cache_key = 'home_new_releases_v4'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(home_cache_key)
@@ -770,9 +797,11 @@ def register_webapp_routes(
                 return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
             try:
                 cur = conn.cursor()
-                cur.execute("""
-                    SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, imdb_id
-                    FROM movies
+                cur.execute(f"""
+                    SELECT m.id, m.title, m.year, m.poster_url, m.backdrop_poster_url,
+                           m.rating, m.genre, m.category, m.language, m.imdb_id,
+                           {local_movie_has_file_sql('m')} AS is_available
+                    FROM movies m
                 """)
                 local_rows = cur.fetchall()
                 cur.close()
@@ -861,7 +890,9 @@ def register_webapp_routes(
                     'rating': row[5] or 'N/A', 'genre': row[6] or 'Unknown',
                     'category': row[7] or 'Movie', 'language': row[8] or '', 'source': 'local',
                     'release_date': release_date.isoformat(), 'release_label': release_label,
-                    'release_type': detail['release_type']
+                    'release_type': detail['release_type'],
+                    'is_available': bool(row[10]),
+                    'availability_state': 'available' if row[10] else 'unavailable'
                 })
             result = {
                 'status': 'success', 'movies': movies, 'window_days': selected_window_days or 60,
@@ -878,7 +909,7 @@ def register_webapp_routes(
             }
             with home_response_cache_lock:
                 home_response_cache[home_cache_key] = (
-                    time.time() + home_response_ttl,
+                    time.time() + availability_response_ttl,
                     result,
                 )
             return jsonify(result)
@@ -886,7 +917,7 @@ def register_webapp_routes(
     @flask_app.route('/api/home/catalogue-rows', methods=['GET'])
     def get_home_catalogue_rows():
         """Return independent home collections instead of one paginated slice."""
-        cache_key = 'home_catalogue_rows_v4'
+        cache_key = 'home_catalogue_rows_v5'
         now = time.time()
         with home_response_cache_lock:
             cached = home_response_cache.get(cache_key)
@@ -898,10 +929,11 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(f"""
                 WITH classified AS (
-                    SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
-                           COALESCE(language, '') AS language, created_at,
+                    SELECT m.id, m.title, m.year, m.poster_url, m.backdrop_poster_url, m.rating, m.genre, m.category,
+                           COALESCE(m.language, '') AS language, m.created_at,
+                           {local_movie_has_file_sql('m')} AS is_available,
                            CASE
                                WHEN LOWER(COALESCE(category, '')) ~ '(^|[^a-z])anime([^a-z]|$)'
                                     OR LOWER(COALESCE(genre, '')) ~ '(^|[^a-z])anime([^a-z]|$)'
@@ -926,8 +958,8 @@ def register_webapp_routes(
                                    THEN BTRIM(rating)::numeric
                                ELSE -1
                            END AS rating_value
-                    FROM movies
-                    WHERE poster_url IS NOT NULL AND poster_url <> ''
+                    FROM movies m
+                    WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
                 ),
                 ranked AS (
                     SELECT *, ROW_NUMBER() OVER (
@@ -938,7 +970,7 @@ def register_webapp_routes(
                     WHERE collection IS NOT NULL
                 )
                 SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
-                       language, collection
+                       language, collection, is_available
                 FROM ranked
                 WHERE row_number <= 12
                 ORDER BY collection, row_number
@@ -957,10 +989,12 @@ def register_webapp_routes(
                     'category': row[7] or 'Movie',
                     'language': row[8] or '',
                     'source': 'local',
+                    'is_available': bool(row[10]),
+                    'availability_state': 'available' if row[10] else 'unavailable',
                 })
             result = {'status': 'success', 'collections': collections}
             with home_response_cache_lock:
-                home_response_cache[cache_key] = (time.time() + home_response_ttl, result)
+                home_response_cache[cache_key] = (time.time() + availability_response_ttl, result)
             return jsonify(result)
         except Exception as error:
             logger.error('Home catalogue rows error: %s', error)
@@ -1499,7 +1533,7 @@ def register_webapp_routes(
         browse_type = request.args.get('type', 'all').lower()
         if browse_type not in {'all', 'movies', 'tv'}:
             return jsonify({'status': 'error', 'message': 'Invalid genre type'}), 400
-        cache_key = f'api_genre_{genre_id}_{browse_type}_v1'
+        cache_key = f'api_genre_{genre_id}_{browse_type}_v2'
         cached = api_movies_cache.get(cache_key)
         if cached:
             return jsonify(cached)
@@ -1508,8 +1542,9 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, content_type, seasons_data
+            cur.execute(f"""
+                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category, language, content_type, seasons_data,
+                       {local_movie_has_file_sql('movies')} AS is_available
                 FROM movies
                 ORDER BY id DESC
             """)
@@ -1528,7 +1563,9 @@ def register_webapp_routes(
                     'category': row[7] or 'Movies',
                     'language': row[8] or '',
                     'content_type': row[9] or 'Movie',
-                    'source': 'local'
+                    'source': 'local',
+                    'is_available': bool(row[11]),
+                    'availability_state': 'available' if row[11] else 'unavailable'
                 })
             result = {
                 'status': 'success',
@@ -1556,7 +1593,7 @@ def register_webapp_routes(
         browse_type = request.args.get('type', 'all').lower()
         if browse_type not in {'all', 'movies', 'tv'}:
             return jsonify({'status': 'error', 'message': 'Invalid browse type'}), 400
-        cache_key = f'api_browse_{browse_type}_v1'
+        cache_key = f'api_browse_{browse_type}_v2'
         cached = api_movies_cache.get(cache_key)
         if cached:
             return jsonify(cached)
@@ -1565,8 +1602,9 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT id, title, year, poster_url, rating, genre, category, language, content_type, seasons_data
+            cur.execute(f"""
+                SELECT id, title, year, poster_url, rating, genre, category, language, content_type, seasons_data,
+                       {local_movie_has_file_sql('movies')} AS is_available
                 FROM movies
                 WHERE poster_url IS NOT NULL AND poster_url <> '' AND year IS NOT NULL
                 ORDER BY year DESC NULLS LAST, id DESC
@@ -1591,7 +1629,9 @@ def register_webapp_routes(
                         'id': row[0], 'title': row[1], 'year': year,
                         'image': row[3], 'rating': row[4] or 'N/A',
                         'genre': row[5] or '', 'category': row[6] or 'Movies',
-                        'language': row[7] or '', 'content_type': row[8] or 'Movie', 'source': 'local'
+                        'language': row[7] or '', 'content_type': row[8] or 'Movie', 'source': 'local',
+                        'is_available': bool(row[10]),
+                        'availability_state': 'available' if row[10] else 'unavailable'
                     })
                 items.sort(key=lambda item: (float(item['rating']) if str(item['rating']).replace('.', '', 1).isdigit() else -1, item['year'], item['id']), reverse=True)
                 collections.append({'id': decade_id, 'label': label, 'movies': items[:12]})
@@ -1745,13 +1785,19 @@ def register_webapp_routes(
                 'status': 'error',
                 'message': 'Page and limit must be integers.'
             }), 400
+        availability = request.args.get('availability', 'all').strip().lower()
+        if availability not in {'all', 'available', 'request'}:
+            return jsonify({
+                'status': 'error',
+                'message': 'Availability must be all, available, or request.'
+            }), 400
         if page < 1 or limit < 1 or limit > 100:
             return jsonify({
                 'status': 'error',
                 'message': 'Page must be positive and limit must be between 1 and 100.'
             }), 400
         
-        cache_key = f"api_movies_{page}_{limit}"
+        cache_key = f"api_movies_v5_{availability}_{page}_{limit}"
         cached = api_movies_cache.get(cache_key)
         if cached:
             return jsonify(cached)
@@ -1763,18 +1809,26 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT id, title, year, poster_url, backdrop_poster_url, rating, genre, category,
-                       COALESCE(language, '') as language, COALESCE(content_type, 'Movie') as content_type, created_at
-                FROM movies
-                WHERE poster_url IS NOT NULL AND poster_url != ''
-                ORDER BY created_at DESC NULLS LAST, id DESC
+            has_file_sql = local_movie_has_file_sql('m')
+            availability_sql = local_movie_availability_filter_sql(availability, 'm')
+            cur.execute(f"""
+                SELECT m.id, m.title, m.year, m.poster_url, m.backdrop_poster_url,
+                       m.rating, m.genre, m.category,
+                       COALESCE(m.language, '') AS language,
+                       COALESCE(m.content_type, 'Movie') AS content_type,
+                       m.created_at,
+                       {has_file_sql} AS is_available
+                FROM movies m
+                WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
+                  AND ({availability_sql})
+                ORDER BY m.created_at DESC NULLS LAST, m.id DESC
                 LIMIT %s OFFSET %s
             """, (limit, offset))
             
             rows = cur.fetchall()
             movies = []
             for r in rows:
+                is_available = bool(r[11])
                 movies.append({
                     'id': r[0],
                     'title': r[1],
@@ -1786,7 +1840,10 @@ def register_webapp_routes(
                     'category': r[7] if r[7] else 'Movie',
                     'language': r[8],
                     'content_type': r[9],
-                    'created_at': r[10].isoformat() if r[10] else None
+                    'created_at': r[10].isoformat() if r[10] else None,
+                    'is_available': is_available,
+                    'is_upcoming': False,
+                    'availability_state': 'available' if is_available else 'unavailable'
                 })
             cur.close()
             close_db_connection(conn)
@@ -2474,8 +2531,9 @@ def register_webapp_routes(
         try:
             cur = conn.cursor()
             upsert_miniapp_user(cur, user)
-            cur.execute("""
-                SELECT m.id, m.title, m.year, m.poster_url, m.rating, m.genre, m.category
+            cur.execute(f"""
+                SELECT m.id, m.title, m.year, m.poster_url, m.rating, m.genre, m.category,
+                       {local_movie_has_file_sql('m')} AS is_available
                 FROM user_watchlist w
                 JOIN movies m ON m.id = w.movie_id
                 WHERE w.user_id = %s
@@ -2486,7 +2544,9 @@ def register_webapp_routes(
                     'id': row[0], 'title': row[1], 'year': row[2] or '',
                     'image': row[3] or '/static/miniapp/poster-placeholder.svg',
                     'rating': row[4] or 'N/A', 'genre': row[5] or 'Unknown',
-                    'category': row[6] or 'Movie', 'source': 'local'
+                    'category': row[6] or 'Movie', 'source': 'local',
+                    'is_available': bool(row[7]),
+                    'availability_state': 'available' if row[7] else 'unavailable'
                 }
                 for row in cur.fetchall()
             ]

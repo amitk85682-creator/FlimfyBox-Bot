@@ -90,6 +90,29 @@ def test_offline_snapshot_preserves_metadata_and_filters_real_dates():
     assert client.get('/api/movie/1/audience-reviews').json['status'] == 'unavailable'
 
 
+def test_snapshot_availability_tabs_only_include_confirmed_statuses():
+    movies = [
+        {'id': 1, 'title': 'Ready', 'is_available': True},
+        {'id': 2, 'title': 'Request', 'is_available': False},
+        {'id': 3, 'title': 'Unknown'},
+    ]
+    client = preview.create_preview({'movies': movies}).test_client()
+    assert [movie['id'] for movie in client.get('/api/movies?availability=available').json['movies']] == [1]
+    assert [movie['id'] for movie in client.get('/api/movies?availability=request').json['movies']] == [2]
+    assert [movie['id'] for movie in client.get('/api/movies').json['movies']] == [1, 2, 3]
+    assert client.get('/api/movies?availability=other').status_code == 400
+
+
+def test_availability_filter_is_the_only_extra_catalogue_query_forwarded(monkeypatch):
+    calls = []
+    monkeypatch.setattr(preview, 'deployed_json', lambda path, params: calls.append((path, params)) or {'status': 'success'})
+    response = preview.create_preview().test_client().get(
+        '/api/movies?page=2&limit=10&availability=request&token=secret'
+    )
+    assert response.status_code == 200
+    assert calls == [('movies', {'page': '2', 'limit': '10', 'availability': 'request'})]
+
+
 def test_snapshot_prefix_search_and_real_genre_membership():
     movies = [
         {'id': 1, 'title': 'Reacher', 'genre': 'Action, Drama', 'category': 'Web Series'},

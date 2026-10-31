@@ -26,7 +26,10 @@
     function themePreference(value) { return ['dark', 'light', 'system'].includes(value) ? value : 'system'; }
     function resolveTheme(value, systemDark) { return themePreference(value) === 'system' ? (systemDark ? 'dark' : 'light') : value; }
     function availabilityLabel(movie) {
-        return futureRelease(movie) ? 'Coming soon' : movie.is_available === false || movie.source === 'tmdb' ? 'Request' : 'In your catalogue';
+        if (futureRelease(movie)) return 'Coming soon';
+        if (movie.is_available === true || movie.availability_state === 'available') return 'Available';
+        if (movie.is_available === false || ['unavailable', 'upcoming'].includes(movie.availability_state) || movie.source === 'tmdb') return 'Request';
+        return 'Checking availability';
     }
     function contentLabel(movie) {
         const type = normalize(movie.content_type || movie.media_type || movie.category);

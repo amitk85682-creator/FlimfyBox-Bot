@@ -80,6 +80,9 @@ const tg = window.Telegram?.WebApp || {
         let genreDetailActiveId = null;
         let browseType = 'all';
         let browseRequestId = 0;
+        let catalogueAvailability = 'available';
+        let catalogueRequestId = 0;
+        let catalogueController = null;
         let globalChatTimer = null;
         let detailsController = null;
         let searchController = null;
@@ -88,8 +91,8 @@ const tg = window.Telegram?.WebApp || {
         let initialHomePending = 0;
         let initialHomeTimeout = null;
         let telegramBackButtonHandler = null;
-        const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v4';
-        const HOME_CATALOGUE_CACHE_TTL = 10 * 60 * 1000;
+        const HOME_CATALOGUE_CACHE_KEY = 'flimfybox-home-catalogue-v5';
+        const HOME_CATALOGUE_CACHE_TTL = 60 * 1000;
 
         function parseMiniAppEpisodeMetadata(value) {
             const text = String(value || '').toUpperCase();
@@ -142,9 +145,10 @@ const tg = window.Telegram?.WebApp || {
             backButton.show();
         }
 
-        function readHomeCatalogueCache() {
+        function readHomeCatalogueCache(availability = catalogueAvailability) {
+            const storageKey = `${HOME_CATALOGUE_CACHE_KEY}-${availability}`;
             try {
-                const cached = JSON.parse(localStorage.getItem(HOME_CATALOGUE_CACHE_KEY) || 'null');
+                const cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
                 if (!cached || !Array.isArray(cached.movies) || !cached.savedAt) return null;
                 return {
                     movies: cached.movies,
@@ -152,14 +156,14 @@ const tg = window.Telegram?.WebApp || {
                     fresh: Date.now() - cached.savedAt < HOME_CATALOGUE_CACHE_TTL
                 };
             } catch (_error) {
-                localStorage.removeItem(HOME_CATALOGUE_CACHE_KEY);
+                localStorage.removeItem(storageKey);
                 return null;
             }
         }
 
-        function writeHomeCatalogueCache(movies, hasMore) {
+        function writeHomeCatalogueCache(movies, hasMore, availability = catalogueAvailability) {
             try {
-                localStorage.setItem(HOME_CATALOGUE_CACHE_KEY, JSON.stringify({
+                localStorage.setItem(`${HOME_CATALOGUE_CACHE_KEY}-${availability}`, JSON.stringify({
                     movies,
                     hasMore: hasMore !== false,
                     savedAt: Date.now()
@@ -170,7 +174,7 @@ const tg = window.Telegram?.WebApp || {
         }
 
         async function loadHomeSection(url, cacheKey) {
-            const storageKey = `flimfybox-home-section-${cacheKey}-v4`;
+            const storageKey = `flimfybox-home-section-${cacheKey}-v5`;
             let cached = null;
             try {
                 cached = JSON.parse(localStorage.getItem(storageKey) || 'null');
@@ -1015,6 +1019,44 @@ const tg = window.Telegram?.WebApp || {
         let catalogueRetryPending = false;
         let failedCataloguePage = null;
 
+        function updateCatalogueAvailabilityUI() {
+            document.querySelectorAll('[data-catalogue-availability]').forEach(button => {
+                const selected = button.dataset.catalogueAvailability === catalogueAvailability;
+                button.classList.toggle('active', selected);
+                button.setAttribute('aria-pressed', String(selected));
+            });
+            const caption = document.getElementById('catalogueAvailabilityCaption');
+            if (caption) caption.textContent = catalogueAvailability === 'available'
+                ? 'Files you can open now'
+                : 'Titles waiting for a FlimfyBox file';
+        }
+
+        function matchesCatalogueAvailability(movie) {
+            const isAvailable = movie?.is_available === true || movie?.availability_state === 'available';
+            const isRequestable = movie?.is_available === false
+                || ['unavailable', 'upcoming'].includes(movie?.availability_state)
+                || movie?.source === 'tmdb';
+            return catalogueAvailability === 'available' ? isAvailable : isRequestable;
+        }
+
+        window.setCatalogueAvailability = function(availability) {
+            if (!['available', 'request'].includes(availability) || availability === catalogueAvailability) return;
+            catalogueAvailability = availability;
+            catalogueRequestId += 1;
+            catalogueController?.abort();
+            catalogueController = null;
+            isFetching = false;
+            currentPage = 1;
+            hasMoreMovies = true;
+            catalogueRetryPending = false;
+            failedCataloguePage = null;
+            updateCatalogueAvailabilityUI();
+            document.getElementById('catalogueRetry')?.remove();
+            document.getElementById('scrollLoader')?.remove();
+            document.getElementById('moreGrid').innerHTML = '<div class="catalogue-loading" role="status"><span></span><span></span><span></span><span></span><span></span><small>Loading titles…</small></div>';
+            return loadMovies(1);
+        };
+
         window.retryCatalogue = function() {
             catalogueRetryPending = false;
             loadMovies(failedCataloguePage || currentPage);
@@ -1024,8 +1066,12 @@ const tg = window.Telegram?.WebApp || {
         async function loadMovies(page = 1) {
             if (isFetching || (page > 1 && !hasMoreMovies) || catalogueRetryPending) return;
             isFetching = true;
+            const requestId = ++catalogueRequestId;
+            const availability = catalogueAvailability;
+            const controller = new AbortController();
+            catalogueController = controller;
             document.getElementById('catalogueRetry')?.remove();
-            const cachedHome = page === 1 ? readHomeCatalogueCache() : null;
+            const cachedHome = page === 1 ? readHomeCatalogueCache(availability) : null;
 
             try {
                 if (cachedHome) {
@@ -1035,7 +1081,6 @@ const tg = window.Telegram?.WebApp || {
                     currentPage = 2;
                     completeInitialHomeLoadingStep();
                     if (cachedHome.fresh) {
-                        isFetching = false;
                         return;
                     }
                 }
@@ -1045,7 +1090,8 @@ const tg = window.Telegram?.WebApp || {
                     document.getElementById('moreGrid').insertAdjacentHTML('beforeend', '<div id="scrollLoader" style="grid-column: 1 / -1; text-align: center; padding: 20px;"><div class="loader" style="width:30px;height:30px;border-width:3px;margin:0 auto;"></div></div>');
                 }
 
-                const data = await apiRequest(`/api/movies?page=${page}&limit=40`);
+                const data = await apiRequest(`/api/movies?page=${page}&limit=40&availability=${encodeURIComponent(availability)}`, { signal: controller.signal });
+                if (requestId !== catalogueRequestId || availability !== catalogueAvailability) return;
                 
                 // Naya data aate hi loader hata do
                 if (page > 1) {
@@ -1054,13 +1100,15 @@ const tg = window.Telegram?.WebApp || {
                 }
 
                 if (data.status === 'success') {
-                    const newMovies = data.movies || [];
-                    hasMoreMovies = data.has_more; 
+                    const returnedMovies = Array.isArray(data.movies) ? data.movies : [];
+                    const newMovies = returnedMovies
+                        .filter(matchesCatalogueAvailability);
+                    hasMoreMovies = data.has_more !== false && newMovies.length > 0;
                     
                     if (page === 1) {
                         // Pehli baar: Pura UI setup karo
                         allMovies = newMovies;
-                        writeHomeCatalogueCache(newMovies, data.has_more);
+                        writeHomeCatalogueCache(newMovies, hasMoreMovies, availability);
                         renderHome(allMovies); 
                         completeInitialHomeLoadingStep();
                     } else {
@@ -1073,7 +1121,7 @@ const tg = window.Telegram?.WebApp || {
                     failedCataloguePage = null;
                 }
             } catch (e) {
-                if (isAbortError(e)) return;
+                if (isAbortError(e) || requestId !== catalogueRequestId) return;
                 console.error('Fetch failed', e);
                 document.getElementById('scrollLoader')?.remove();
                 catalogueRetryPending = true;
@@ -1081,7 +1129,10 @@ const tg = window.Telegram?.WebApp || {
                 document.getElementById('moreGrid').insertAdjacentHTML('beforeend', '<div id="catalogueRetry" class="empty-search-state">We could not load more titles.<br><span>Check your connection and try again.</span><button class="btn-request" onclick="retryCatalogue()">Try again</button></div>');
                 if (page === 1) completeInitialHomeLoadingStep();
             } finally {
-                isFetching = false;
+                if (requestId === catalogueRequestId) {
+                    isFetching = false;
+                    if (catalogueController === controller) catalogueController = null;
+                }
             }
         }
 
@@ -1376,7 +1427,9 @@ const tg = window.Telegram?.WebApp || {
                 year: movie.year,
                 category: movie.category,
                 genre: movie.genre,
-                source: movie.source || 'local'
+                source: movie.source || 'local',
+                is_available: movie.is_available,
+                availability_state: movie.availability_state
             });
             saveRecentlyViewed(items);
         }
@@ -1415,7 +1468,7 @@ const tg = window.Telegram?.WebApp || {
                 heroTimer = null;
             }
 
-            const recentViewed = getRecentlyViewed();
+            const recentViewed = getRecentlyViewed().filter(matchesCatalogueAvailability);
             const recentScroll = document.getElementById('recentScroll');
             const recentRow = document.getElementById('rowRecent');
             if (recentViewed.length) {
@@ -1430,13 +1483,15 @@ const tg = window.Telegram?.WebApp || {
             const upcomingScroll = upcomingRow ? upcomingRow.querySelector('#upcomingScroll') : document.getElementById('upcomingScroll');
             if (upcomingRow && upcomingScroll) {
                 const requestId = ++upcomingRequestId;
-                upcomingRow.style.display = '';
+                upcomingRow.style.display = catalogueAvailability === 'request' ? '' : 'none';
                 upcomingScroll.innerHTML = '<div class="loader">Loading upcoming…</div>';
                 loadHomeSection('/api/upcoming?limit=18', 'upcoming')
                     .then(data => {
                         if (requestId !== upcomingRequestId) return;
                         if (data.status !== 'success') throw new Error(data.message || 'Could not load upcoming');
-                        const upcoming = (Array.isArray(data.movies) ? data.movies : []).filter(movie => FlimfyUI.futureRelease(movie));
+                        const upcoming = (Array.isArray(data.movies) ? data.movies : [])
+                            .map(movie => ({ ...movie, source: 'tmdb' }))
+                            .filter(movie => FlimfyUI.futureRelease(movie) && matchesCatalogueAvailability(movie));
                         upcoming.forEach(item => {
                             if (item && item.id) {
                                 tmdbMoviesMap[item.id] = { ...item, source: 'tmdb', id: item.id };
@@ -1451,13 +1506,13 @@ const tg = window.Telegram?.WebApp || {
                         upcomingScroll.innerHTML = partialNotice + (upcoming.length
                             ? renderCards(upcoming, 'card', true)
                             : emptyState);
-                        upcomingRow.style.display = '';
+                        upcomingRow.style.display = catalogueAvailability === 'request' ? '' : 'none';
                     })
                     .catch(error => {
                         if (requestId !== upcomingRequestId) return;
                         console.error('Upcoming load failed:', error);
                         upcomingScroll.innerHTML = '<div class="search-empty-state">Upcoming is temporarily unavailable.</div>';
-                        upcomingRow.style.display = '';
+                        upcomingRow.style.display = catalogueAvailability === 'request' ? '' : 'none';
                     });
             }
 
@@ -1500,7 +1555,7 @@ const tg = window.Telegram?.WebApp || {
                 }
             ];
             catalogueRows.forEach(({ row, target, matches }) => {
-                const items = movies.filter(matches).slice(0, 12);
+                const items = movies.filter(movie => matchesCatalogueAvailability(movie) && matches(movie)).slice(0, 12);
                 const rowElement = document.getElementById(row);
                 document.getElementById(target).innerHTML = items.length
                     ? renderCards(items, 'card', false)
@@ -1521,7 +1576,7 @@ const tg = window.Telegram?.WebApp || {
                         ['rowBollywood', 'bollywoodScroll', collections.bollywood],
                         ['rowAnime', 'animeScroll', collections.anime]
                     ].forEach(([row, target, items]) => {
-                        const list = Array.isArray(items) ? items : [];
+                        const list = (Array.isArray(items) ? items : []).filter(matchesCatalogueAvailability);
                         document.getElementById(target).innerHTML = list.length
                             ? renderCards(list, 'card', false)
                             : '';
@@ -1535,7 +1590,7 @@ const tg = window.Telegram?.WebApp || {
                 .then(data => {
                     if (requestId !== newReleaseRequestId) return;
                     if (data.status !== 'success') throw new Error(data.message || 'Could not load new releases');
-                    const newReleases = data.movies || [];
+                    const newReleases = (data.movies || []).filter(matchesCatalogueAvailability);
                     const newReleasesRow = document.getElementById('rowActualNewReleases');
                     const newReleasesCaption = newReleasesRow.querySelector('.row-caption');
                     if (newReleasesCaption) {
@@ -1561,7 +1616,7 @@ const tg = window.Telegram?.WebApp || {
                 .then(data => {
                     if (trendingRequest !== trendingRequestId) return;
                     if (data.status !== 'success') throw new Error(data.message || 'Could not load trending titles');
-                    const trending = Array.isArray(data.results) ? data.results : [];
+                    const trending = (Array.isArray(data.results) ? data.results : []).filter(matchesCatalogueAvailability);
                     const trendingRow = document.getElementById('rowTrending');
                     document.getElementById('trendingScroll').innerHTML = trending.length
                         ? renderCards(trending.slice(0, 12), 'card', false)
@@ -1588,7 +1643,12 @@ const tg = window.Telegram?.WebApp || {
                 })
                 .finally(completeInitialHomeLoadingStep);
 
-            document.getElementById('moreGrid').innerHTML = renderCards(movies, 'grid-card', false);
+            const moreGrid = document.getElementById('moreGrid');
+            moreGrid.innerHTML = movies.length
+                ? renderCards(movies, 'grid-card', false)
+                : (catalogueAvailability === 'available'
+                    ? '<div class="catalogue-empty"><i class="fas fa-film" aria-hidden="true"></i><strong>No available titles are listed yet</strong><span>Try the Request tab to browse titles without a file.</span></div>'
+                    : '<div class="catalogue-empty"><i class="fas fa-circle-check" aria-hidden="true"></i><strong>No titles are waiting for a file</strong><span>There are no unavailable titles in this list right now.</span></div>');
         }
 
         function showCatalogueHeroFallback(movies) {
@@ -1622,10 +1682,14 @@ const tg = window.Telegram?.WebApp || {
             if (!movies.length) return '<div class="search-empty-state">No titles to show right now.<br><span>Check back soon.</span></div>';
             return movies.map(m => {
                 const isTMDB = forceTMDB || m.source === 'tmdb';
-                const rating = m.rating && m.rating !== 'N/A' ? `★ ${escapeHtml(m.rating)}` : '';
-                const badge = isTMDB
-                    ? `<span class="card-badge request">${m.is_upcoming ? 'Coming soon' : 'Request'}</span>`
-                    : (rating ? `<span class="card-badge available">${rating}</span>` : '');
+                const available = m.is_available === true || m.availability_state === 'available';
+                const unavailable = m.is_available === false || ['unavailable', 'upcoming'].includes(m.availability_state) || isTMDB;
+                const upcoming = FlimfyUI.futureRelease(m);
+                const badge = available
+                    ? '<span class="card-badge available"><i class="fas fa-circle-check" aria-hidden="true"></i> Available</span>'
+                    : unavailable
+                        ? `<span class="card-badge request"><i class="fas fa-${upcoming ? 'calendar' : 'bell'}" aria-hidden="true"></i> ${upcoming ? 'Coming soon' : 'Request'}</span>`
+                        : '<span class="card-badge unknown" title="Availability has not been confirmed">Checking</span>';
                 const payload = encodeURIComponent(JSON.stringify(m)).replace(/'/g, '%27');
                 return `<button type="button" class="${cardClass}" aria-label="Open ${escapeHtml(m.title)}"
                     data-movie="${payload}" data-tmdb="${isTMDB}"
@@ -1977,74 +2041,62 @@ document.addEventListener('keydown', (e) => {
         function loadFlimfyCommunityReviews(movie, requestId, signal) {
             const container = document.getElementById('flimfyReviews');
             if (!container || !window.FlimfyVerdict) return;
-            const movieId = String(movie?.id || '');
+            const rawId = String(movie?.id || '').trim();
+            const movieId = rawId;
             const isCatalogued = /^\d+$/.test(movieId) && movie.source !== 'tmdb';
-            if (!isCatalogued) {
-                window.FlimfyVerdict.renderReviews(container, {
-                    status: 'success', reviews: [], review_count: 0, can_review: false,
-                    is_upcoming: Boolean(movie?.is_upcoming)
-                });
-                return;
-            }
+            const tmdbId = String(movie?.tmdb_id || rawId.replace(/^tmdb_/, '')).trim();
+            const typeHint = [movie?.media_type, movie?.content_type, movie?.category]
+                .filter(Boolean).join(' ').toLowerCase();
+            const mediaType = /\b(tv|series|web\s*series)\b/.test(typeHint) ? 'tv' : 'movie';
+            const isExternalTitle = movie?.source === 'tmdb' || /^tmdb_\d+$/.test(rawId);
+            const audienceEndpoint = isExternalTitle && /^\d+$/.test(tmdbId)
+                ? `/api/tmdb/${mediaType}/${encodeURIComponent(tmdbId)}/audience-reviews`
+                : isCatalogued
+                    ? `/api/movie/${encodeURIComponent(movieId)}/audience-reviews`
+                    : null;
             window.FlimfyVerdict.renderReviews(container, { status: 'loading' });
-            fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/reviews`, {
-                signal,
-                headers: telegramAuthHeaders()
-            })
+
+            const requestReviewPayload = (endpoint, headers = {}) => fetchWithTimeout(endpoint, { signal, headers })
                 .then(async response => {
                     const data = await response.json();
                     if (!response.ok || data.status !== 'success') {
                         throw new Error(data.message || 'Community reviews are temporarily unavailable.');
                     }
                     return data;
-                })
-                .then(data => {
-                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== movieId) return;
-                    window.FlimfyVerdict.renderReviews(container, data);
-                    bindFlimfyReviewForm(container, movieId, movie, requestId, signal);
-                })
-                .catch(error => {
-                    if (requestId !== detailsRequestId || isAbortError(error)) return;
+                });
+            const flimfyRequest = isCatalogued
+                ? requestReviewPayload(`/api/movie/${encodeURIComponent(movieId)}/reviews`, telegramAuthHeaders())
+                : Promise.resolve({ status: 'success', reviews: [], review_count: 0, can_review: false });
+            const tmdbRequest = audienceEndpoint
+                ? requestReviewPayload(audienceEndpoint)
+                : Promise.resolve({ status: 'success', reviews: [], review_count: 0, linked: false });
+
+            Promise.allSettled([flimfyRequest, tmdbRequest]).then(([flimfyResult, tmdbResult]) => {
+                if (requestId !== detailsRequestId || String(activeMovie?.id) !== rawId || signal?.aborted) return;
+                const flimfy = flimfyResult.status === 'fulfilled' ? flimfyResult.value : null;
+                const tmdb = tmdbResult.status === 'fulfilled' ? tmdbResult.value : null;
+                if (!flimfy && !tmdb) {
                     window.FlimfyVerdict.renderReviews(container, { status: 'unavailable' });
+                    return;
+                }
+                window.FlimfyVerdict.renderReviews(container, {
+                    status: 'success',
+                    reviews: flimfy?.reviews || [],
+                    review_count: flimfy?.review_count || 0,
+                    user_review: flimfy?.user_review || '',
+                    can_review: Boolean(flimfy?.can_review),
+                    is_catalogued: isCatalogued,
+                    is_upcoming: Boolean(movie?.is_upcoming || flimfy?.is_upcoming),
+                    tmdb_reviews: tmdb?.reviews || [],
+                    tmdb_review_count: tmdb?.review_count || 0,
+                    tmdb_linked: tmdb?.linked !== false,
+                    tmdb_unavailable: Boolean(audienceEndpoint && !tmdb),
+                    flimfy_unavailable: Boolean(isCatalogued && !flimfy)
                 });
-        }
-        function loadTmdbAudienceReviews(movie, isTMDB, requestId, signal) {
-            const container = document.getElementById('tmdbAudienceReviews');
-            if (!container || !window.FlimfyVerdict) return;
-            const rawId = String(movie?.id || '').trim();
-            const tmdbId = String(movie?.tmdb_id || rawId.replace(/^tmdb_/, '')).trim();
-            const typeHint = [movie?.media_type, movie?.content_type, movie?.category]
-                .filter(Boolean).join(' ').toLowerCase();
-            const mediaType = /\b(tv|series|web\s*series)\b/.test(typeHint) ? 'tv' : 'movie';
-            const isExternalTitle = isTMDB || movie?.source === 'tmdb' || /^tmdb_\d+$/.test(rawId);
-            const endpoint = isExternalTitle && /^\d+$/.test(tmdbId)
-                ? `/api/tmdb/${mediaType}/${encodeURIComponent(tmdbId)}/audience-reviews`
-                : /^\d+$/.test(rawId)
-                    ? `/api/movie/${encodeURIComponent(rawId)}/audience-reviews`
-                    : null;
-            if (!endpoint) {
-                window.FlimfyVerdict.renderAudienceReviews(container, {
-                    status: 'success', linked: false, reviews: [], review_count: 0
-                });
-                return;
-            }
-            window.FlimfyVerdict.renderAudienceReviews(container, { status: 'loading' });
-            fetchWithTimeout(endpoint, { signal })
-                .then(async response => {
-                    const data = await response.json();
-                    if (!response.ok || data.status !== 'success') {
-                        throw new Error(data.message || 'TMDb reviews are temporarily unavailable.');
-                    }
-                    return data;
-                })
-                .then(data => {
-                    if (requestId !== detailsRequestId || String(activeMovie?.id) !== rawId) return;
-                    window.FlimfyVerdict.renderAudienceReviews(container, data);
-                })
-                .catch(error => {
-                    if (requestId !== detailsRequestId || isAbortError(error)) return;
-                    window.FlimfyVerdict.renderAudienceReviews(container, { status: 'unavailable' });
-                });
+                if (isCatalogued && flimfy) {
+                    bindFlimfyReviewForm(container, movieId, movie, requestId, signal);
+                }
+            });
         }
         window.scrollToDetailDownloads = function() {
             const target = document.getElementById('dpLinks');
@@ -2105,7 +2157,6 @@ document.addEventListener('keydown', (e) => {
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
             loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
-            loadTmdbAudienceReviews(movie, isTMDB, requestId, detailsController.signal);
             loadFlimfyCommunityReviews(movie, requestId, detailsController.signal);
             // The card already contains the title, poster, year, rating and genre.
             // Show that immediately while files/cast finish loading in the background.

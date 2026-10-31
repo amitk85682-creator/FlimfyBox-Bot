@@ -94,7 +94,7 @@ test('Flimfy community review text stays plain text and never receives a TMDb at
             review_count: 1,
             can_review: false
         });
-        assert.equal(reviews.querySelector('.section-kicker').textContent, 'FROM THE FLIMFYBOX COMMUNITY');
+        assert.equal(reviews.querySelector('.section-kicker').textContent, 'FLIMFYBOX REVIEWS');
         assert.equal(reviews.querySelector('.review-count').textContent, '1 review');
         assert.equal(reviews.querySelector('.flimfy-review-copy').textContent, '<img src=x onerror=alert(1)>');
         const hasLink = item => item.tag === 'a' || item.children.some(hasLink);
@@ -135,7 +135,7 @@ test('FlimfyBox source explains an empty community score without implying an out
     }
 });
 
-test('public TMDb reviews stay labeled as TMDb and only link to real TMDb review pages', () => {
+test('TMDb reviews appear inside FlimfyBox reviews with source labels and safe source links', () => {
     const previousDocument = global.document;
     class Element {
         constructor(tag) { this.tag = tag; this.className = ''; this.textContent = ''; this.children = []; this.style = {}; }
@@ -153,9 +153,10 @@ test('public TMDb reviews stay labeled as TMDb and only link to real TMDb review
     global.document = { createElement: tag => new Element(tag) };
     try {
         const reviews = new Element('section');
-        meter.renderAudienceReviews(reviews, {
-            status: 'success', source: 'TMDb', linked: true, review_count: 9,
-            reviews: [{
+        meter.renderReviews(reviews, {
+            status: 'success', review_count: 1, tmdb_review_count: 9, tmdb_linked: true,
+            reviews: [{ author: 'FlimfyBox member', content: 'I would watch it again.', rating: 4 }],
+            tmdb_reviews: [{
                 author: 'TMDb reviewer', content: 'A terrific film.', rating: 8.4,
                 url: 'https://www.themoviedb.org/review/review-1'
             }, {
@@ -164,9 +165,10 @@ test('public TMDb reviews stay labeled as TMDb and only link to real TMDb review
             }]
         });
         const heading = reviews.children[0].children.find(child => child.tag === 'h2');
-        assert.equal(heading.textContent, 'TMDb member reviews');
-        assert.equal(reviews.querySelector('.tmdb-source-pill').textContent, 'TMDb');
-        assert.equal(reviews.querySelector('.review-count').textContent, '9 on TMDb');
+        assert.equal(heading.textContent, 'Viewer reviews');
+        assert.equal(reviews.querySelector('.section-kicker').textContent, 'FLIMFYBOX REVIEWS');
+        assert.equal(reviews.querySelector('.flimfy-review-brand-pill').textContent, 'FlimfyBox');
+        assert.equal(reviews.querySelector('.review-count').textContent, '10 reviews');
         const links = [];
         const collectLinks = item => {
             if (item.tag === 'a') links.push(item);
@@ -176,14 +178,22 @@ test('public TMDb reviews stay labeled as TMDb and only link to real TMDb review
         assert.equal(links.length, 1);
         assert.equal(links[0].href, 'https://www.themoviedb.org/review/review-1');
         assert.equal(links[0].rel, 'noopener noreferrer');
-        assert.equal(reviews.querySelector('.flimfy-review-author').textContent, 'TMDb reviewer');
+        assert.match(reviews.querySelector('.flimfy-review-readonly').textContent, /provided by TMDb/);
+        const authorNames = [];
+        const collectAuthors = item => {
+            if (item.className === 'flimfy-review-author') authorNames.push(item.textContent);
+            item.children.forEach(collectAuthors);
+        };
+        reviews.children.forEach(collectAuthors);
+        assert.deepEqual(authorNames, ['FlimfyBox member', 'TMDb reviewer', 'Another reviewer']);
 
         const unlinked = new Element('section');
-        meter.renderAudienceReviews(unlinked, {
-            status: 'success', linked: false, review_count: 0, reviews: []
+        meter.renderReviews(unlinked, {
+            status: 'success', is_catalogued: true, tmdb_linked: false,
+            review_count: 0, tmdb_review_count: 0, reviews: [], tmdb_reviews: []
         });
-        assert.equal(unlinked.querySelector('.review-count').textContent, 'TMDb source');
-        assert.match(unlinked.querySelector('.review-empty').textContent, /not linked to a TMDb entry/);
+        assert.equal(unlinked.querySelector('.review-count').textContent, 'FlimfyBox');
+        assert.match(unlinked.querySelector('.flimfy-review-readonly').textContent, /not linked to this title/);
     } finally {
         global.document = previousDocument;
     }

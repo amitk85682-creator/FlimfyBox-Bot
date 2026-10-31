@@ -60,6 +60,11 @@ test('cards preserve quoted titles safely and use keyboard-operable native butto
     assert.match(html, /\/w342\/poster.jpg/);
     assert.equal(JSON.parse(decodeURIComponent(html.match(/data-movie="([^"]+)"/)[1])).title, title);
     assert.equal(api.artworkUrl('javascript:alert(1)'), '/placeholder.svg');
+    assert.match(html, /Checking/);
+    assert.match(api.renderCards([
+        { id: 2, title: 'Ready', is_available: true },
+        { id: 3, title: 'Request', is_available: false }
+    ]), /Available[\s\S]*Request/);
 });
 
 test('mini app detail controls are real, named, and keyboard operable', () => {
@@ -116,6 +121,7 @@ test('a failed next catalogue page retains loaded cards and retries the same pag
         '\nwindow.state = () => ({currentPage, isFetching, catalogueRetryPending});', {
         document: { getElementById: id => id === 'moreGrid' ? grid : null },
         allMovies: [{ id: 1 }], console: { error() {} }, isAbortError: () => false,
+        AbortController, catalogueRequestId: 0, catalogueAvailability: 'available', catalogueController: null,
         readHomeCatalogueCache: () => ({ movies: [{ id: 1 }], hasMore: true, fresh: true }),
         completeInitialHomeLoadingStep() {}, renderHome() {}, renderCards: () => 'next-cards',
         apiRequest: async url => { pages.push(url); if (fail) throw new Error('offline'); return { status: 'success', movies: [{ id: 2 }], has_more: false }; }
@@ -134,6 +140,44 @@ test('a failed next catalogue page retains loaded cards and retries the same pag
     assert.equal(pages[0], pages[1]);
 });
 
+test('switching availability cancels stale results and requests the selected partition', async () => {
+    const buttons = ['available', 'request'].map(value => ({
+        dataset: { catalogueAvailability: value },
+        classList: { toggle(_name, active) { this.active = active; } },
+        setAttribute(_name, pressed) { this.pressed = pressed; }
+    }));
+    const grid = { innerHTML: '' };
+    const caption = { textContent: '' };
+    const requests = [];
+    const api = runtime(section('// Pagination State', '// 🔥 NAYA: Infinite Scroll Listener') +
+        '\nwindow.state = () => ({catalogueAvailability, currentPage, isFetching});', {
+        AbortController, catalogueRequestId: 0, catalogueAvailability: 'available', catalogueController: null,
+        document: {
+            querySelectorAll: () => buttons,
+            getElementById: id => id === 'moreGrid' ? grid : id === 'catalogueAvailabilityCaption' ? caption : null
+        },
+        addEventListener() {}, allMovies: [], console: { error() {} }, isAbortError: error => error?.name === 'AbortError',
+        readHomeCatalogueCache: () => null, completeInitialHomeLoadingStep() {}, renderHome() {},
+        writeHomeCatalogueCache() {}, renderCards: () => '',
+        apiRequest: (url, { signal }) => new Promise((resolve, reject) => {
+            requests.push({ url, signal, resolve });
+            signal.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')));
+        })
+    });
+    const oldRequest = api.loadMovies(1);
+    await Promise.resolve();
+    const selectedRequest = api.setCatalogueAvailability('request');
+    assert.equal(requests[0].signal.aborted, true);
+    assert.match(requests[1].url, /availability=request/);
+    assert.equal(buttons[0].pressed, 'false');
+    assert.equal(buttons[1].pressed, 'true');
+    requests[1].resolve({ status: 'success', movies: [{ id: 22, is_available: false }], has_more: false });
+    await Promise.all([oldRequest, selectedRequest]);
+    assert.equal(api.state().catalogueAvailability, 'request');
+    assert.equal(api.state().currentPage, 2);
+    assert.equal(api.state().isFetching, false);
+});
+
 test('a stale cache at the end of the catalogue can retry refreshing page one', async () => {
     let fail = true;
     const pages = [];
@@ -141,6 +185,7 @@ test('a stale cache at the end of the catalogue can retry refreshing page one', 
     const api = runtime(section('// Pagination State', '// 🔥 NAYA: Infinite Scroll Listener'), {
         document: { getElementById: id => id === 'moreGrid' ? grid : null },
         allMovies: [], console: { error() {} }, isAbortError: () => false,
+        AbortController, catalogueRequestId: 0, catalogueAvailability: 'available', catalogueController: null,
         readHomeCatalogueCache: () => ({ movies: [{ id: 1 }], hasMore: false, fresh: false }),
         completeInitialHomeLoadingStep() {}, renderHome() {}, writeHomeCatalogueCache() {},
         apiRequest: async url => { pages.push(url); if (fail) throw new Error('offline'); return { status: 'success', movies: [{ id: 2 }], has_more: false }; }
@@ -150,6 +195,6 @@ test('a stale cache at the end of the catalogue can retry refreshing page one', 
     api.retryCatalogue();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(pages.length, 2);
-    assert.equal(pages[0], '/api/movies?page=1&limit=40');
+    assert.equal(pages[0], '/api/movies?page=1&limit=40&availability=available');
     assert.equal(pages[1], pages[0]);
 });

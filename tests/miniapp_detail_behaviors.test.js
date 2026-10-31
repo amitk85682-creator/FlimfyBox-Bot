@@ -175,33 +175,45 @@ test('member review form saves through the authenticated FlimfyBox endpoint and 
     assert.deepEqual(toasts, ['✓ FlimfyBox review saved']);
 });
 
-test('public review loading keeps catalogue IDs and TMDb IDs in separate routes', async () => {
+test('one FlimfyBox review panel combines local and TMDb reviews using the correct title IDs', async () => {
     const container = {};
     const endpoints = [];
     const renders = [];
-    const api = runtime(sourceSection('function loadTmdbAudienceReviews', 'window.scrollToDetailDownloads'), {
-        document: { getElementById: id => id === 'tmdbAudienceReviews' ? container : null },
+    const bound = [];
+    const api = runtime(sourceSection('function loadFlimfyCommunityReviews', 'window.scrollToDetailDownloads'), {
+        document: { getElementById: id => id === 'flimfyReviews' ? container : null },
         FlimfyVerdict: {
-            renderAudienceReviews: (_container, data) => renders.push(data)
+            renderReviews: (_container, data) => renders.push(data)
         },
         fetchWithTimeout: async endpoint => {
             endpoints.push(endpoint);
-            return { ok: true, json: async () => ({ status: 'success', source: 'TMDb', reviews: [], review_count: 0 }) };
+            const isTmdb = endpoint.endsWith('/audience-reviews');
+            return { ok: true, json: async () => isTmdb
+                ? { status: 'success', source: 'TMDb', reviews: [{ author: 'TMDb member' }], review_count: 9, linked: true }
+                : { status: 'success', reviews: [{ author: 'FlimfyBox member' }], review_count: 1, can_review: false } };
         },
+        bindFlimfyReviewForm: (...args) => bound.push(args),
+        telegramAuthHeaders: () => ({ 'X-Telegram-Init-Data': 'test' }),
         activeMovie: { id: 77 },
         detailsRequestId: 1,
         isAbortError: error => error?.name === 'AbortError'
     });
 
-    api.loadTmdbAudienceReviews({ id: 77, tmdb_id: 900, category: 'Web Series' }, false, 1, {});
+    const localSignal = { aborted: false };
+    api.loadFlimfyCommunityReviews({ id: 77, tmdb_id: 900, content_type: 'Web Series', source: 'local' }, 1, localSignal);
     await new Promise(resolve => setImmediate(resolve));
-    api.activeMovie = { id: 'tmdb_901' };
-    api.loadTmdbAudienceReviews({ id: 'tmdb_901', source: 'tmdb', media_type: 'tv' }, true, 1, {});
-    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(endpoints, ['/api/movie/77/reviews', '/api/movie/77/audience-reviews']);
+    assert.equal(renders.at(-1).reviews[0].author, 'FlimfyBox member');
+    assert.equal(renders.at(-1).tmdb_reviews[0].author, 'TMDb member');
+    assert.equal(renders.at(-1).tmdb_review_count, 9);
+    assert.equal(bound.length, 1);
 
-    assert.deepEqual(endpoints, [
-        '/api/movie/77/audience-reviews',
-        '/api/tmdb/tv/901/audience-reviews'
-    ]);
-    assert.equal(renders.filter(payload => payload.status === 'success').length, 2);
+    endpoints.length = 0;
+    api.activeMovie = { id: 'tmdb_901' };
+    api.loadFlimfyCommunityReviews({ id: 'tmdb_901', source: 'tmdb', media_type: 'tv' }, 1, { aborted: false });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(endpoints, ['/api/tmdb/tv/901/audience-reviews']);
+    assert.equal(renders.at(-1).reviews.length, 0);
+    assert.equal(renders.at(-1).tmdb_reviews[0].author, 'TMDb member');
+    assert.equal(renders.at(-1).is_catalogued, false);
 });

@@ -210,17 +210,24 @@
     }
 
     function renderReviews(container, payload = {}) {
-        const reviews = Array.isArray(payload?.reviews) ? payload.reviews.slice(0, 10) : [];
+        const flimfyReviews = Array.isArray(payload?.reviews)
+            ? payload.reviews.slice(0, 10).map(review => ({ ...review, review_source: 'flimfybox' }))
+            : [];
+        const tmdbReviews = Array.isArray(payload?.tmdb_reviews)
+            ? payload.tmdb_reviews.slice(0, 5).map(review => ({ ...review, review_source: 'tmdb' }))
+            : [];
+        const reviews = [...flimfyReviews, ...tmdbReviews];
         const heading = node('div', 'detail-section-heading');
         heading.append(
-            node('span', 'section-kicker', 'FROM THE FLIMFYBOX COMMUNITY'),
-            node('h2', '', 'Member reviews')
+            node('span', 'section-kicker', 'FLIMFYBOX REVIEWS'),
+            node('h2', '', 'Viewer reviews')
         );
-        const count = payload?.review_count;
-        const hasReviewCount = count !== null && count !== undefined && count !== ''
-            && Number.isFinite(Number(count));
-        heading.append(node('span', 'review-count', hasReviewCount
-            ? `${Number(count).toLocaleString()} ${Number(count) === 1 ? 'review' : 'reviews'}`
+        const flimfyCount = Number(payload?.review_count);
+        const tmdbCount = Number(payload?.tmdb_review_count);
+        const totalReviewCount = Math.max(Number.isFinite(flimfyCount) ? flimfyCount : 0, flimfyReviews.length)
+            + Math.max(Number.isFinite(tmdbCount) ? tmdbCount : 0, tmdbReviews.length);
+        heading.append(node('span', 'review-count', totalReviewCount
+            ? `${totalReviewCount.toLocaleString()} ${totalReviewCount === 1 ? 'review' : 'reviews'}`
             : 'FlimfyBox'));
         container.append(heading);
 
@@ -236,21 +243,47 @@
         if (!reviews.length) {
             container.append(node('p', 'review-empty', payload?.is_upcoming
                 ? 'Reviews open after this title is released.'
-                : 'No member reviews yet. Be the first to share what you thought.'));
+                : payload?.tmdb_unavailable || payload?.flimfy_unavailable
+                    ? 'Reviews are temporarily unavailable. Please try again later.'
+                    : 'No reviews yet. Be the first to share what you thought.'));
         } else {
             const list = node('div', 'flimfy-review-list');
             reviews.forEach(review => {
                 const card = node('article', 'flimfy-review-card');
                 const meta = node('div', 'flimfy-review-meta');
-                meta.append(node('strong', 'flimfy-review-author', review.author || 'FlimfyBox member'));
+                const isTmdbReview = review.review_source === 'tmdb';
+                meta.append(node('strong', 'flimfy-review-author', review.author || (isTmdbReview ? 'TMDb member' : 'FlimfyBox member')));
+                if (isTmdbReview) meta.append(node('span', 'flimfy-review-brand-pill', 'FlimfyBox'));
                 const date = formatReviewDate(review.created_at);
                 if (date) meta.append(node('span', 'flimfy-review-date', date));
-                const reviewRating = normalizedScore(review.rating, 5);
-                if (reviewRating !== null) meta.append(node('span', 'flimfy-review-rating', `★ ${reviewRating.toFixed(1)} / 5`));
+                const reviewRating = normalizedScore(review.rating, isTmdbReview ? 10 : 5);
+                if (reviewRating !== null) meta.append(node('span', 'flimfy-review-rating', `★ ${reviewRating.toFixed(1)} / ${isTmdbReview ? 10 : 5}`));
                 card.append(meta, node('p', 'flimfy-review-copy', review.content || ''));
+                if (isTmdbReview) {
+                    const url = trustedTmdbReviewUrl(review.url);
+                    if (url) {
+                        const sourceLink = node('a', 'tmdb-review-source-link', 'Read original on TMDb');
+                        sourceLink.href = url;
+                        sourceLink.target = '_blank';
+                        sourceLink.rel = 'noopener noreferrer';
+                        card.append(sourceLink);
+                    }
+                }
                 list.append(card);
             });
             container.append(list);
+        }
+        if (tmdbReviews.length) {
+            container.append(node('p', 'flimfy-review-readonly', 'Public review excerpts are provided by TMDb.'));
+        }
+
+        if (payload?.tmdb_linked === false) {
+            container.append(node('p', 'flimfy-review-readonly', 'TMDb reviews are not linked to this title yet.'));
+        } else if (payload?.tmdb_unavailable && reviews.length) {
+            container.append(node('p', 'flimfy-review-readonly', 'TMDb reviews are temporarily unavailable.'));
+        }
+        if (payload?.flimfy_unavailable && reviews.length) {
+            container.append(node('p', 'flimfy-review-readonly', 'FlimfyBox member reviews are temporarily unavailable.'));
         }
 
         if (payload?.can_review) {
@@ -276,66 +309,9 @@
             submit.type = 'submit';
             form.append(label, input, help, status, submit);
             container.append(form);
-        } else if (!payload?.is_upcoming) {
+        } else if (payload?.is_catalogued && !payload?.is_upcoming) {
             container.append(node('p', 'flimfy-review-readonly', 'Open FlimfyBox in Telegram to post or update a review.'));
         }
-    }
-
-    function renderAudienceReviews(container, payload = {}) {
-        const reviews = Array.isArray(payload?.reviews) ? payload.reviews.slice(0, 5) : [];
-        const heading = node('div', 'detail-section-heading');
-        heading.append(
-            node('span', 'section-kicker', 'PUBLIC AUDIENCE VOICES'),
-            node('h2', '', 'TMDb member reviews')
-        );
-        const count = Number(payload?.review_count);
-        heading.append(node('span', 'review-count', payload?.linked === false
-            ? 'TMDb source'
-            : Number.isFinite(count) && count >= 0
-            ? `${count.toLocaleString()} on TMDb`
-            : 'TMDb source'));
-        container.append(heading);
-
-        if (payload?.status === 'loading') {
-            container.append(node('p', 'review-empty', 'Loading public reviews from TMDb…'));
-            return;
-        }
-        if (payload?.status !== 'success' && payload?.status !== undefined) {
-            container.append(node('p', 'review-empty', 'TMDb reviews are temporarily unavailable.'));
-            return;
-        }
-        if (payload?.linked === false) {
-            container.append(node('p', 'review-empty', 'This catalogue title is not linked to a TMDb entry yet.'));
-            return;
-        }
-        if (!reviews.length) {
-            container.append(node('p', 'review-empty', 'No public TMDb review excerpts are available for this title yet.'));
-            return;
-        }
-
-        const list = node('div', 'flimfy-review-list tmdb-audience-review-list');
-        reviews.forEach(review => {
-            const card = node('article', 'flimfy-review-card tmdb-audience-review-card');
-            const meta = node('div', 'flimfy-review-meta');
-            meta.append(node('strong', 'flimfy-review-author', review.author || 'TMDb member'));
-            meta.append(node('span', 'tmdb-source-pill', 'TMDb'));
-            const date = formatReviewDate(review.created_at);
-            if (date) meta.append(node('span', 'flimfy-review-date', date));
-            const reviewRating = normalizedScore(review.rating);
-            if (reviewRating !== null) meta.append(node('span', 'flimfy-review-rating', `★ ${reviewRating.toFixed(1)} / 10`));
-            const copy = node('p', 'flimfy-review-copy', review.content || '');
-            card.append(meta, copy);
-            const url = trustedTmdbReviewUrl(review.url);
-            if (url) {
-                const sourceLink = node('a', 'tmdb-review-source-link', 'Read full review on TMDb');
-                sourceLink.href = url;
-                sourceLink.target = '_blank';
-                sourceLink.rel = 'noopener noreferrer';
-                card.append(sourceLink);
-            }
-            list.append(card);
-        });
-        container.append(list);
     }
 
     const api = {
@@ -361,11 +337,6 @@
             if (!reviewContainer) return;
             reviewContainer.replaceChildren();
             renderReviews(reviewContainer, payload || {});
-        },
-        renderAudienceReviews(reviewContainer, payload) {
-            if (!reviewContainer) return;
-            reviewContainer.replaceChildren();
-            renderAudienceReviews(reviewContainer, payload || {});
         },
         setCommunityRating(meterContainer, data) {
             if (!meterContainer) return;
