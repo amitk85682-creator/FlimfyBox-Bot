@@ -44,6 +44,8 @@ def test_rating_source_endpoints_are_available_in_read_only_proxy(monkeypatch, p
     ('post', '/api/request'), ('post', '/api/movie/1/rating'),
     ('delete', '/api/my-list/1'), ('get', '/api/my-list'),
     ('get', '/api/my-list/1/status'), ('get', '/api/upcoming/reminder'),
+    ('get', '/api/my-list/1/availability-notification'),
+    ('post', '/api/my-list/1/availability-notification'),
     ('get', '/api/global-chat'), ('post', '/api/movies'),
     ('put', '/api/movies'), ('get', '/api/unknown'),
     ('get', '/api/https://example.org'), ('get', '/watch/1/file/2'),

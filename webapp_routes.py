@@ -18,6 +18,7 @@ import secrets
 import hashlib
 import hmac
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from fuzzywuzzy import process, fuzz
 
@@ -1057,12 +1058,198 @@ def register_webapp_routes(
         if not re.fullmatch(r'[A-Za-z0-9_-]{16,128}', guest_token):
             return None
         digest = hashlib.sha256(guest_token.encode('utf-8')).digest()
-        guest_id = -max(1, int.from_bytes(digest[:8], byteorder='big', signed=False))
+        guest_number = int.from_bytes(digest[:8], byteorder='big', signed=False) & ((1 << 63) - 1)
+        guest_id = -max(1, guest_number)
         return {
             'id': guest_id,
             'username': '',
             'first_name': 'Guest',
         }
+
+    @flask_app.route('/api/home/daily-picks', methods=['GET'])
+    def get_home_daily_picks():
+        """Return a stable three-title shortlist for each user and India-local day."""
+        india_tz = timezone(timedelta(hours=5, minutes=30))
+        now_india = datetime.now(india_tz)
+        today = now_india.date()
+        tomorrow = datetime.combine(today + timedelta(days=1), datetime.min.time(), india_tz)
+        signed_in_user = telegram_user_from_request()
+        user_key = str(signed_in_user['id']) if signed_in_user else 'guest'
+        cache_key = f'home_daily_picks_v1:{today.isoformat()}:{user_key}'
+        now = time.time()
+        with home_response_cache_lock:
+            cached = home_response_cache.get(cache_key)
+            if cached and cached[0] > now:
+                return jsonify(cached[1])
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            profile_rows = []
+            genre_scores = {}
+            language_scores = {}
+            category_scores = {}
+            if signed_in_user:
+                cur.execute("""
+                    SELECT m.genre, m.language, m.category, e.event_type, COUNT(*)
+                    FROM user_recommendation_events e
+                    JOIN movies m ON m.id = e.movie_id
+                    WHERE e.user_id = %s
+                      AND e.created_at >= CURRENT_TIMESTAMP - INTERVAL '180 days'
+                    GROUP BY m.genre, m.language, m.category, e.event_type
+                """, (signed_in_user['id'],))
+                profile_rows = cur.fetchall()
+                event_weights = {
+                    'rating_submitted': 5, 'watchlist_add': 4, 'miniapp_download': 4,
+                    'miniapp_open_details': 2, 'surprise_click': 2, 'daily_pick_click': 3,
+                    'mood_pick_liked': 6, 'mood_pick_skipped': -4,
+                    'surprise_skip': -3, 'surprise_impression': 0,
+                }
+                for genre, language, category, event_type, count in profile_rows:
+                    weight = event_weights.get(event_type, 1) * count
+                    for token in re.split(r'[,/&|]', (genre or '').lower()):
+                        token = token.strip()
+                        if token:
+                            genre_scores[token] = genre_scores.get(token, 0) + weight
+                    for token in re.split(r'[,/&|]', (language or '').lower()):
+                        token = token.strip()
+                        if token:
+                            language_scores[token] = language_scores.get(token, 0) + weight
+                    category_key = (category or '').strip().lower()
+                    if category_key:
+                        category_scores[category_key] = category_scores.get(category_key, 0) + weight
+
+            has_file_sql = local_movie_has_file_sql('m')
+            cur.execute(f"""
+                SELECT m.id, m.title, m.year, m.poster_url, m.backdrop_poster_url,
+                       m.rating, m.genre, m.category, m.language, m.content_type,
+                       {has_file_sql} AS is_available
+                FROM movies m
+                WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
+                  AND NOT COALESCE(m.is_unreleased, FALSE)
+                  AND {has_file_sql}
+                ORDER BY m.id DESC
+                LIMIT 1200
+            """)
+            scored = []
+            for row in cur.fetchall():
+                genre_tokens = {token.strip().lower() for token in re.split(r'[,/&|]', str(row[6] or '')) if token.strip()}
+                category_tokens = {token.strip().lower() for token in re.split(r'[,/&|]', str(row[7] or '')) if token.strip()}
+                language_tokens = {token.strip().lower() for token in re.split(r'[,/&|]', str(row[8] or '')) if token.strip()}
+                score = sum(genre_scores.get(token, 0) for token in genre_tokens)
+                score += sum(category_scores.get(token, 0) for token in category_tokens)
+                score += sum(language_scores.get(token, 0) for token in language_tokens)
+                rating_text = str(row[5] or '').strip()
+                rating_score = float(rating_text) if re.fullmatch(r'\d+(?:\.\d+)?', rating_text) else 0
+                scored.append((score + rating_score * 0.25, row))
+
+            scored.sort(key=lambda item: (item[0], item[1][0]), reverse=True)
+            top_pool = [row for _score, row in scored[:min(80, len(scored))]]
+            seed_text = f'{today.isoformat()}:{user_key}'
+            seed = int.from_bytes(hashlib.sha256(seed_text.encode('utf-8')).digest()[:8], 'big')
+            random.Random(seed).shuffle(top_pool)
+            movies = [{
+                'id': row[0], 'title': row[1], 'year': row[2] or '',
+                'image': row[3] or '/static/miniapp/poster-placeholder.svg',
+                'backdrop': row[4] or row[3] or '/static/miniapp/poster-placeholder.svg',
+                'rating': row[5] or 'N/A', 'genre': row[6] or 'Unknown',
+                'category': row[7] or 'Movie', 'language': row[8] or '',
+                'content_type': row[9] or 'Movie', 'source': 'local',
+                'is_available': bool(row[10]), 'availability_state': 'available',
+            } for row in top_pool[:3]]
+            cur.close()
+            result = {
+                'status': 'success', 'date': today.isoformat(),
+                'date_label': today.strftime('%a, %d %b'),
+                'refreshes_at': tomorrow.isoformat(), 'movies': movies,
+                'personalized': any(row[3] != 'surprise_impression' for row in profile_rows),
+            }
+            ttl = max(1, min(21600, (tomorrow - now_india).total_seconds()))
+            with home_response_cache_lock:
+                daily_keys = []
+                for stale_key, cache_value in list(home_response_cache.items()):
+                    if not stale_key.startswith('home_daily_picks_v1:'):
+                        continue
+                    if stale_key != cache_key and (cache_value[0] <= time.time() or f':{today.isoformat()}:' not in stale_key):
+                        del home_response_cache[stale_key]
+                    elif stale_key != cache_key:
+                        daily_keys.append(stale_key)
+                while len(daily_keys) >= 500:
+                    home_response_cache.pop(daily_keys.pop(0), None)
+                home_response_cache[cache_key] = (time.time() + ttl, result)
+            return jsonify(result)
+        except Exception as error:
+            logger.error('Daily picks error: %s', error)
+            return jsonify({'status': 'error', 'message': 'Could not load today\'s picks'}), 500
+        finally:
+            close_db_connection(conn)
+
+    @flask_app.route('/api/home/daily-checkin', methods=['POST'])
+    def post_home_daily_checkin():
+        user, error = require_telegram_user()
+        if error:
+            return error
+        india_tz = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(india_tz).date()
+        today_text = today.isoformat()
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            # This upsert locks the user's row, so simultaneous Mini App opens
+            # cannot create multiple check-ins for the same day.
+            upsert_miniapp_user(cur, user)
+            cur.execute("""
+                SELECT 1
+                FROM user_recommendation_events
+                WHERE user_id = %s AND event_type = 'daily_checkin'
+                  AND metadata->>'date' = %s
+                LIMIT 1
+            """, (user['id'], today_text))
+            new_checkin = cur.fetchone() is None
+            if new_checkin:
+                cur.execute("""
+                    INSERT INTO user_recommendation_events
+                        (user_id, movie_id, event_type, source, metadata)
+                    VALUES (%s, NULL, 'daily_checkin', 'miniapp', %s::jsonb)
+                """, (user['id'], json.dumps({'date': today_text})))
+            conn.commit()
+            cutoff = (today - timedelta(days=365)).isoformat()
+            cur.execute("""
+                SELECT DISTINCT metadata->>'date'
+                FROM user_recommendation_events
+                WHERE user_id = %s AND event_type = 'daily_checkin'
+                  AND metadata->>'date' >= %s
+            """, (user['id'], cutoff))
+            checkin_dates = {row[0] for row in cur.fetchall() if row[0]}
+            current_streak = 0
+            for days_ago in range(366):
+                day_text = (today - timedelta(days=days_ago)).isoformat()
+                if day_text not in checkin_dates:
+                    break
+                current_streak += 1
+            week = []
+            for days_ago in range(6, -1, -1):
+                day = today - timedelta(days=days_ago)
+                day_text = day.isoformat()
+                week.append({
+                    'date': day_text, 'label': day.strftime('%a')[:2],
+                    'done': day_text in checkin_dates, 'is_today': day_text == today_text,
+                })
+            cur.close()
+            return jsonify({
+                'status': 'success', 'current_streak': current_streak,
+                'checked_in_today': True, 'new_checkin': new_checkin, 'week': week,
+            })
+        except Exception as error:
+            conn.rollback()
+            logger.error('Daily check-in error: %s', error)
+            return jsonify({'status': 'error', 'message': 'Could not update today\'s streak'}), 500
+        finally:
+            close_db_connection(conn)
 
     @flask_app.route('/api/recommendation-events', methods=['POST'])
     def record_recommendation_event_api():
@@ -1075,7 +1262,8 @@ def register_webapp_routes(
         allowed_event_types = {
             'miniapp_open_details', 'miniapp_download', 'watchlist_add',
             'watchlist_remove', 'rating_submitted', 'surprise_impression',
-            'surprise_click', 'surprise_skip',
+            'surprise_click', 'surprise_skip', 'mood_pick_liked',
+            'mood_pick_skipped', 'daily_pick_click',
         }
         if event_type not in allowed_event_types:
             return jsonify({'status': 'error', 'message': 'Unsupported recommendation event.'}), 400
@@ -1132,6 +1320,19 @@ def register_webapp_routes(
                 'status': 'error',
                 'message': 'Chat identity is unavailable. Refresh the app and try again.',
             }), 400
+        payload = (request.get_json(silent=True) or {}) if request.method == 'POST' else {}
+        if request.method == 'POST' and not isinstance(payload, dict):
+            return jsonify({'status': 'error', 'message': 'Invalid message payload.'}), 400
+        message = str(payload.get('message') or '').strip() if request.method == 'POST' else ''
+        if request.method == 'POST' and (not message or len(message) > 3800):
+            return jsonify({'status': 'error', 'message': 'Message must be between 1 and 3800 characters.'}), 400
+        client_message_id = None
+        if request.method == 'POST':
+            try:
+                client_message_id = str(uuid.UUID(str(payload.get('client_id') or '')))
+            except (ValueError, TypeError, AttributeError):
+                return jsonify({'status': 'error', 'message': 'Invalid message id. Please retry.'}), 400
+
         conn = get_db_connection()
         if not conn:
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
@@ -1139,28 +1340,112 @@ def register_webapp_routes(
             cur = conn.cursor()
             upsert_miniapp_user(cur, user)
             if request.method == 'POST':
-                payload = request.get_json(silent=True) or {}
-                message = str(payload.get('message') or '').strip()
-                if not message or len(message) > 500:
-                    return jsonify({'status': 'error', 'message': 'Message must be between 1 and 500 characters.'}), 400
                 cur.execute("""
-                    INSERT INTO global_chat_messages (user_id, username, first_name, message)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING id, username, first_name, message, created_at
-                """, (user['id'], user.get('username', ''), user.get('first_name', ''), message))
+                    INSERT INTO global_chat_messages
+                        (user_id, username, first_name, message, source, client_message_id)
+                    VALUES (%s, %s, %s, %s, 'miniapp', %s)
+                    ON CONFLICT (user_id, client_message_id) DO NOTHING
+                    RETURNING id, user_id, username, first_name, message, created_at,
+                              source, client_message_id
+                """, (user['id'], user.get('username', ''), user.get('first_name', ''),
+                      message, client_message_id))
+                row = cur.fetchone()
+                if row:
+                    cur.execute("""
+                        INSERT INTO global_chat_relay_outbox (message_id)
+                        VALUES (%s)
+                    """, (row[0],))
+                    relay_status = 'pending'
+                else:
+                    cur.execute("""
+                        SELECT m.id, m.user_id, m.username, m.first_name, m.message,
+                               m.created_at, m.source, m.client_message_id,
+                               COALESCE(o.status, 'sent')
+                        FROM global_chat_messages m
+                        LEFT JOIN global_chat_relay_outbox o ON o.message_id = m.id
+                        WHERE m.user_id = %s AND m.client_message_id = %s
+                    """, (user['id'], client_message_id))
+                    row = cur.fetchone()
+                    if not row or row[4] != message:
+                        conn.rollback()
+                        return jsonify({'status': 'error', 'message': 'Message retry did not match.'}), 409
+                    relay_status = row[8]
+                    if relay_status == 'failed':
+                        cur.execute("""
+                            UPDATE global_chat_relay_outbox
+                            SET status = 'pending', attempts = 0,
+                                next_attempt_at = CURRENT_TIMESTAMP, locked_at = NULL,
+                                last_error = NULL, updated_at = CURRENT_TIMESTAMP
+                            WHERE message_id = %s
+                        """, (row[0],))
+                        relay_status = 'pending'
                 conn.commit()
+                created_at = row[5]
+                if created_at and created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                return jsonify({
+                    'status': 'success',
+                    'message': {
+                        'id': row[0], 'is_mine': True, 'username': row[2] or '',
+                        'first_name': row[3] or 'User', 'message': row[4],
+                        'created_at': created_at.isoformat() if created_at else '',
+                        'source': row[6] or 'miniapp', 'client_id': str(row[7]),
+                        'relay_status': relay_status,
+                    }
+                })
+
+            after_id = request.args.get('after_id', type=int)
+            if after_id and after_id > 0:
+                cur.execute("""
+                    SELECT m.id, m.user_id, m.username, m.first_name, m.message,
+                       m.created_at, m.source, m.client_message_id,
+                       COALESCE(o.status, 'sent')
+                    FROM global_chat_messages m
+                    LEFT JOIN global_chat_relay_outbox o ON o.message_id = m.id
+                    WHERE m.id > %s
+                    ORDER BY m.id ASC
+                    LIMIT 100
+                """, (after_id,))
+                rows = cur.fetchall()
+            else:
+                cur.execute("""
+                    SELECT m.id, m.user_id, m.username, m.first_name, m.message,
+                       m.created_at, m.source, m.client_message_id,
+                       COALESCE(o.status, 'sent')
+                    FROM global_chat_messages m
+                    LEFT JOIN global_chat_relay_outbox o ON o.message_id = m.id
+                    ORDER BY m.id DESC
+                    LIMIT 80
+                """)
+                rows = list(reversed(cur.fetchall()))
+
+            messages = []
+            for row in rows:
+                created_at = row[5]
+                if created_at and created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                messages.append({
+                    'id': row[0], 'is_mine': row[1] == user['id'],
+                    'username': row[2] or '', 'first_name': row[3] or 'Community member',
+                    'message': row[4], 'created_at': created_at.isoformat() if created_at else '',
+                    'source': row[6] or 'miniapp',
+                    'client_id': str(row[7]) if row[7] else '', 'relay_status': row[8] or 'sent',
+                })
+
             cur.execute("""
-                SELECT id, user_id, username, first_name, message, created_at
-                FROM global_chat_messages
-                ORDER BY created_at DESC, id DESC
-                LIMIT 100
-            """)
-            messages = [{
-                'id': row[0], 'user_id': row[1], 'username': row[2] or '',
-                'first_name': row[3] or 'User', 'message': row[4],
-                'created_at': row[5].isoformat() if row[5] else ''
-            } for row in reversed(cur.fetchall())]
-            return jsonify({'status': 'success', 'messages': messages})
+                SELECT o.message_id, o.status
+                FROM global_chat_relay_outbox o
+                JOIN global_chat_messages m ON m.id = o.message_id
+                WHERE m.user_id = %s
+                  AND m.created_at >= CURRENT_TIMESTAMP - INTERVAL '1 hour'
+                ORDER BY o.message_id DESC
+                LIMIT 50
+            """, (user['id'],))
+            relay_updates = [{'id': row[0], 'relay_status': row[1]} for row in cur.fetchall()]
+            return jsonify({
+                'status': 'success', 'messages': messages,
+                'relay_updates': relay_updates,
+            })
         except Exception:
             conn.rollback()
             logger.exception('Global chat request failed')
@@ -1650,14 +1935,50 @@ def register_webapp_routes(
         browse_type = request.args.get('type', 'all').lower()
         if browse_type not in {'all', 'movies', 'tv'}:
             return jsonify({'status': 'error', 'message': 'Invalid browse type'}), 400
+        mood = request.args.get('mood', 'any').strip().lower()
+        mood_genres = {
+            'any': set(),
+            'fun': {'comedy', 'animation', 'animated', 'family', 'musical'},
+            'mind': {'thriller', 'mystery', 'crime', 'sci-fi', 'sci fi', 'science fiction', 'detective'},
+            'action': {'action', 'adventure', 'war', 'fantasy', 'superhero'},
+            'heart': {'romance', 'romantic', 'drama', 'family'},
+            'anime': {'anime', 'animation', 'animated', 'isekai', 'shonen', 'shojo', 'seinen'},
+        }
+        if mood not in mood_genres:
+            return jsonify({'status': 'error', 'message': 'Invalid mood'}), 400
+        language = request.args.get('language', 'any').strip().lower()
+        if language not in {'any', 'hindi', 'english'}:
+            return jsonify({'status': 'error', 'message': 'Invalid language'}), 400
+        availability = request.args.get('availability', 'available').strip().lower()
+        if availability not in {'available', 'all'}:
+            return jsonify({'status': 'error', 'message': 'Availability must be available or all'}), 400
+        excluded_ids = []
+        for raw_id in request.args.get('exclude', '').split(',')[:8]:
+            if not raw_id.strip():
+                continue
+            try:
+                movie_id = int(raw_id)
+            except (TypeError, ValueError):
+                return jsonify({'status': 'error', 'message': 'Invalid excluded title'}), 400
+            if movie_id <= 0:
+                return jsonify({'status': 'error', 'message': 'Invalid excluded title'}), 400
+            excluded_ids.append(movie_id)
         conn = get_db_connection()
         if not conn:
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            classification_sql = "category = 'Web Series' OR (seasons_data IS NOT NULL AND seasons_data <> '{}'::jsonb)"
-            where_type = '' if browse_type == 'all' else (f' AND ({classification_sql})' if browse_type == 'tv' else f' AND NOT ({classification_sql})')
+            classification_sql = "(LOWER(COALESCE(m.content_type, '')) IN ('web series', 'tv series') OR LOWER(COALESCE(m.category, '')) = 'web series' OR (m.seasons_data IS NOT NULL AND m.seasons_data <> '{}'::jsonb))"
+            where_type = '' if browse_type == 'all' else (f' AND {classification_sql}' if browse_type == 'tv' else f' AND NOT {classification_sql}')
+            has_file_sql = local_movie_has_file_sql('m')
+            where_availability = f' AND {has_file_sql}' if availability == 'available' else ''
+            excluded_set = set(excluded_ids)
             signed_in_user = telegram_user_from_request()
+            profile_rows = []
+            recent_ids = set()
+            genre_scores = {}
+            language_scores = {}
+            category_scores = {}
             if signed_in_user:
                 cur.execute("""
                     SELECT m.genre, m.language, m.category, e.event_type, COUNT(*)
@@ -1676,21 +1997,23 @@ def register_webapp_routes(
                     'miniapp_open_details': 2,
                     'group_selection': 2,
                     'surprise_click': 2,
+                    'mood_pick_liked': 6,
+                    'mood_pick_skipped': -4,
+                    'surprise_skip': -3,
+                    'surprise_impression': 0,
                     'pm_search': 1,
                     'group_search': 1,
                 }
-                genre_scores = {}
-                language_scores = {}
-                category_scores = {}
                 for genre, language, category, event_type, count in profile_rows:
                     weight = event_weights.get(event_type, 1) * count
                     for token in re.split(r'[,/&|]', (genre or '').lower()):
                         token = token.strip()
                         if token:
                             genre_scores[token] = genre_scores.get(token, 0) + weight
-                    language_key = (language or '').strip().lower()
-                    if language_key:
-                        language_scores[language_key] = language_scores.get(language_key, 0) + weight
+                    for language_key in re.split(r'[,/&|]', (language or '').lower()):
+                        language_key = language_key.strip()
+                        if language_key:
+                            language_scores[language_key] = language_scores.get(language_key, 0) + weight
                     category_key = (category or '').strip().lower()
                     if category_key:
                         category_scores[category_key] = category_scores.get(category_key, 0) + weight
@@ -1704,68 +2027,82 @@ def register_webapp_routes(
                     LIMIT 80
                 """, (signed_in_user['id'],))
                 recent_ids = {row[0] for row in cur.fetchall()}
-                cur.execute(f"""
-                    SELECT m.id, m.title, m.year, m.poster_url, m.rating, m.genre, m.category, m.language
+
+            cur.execute(f"""
+                    SELECT m.id, m.title, m.year, m.poster_url, m.rating, m.genre,
+                           m.category, m.language, m.content_type,
+                           {has_file_sql} AS is_available
                     FROM movies m
                     WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
-                      AND (
-                          (m.file_id IS NOT NULL AND m.file_id <> '')
-                          OR EXISTS (SELECT 1 FROM movie_files mf WHERE mf.movie_id = m.id
-                                    AND (mf.file_id IS NOT NULL OR mf.url IS NOT NULL))
-                      ){where_type}
+                      AND NOT COALESCE(m.is_unreleased, FALSE)
+                      {where_availability}{where_type}
                     ORDER BY m.id DESC
-                    LIMIT 500
+                    LIMIT 1200
                 """)
-                candidates = []
-                for row in cur.fetchall():
-                    movie_id, title, year, poster, rating, genre, category, language = row
-                    if movie_id in recent_ids:
-                        continue
-                    score = 0
-                    for token in re.split(r'[,/&|]', (genre or '').lower()):
-                        score += genre_scores.get(token.strip(), 0)
-                    score += language_scores.get((language or '').strip().lower(), 0)
-                    score += category_scores.get((category or '').strip().lower(), 0)
-                    rating_score = float(rating) if str(rating or '').replace('.', '', 1).isdigit() else 0
-                    candidates.append((score + rating_score * 0.25, row))
-                if candidates:
-                    candidates.sort(key=lambda item: (item[0], item[1][0]), reverse=True)
-                    top_score = candidates[0][0]
-                    shortlist = [item[1] for item in candidates if item[0] >= top_score - 3][:20]
-                    row = random.choice(shortlist)
-                    movie = {
-                        'id': row[0], 'title': row[1], 'year': row[2] or '',
-                        'image': row[3], 'rating': row[4] or 'N/A', 'genre': row[5] or '',
-                        'category': row[6] or 'Movies', 'language': row[7] or '', 'source': 'local',
-                    }
-                    cur.close()
-                    return jsonify({
-                        'status': 'success', 'type': browse_type, 'movie': movie,
-                        'personalized': bool(profile_rows),
-                    })
-            cur.execute(f"""
-                SELECT COUNT(*) FROM movies
-                WHERE poster_url IS NOT NULL AND poster_url <> ''{where_type}
-            """)
-            total = cur.fetchone()[0]
-            if not total:
-                return jsonify({'status': 'success', 'type': browse_type, 'movie': None, 'message': 'No eligible local titles are available.'})
-            offset = random.randrange(total)
-            cur.execute(f"""
-                SELECT id, title, year, poster_url, rating, genre, category, language
-                FROM movies
-                WHERE poster_url IS NOT NULL AND poster_url <> ''{where_type}
-                ORDER BY id
-                LIMIT 1 OFFSET %s
-            """, (offset,))
-            row = cur.fetchone()
+            rows = cur.fetchall()
+            target_genres = mood_genres[mood]
+            candidates = []
+            for row in rows:
+                movie_id, title, year, poster, rating, genre, category, movie_language, content_type, is_available = row
+                if movie_id in excluded_set:
+                    continue
+                language_value = str(movie_language or '').lower()
+                if language != 'any' and not re.search(rf'\b{re.escape(language)}\b', language_value):
+                    continue
+                genre_tokens = {token.strip().lower() for token in re.split(r'[,/&|]', str(genre or '')) if token.strip()}
+                category_tokens = {token.strip().lower() for token in re.split(r'[,/&|]', str(category or '')) if token.strip()}
+                content_tokens = {token.strip().lower() for token in re.split(r'[,/&|]', str(content_type or '')) if token.strip()}
+                tags = genre_tokens | category_tokens | content_tokens
+                matched_genres = sorted(tags & target_genres)
+                rating_text = str(rating or '').strip()
+                try:
+                    rating_score = float(rating_text) if re.fullmatch(r'\d+(?:\.\d+)?', rating_text) else 0
+                except (TypeError, ValueError):
+                    rating_score = 0
+                profile_score = 0
+                for token in genre_tokens:
+                    profile_score += genre_scores.get(token, 0)
+                for token in category_tokens:
+                    profile_score += category_scores.get(token, 0)
+                for token in re.split(r'[,/&|]', language_value):
+                    profile_score += language_scores.get(token.strip(), 0)
+                score = profile_score + rating_score * 0.25
+                if matched_genres:
+                    score += 8 + len(matched_genres)
+                candidates.append({
+                    'score': score, 'row': row, 'matched_genres': matched_genres,
+                    'mood_match': bool(matched_genres) if mood != 'any' else False,
+                })
+
+            if not candidates:
+                message = 'Is language, Browse type aur availability mein koi title nahi mila. Filter badal kar dekho.'
+                cur.close()
+                return jsonify({'status': 'success', 'type': browse_type, 'movie': None, 'message': message})
+
+            mood_matches = [candidate for candidate in candidates if candidate['mood_match']]
+            mood_pool = mood_matches if mood_matches else candidates
+            fresh_pool = [candidate for candidate in mood_pool if candidate['row'][0] not in recent_ids]
+            pool = fresh_pool or mood_pool
+            pool.sort(key=lambda candidate: (candidate['score'], candidate['row'][0]), reverse=True)
+            best_score = pool[0]['score']
+            shortlist = [candidate for candidate in pool if candidate['score'] >= best_score - 3][:24]
+            selected = random.choice(shortlist)
+            row = selected['row']
             movie = {
                 'id': row[0], 'title': row[1], 'year': row[2] or '',
                 'image': row[3], 'rating': row[4] or 'N/A', 'genre': row[5] or '',
-                'category': row[6] or 'Movies', 'language': row[7] or '', 'source': 'local'
-            } if row else None
+                'category': row[6] or 'Movies', 'language': row[7] or '',
+                'content_type': row[8] or 'Movie', 'source': 'local',
+                'is_available': bool(row[9]),
+                'availability_state': 'available' if row[9] else 'unavailable',
+            }
             cur.close()
-            return jsonify({'status': 'success', 'type': browse_type, 'movie': movie})
+            return jsonify({
+                'status': 'success', 'type': browse_type, 'movie': movie,
+                'mood_match': selected['mood_match'],
+                'matched_genres': selected['matched_genres'],
+                'personalized': any(row[3] != 'surprise_impression' for row in profile_rows),
+            })
         except Exception as error:
             logger.error('Browse surprise error: %s', error)
             return jsonify({'status': 'error', 'message': 'Could not select a title'}), 500
@@ -2639,6 +2976,104 @@ def register_webapp_routes(
             logger.error(f"My List removal error: {e}")
             conn.rollback()
             return jsonify({'status': 'error', 'message': 'Could not update My List'}), 500
+        finally:
+            close_db_connection(conn)
+
+    @flask_app.route('/api/my-list/<int:movie_id>/availability-notification', methods=['GET', 'POST'])
+    def toggle_my_list_availability_notification(movie_id):
+        user, error = require_telegram_user()
+        if error:
+            return error
+        payload = request.get_json(silent=True) or {}
+        if request.method == 'POST' and not isinstance(payload.get('enabled'), bool):
+            return jsonify({'status': 'error', 'message': 'Choose whether notifications are enabled.'}), 400
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor()
+            cur.execute(f"""
+                SELECT m.title, {local_movie_has_file_sql('m')}
+                FROM movies m
+                WHERE m.id = %s
+            """, (movie_id,))
+            movie = cur.fetchone()
+            if not movie:
+                return jsonify({'status': 'error', 'message': 'Title not found.'}), 404
+            upsert_miniapp_user(cur, user)
+
+            cur.execute("""
+                SELECT availability_notification_requested, availability_notified_at
+                FROM user_watchlist
+                WHERE user_id = %s AND movie_id = %s
+            """, (user['id'], movie_id))
+            existing = cur.fetchone()
+            saved = existing is not None
+            requested = bool(existing and existing[0])
+            notified = bool(existing and existing[1])
+            available = bool(movie[1])
+
+            if request.method == 'GET':
+                conn.commit()
+                return jsonify({
+                    'status': 'success', 'saved': saved, 'requested': requested,
+                    'notified': notified, 'available': available
+                })
+
+            enabled = payload['enabled']
+            if enabled and available:
+                conn.commit()
+                return jsonify({
+                    'status': 'success', 'saved': saved, 'requested': requested,
+                    'notified': notified, 'available': True, 'already_available': True,
+                    'message': 'This title is already available.'
+                })
+
+            if enabled:
+                cur.execute("""
+                    INSERT INTO user_watchlist (user_id, movie_id)
+                    VALUES (%s, %s) ON CONFLICT (user_id, movie_id) DO NOTHING
+                """, (user['id'], movie_id))
+                cur.execute("""
+                    UPDATE user_watchlist
+                    SET availability_notification_requested = TRUE,
+                        availability_notified_at = CASE
+                            WHEN availability_notification_requested THEN availability_notified_at
+                            ELSE NULL END,
+                        availability_notification_attempts = CASE
+                            WHEN availability_notification_requested THEN availability_notification_attempts
+                            ELSE 0 END,
+                        availability_notification_next_attempt_at = CASE
+                            WHEN availability_notification_requested THEN availability_notification_next_attempt_at
+                            ELSE CURRENT_TIMESTAMP END,
+                        availability_notification_lease_until = CASE
+                            WHEN availability_notification_requested THEN availability_notification_lease_until
+                            ELSE NULL END,
+                        availability_notification_last_error = CASE
+                            WHEN availability_notification_requested THEN availability_notification_last_error
+                            ELSE NULL END
+                    WHERE user_id = %s AND movie_id = %s
+                """, (user['id'], movie_id))
+            elif saved:
+                cur.execute("""
+                    UPDATE user_watchlist
+                    SET availability_notification_requested = FALSE,
+                        availability_notification_lease_until = NULL,
+                        availability_notification_last_error = NULL
+                    WHERE user_id = %s AND movie_id = %s
+                """, (user['id'], movie_id))
+
+            conn.commit()
+            return jsonify({
+                'status': 'success', 'saved': saved or enabled,
+                'requested': enabled, 'notified': notified,
+                'available': available, 'already_enabled': requested and enabled
+            })
+        except Exception:
+            conn.rollback()
+            logger.exception('My List availability notification update failed for movie %s', movie_id)
+            return jsonify({'status': 'error', 'message': 'Could not update notification.'}), 500
         finally:
             close_db_connection(conn)
     

@@ -549,6 +549,88 @@ def _migration_15(conn):
         """)
 
 
+def _migration_16(conn):
+    """Bridge Mini App Global Chat messages with a Telegram group."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'miniapp'
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD COLUMN IF NOT EXISTS telegram_message_id BIGINT
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD COLUMN IF NOT EXISTS client_message_id UUID
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            DROP CONSTRAINT IF EXISTS global_chat_messages_message_check
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD CONSTRAINT global_chat_messages_message_length_check
+            CHECK (char_length(message) BETWEEN 1 AND 4096)
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD CONSTRAINT global_chat_messages_telegram_message_unique
+            UNIQUE (telegram_chat_id, telegram_message_id)
+        """)
+        cur.execute("""
+            ALTER TABLE global_chat_messages
+            ADD CONSTRAINT global_chat_messages_client_message_unique
+            UNIQUE (user_id, client_message_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_global_chat_user_created
+            ON global_chat_messages (user_id, created_at DESC, id DESC)
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS global_chat_relay_outbox (
+                message_id BIGINT PRIMARY KEY
+                    REFERENCES global_chat_messages(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'processing', 'retry', 'sent', 'failed')),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                locked_at TIMESTAMPTZ,
+                last_error TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_global_chat_relay_due
+            ON global_chat_relay_outbox (status, next_attempt_at, message_id)
+        """)
+
+
+def _migration_17(conn):
+    """Track opt-in availability alerts for titles saved to My List."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE user_watchlist
+                ADD COLUMN IF NOT EXISTS availability_notification_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS availability_notified_at TIMESTAMP NULL,
+                ADD COLUMN IF NOT EXISTS availability_notification_attempts INTEGER NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS availability_notification_next_attempt_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS availability_notification_lease_until TIMESTAMP NULL,
+                ADD COLUMN IF NOT EXISTS availability_notification_last_error TEXT NULL
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_watchlist_availability_due
+            ON user_watchlist (availability_notification_next_attempt_at, created_at)
+            WHERE availability_notification_requested
+              AND availability_notified_at IS NULL
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -565,6 +647,8 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (13, _migration_13),
     (14, _migration_14),
     (15, _migration_15),
+    (16, _migration_16),
+    (17, _migration_17),
 )
 
 

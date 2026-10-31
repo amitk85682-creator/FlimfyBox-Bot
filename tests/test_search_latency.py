@@ -225,6 +225,7 @@ def test_upcoming_worker_does_not_block_event_loop_and_saves_only_sent_events():
                               send_message=AsyncMock())
         ns = load_functions('run_async', 'upcoming_reminder_worker',
                             _get_pending_upcoming_notifications=load,
+                            _claim_pending_watchlist_availability_notifications=lambda: [],
                             _mark_upcoming_notification=mark, datetime=datetime,
                             html_escape=lambda value: value, safe_send=send)
         ns['asyncio'] = SimpleNamespace(get_running_loop=asyncio.get_running_loop,

@@ -348,6 +348,14 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DATABASE_URL = os.environ.get('DATABASE_URL')
 TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
+try:
+    GLOBAL_CHAT_GROUP_ID = int(os.environ.get('GLOBAL_CHAT_GROUP_ID', '-1004327792876'))
+except (TypeError, ValueError):
+    GLOBAL_CHAT_GROUP_ID = None
+    logger.error('GLOBAL_CHAT_GROUP_ID is invalid; Telegram Global Chat relay is disabled.')
+GLOBAL_CHAT_RELAY_BOT_TOKEN = (
+    os.environ.get('GLOBAL_CHAT_RELAY_BOT_TOKEN') or TELEGRAM_BOT_TOKEN
+)
 # Keep the Telegram Web App endpoint configurable. The old Render service was
 # still hard-coded in several buttons, so Telegram opened the retired Mini App.
 def normalize_mini_app_url(value: str) -> str:
@@ -16714,11 +16722,256 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # 👇👇👇 IS FUNCTION KO REPLACE KARO (Line ~1665) 👇👇👇
 
+def _claim_global_chat_relay_messages(limit=10):
+    """Claim queued Mini App messages so a slow Telegram call never blocks HTTP."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE global_chat_relay_outbox
+            SET status = 'retry', locked_at = NULL, next_attempt_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'processing'
+              AND locked_at < CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+        """)
+        cur.execute("""
+            WITH picked AS (
+                SELECT message_id
+                FROM global_chat_relay_outbox
+                WHERE status IN ('pending', 'retry')
+                  AND next_attempt_at <= CURRENT_TIMESTAMP
+                ORDER BY message_id
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE global_chat_relay_outbox AS outbox
+            SET status = 'processing', attempts = outbox.attempts + 1,
+                locked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            FROM picked
+            WHERE outbox.message_id = picked.message_id
+            RETURNING outbox.message_id, outbox.attempts
+        """, (limit,))
+        claimed = cur.fetchall()
+        if not claimed:
+            conn.commit()
+            cur.close()
+            return []
+        ids = [row[0] for row in claimed]
+        attempts_by_id = {row[0]: row[1] for row in claimed}
+        cur.execute("""
+            SELECT message.id, message.username, message.first_name, message.message
+            FROM global_chat_messages AS message
+            WHERE message.id = ANY(%s)
+            ORDER BY message.id
+        """, (ids,))
+        rows = [
+            (row[0], attempts_by_id[row[0]], row[1] or '', row[2] or '', row[3])
+            for row in cur.fetchall()
+        ]
+        conn.commit()
+        cur.close()
+        return rows
+    except Exception:
+        conn.rollback()
+        logger.exception('Could not claim Global Chat relay messages')
+        return []
+    finally:
+        close_db_connection(conn)
+
+
+def _finish_global_chat_relay_message(message_id, telegram_message_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('Database connection unavailable while completing chat relay')
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE global_chat_messages
+            SET telegram_chat_id = %s, telegram_message_id = %s
+            WHERE id = %s
+        """, (GLOBAL_CHAT_GROUP_ID, telegram_message_id, message_id))
+        cur.execute("""
+            UPDATE global_chat_relay_outbox
+            SET status = 'sent', locked_at = NULL, last_error = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE message_id = %s
+        """, (message_id,))
+        conn.commit()
+        cur.close()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+def _retry_global_chat_relay_message(message_id, attempts, error, delay_seconds=2, permanent=False):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('Database connection unavailable while rescheduling chat relay')
+    try:
+        cur = conn.cursor()
+        error_text = str(error or 'Telegram delivery failed')[:1000]
+        should_fail = permanent or attempts >= 12
+        cur.execute("""
+            UPDATE global_chat_relay_outbox
+            SET status = %s,
+                next_attempt_at = CURRENT_TIMESTAMP + make_interval(secs => %s),
+                locked_at = NULL, last_error = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE message_id = %s
+        """, ('failed' if should_fail else 'retry', max(1, int(delay_seconds)), error_text, message_id))
+        conn.commit()
+        cur.close()
+        if should_fail:
+            logger.error('Global Chat relay permanently failed for message %s: %s', message_id, error_text)
+        else:
+            logger.warning('Global Chat relay will retry message %s: %s', message_id, error_text)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        close_db_connection(conn)
+
+
+async def global_chat_relay_worker(application):
+    """Reliably copy Mini App messages into the configured Telegram group."""
+    if not GLOBAL_CHAT_GROUP_ID:
+        logger.error('Global Chat relay worker stopped because its group ID is missing.')
+        return
+    logger.info('Global Chat relay worker started for group %s', GLOBAL_CHAT_GROUP_ID)
+    loop = asyncio.get_running_loop()
+    last_send_attempt = 0.0
+    while not _shutdown_requested.is_set():
+        try:
+            messages = await run_interactive(_claim_global_chat_relay_messages, 10)
+            if not messages:
+                await asyncio.sleep(1)
+                continue
+            for message_id, attempts, username, first_name, body in messages:
+                delay = 3.1 - (loop.time() - last_send_attempt)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                last_send_attempt = loop.time()
+                display_name = re.sub(r'\s+', ' ', first_name or username or 'Community member').strip()[:64]
+                if username and first_name:
+                    display_name = f'{display_name} (@{username[:32]})'
+                try:
+                    sent = await application.bot.send_message(
+                        chat_id=GLOBAL_CHAT_GROUP_ID,
+                        text=f'{display_name}: {body}',
+                        read_timeout=15,
+                        write_timeout=15,
+                        connect_timeout=10,
+                        pool_timeout=10,
+                    )
+                    await run_interactive(
+                        _finish_global_chat_relay_message, message_id, sent.message_id
+                    )
+                except RetryAfter as error:
+                    wait_time = error.retry_after
+                    if hasattr(wait_time, 'total_seconds'):
+                        wait_time = wait_time.total_seconds()
+                    await run_interactive(
+                        _retry_global_chat_relay_message,
+                        message_id, attempts, error, max(2, int(wait_time) + 1), False,
+                    )
+                except TelegramError as error:
+                    delay = min(300, 2 ** min(attempts, 8))
+                    await run_interactive(
+                        _retry_global_chat_relay_message,
+                        message_id, attempts, error, delay, False,
+                    )
+                except Exception as error:
+                    delay = min(300, 2 ** min(attempts, 8))
+                    await run_interactive(
+                        _retry_global_chat_relay_message,
+                        message_id, attempts, error, delay, False,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('Global Chat relay worker loop failed')
+            await asyncio.sleep(2)
+
+
+async def global_chat_group_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save messages sent directly in the linked Telegram group to the shared chat."""
+    message = update.effective_message
+    chat = update.effective_chat
+    if (
+        not message or not chat or chat.id != GLOBAL_CHAT_GROUP_ID
+        or context.bot.token != GLOBAL_CHAT_RELAY_BOT_TOKEN
+    ):
+        return
+    text = (message.text or '').strip()
+    if not text or len(text) > 4096:
+        return
+    sender = update.effective_user
+    sender_chat = message.sender_chat
+    if sender:
+        if sender.is_bot and sender.id == context.bot.id:
+            return
+        user_id = sender.id
+        username = sender.username or ''
+        first_name = sender.first_name or ('Bot' if sender.is_bot else 'Telegram member')
+    elif sender_chat:
+        user_id = -abs(sender_chat.id)
+        username = sender_chat.username or ''
+        first_name = sender_chat.title or 'Telegram chat'
+    else:
+        return
+
+    def save_telegram_message():
+        conn = get_db_connection()
+        if not conn:
+            raise RuntimeError('Database connection unavailable for Telegram chat message')
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO miniapp_users (user_id, username, first_name, last_seen)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    first_name = EXCLUDED.first_name,
+                    last_seen = CURRENT_TIMESTAMP
+            """, (user_id, username, first_name))
+            cur.execute("""
+                INSERT INTO global_chat_messages
+                    (user_id, username, first_name, message, source,
+                     telegram_chat_id, telegram_message_id)
+                VALUES (%s, %s, %s, %s, 'telegram', %s, %s)
+                ON CONFLICT (telegram_chat_id, telegram_message_id) DO NOTHING
+            """, (user_id, username, first_name, text, chat.id, message.message_id))
+            conn.commit()
+            cur.close()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            close_db_connection(conn)
+
+    for attempt in range(3):
+        try:
+            await run_interactive(save_telegram_message)
+            return
+        except Exception:
+            if attempt == 2:
+                logger.exception(
+                    'Could not sync Telegram Global Chat message %s from group %s after retries',
+                    message.message_id, chat.id,
+                )
+            else:
+                await asyncio.sleep(0.5 * (attempt + 1))
+
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handle messages in groups using FAST SQL Search.
     Agar movie database me hai to reply karega, nahi to chup rahega.
     """
+    if update.effective_chat and update.effective_chat.id == GLOBAL_CHAT_GROUP_ID:
+        return
     if not update.message or not update.message.text:
         return
     
@@ -16874,6 +17127,34 @@ async def upcoming_reminder_worker(app: Application):
                 except Exception as exc:
                     logger.warning('Upcoming reminder processing failed for user_id=%s: %s', user_id, exc)
                 await asyncio.sleep(0.2)
+
+            watchlist_rows = await run_async(_claim_pending_watchlist_availability_notifications)
+            for user_id, movie_id, title in watchlist_rows:
+                try:
+                    sent_message = await safe_send(app.bot.send_message(
+                        chat_id=int(user_id),
+                        text=(
+                            f"📥 <b>{html_escape(title or 'This title')}</b> is now available on FlimfyBox!\n\n"
+                            "You saved it to My List, so here is your update."
+                        ),
+                        parse_mode='HTML'
+                    ))
+                    if sent_message is None:
+                        raise RuntimeError('Telegram did not confirm delivery')
+                    await run_async(_mark_watchlist_availability_notified, user_id, movie_id)
+                except Exception as exc:
+                    logger.warning(
+                        'My List availability notification failed for user_id=%s movie_id=%s: %s',
+                        user_id, movie_id, exc
+                    )
+                    try:
+                        await run_async(_retry_watchlist_availability_notification, user_id, movie_id, str(exc))
+                    except Exception:
+                        logger.exception(
+                            'Could not schedule My List notification retry for user_id=%s movie_id=%s',
+                            user_id, movie_id
+                        )
+                await asyncio.sleep(0.2)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -16948,6 +17229,96 @@ def _mark_upcoming_notification(notification_id, stage):
                 """, (notification_id,))
             else:
                 raise ValueError('Unknown notification stage')
+        conn.commit()
+    finally:
+        close_db_connection(conn)
+
+
+def _claim_pending_watchlist_availability_notifications():
+    """Lease available, opted-in My List entries so only one worker sends each alert."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '5s'")
+            cur.execute("""
+                WITH candidates AS (
+                    SELECT w.user_id, w.movie_id
+                    FROM user_watchlist w
+                    JOIN movies m ON m.id = w.movie_id
+                    WHERE w.availability_notification_requested
+                      AND w.availability_notified_at IS NULL
+                      AND w.availability_notification_next_attempt_at <= CURRENT_TIMESTAMP
+                      AND (w.availability_notification_lease_until IS NULL
+                           OR w.availability_notification_lease_until < CURRENT_TIMESTAMP)
+                      AND (
+                          NULLIF(m.url, '') IS NOT NULL OR NULLIF(m.file_id, '') IS NOT NULL
+                          OR EXISTS (
+                              SELECT 1 FROM movie_files mf
+                              WHERE mf.movie_id = m.id
+                                AND (NULLIF(mf.url, '') IS NOT NULL OR NULLIF(mf.file_id, '') IS NOT NULL)
+                          )
+                      )
+                    ORDER BY w.created_at ASC
+                    FOR UPDATE OF w SKIP LOCKED
+                    LIMIT 50
+                )
+                UPDATE user_watchlist w
+                SET availability_notification_lease_until = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+                    availability_notification_attempts = availability_notification_attempts + 1
+                FROM candidates c
+                JOIN movies m ON m.id = c.movie_id
+                WHERE w.user_id = c.user_id AND w.movie_id = c.movie_id
+                RETURNING w.user_id, w.movie_id, m.title
+            """)
+            rows = cur.fetchall()
+        conn.commit()
+        return rows
+    finally:
+        close_db_connection(conn)
+
+
+def _mark_watchlist_availability_notified(user_id, movie_id):
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('My List notification state could not be saved')
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE user_watchlist
+                SET availability_notified_at = CURRENT_TIMESTAMP,
+                    availability_notification_lease_until = NULL,
+                    availability_notification_last_error = NULL
+                WHERE user_id = %s AND movie_id = %s
+                  AND availability_notification_requested
+                  AND availability_notified_at IS NULL
+            """, (user_id, movie_id))
+        conn.commit()
+    finally:
+        close_db_connection(conn)
+
+
+def _retry_watchlist_availability_notification(user_id, movie_id, error):
+    """Back off repeatedly failing Telegram deliveries without blocking the batch."""
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('My List notification retry state could not be saved')
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE user_watchlist
+                SET availability_notification_lease_until = NULL,
+                    availability_notification_next_attempt_at = CURRENT_TIMESTAMP + CASE
+                        WHEN availability_notification_attempts <= 1 THEN INTERVAL '1 minute'
+                        WHEN availability_notification_attempts = 2 THEN INTERVAL '5 minutes'
+                        WHEN availability_notification_attempts = 3 THEN INTERVAL '30 minutes'
+                        ELSE INTERVAL '6 hours' END,
+                    availability_notification_last_error = %s
+                WHERE user_id = %s AND movie_id = %s
+                  AND availability_notification_requested
+                  AND availability_notified_at IS NULL
+            """, (str(error)[:500], user_id, movie_id))
         conn.commit()
     finally:
         close_db_connection(conn)
@@ -17220,6 +17591,13 @@ def register_handlers(application: Application):
         pm_file_listener
     ), group=2)
 
+    # The dedicated bridge group is saved as chat history, not sent through
+    # the movie-search handler. A later handler group also captures commands.
+    application.add_handler(
+        MessageHandler(filters.TEXT & filters.ChatType.GROUPS, global_chat_group_listener),
+        group=4,
+    )
+
     # -----------------------------------------------------------
     # 4. GENRE & GROUP HANDLERS
     # -----------------------------------------------------------
@@ -17361,6 +17739,17 @@ async def main():
     if apps:
         worker_tasks.append(asyncio.create_task(upcoming_reminder_worker(apps[0])))
         worker_tasks.append(asyncio.create_task(_batch_lease_heartbeat_loop()))
+        relay_app = next(
+            (app for app in apps if app.bot.token == GLOBAL_CHAT_RELAY_BOT_TOKEN),
+            None,
+        )
+        if relay_app and GLOBAL_CHAT_GROUP_ID:
+            worker_tasks.append(asyncio.create_task(global_chat_relay_worker(relay_app)))
+        else:
+            logger.error(
+                'Global Chat relay is not running: its bot token is not among the configured bots '
+                'or GLOBAL_CHAT_GROUP_ID is invalid.'
+            )
     worker_tasks.append(asyncio.create_task(keep_miniapp_alive_worker()))
     _startup_complete.set()
     logger.info("✅ Startup complete; service is ready.")

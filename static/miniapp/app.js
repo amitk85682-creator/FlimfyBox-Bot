@@ -80,10 +80,24 @@ const tg = window.Telegram?.WebApp || {
         let genreDetailActiveId = null;
         let browseType = 'all';
         let browseRequestId = 0;
+        let moodPickRequestId = 0;
+        let moodPickController = null;
+        let currentMoodPick = null;
+        let moodPickExcludedIds = [];
+        const moodReaderSelections = { mood: 'any', language: 'any', availability: 'available' };
+        let dailyPickRequestId = 0;
+        let dailyPickController = null;
+        let watchStreakLoaded = false;
+        let watchStreakRequestId = 0;
+        let watchStreakController = null;
         let catalogueAvailability = 'available';
         let catalogueRequestId = 0;
         let catalogueController = null;
         let globalChatTimer = null;
+        let globalChatCursor = 0;
+        let globalChatHasLoaded = false;
+        let globalChatLoading = false;
+        const globalChatMessageNodes = new Map();
         let detailsController = null;
         let searchController = null;
         let browseController = null;
@@ -535,6 +549,10 @@ const tg = window.Telegram?.WebApp || {
         window.setBrowseType = async function(type) {
             if (!['all', 'movies', 'tv'].includes(type) || type === browseType && genreCatalogType === type) return;
             browseType = type;
+            cancelMoodReaderRequest();
+            currentMoodPick = null;
+            moodPickExcludedIds = [];
+            document.getElementById('surpriseRecommendation')?.setAttribute('hidden', '');
             genreCatalog = null;
             genreCatalogType = null;
             genreCatalogRequestId++;
@@ -550,32 +568,158 @@ const tg = window.Telegram?.WebApp || {
             }
         };
 
-        window.surpriseMe = async function() {
+        window.toggleMoodReader = function() {
+            const panel = document.getElementById('moodReader');
+            const button = document.getElementById('moodReaderToggle');
+            if (!panel || !button) return;
+            panel.hidden = !panel.hidden;
+            button.setAttribute('aria-expanded', String(!panel.hidden));
+            if (!panel.hidden) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        };
+
+        function cancelMoodReaderRequest() {
+            moodPickRequestId += 1;
+            if (moodPickController) moodPickController.abort();
+            moodPickController = null;
+            const submit = document.getElementById('moodReaderSubmit');
+            if (submit) {
+                submit.disabled = false;
+                submit.removeAttribute('aria-busy');
+            }
+        }
+
+        window.setMoodReaderChoice = function(groupName, value, button) {
+            if (!Object.prototype.hasOwnProperty.call(moodReaderSelections, groupName) || !button) return;
+            if (moodReaderSelections[groupName] === value) return;
+            moodReaderSelections[groupName] = value;
+            button.closest(`[data-mood-group="${groupName}"]`)?.querySelectorAll('[data-mood-value]').forEach(option => {
+                const selected = option === button;
+                option.setAttribute('aria-pressed', String(selected));
+                option.classList.toggle('is-selected', selected);
+            });
+            cancelMoodReaderRequest();
+            currentMoodPick = null;
+            moodPickExcludedIds = [];
+            document.getElementById('surpriseRecommendation')?.setAttribute('hidden', '');
+        };
+
+        window.surpriseMe = async function(skipCurrent = false) {
             const result = document.getElementById('surpriseResult');
             const recommendation = document.getElementById('surpriseRecommendation');
+            const explanation = document.getElementById('moodPickExplanation');
+            const feedback = document.getElementById('moodPickFeedback');
+            const submit = document.getElementById('moodReaderSubmit');
+            if (!result || !recommendation || !submit) return;
+            if (moodPickController) moodPickController.abort();
+            const requestId = ++moodPickRequestId;
+            const controller = new AbortController();
+            moodPickController = controller;
+            if (skipCurrent && currentMoodPick) {
+                trackRecommendationEvent('mood_pick_skipped', currentMoodPick.id, {
+                    mood: moodReaderSelections.mood,
+                    language: moodReaderSelections.language,
+                    browse_type: browseType
+                });
+                moodPickExcludedIds.push(String(currentMoodPick.id));
+                moodPickExcludedIds = moodPickExcludedIds.slice(-8);
+            }
+            currentMoodPick = null;
             recommendation.hidden = false;
-            result.innerHTML = '<div class="surprise-loading">Finding your next watch…</div>';
+            if (feedback) {
+                feedback.hidden = true;
+                feedback.querySelectorAll('button').forEach(button => { button.disabled = false; });
+            }
+            if (explanation) explanation.textContent = '';
+            submit.disabled = true;
+            submit.setAttribute('aria-busy', 'true');
+            result.innerHTML = '<div class="mood-reader-loading"><span class="mood-reader-loading-mark"><i class="fas fa-sparkles" aria-hidden="true"></i></span><strong>FlimfyBox tumhara mood padh raha hai…</strong><span>Ek sahi pick dhoondh raha hai</span></div>';
             try {
-                const response = await fetchWithTimeout(`/api/browse/surprise?type=${encodeURIComponent(browseType)}`);
+                const params = new URLSearchParams({
+                    type: browseType,
+                    mood: moodReaderSelections.mood,
+                    language: moodReaderSelections.language,
+                    availability: moodReaderSelections.availability,
+                    exclude: moodPickExcludedIds.join(',')
+                });
+                const response = await fetchWithTimeout(
+                    `/api/browse/surprise?${params.toString()}`,
+                    { headers: telegramAuthHeaders(), signal: controller.signal },
+                    16000
+                );
                 const data = await response.json();
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not find a title');
+                if (requestId !== moodPickRequestId) return;
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Pick nahi mil payi.');
                 if (!data.movie) {
-                    result.innerHTML = `<div class="surprise-empty">${data.message || 'No eligible local titles are available.'}</div>`;
+                    result.innerHTML = `<div class="surprise-empty"><i class="fas fa-face-meh" aria-hidden="true"></i><strong>Is choice mein pick nahi mili</strong><span>${escapeHtml(data.message || 'Language ya Available filter badal kar dekho.')}</span></div>`;
                     return;
                 }
                 const movie = data.movie;
-                trackRecommendationEvent('surprise_impression', movie.id, { browse_type: browseType });
+                currentMoodPick = movie;
+                const metadata = {
+                    mood: moodReaderSelections.mood,
+                    language: moodReaderSelections.language,
+                    availability: moodReaderSelections.availability,
+                    browse_type: browseType,
+                    mood_match: Boolean(data.mood_match),
+                    personalized: Boolean(data.personalized)
+                };
+                trackRecommendationEvent('surprise_impression', movie.id, metadata);
                 if (!allMovies.some(item => String(item.id) === String(movie.id))) allMovies.push(movie);
                 result.innerHTML = renderCards([movie], 'grid-card', false);
+                if (explanation) {
+                    const moodLabels = {
+                        fun: 'hansne wali', mind: 'dimaag hilane wali', action: 'action wali',
+                        heart: 'dil wali', anime: 'anime vibe', any: 'random'
+                    };
+                    let reason = data.mood_match && moodReaderSelections.mood !== 'any'
+                        ? `${moodLabels[moodReaderSelections.mood]} movies se match ki.`
+                        : moodReaderSelections.mood !== 'any'
+                            ? 'Exact mood match nahi mila, isliye closest pick dhoondhi.'
+                            : 'Tumhare Browse filter se ek fresh pick nikali.';
+                    if (data.personalized) reason += ' Tumhari FlimfyBox activity bhi dhyan mein rakhi.';
+                    else reason += ' Jitni activity badhegi, picks utni personal hongi.';
+                    if (Array.isArray(data.matched_genres) && data.matched_genres.length) {
+                        reason += ` Genre: ${data.matched_genres.slice(0, 2).join(', ')}.`;
+                    }
+                    explanation.textContent = reason;
+                }
+                if (feedback) feedback.hidden = false;
                 const card = result.querySelector('.grid-card, .card');
                 if (card) {
                     card.addEventListener('click', () => {
-                        trackRecommendationEvent('surprise_click', movie.id, { browse_type: browseType });
+                        trackRecommendationEvent('surprise_click', movie.id, metadata);
                     }, { once: true });
                 }
             } catch (error) {
-                result.innerHTML = `<div class="surprise-empty">${error.message || 'Could not find a title'}</div>`;
+                if (requestId !== moodPickRequestId) return;
+                result.innerHTML = `<div class="surprise-empty"><i class="fas fa-cloud-arrow-down" aria-hidden="true"></i><strong>Pick load nahi hui</strong><span>${escapeHtml(error.message || 'Connection check karke dobara try karo.')}</span><button type="button" onclick="surpriseMe()">Dobara try karo</button></div>`;
+            } finally {
+                if (requestId === moodPickRequestId) {
+                    if (moodPickController === controller) moodPickController = null;
+                    submit.disabled = false;
+                    submit.removeAttribute('aria-busy');
+                }
             }
+        };
+
+        window.handleMoodReaderFeedback = function(feedback) {
+            if (!currentMoodPick) return;
+            if (feedback === 'skip') {
+                window.surpriseMe(true);
+                return;
+            }
+            if (feedback !== 'liked') return;
+            trackRecommendationEvent('mood_pick_liked', currentMoodPick.id, {
+                mood: moodReaderSelections.mood,
+                language: moodReaderSelections.language,
+                availability: moodReaderSelections.availability,
+                browse_type: browseType
+            });
+            const buttons = document.querySelectorAll('.mood-pick-feedback button');
+            buttons.forEach(button => { button.disabled = true; });
+            const liked = document.querySelector('.mood-pick-liked');
+            if (liked) liked.innerHTML = '<i class="fas fa-check" aria-hidden="true"></i> Samajh gaya ✨';
+            showToast('Agli pick mein is vibe ko yaad rakhunga');
         };
 
         // Utility
@@ -617,10 +761,18 @@ const tg = window.Telegram?.WebApp || {
             const storageKey = 'flimfybox-chat-guest-token';
             let token = localStorage.getItem(storageKey);
             if (!token) {
-                token = `${crypto.randomUUID()}-${crypto.randomUUID()}`;
+                token = `${createGlobalChatUuid()}-${createGlobalChatUuid()}`;
                 localStorage.setItem(storageKey, token);
             }
             return token;
+        }
+
+        function createGlobalChatUuid() {
+            if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, character => {
+                const value = Math.random() * 16 | 0;
+                return (character === 'x' ? value : (value & 0x3 | 0x8)).toString(16);
+            });
         }
 
         function globalChatHeaders() {
@@ -718,6 +870,10 @@ const tg = window.Telegram?.WebApp || {
 
         window.showInfoPanel = function(title, body, icon = 'circle-info', actions = '') {
             closeMorePanel();
+            if (title !== 'Global Chat' && globalChatTimer) {
+                clearInterval(globalChatTimer);
+                globalChatTimer = null;
+            }
             document.getElementById('infoModalTitle').textContent = title;
             document.getElementById('infoModalBody').innerHTML = body;
             document.getElementById('infoModalIcon').innerHTML = `<i class="fas fa-${icon}"></i>`;
@@ -744,51 +900,121 @@ const tg = window.Telegram?.WebApp || {
         window.showGlobalChat = function() {
             closeMorePanel();
             if (globalChatTimer) clearInterval(globalChatTimer);
+            globalChatCursor = 0;
+            globalChatHasLoaded = false;
+            globalChatLoading = false;
+            globalChatMessageNodes.clear();
             showInfoPanel('Global Chat', `
                 <div class="chat-shell">
-                    <div class="chat-room-banner">
-                        <div class="chat-room-icon"><i class="fas fa-earth-americas"></i></div>
-                        <div><strong>FlimfyBox Community</strong><span>Everyone can join the conversation</span></div>
-                        <span class="chat-live"><i></i> Live</span>
+                    <header class="chat-room-header">
+                        <div class="chat-room-icon"><i class="fas fa-comments"></i></div>
+                        <div class="chat-room-title">
+                            <strong>FlimfyBox Chat</strong>
+                            <span><i class="chat-connection-dot"></i><span id="chatConnectionLabel">Connecting…</span></span>
+                        </div>
+                        <div class="chat-room-sync"><i class="fab fa-telegram"></i><span>Telegram group</span></div>
+                    </header>
+                    <div class="chat-messages" aria-live="polite" aria-relevant="additions text" role="log">
+                        <div class="chat-loading"><span class="chat-loading-orbit"><i class="fas fa-comment-dots"></i></span><strong>Chat load ho rahi hai</strong><span>Bas ek second…</span></div>
                     </div>
-                    <div class="chat-messages" aria-live="polite"><div class="chat-loading"><i class="fas fa-spinner fa-spin"></i><span>Loading the community…</span></div></div>
-                    <form class="chat-form" onsubmit="sendGlobalChat(event)">
-                        <input class="chat-input" maxlength="500" autocomplete="off" placeholder="Share something with the community…" required>
-                        <button class="chat-send" type="submit" aria-label="Send message"><i class="fas fa-paper-plane"></i></button>
+                    <button class="chat-jump-bottom" type="button" onclick="scrollGlobalChatToBottom()"><i class="fas fa-arrow-down"></i> Naye messages</button>
+                    <form class="chat-composer" onsubmit="sendGlobalChat(event)">
+                        <div class="chat-input-wrap">
+                            <textarea class="chat-input" maxlength="3800" rows="1" autocomplete="off" placeholder="Message likho…" aria-label="Write a message"></textarea>
+                            <span class="chat-counter" aria-live="polite">0 / 3800</span>
+                        </div>
+                        <button class="chat-send" type="submit" aria-label="Send message" disabled><i class="fas fa-paper-plane"></i></button>
                     </form>
-                    <div class="chat-hint"><i class="fas fa-shield-halved"></i> Keep it friendly · 500 characters max</div>
+                    <div class="chat-footnote"><i class="fas fa-arrows-left-right"></i> Mini App aur Telegram group ke messages yahan saath dikhenge</div>
                 </div>
             `, 'comment', '');
             document.getElementById('infoModal').classList.add('chat-modal');
+            const input = document.querySelector('.chat-input');
+            const send = document.querySelector('.chat-send');
+            const counter = document.querySelector('.chat-counter');
+            const resizeInput = () => {
+                if (!input) return;
+                input.style.height = 'auto';
+                input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
+                if (send) send.disabled = !input.value.trim();
+                if (counter) {
+                    counter.textContent = `${input.value.length} / 3800`;
+                    counter.classList.toggle('is-near-limit', input.value.length > 3600);
+                }
+            };
+            input?.addEventListener('input', resizeInput);
+            input?.addEventListener('keydown', event => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                    event.preventDefault();
+                    if (input.value.trim()) input.form?.requestSubmit();
+                }
+            });
+            const messageList = document.querySelector('.chat-messages');
+            messageList?.addEventListener('scroll', () => {
+                const nearBottom = messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < 84;
+                document.querySelector('.chat-jump-bottom')?.classList.toggle('is-visible', !nearBottom);
+            }, { passive: true });
+            resizeInput();
             loadGlobalChat();
-            globalChatTimer = setInterval(loadGlobalChat, 5000);
+            globalChatTimer = setInterval(loadGlobalChat, 2500);
+            setTimeout(() => input?.focus({ preventScroll: true }), 180);
         };
 
         window.loadGlobalChat = function() {
-            fetchWithTimeout('/api/global-chat', { headers: globalChatHeaders() })
+            if (globalChatLoading) return;
+            globalChatLoading = true;
+            const url = globalChatHasLoaded && globalChatCursor
+                ? `/api/global-chat?after_id=${encodeURIComponent(globalChatCursor)}`
+                : '/api/global-chat';
+            fetchWithTimeout(url, { headers: globalChatHeaders() })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))
                 .then(({ ok, data }) => {
                     if (!ok) throw new Error(data.message || 'Could not load Global Chat.');
                     const messages = document.querySelector('.chat-messages');
                     if (!messages) return;
-                    messages.innerHTML = (data.messages || []).map(item => {
-                        const author = item.username ? `@${item.username}` : (item.first_name || 'Community member');
-                        const initials = escapeHtml(author.replace(/^@/, '').slice(0, 1).toUpperCase());
-                        const time = item.created_at ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                        return `<article class="chat-message">
-                            <div class="chat-avatar">${initials}</div>
-                            <div class="chat-message-body">
-                                <div class="chat-message-meta"><strong>${escapeHtml(author)}</strong><time>${escapeHtml(time)}</time></div>
-                                <div class="chat-text">${escapeHtml(item.message)}</div>
-                            </div>
-                        </article>`;
-                    }).join('') || '<div class="chat-empty"><i class="fas fa-comments"></i><strong>No messages yet</strong><span>Start the conversation with the community.</span></div>';
-                    messages.scrollTop = messages.scrollHeight;
+                    setGlobalChatConnection(true);
+                    const incoming = data.messages || [];
+                    const isInitialLoad = !globalChatHasLoaded;
+                    const wasAtBottom = !globalChatHasLoaded
+                        || messages.scrollHeight - messages.scrollTop - messages.clientHeight < 84;
+                    if (!globalChatHasLoaded) {
+                        const outgoingNodes = [...messages.querySelectorAll('.chat-message[data-client-id]')];
+                        messages.innerHTML = '';
+                        globalChatMessageNodes.clear();
+                        incoming.forEach(item => upsertGlobalChatMessage(item));
+                        outgoingNodes.forEach(node => {
+                            const key = `client:${node.dataset.clientId}`;
+                            if (!globalChatMessageNodes.has(key)) {
+                                appendGlobalChatDayDivider(messages, node.dataset.day, node.dataset.dayLabel);
+                                messages.appendChild(node);
+                                globalChatMessageNodes.set(key, node);
+                            }
+                        });
+                    } else {
+                        incoming.forEach(item => upsertGlobalChatMessage(item));
+                    }
+                    if (!incoming.length && !globalChatHasLoaded && !messages.querySelector('.chat-message')) {
+                        showGlobalChatEmptyState(messages);
+                    }
+                    (data.relay_updates || []).forEach(item => updateGlobalChatDelivery(item.id, item.relay_status));
+                    if (isInitialLoad) {
+                        globalChatCursor = incoming.reduce((cursor, item) => {
+                            const id = Number(item.id);
+                            return Number.isFinite(id) ? Math.max(cursor, id) : cursor;
+                        }, 0);
+                    }
+                    globalChatHasLoaded = true;
+                    if (wasAtBottom || incoming.some(item => item.is_mine)) scrollGlobalChatToBottom(false);
+                    else if (incoming.length) document.querySelector('.chat-jump-bottom')?.classList.add('is-visible');
                 })
                 .catch(error => {
-                    const messages = document.querySelector('.chat-messages');
-                    if (messages) messages.innerHTML = `<div class="chat-empty chat-error"><i class="fas fa-cloud-exclamation"></i><strong>Chat is taking a break</strong><span>${escapeHtml(error.message)}</span></div>`;
-                });
+                    setGlobalChatConnection(false);
+                    if (!globalChatHasLoaded) {
+                        const messages = document.querySelector('.chat-messages');
+                        if (messages) messages.innerHTML = `<div class="chat-empty chat-error"><span class="chat-empty-icon"><i class="fas fa-cloud-arrow-down"></i></span><strong>Abhi chat load nahi hui</strong><span>${escapeHtml(error.message)}</span><button type="button" onclick="loadGlobalChat()">Dobara try karo</button></div>`;
+                    }
+                })
+                .finally(() => { globalChatLoading = false; });
         };
 
         window.sendGlobalChat = function(event) {
@@ -797,20 +1023,169 @@ const tg = window.Telegram?.WebApp || {
             const input = form.querySelector('.chat-input');
             const message = input.value.trim();
             if (!message) return;
-            input.disabled = true;
-            fetchWithTimeout('/api/global-chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...globalChatHeaders() },
-                body: JSON.stringify({ message })
-            })
-                .then(response => response.json().then(data => ({ ok: response.ok, data })))
-                .then(({ ok, data }) => {
-                    if (!ok) throw new Error(data.message || 'Could not send message');
-                    input.value = '';
-                    loadGlobalChat();
-                })
-                .catch(error => showToast(error.message))
-                .finally(() => { input.disabled = false; });
+            const clientId = createGlobalChatUuid();
+            const optimistic = {
+                id: `local-${clientId}`, client_id: clientId, is_mine: true,
+                first_name: 'You', message, created_at: new Date().toISOString(),
+                source: 'miniapp', relay_status: 'pending'
+            };
+            upsertGlobalChatMessage(optimistic);
+            input.value = '';
+            input.style.height = 'auto';
+            document.querySelector('.chat-counter').textContent = '0 / 3800';
+            form.querySelector('.chat-send').disabled = true;
+            scrollGlobalChatToBottom(false);
+            postGlobalChatMessage(message, clientId);
+        };
+
+        async function postGlobalChatMessage(message, clientId) {
+            const node = globalChatMessageNodes.get(`client:${clientId}`);
+            updateGlobalChatDelivery(node?.dataset.messageId, 'processing');
+            try {
+                const response = await fetchWithTimeout('/api/global-chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...globalChatHeaders() },
+                    body: JSON.stringify({ message, client_id: clientId })
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Message send nahi hua.');
+                if (data.message) upsertGlobalChatMessage(data.message);
+                setGlobalChatConnection(true);
+                const input = document.querySelector('.chat-input');
+                if (input && document.activeElement !== input) input.focus({ preventScroll: true });
+            } catch (error) {
+                updateGlobalChatDelivery(node?.dataset.messageId, 'failed');
+                showToast(error.message || 'Message send nahi hua. Retry button dabao.');
+            }
+        }
+
+        window.retryGlobalChatMessage = function(button) {
+            const node = button.closest('.chat-message');
+            if (!node) return;
+            const clientId = node.dataset.clientId;
+            const message = node.dataset.message || '';
+            if (!clientId || !message) return;
+            updateGlobalChatDelivery(node.dataset.messageId, 'processing');
+            postGlobalChatMessage(message, clientId);
+        };
+
+        function upsertGlobalChatMessage(item) {
+            const messages = document.querySelector('.chat-messages');
+            if (!messages || !item) return;
+            messages.querySelector('.chat-empty')?.remove();
+            const key = item.client_id ? `client:${item.client_id}` : `id:${item.id}`;
+            let article = globalChatMessageNodes.get(key);
+            const author = item.first_name || (item.username ? `@${item.username}` : 'Community member');
+            const time = item.created_at
+                ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                : '';
+            const createdAt = item.created_at ? new Date(item.created_at) : new Date();
+            const dayKey = Number.isNaN(createdAt.getTime()) ? '' : createdAt.toLocaleDateString();
+            const dayLabel = Number.isNaN(createdAt.getTime()) ? '' : formatGlobalChatDay(createdAt);
+            const text = escapeHtml(item.message).replace(/\r?\n/g, '<br>');
+            const isMine = Boolean(item.is_mine);
+            const markup = `
+                ${!isMine ? `<div class="chat-avatar" aria-hidden="true">${escapeHtml(author.trim().slice(0, 1).toUpperCase() || '•')}</div>` : ''}
+                <div class="chat-message-body">
+                    ${!isMine ? `<div class="chat-message-author">${escapeHtml(author)}</div>` : ''}
+                    <div class="chat-bubble"><div class="chat-text">${text}</div>
+                        <div class="chat-bubble-meta"><time>${escapeHtml(time)}</time>${isMine ? `<span class="chat-delivery" aria-live="polite"></span>` : ''}</div>
+                    </div>
+                </div>`;
+            if (!article) {
+                article = document.createElement('article');
+                article.className = `chat-message ${isMine ? 'chat-message--mine' : 'chat-message--other'}`;
+                article.dataset.key = key;
+                appendGlobalChatDayDivider(messages, dayKey, dayLabel);
+                messages.appendChild(article);
+                globalChatMessageNodes.set(key, article);
+            }
+            article.dataset.messageId = String(item.id || '');
+            article.dataset.day = dayKey;
+            article.dataset.dayLabel = dayLabel;
+            if (item.client_id) article.dataset.clientId = item.client_id;
+            article.dataset.message = item.message;
+            article.classList.toggle('chat-message--mine', isMine);
+            article.classList.toggle('chat-message--other', !isMine);
+            article.innerHTML = markup;
+            trimGlobalChatHistory(messages);
+            if (isMine) updateGlobalChatDelivery(item.id, item.relay_status || 'sent');
+            const numericId = Number(item.id);
+            if (Number.isFinite(numericId)) globalChatCursor = Math.max(globalChatCursor, numericId);
+        }
+
+        function formatGlobalChatDay(date) {
+            const today = new Date();
+            if (date.toDateString() === today.toDateString()) return 'TODAY';
+            const yesterday = new Date(today);
+            yesterday.setDate(today.getDate() - 1);
+            if (date.toDateString() === yesterday.toDateString()) return 'YESTERDAY';
+            return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase();
+        }
+
+        function appendGlobalChatDayDivider(messages, dayKey, label) {
+            if (!dayKey || !label) return;
+            const existing = messages.querySelectorAll('.chat-message');
+            const prior = existing[existing.length - 1];
+            if (prior?.dataset.day === dayKey) return;
+            const divider = document.createElement('div');
+            divider.className = 'chat-day-divider';
+            divider.dataset.day = dayKey;
+            divider.innerHTML = `<span>${escapeHtml(label)}</span>`;
+            messages.appendChild(divider);
+        }
+
+        function trimGlobalChatHistory(messages) {
+            while (messages.querySelectorAll('.chat-message').length > 250) {
+                const oldest = messages.querySelector('.chat-message');
+                if (!oldest || oldest.dataset.messageId?.startsWith('local-')) break;
+                globalChatMessageNodes.delete(oldest.dataset.key);
+                const previousDivider = oldest.previousElementSibling?.classList.contains('chat-day-divider')
+                    ? oldest.previousElementSibling
+                    : null;
+                oldest.remove();
+                previousDivider?.remove();
+            }
+        }
+
+        function updateGlobalChatDelivery(messageId, status) {
+            if (messageId === undefined || messageId === null) return;
+            let node = null;
+            for (const candidate of globalChatMessageNodes.values()) {
+                if (String(candidate.dataset.messageId) === String(messageId)) { node = candidate; break; }
+            }
+            if (!node) return;
+            const delivery = node.querySelector('.chat-delivery');
+            if (!delivery) return;
+            const states = {
+                pending: ['fa-clock', 'Sending to group'],
+                processing: ['fa-clock', 'Sending to group'],
+                retry: ['fa-clock', 'Waiting to sync'],
+                sent: ['fa-check-double', 'Delivered to group'],
+                failed: ['fa-circle-exclamation', 'Could not sync to group']
+            };
+            const [icon, label] = states[status] || states.pending;
+            delivery.className = `chat-delivery chat-delivery--${status}`;
+            delivery.innerHTML = status === 'failed'
+                ? `<button type="button" class="chat-retry" onclick="retryGlobalChatMessage(this)" aria-label="Retry message sync"><i class="fas fa-rotate-right"></i></button><i class="fas ${icon}" title="${label}"></i>`
+                : `<i class="fas ${icon}" title="${label}"></i><span class="sr-only">${label}</span>`;
+        }
+
+        function showGlobalChatEmptyState(messages) {
+            messages.innerHTML = `<div class="chat-empty"><span class="chat-empty-icon"><i class="fas fa-comments"></i></span><strong>Yeh chat abhi khaali hai</strong><span>Pehla message tum bhejo 👋</span></div>`;
+        }
+
+        function setGlobalChatConnection(connected) {
+            const label = document.getElementById('chatConnectionLabel');
+            const dot = document.querySelector('.chat-connection-dot');
+            if (label) label.textContent = connected ? 'Chat connected' : 'Reconnecting…';
+            dot?.classList.toggle('is-offline', !connected);
+        }
+
+        window.scrollGlobalChatToBottom = function(hideButton = true) {
+            const messages = document.querySelector('.chat-messages');
+            if (messages) messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
+            if (hideButton) document.querySelector('.chat-jump-bottom')?.classList.remove('is-visible');
         };
 
         function escapeHtml(value) {
@@ -1004,6 +1379,7 @@ const tg = window.Telegram?.WebApp || {
                     trackRecommendationEvent('watchlist_add', movieId);
                     showToast('Saved to My List');
                 }
+                refreshWatchlistAvailabilityButton(movieId);
             } catch (error) {
                 showToast(error.message || 'Could not save title');
             } finally {
@@ -1462,6 +1838,107 @@ const tg = window.Telegram?.WebApp || {
             return fallback;
         }
 
+        async function loadDailyPicks() {
+            const row = document.getElementById('rowDailyPicks');
+            const scroll = document.getElementById('dailyPicksScroll');
+            const dateLabel = document.getElementById('dailyPicksDate');
+            if (!row || !scroll) return;
+            if (dailyPickController) dailyPickController.abort();
+            const requestId = ++dailyPickRequestId;
+            const controller = new AbortController();
+            dailyPickController = controller;
+            row.style.display = '';
+            scroll.innerHTML = '<div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Aaj ki picks aa rahi hain…</span></div>';
+            try {
+                const response = await fetchWithTimeout('/api/home/daily-picks', {
+                    headers: telegramAuthHeaders(), signal: controller.signal
+                });
+                const data = await response.json();
+                if (requestId !== dailyPickRequestId) return;
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Aaj ki picks abhi load nahi hui.');
+                const picks = (Array.isArray(data.movies) ? data.movies : [])
+                    .filter(movie => movie && movie.is_available === true && !movie.is_unreleased)
+                    .slice(0, 3);
+                if (!picks.length) {
+                    scroll.innerHTML = '<div class="daily-picks-empty" role="status"><strong>Aaj koi nayi pick nahi mili</strong><span>Thodi der baad dobara dekho.</span><button type="button" onclick="retryDailyPicks()">Dobara try karo</button></div>';
+                } else {
+                    picks.forEach(movie => {
+                        if (!allMovies.some(item => String(item.id) === String(movie.id))) allMovies.push(movie);
+                    });
+                    scroll.innerHTML = renderCards(picks, 'card', false);
+                    scroll.querySelectorAll('.card').forEach((card, index) => {
+                        const movie = picks[index];
+                        if (movie) card.addEventListener('click', () => {
+                            trackRecommendationEvent('daily_pick_click', movie.id, { pick_date: data.date || '' });
+                        }, { once: true });
+                    });
+                }
+                if (dateLabel) {
+                    const label = data.date_label || data.date || 'Fresh today';
+                    dateLabel.textContent = data.personalized ? 'Tumhari pasand' : `Aaj · ${label}`;
+                }
+            } catch (error) {
+                if (requestId !== dailyPickRequestId) return;
+                scroll.innerHTML = `<div class="daily-picks-empty" role="status"><strong>Aaj ki picks load nahi hui</strong><span>${escapeHtml(error.message || 'Connection check karke try karo.')}</span><button type="button" onclick="retryDailyPicks()">Dobara try karo</button></div>`;
+                if (dateLabel) dateLabel.textContent = 'Dobara try karo';
+            } finally {
+                if (requestId === dailyPickRequestId && dailyPickController === controller) dailyPickController = null;
+            }
+        }
+
+        window.retryDailyPicks = function() {
+            loadDailyPicks();
+        };
+
+        async function loadWatchStreak() {
+            const card = document.getElementById('watchStreakCard');
+            if (!card || watchStreakLoaded) return;
+            if (watchStreakController) watchStreakController.abort();
+            const requestId = ++watchStreakRequestId;
+            const controller = new AbortController();
+            watchStreakController = controller;
+            try {
+                const response = await fetchWithTimeout('/api/home/daily-checkin', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
+                    body: JSON.stringify({}),
+                    signal: controller.signal
+                });
+                const data = await response.json();
+                if (requestId !== watchStreakRequestId) return;
+                if (response.status === 401) {
+                    watchStreakLoaded = true;
+                    card.hidden = true;
+                    return;
+                }
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Streak load nahi hui.');
+                const streak = Math.max(0, Number(data.current_streak) || 0);
+                const heading = document.getElementById('watchStreakHeading');
+                const message = document.getElementById('watchStreakMessage');
+                const count = document.getElementById('watchStreakCount');
+                const week = document.getElementById('watchStreakWeek');
+                if (heading) heading.textContent = streak ? 'Aaj ka din count ho gaya' : 'Aaj se shuru karo';
+                if (message) {
+                    message.textContent = data.new_checkin
+                        ? (streak > 1 ? `Aaj ka check-in ho gaya — ${streak} din lagataar!` : 'Aaj se naya streak shuru — kal phir aana ✨')
+                        : `Aaj ka check-in ho chuka — tumhara streak ${streak} din ka hai.`;
+                }
+                if (count) count.textContent = String(streak);
+                if (week) week.innerHTML = (Array.isArray(data.week) ? data.week : []).map(day => `
+                    <span class="watch-streak-day ${day.done ? 'is-done' : ''} ${day.is_today ? 'is-today' : ''}" role="listitem" aria-label="${escapeHtml(day.label)}${day.done ? ', complete' : ', not complete'}">
+                        <span>${escapeHtml(day.label)}</span><span class="watch-streak-day-dot" aria-hidden="true"></span>
+                    </span>`).join('');
+                card.hidden = false;
+                watchStreakLoaded = true;
+            } catch (error) {
+                if (requestId !== watchStreakRequestId) return;
+                console.warn('Daily streak is temporarily unavailable:', error);
+                card.hidden = true;
+            } finally {
+                if (requestId === watchStreakRequestId && watchStreakController === controller) watchStreakController = null;
+            }
+        }
+
         function renderHome(movies) {
             if (heroTimer) {
                 clearInterval(heroTimer);
@@ -1483,7 +1960,7 @@ const tg = window.Telegram?.WebApp || {
             const upcomingScroll = upcomingRow ? upcomingRow.querySelector('#upcomingScroll') : document.getElementById('upcomingScroll');
             if (upcomingRow && upcomingScroll) {
                 const requestId = ++upcomingRequestId;
-                upcomingRow.style.display = catalogueAvailability === 'request' ? '' : 'none';
+                upcomingRow.style.display = '';
                 upcomingScroll.innerHTML = '<div class="loader">Loading upcoming…</div>';
                 loadHomeSection('/api/upcoming?limit=18', 'upcoming')
                     .then(data => {
@@ -1491,7 +1968,7 @@ const tg = window.Telegram?.WebApp || {
                         if (data.status !== 'success') throw new Error(data.message || 'Could not load upcoming');
                         const upcoming = (Array.isArray(data.movies) ? data.movies : [])
                             .map(movie => ({ ...movie, source: 'tmdb' }))
-                            .filter(movie => FlimfyUI.futureRelease(movie) && matchesCatalogueAvailability(movie));
+                            .filter(movie => FlimfyUI.futureRelease(movie));
                         upcoming.forEach(item => {
                             if (item && item.id) {
                                 tmdbMoviesMap[item.id] = { ...item, source: 'tmdb', id: item.id };
@@ -1506,15 +1983,18 @@ const tg = window.Telegram?.WebApp || {
                         upcomingScroll.innerHTML = partialNotice + (upcoming.length
                             ? renderCards(upcoming, 'card', true)
                             : emptyState);
-                        upcomingRow.style.display = catalogueAvailability === 'request' ? '' : 'none';
+                        upcomingRow.style.display = '';
                     })
                     .catch(error => {
                         if (requestId !== upcomingRequestId) return;
                         console.error('Upcoming load failed:', error);
                         upcomingScroll.innerHTML = '<div class="search-empty-state">Upcoming is temporarily unavailable.</div>';
-                        upcomingRow.style.display = catalogueAvailability === 'request' ? '' : 'none';
+                        upcomingRow.style.display = '';
                     });
             }
+
+            loadDailyPicks();
+            loadWatchStreak();
 
             const catalogueRows = [
                 {
@@ -2178,7 +2658,7 @@ document.addEventListener('keydown', (e) => {
                 if (isGenuinelyUpcoming) {
                     renderUpcomingActions(movie);
                 } else {
-                    renderUnavailableAction(movie);
+                    renderUnavailableAction(movie, isTMDB || movie.source === 'tmdb');
                 }
                 detailsPage.classList.remove('is-loading');
                 return;
@@ -2295,7 +2775,7 @@ document.addEventListener('keydown', (e) => {
                         } else if (m.is_available) {
                             linksContainer.innerHTML = '<div class="download-panel-heading"><span class="section-kicker">YOUR WATCH OPTIONS</span><h2>Available file</h2><p>One file is ready in the catalogue.</p></div><button class="download-option" type="button" onclick="downloadMovie(' + Number(m.id) + ')"><span class="download-option-quality"><i class="fas fa-film"></i><span>Open available file</span></span><span class="download-option-action"><span>Get file</span><i class="fas fa-arrow-down"></i></span></button>';
                         } else {
-                            renderUnavailableAction(activeMovie);
+                            renderUnavailableAction(activeMovie, false);
                         }
                         detailsPage.classList.remove('is-loading');
                     }
@@ -2329,7 +2809,15 @@ document.addEventListener('keydown', (e) => {
                     <i class="fas ${icon}"></i> <span>${label}</span>
                 </button>`;
             };
-            actionContainer.innerHTML = renderNotificationButton('release', false);
+            const localMovieId = Number(movie.id);
+            const canAlertFromMyList = movie.source !== 'tmdb'
+                && Number.isInteger(localMovieId) && localMovieId > 0
+                && !String(movie.id).startsWith('tmdb_');
+            actionContainer.innerHTML = renderNotificationButton('release', false)
+                + (canAlertFromMyList ? `<button class="btn-request upcoming-notify-button watchlist-alert-button" type="button" data-movie-id="${localMovieId}" data-enabled="false" aria-pressed="false" onclick="toggleWatchlistAvailabilityNotification(this)">
+                    <i class="fas fa-bell"></i> <span>Save &amp; notify me when ready</span>
+                </button>` : '');
+            if (canAlertFromMyList) refreshWatchlistAvailabilityButton(localMovieId);
             if (linksContainer) {
                 linksContainer.innerHTML = releaseDate
                     ? `<div class="pre-release-note"><i class="fas fa-calendar"></i> Expected release: ${escapeHtml(releaseDate)}</div>`
@@ -2354,7 +2842,7 @@ document.addEventListener('keydown', (e) => {
                 })
                 .catch(error => console.warn('Upcoming notification status unavailable:', error));
         }
-        function renderUnavailableAction(movie) {
+        function renderUnavailableAction(movie, remoteTitle = false) {
             const actionContainer = document.getElementById('dpTrailerBtn');
             const linksContainer = document.getElementById('dpLinks');
             
@@ -2376,26 +2864,108 @@ document.addEventListener('keydown', (e) => {
                 const requestBtnHtml = `<button class="btn-request" type="button" data-request-title="${escapeHtml(movie.title || '')}" onclick="requestSilent(this.dataset.requestTitle)">
                     <i class="fas fa-paper-plane"></i> Request ${escapeHtml(movie.title || 'this title')}
                 </button>`;
-                
-                actionContainer.innerHTML = requestBtnHtml + renderNotificationButton('availability', false);
-                
-                const button = actionContainer.querySelector('.upcoming-notify-button');
-                if (button && tmdbId) {
-                    fetchWithTimeout(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
-                        headers: telegramAuthHeaders()
-                    })
-                        .then(response => response.json().then(data => ({ ok: response.ok, data })))
-                        .then(({ ok, data }) => {
-                            if (!ok || data.status !== 'success') throw new Error(data.message || 'Notification status unavailable');
-                            setUpcomingNotificationButton(button, Boolean(data.availability_notification_set));
+
+                const localMovieId = Number(movie.id);
+                const isLocalMovie = !remoteTitle && movie.source !== 'tmdb'
+                    && Number.isInteger(localMovieId) && localMovieId > 0
+                    && !String(movie.id).startsWith('tmdb_');
+                if (isLocalMovie) {
+                    actionContainer.innerHTML = requestBtnHtml + `<button class="btn-request upcoming-notify-button watchlist-alert-button" type="button" data-movie-id="${localMovieId}" data-enabled="false" aria-pressed="false" onclick="toggleWatchlistAvailabilityNotification(this)">
+                        <i class="fas fa-bell"></i> <span>Save &amp; notify me</span>
+                    </button>`;
+                    refreshWatchlistAvailabilityButton(localMovieId);
+                } else {
+                    actionContainer.innerHTML = requestBtnHtml + renderNotificationButton('availability', false);
+                    const button = actionContainer.querySelector('.upcoming-notify-button');
+                    if (button && tmdbId) {
+                        fetchWithTimeout(`/api/upcoming/reminder?tmdb_id=${encodeURIComponent(tmdbId)}&release_date=${encodeURIComponent(releaseDate)}&title=${encodeURIComponent(movie.title || '')}`, {
+                            headers: telegramAuthHeaders()
                         })
-                        .catch(error => console.warn('Upcoming notification status unavailable:', error));
+                            .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                            .then(({ ok, data }) => {
+                                if (!ok || data.status !== 'success') throw new Error(data.message || 'Notification status unavailable');
+                                setUpcomingNotificationButton(button, Boolean(data.availability_notification_set));
+                            })
+                            .catch(error => console.warn('Upcoming notification status unavailable:', error));
+                    }
                 }
             }
             if (linksContainer) {
                 linksContainer.innerHTML = '<div class="pre-release-note"><i class="fas fa-circle-info"></i> This title is currently unavailable on FlimfyBox.</div>';
             }
         }
+        function setWatchlistAvailabilityButton(button, state = {}) {
+            if (!button) return;
+            const enabled = Boolean(state.requested);
+            button.dataset.enabled = String(enabled);
+            button.dataset.available = String(Boolean(state.available));
+            button.disabled = false;
+            button.classList.toggle('is-enabled', enabled || Boolean(state.available));
+            button.setAttribute('aria-pressed', String(enabled));
+            if (state.available) {
+                button.innerHTML = '<i class="fas fa-circle-check"></i> <span>Available now · open title</span>';
+                return;
+            }
+            const label = enabled ? 'Alert is on' : (state.saved ? 'Notify me when ready' : 'Save & notify me');
+            button.innerHTML = enabled
+                ? `<i class="fas fa-check"></i> <span>${label}</span>`
+                : `<i class="fas fa-bell"></i> <span>${label}</span>`;
+        }
+        function reopenAvailableMovie(movieId) {
+            const normalizedId = String(movieId);
+            const cachedMovie = allMovies.find(movie => String(movie.id) === normalizedId);
+            if (cachedMovie) cachedMovie.is_available = true;
+            if (activeMovie && String(activeMovie.id) === normalizedId) activeMovie.is_available = true;
+            openDetails(normalizedId, false);
+        }
+        function refreshWatchlistAvailabilityButton(movieId) {
+            const button = document.querySelector(`.watchlist-alert-button[data-movie-id="${Number(movieId)}"]`);
+            if (!button) return;
+            fetchWithTimeout(`/api/my-list/${encodeURIComponent(movieId)}/availability-notification`, {
+                headers: telegramAuthHeaders()
+            })
+                .then(response => response.json().then(data => ({ ok: response.ok, data })))
+                .then(({ ok, data }) => {
+                    if (!ok || data.status !== 'success') throw new Error(data.message || 'Notification status unavailable');
+                    setWatchlistAvailabilityButton(button, data);
+                })
+                .catch(error => console.warn('My List notification status unavailable:', error));
+        }
+        window.toggleWatchlistAvailabilityNotification = async function(button) {
+            if (!button || button.disabled) return;
+            const movieId = String(button.dataset.movieId || '');
+            if (!movieId) return;
+            if (button.dataset.available === 'true') {
+                reopenAvailableMovie(movieId);
+                return;
+            }
+            const enabled = button.dataset.enabled !== 'true';
+            button.disabled = true;
+            try {
+                const response = await fetchWithTimeout(`/api/my-list/${encodeURIComponent(movieId)}/availability-notification`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...telegramAuthHeaders() },
+                    body: JSON.stringify({ enabled })
+                });
+                const data = await response.json();
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not update notification');
+                if (data.already_available) {
+                    showToast('This title is already available. Refreshing details…');
+                    reopenAvailableMovie(movieId);
+                    return;
+                }
+                if (data.saved) {
+                    savedMovieIds.add(movieId);
+                    const listButton = document.getElementById('detailMyListButton');
+                    if (listButton) listButton.innerHTML = '<i class="fas fa-check"></i>';
+                }
+                setWatchlistAvailabilityButton(button, data);
+                showToast(data.requested ? '✓ We’ll message you when it is ready' : 'Availability alert turned off');
+            } catch (error) {
+                button.disabled = false;
+                showToast(error.message || 'Could not update notification');
+            }
+        };
         function setUpcomingNotificationButton(button, enabled) {
             if (!button) return;
             button.classList.toggle('is-enabled', enabled);

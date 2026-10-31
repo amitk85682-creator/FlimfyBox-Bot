@@ -6,6 +6,7 @@ Neither mode starts the bot or permits account mutations. Offline mode never
 manufactures release dates, metadata, files, ratings, or successful actions.
 """
 import argparse
+import hashlib
 import json
 import re
 import time
@@ -21,6 +22,7 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 PUBLIC_GETS = {
     'movies': {'page', 'limit', 'availability'},
     'home/trending': {'limit'},
+    'home/daily-picks': set(),
     'home/new-releases': {'limit', 'days'},
     'home/catalogue-rows': {'limit'},
     'upcoming': {'limit'},
@@ -28,7 +30,7 @@ PUBLIC_GETS = {
     'suggest': {'q'},
     'genres': {'type'},
     'browse': {'type'},
-    'browse/surprise': {'type'},
+    'browse/surprise': {'type', 'mood', 'language', 'availability', 'exclude'},
 }
 ACCOUNT_MESSAGE = 'Account actions are disabled in this read-only preview. Open the mini app in Telegram to use them.'
 
@@ -153,6 +155,13 @@ def create_preview(catalogue=None):
             return jsonify(status='success', movies=filtered[offset:offset + limit], has_more=offset + limit < len(filtered))
         if path == 'home/trending':
             return jsonify(status='success', results=movies[:12], hero_limit=5, source='offline-snapshot')
+        if path == 'home/daily-picks':
+            available = [m for m in movies if not m.get('is_unreleased') and (
+                m.get('is_available') is True or m.get('availability_state') == 'available')]
+            available.sort(key=lambda movie: hashlib.sha256(
+                f"{today.isoformat()}:{movie.get('id', '')}".encode('utf-8')).hexdigest())
+            return jsonify(status='success', date=today.isoformat(), date_label=today.strftime('%a, %d %b'),
+                           movies=available[:3], personalized=False)
         if path == 'home/new-releases':
             recent = [m for m in movies if release_day(m) and timedelta(0) <= today - release_day(m) <= timedelta(days=60)]
             return jsonify(status='success', movies=recent, window_days=60)
@@ -188,9 +197,45 @@ def create_preview(catalogue=None):
         if path == 'browse':
             return jsonify(status='success', collections=[{'id': 'snapshot', 'label': 'In this catalogue snapshot', 'movies': typed}])
         if path == 'browse/surprise':
-            if not typed:
-                return jsonify(status='error', message='No matching titles in this snapshot'), 404
-            return jsonify(status='success', movie=typed[0])
+            mood = request.args.get('mood', 'any').strip().lower()
+            language = request.args.get('language', 'any').strip().lower()
+            availability = request.args.get('availability', 'available').strip().lower()
+            mood_genres = {
+                'any': set(),
+                'fun': {'comedy', 'animation', 'animated', 'family', 'musical'},
+                'mind': {'thriller', 'mystery', 'crime', 'sci-fi', 'sci fi', 'science fiction', 'detective'},
+                'action': {'action', 'adventure', 'war', 'fantasy', 'superhero'},
+                'heart': {'romance', 'romantic', 'drama', 'family'},
+                'anime': {'anime', 'animation', 'animated', 'isekai', 'shonen', 'shojo', 'seinen'},
+            }
+            if mood not in mood_genres or language not in {'any', 'hindi', 'english'} or availability not in {'available', 'all'}:
+                return jsonify(status='error', message='Invalid mood, language, or availability'), 400
+            excluded = set()
+            try:
+                excluded = {int(value) for value in request.args.get('exclude', '').split(',')[:8] if value.strip()}
+            except ValueError:
+                return jsonify(status='error', message='Invalid excluded title'), 400
+            eligible = []
+            for movie in typed:
+                if movie.get('is_unreleased'):
+                    continue
+                if availability == 'available' and not (movie.get('is_available') is True or movie.get('availability_state') == 'available'):
+                    continue
+                if int(movie.get('id') or 0) in excluded:
+                    continue
+                if language != 'any' and not re.search(rf'\b{re.escape(language)}\b', str(movie.get('language', '')).lower()):
+                    continue
+                tags = genres_for(movie) | {str(movie.get('category', '')).strip().lower(), str(movie.get('content_type', '')).strip().lower()}
+                matched = sorted(tags & mood_genres[mood])
+                eligible.append((movie, matched))
+            if not eligible:
+                return jsonify(status='success', movie=None, message='Is language, Browse type aur availability mein koi title nahi mila. Filter badal kar dekho.')
+            exact_matches = [item for item in eligible if item[1]] if mood != 'any' else []
+            movie, matched = (exact_matches or eligible)[0]
+            result = dict(movie)
+            if not result.get('image') and result.get('poster_url'):
+                result['image'] = result['poster_url']
+            return jsonify(status='success', movie=result, mood_match=bool(matched), matched_genres=matched, personalized=False)
         if re.fullmatch(r'movie/[1-9][0-9]*', path):
             movie = next((m for m in movies if str(m.get('id')) == path.split('/')[1]), None)
             if movie:
