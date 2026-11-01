@@ -5528,13 +5528,25 @@ def get_all_movie_qualities(movie_id):
             SELECT quality, url, file_id, file_size, languages, extra_info
             FROM movie_files
             WHERE movie_id = %s AND (url IS NOT NULL OR file_id IS NOT NULL)
-            ORDER BY CASE quality
-                WHEN '4K' THEN 1
-                WHEN 'HD Quality' THEN 2
-                WHEN 'Standart Quality'  THEN 3
-                WHEN 'Low Quality'  THEN 4
-                ELSE 5
-            END DESC
+            ORDER BY CASE
+                WHEN UPPER(COALESCE(quality, '')) LIKE '%2160P%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%4K%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%UHD%' THEN 1
+                WHEN UPPER(COALESCE(quality, '')) LIKE '%1440P%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%2K%' THEN 2
+                WHEN UPPER(COALESCE(quality, '')) LIKE '%1080P%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%FHD%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%FULL HD%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%HD QUALITY%' THEN 3
+                WHEN UPPER(COALESCE(quality, '')) LIKE '%720P%' THEN 4
+                WHEN UPPER(COALESCE(quality, '')) LIKE '%576P%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%480P%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%STANDARD QUALITY%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%STANDART QUALITY%' THEN 5
+                WHEN UPPER(COALESCE(quality, '')) LIKE '%360P%'
+                  OR UPPER(COALESCE(quality, '')) LIKE '%LOW QUALITY%' THEN 6
+                ELSE 7
+            END ASC
         """, (movie_id,))
         results = cur.fetchall()
         cur.close()
@@ -5588,13 +5600,25 @@ def get_movie_delivery_data(movie_id):
               ON mf.movie_id = m.id
              AND (mf.url IS NOT NULL OR mf.file_id IS NOT NULL)
             WHERE m.id = %s
-            ORDER BY CASE mf.quality
-                WHEN '4K' THEN 1
-                WHEN 'HD Quality' THEN 2
-                WHEN 'Standart Quality' THEN 3
-                WHEN 'Low Quality' THEN 4
-                ELSE 5
-            END DESC
+            ORDER BY CASE
+                WHEN UPPER(COALESCE(mf.quality, '')) LIKE '%2160P%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%4K%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%UHD%' THEN 1
+                WHEN UPPER(COALESCE(mf.quality, '')) LIKE '%1440P%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%2K%' THEN 2
+                WHEN UPPER(COALESCE(mf.quality, '')) LIKE '%1080P%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%FHD%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%FULL HD%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%HD QUALITY%' THEN 3
+                WHEN UPPER(COALESCE(mf.quality, '')) LIKE '%720P%' THEN 4
+                WHEN UPPER(COALESCE(mf.quality, '')) LIKE '%576P%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%480P%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%STANDARD QUALITY%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%STANDART QUALITY%' THEN 5
+                WHEN UPPER(COALESCE(mf.quality, '')) LIKE '%360P%'
+                  OR UPPER(COALESCE(mf.quality, '')) LIKE '%LOW QUALITY%' THEN 6
+                ELSE 7
+            END ASC
         """, (movie_id,))
         rows = cur.fetchall()
         cur.close()
@@ -5632,15 +5656,15 @@ def create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages
 
         # 3. Send All, Trending (Row 1)
         keyboard.append([
-            InlineKeyboardButton("◆ SEND ALL", callback_data=f"sendall_{movie_id}_{page}"),
-            InlineKeyboardButton("TRENDING", url=FILMFYBOX_GROUP_URL)
+            InlineKeyboardButton("📥 SEND THIS PAGE", callback_data=f"sendall_{movie_id}_{page}"),
+            InlineKeyboardButton("💬 COMMUNITY", url=FILMFYBOX_GROUP_URL)
         ])
         
         # 4. Filters (Row 2)
         keyboard.append([
-            InlineKeyboardButton("QUALITY", callback_data=f"v_qual_{movie_id}"),
-            InlineKeyboardButton("LANGUAGE", callback_data=f"v_lang_{movie_id}"),
-            InlineKeyboardButton("SEASON", callback_data=f"v_seas_{movie_id}")
+            InlineKeyboardButton("🎞 QUALITY", callback_data=f"v_qual_{movie_id}"),
+            InlineKeyboardButton("🔊 LANGUAGE", callback_data=f"v_lang_{movie_id}"),
+            InlineKeyboardButton("📺 SEASON", callback_data=f"v_seas_{movie_id}")
         ])
         
         # 5. Pagination (Premium look)
@@ -5724,38 +5748,71 @@ async def deliver_movie_page_on_start(update: Update, context: ContextTypes.DEFA
         'language': language,
         'seasons_data': seasons_data,
     }
+    total_pages = max(1, (len(qualities) + 9) // 10)
+    status_msg = None
+    try:
+        status_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Preparing page {page}/{total_pages}: {len(page_files)} files."
+        )
+    except Exception:
+        logger.info("Could not post file-page progress for movie %s", movie_id)
+    sent_count = 0
+    failed_count = 0
     for file_data in page_files:
         metadata['extra_info'] = str(file_data[5]).strip() if len(file_data) > 5 and file_data[5] else ""
-        await send_movie_to_user(
-            update,
-            context,
-            movie_id,
-            title,
-            file_data[1],
-            file_data[2],
-            send_warning=False,
-            pre_fetched_meta=dict(metadata),
-            suppress_delete_notice=True,
-        )
+        try:
+            delivered = await send_movie_to_user(
+                update,
+                context,
+                movie_id,
+                title,
+                file_data[1],
+                file_data[2],
+                send_warning=False,
+                pre_fetched_meta=dict(metadata),
+                suppress_delete_notice=True,
+                require_exact_file=True,
+            )
+            if delivered:
+                sent_count += 1
+            else:
+                failed_count += 1
+        except Exception:
+            logger.exception("Send All deep-link delivery failed for movie %s", movie_id)
+            failed_count += 1
         await asyncio.sleep(0.3)
 
     # Send auto-delete notice only once after all files are delivered
-    try:
-        target_chat_id = update.effective_user.id
-        warn_text_msg = await context.bot.send_message(
-            chat_id=target_chat_id,
-            text=(
-                "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
-                "◈ ऊपर भेजी गयी file <b>2 minutes</b> बाद auto-delete हो जाएगी।\n"
-                "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
-            ),
-            parse_mode='HTML'
-        )
+    if sent_count:
+        try:
+            target_chat_id = update.effective_user.id
+            warn_text_msg = await context.bot.send_message(
+                chat_id=target_chat_id,
+                text=(
+                    "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
+                    f"◈ The {sent_count} delivered file{'s' if sent_count != 1 else ''} will be deleted automatically in <b>2 minutes</b>.\n"
+                    "◈ Save or forward them before then."
+                ),
+                parse_mode='HTML'
+            )
+            track_message_for_deletion(
+                context, target_chat_id, warn_text_msg.message_id, USER_FILE_DELETE_SECONDS,
+            )
+        except Exception:
+            logger.exception("Could not send auto-delete notice for movie page %s", movie_id)
+
+    result_text = f"Page {page}/{total_pages}: {sent_count}/{len(page_files)} files sent."
+    if failed_count:
+        result_text += f"\n{failed_count} could not be delivered. You can select those versions individually."
+    if status_msg:
+        try:
+            await status_msg.edit_text(result_text)
+        except Exception:
+            logger.info("Could not update file-page status for movie %s", movie_id)
         track_message_for_deletion(
-            context, target_chat_id, warn_text_msg.message_id, USER_FILE_DELETE_SECONDS,
+            context, update.effective_chat.id, status_msg.message_id, USER_TEXT_DELETE_SECONDS,
         )
-    except:
-        pass
 
 def load_movie_selection_data(movie_id):
     """Reload callback state from the database after a file-link click clears memory."""
@@ -5785,9 +5842,10 @@ def load_movie_selection_data(movie_id):
     }
 
 # ==================== HELPER FUNCTION ====================
-async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, require_exact_file: bool = False, suppress_delete_notice: bool = False):
+async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, require_exact_file: bool = False, suppress_delete_notice: bool = False, suppress_callback_notice: bool = False):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & FIXED"""
     chat_id = update.effective_chat.id
+    safe_title = html_escape(str(title or 'Movie'))
 
     # --- 1. Fetch movie details (Genre, Year, Language) ---
     genre = ""
@@ -5803,9 +5861,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         db_lang = pre_fetched_meta.get('language')
         seasons_data_db = pre_fetched_meta.get('seasons_data')
         
-        if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
-        if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
-        if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+        if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {html_escape(str(db_genre))}\n"
+        if db_year and db_year > 0: year = f"📅 <b>Year:</b> {html_escape(str(db_year))}\n"
+        if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {html_escape(str(db_lang))}\n"
     
     # Agar data nahi diya gaya, tabhi DB open karo
     else:
@@ -5817,9 +5875,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 result = cur.fetchone()
                 if result:
                     db_genre, db_year, db_lang, seasons_data_db = result
-                    if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {db_genre}\n"
-                    if db_year and db_year > 0: year = f"📅 <b>Year:</b> {db_year}\n"
-                    if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {db_lang}\n"
+                    if db_genre and db_genre != 'Unknown': genre = f"🎭 <b>Genre:</b> {html_escape(str(db_genre))}\n"
+                    if db_year and db_year > 0: year = f"📅 <b>Year:</b> {html_escape(str(db_year))}\n"
+                    if db_lang and db_lang.strip(): lang_display = f"🔊 <b>Language:</b> {html_escape(str(db_lang))}\n"
                 cur.close()
             except Exception as e:
                 logger.error(f"Error fetching movie info: {e}")
@@ -5837,15 +5895,15 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         edition_keywords = ["UNCUT", "EXTENDED", "CUT", "UNRATED", "REMASTERED", "EDITION"]
         
         if any(word in ext for word in edition_keywords):
-            extra_display = f"📌 <b>Edition:</b> {extra_val}\n"
+            extra_display = f"📌 <b>Edition:</b> {html_escape(extra_val)}\n"
         elif "S" in ext and "E" in ext:
-            extra_display = f"📌 <b>Season & Episode:</b> {extra_val}\n"
+            extra_display = f"📌 <b>Season &amp; Episode:</b> {html_escape(extra_val)}\n"
         elif "S" in ext:
-            extra_display = f"📌 <b>Season:</b> {extra_val}\n"
+            extra_display = f"📌 <b>Season:</b> {html_escape(extra_val)}\n"
         elif "E" in ext:
-            extra_display = f"📌 <b>Episode:</b> {extra_val}\n"
+            extra_display = f"📌 <b>Episode:</b> {html_escape(extra_val)}\n"
         else:
-            extra_display = f"📌 <b>Info:</b> {extra_val}\n"
+            extra_display = f"📌 <b>Info:</b> {html_escape(extra_val)}\n"
             
         # SMART FIX: Update year based on seasons_data
         if ("S" in ext or "SEASON" in ext) and seasons_data_db:
@@ -5888,15 +5946,15 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     edition_keywords = ["UNCUT", "EXTENDED", "CUT", "UNRATED", "REMASTERED", "EDITION"]
                     
                     if any(word in ext for word in edition_keywords):
-                        extra_display = f"📌 <b>Edition:</b> {extra_val}\n"
+                        extra_display = f"📌 <b>Edition:</b> {html_escape(extra_val)}\n"
                     elif "S" in ext and "E" in ext:
-                        extra_display = f"📌 <b>Season & Episode:</b> {extra_val}\n"
+                        extra_display = f"📌 <b>Season &amp; Episode:</b> {html_escape(extra_val)}\n"
                     elif "S" in ext:
-                        extra_display = f"📌 <b>Season:</b> {extra_val}\n"
+                        extra_display = f"📌 <b>Season:</b> {html_escape(extra_val)}\n"
                     elif "E" in ext:
-                        extra_display = f"📌 <b>Episode:</b> {extra_val}\n"
+                        extra_display = f"📌 <b>Episode:</b> {html_escape(extra_val)}\n"
                     else:
-                        extra_display = f"📌 <b>Info:</b> {extra_val}\n"
+                        extra_display = f"📌 <b>Info:</b> {html_escape(extra_val)}\n"
                         
                     # SMART FIX: Update year based on seasons_data if specific season/episode year is available
                     if ("S" in ext or "SEASON" in ext) and seasons_data_db:
@@ -5933,9 +5991,9 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if require_exact_file and not url and not file_id:
         await context.bot.send_message(
             chat_id=update.effective_user.id,
-            text="❌ Selected file is unavailable. Please choose another quality from the Mini App."
+            text="❌ This file is unavailable. Please choose another version or try again later."
         )
-        return
+        return False
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
@@ -5952,7 +6010,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             # 👇 YAHAN SE FIX SHURU HOTA HAI (HTML INLINE LINKS KE LIYE) 👇
             bot_username = context.bot.username
             text = (
-                f"<b>🎬 {title}</b>\n"
+                f"<b>🎬 {safe_title}</b>\n"
                 "<i>Choose your preferred version</i>\n\n"
             )
             
@@ -6008,7 +6066,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     await update.callback_query.answer("This file menu expires in 5 minutes.", show_alert=True)
                 except:
                     pass
-            return
+            return True
 
     target_chat_id = update.effective_user.id if (url or file_id) else chat_id
 
@@ -6028,13 +6086,13 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # --- CAPTION UPDATE WITH EXTRA INFO ---
         caption_text = (
             f"<b>━━━━━ 🎬 𝗙𝗶𝗹𝗲 𝗗𝗲𝘁𝗮𝗶𝗹𝘀 ━━━━━</b>\n"
-            f"✦ <b>{title}</b>\n"
+            f"✦ <b>{safe_title}</b>\n"
             f"{extra_display}"
             f"{year}"        
             f"{genre}"       
             f"{lang_display}"  
-            f"<b>Update Channel:</b> <a href='{UPDATE_CHANNEL_URL}'>Join BackUp</a>\n"
-            f"\n◈ <b>JOIN »</b> <a href='{FILMFYBOX_CHANNEL_URL}'>FilmfyBox</a>\n\n"
+            f"<b>Update Channel:</b> <a href='{html_escape(UPDATE_CHANNEL_URL, quote=True)}'>Join BackUp</a>\n"
+            f"\n◈ <b>JOIN »</b> <a href='{html_escape(FILMFYBOX_CHANNEL_URL, quote=True)}'>FilmfyBox</a>\n\n"
             f"◈ <b>Drop the movie name, I'll find it for you 🎬✨👇</b>\n"
             f"◈ <b><a href='https://t.me/+dxaCr_cMmGpkYTFl'>FlimfyBox Chat</a></b>\n"
             f"<b>━━━━━━━━━━━━━━━━━━━</b>"
@@ -6090,7 +6148,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not sent_msg and url and "http" in url and "t.me" not in url:
              sent_msg = await context.bot.send_message(
                 chat_id=target_chat_id,
-                text=f"🎬 <b>{title}</b>\n\n🔗 <b>Watch/Download:</b> {url}",
+                text=f"🎬 <b>{safe_title}</b>\n\n🔗 <b>Watch/Download:</b> {html_escape(str(url))}",
                 parse_mode='HTML',
                 reply_markup=join_keyboard
             )
@@ -6110,12 +6168,18 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if warning_msg:
             track_user_message_for_deletion(context, target_chat_id, warning_msg)
         elif not sent_msg:
-            err_msg = await context.bot.send_message(chat_id=target_chat_id, text="❌ Error: File not found or Bot needs Admin rights in Source Channel.")
+            err_msg = await context.bot.send_message(
+                chat_id=target_chat_id,
+                text="❌ This file could not be delivered. Please choose another version or try again later."
+            )
             track_message_for_deletion(context, target_chat_id, err_msg.message_id, USER_TEXT_DELETE_SECONDS)
 
-        if sent_msg and update.callback_query:
+        if sent_msg and update.callback_query and not suppress_callback_notice:
             try:
-                await update.callback_query.answer("✅ File Sent!\n⚠️ Ye file aur message 2 minutes baad delete ho jayegi.", show_alert=True)
+                await update.callback_query.answer(
+                    "File sent. It will be removed automatically after 2 minutes.",
+                    show_alert=True,
+                )
             except:
                 pass
         elif sent_msg and not update.callback_query and not suppress_delete_notice:
@@ -6126,8 +6190,8 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     chat_id=target_chat_id,
                     text=(
                         "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
-                        "◈ ऊपर भेजी गयी file <b>2 minutes</b> बाद auto-delete हो जाएगी।\n"
-                        "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
+                        "◈ This file will be deleted automatically in <b>2 minutes</b>.\n"
+                        "◈ Please save or forward it before then."
                     ),
                     parse_mode='HTML'
                 )
@@ -6141,6 +6205,8 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 )
             except:
                 pass
+
+        return bool(sent_msg)
 
     except telegram.error.Forbidden:
         if update.callback_query:
@@ -6159,10 +6225,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except:
                 pass
         logger.warning(f"User {target_chat_id} blocked or hasn't started the bot.")
+        return False
     except Exception as e:
         logger.error(f"Critical Error in send_movie: {e}")
         try: await context.bot.send_message(chat_id=target_chat_id, text="❌ System Error.")
         except: pass
+        return False
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 # ============================================================================
@@ -8000,12 +8068,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         context.user_data['sendall_page'] = current_page
-        await query.answer(f"🚀 Sending {len(page_files)} files (Page {current_page})...")
-        status_msg = await query.message.reply_text(f"🚀 **Sending {len(page_files)} files (Page {current_page})...**", parse_mode='Markdown')
+        try:
+            await query.answer(f"Sending {len(page_files)} files (Page {current_page})…")
+        except Exception:
+            logger.info("Could not acknowledge Send This Page callback for movie %s", movie_id)
+        status_msg = None
+        try:
+            status_msg = await query.message.reply_text(
+                f"Sending {len(page_files)} files on page {current_page}…"
+            )
+        except Exception:
+            logger.info("Could not post Send This Page progress for movie %s", movie_id)
         
         # 1. LOOP: SIRF CURRENT PAGE KI FILES BHEJO
         # ⚡ SPEED FIX: extra_info bhi pre_fetched_meta mein pass karo + sleep kam kiya
-        count = 0
+        sent_count = 0
+        failed_count = 0
         for file_data in page_files:
             url = file_data[1]
             file_id = file_data[2]
@@ -8016,26 +8094,32 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_meta['extra_info'] = file_extra_info  # Ye pass karo taaki send_movie_to_user DB na hit kare
             
             try:
-                await send_movie_to_user(
+                delivered = await send_movie_to_user(
                     update, context, movie_id, title, url, file_id, 
                     send_warning=False,
                     pre_fetched_meta=file_meta,
                     suppress_delete_notice=True,
+                    suppress_callback_notice=True,
+                    require_exact_file=True,
                 )
-                await asyncio.sleep(0.3)  # ⚡ 1.2s → 0.3s (safe_send mein flood protection already hai)
-                count += 1
+                if delivered:
+                    sent_count += 1
+                else:
+                    failed_count += 1
+                await asyncio.sleep(0.3)  # safe_send already handles Telegram flood limits
             except Exception as e:
                 logger.error(f"Send All Error: {e}")
+                failed_count += 1
 
         # Send auto-delete notice only once after all files are delivered
-        if count > 0:
+        if sent_count > 0:
             try:
                 warn_text_msg = await context.bot.send_message(
                     chat_id=chat_id,
                     text=(
                         "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
-                        "◈ ऊपर भेजी गयी file <b>2 minutes</b> बाद auto-delete हो जाएगी।\n"
-                        "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
+                        f"◈ The {sent_count} delivered file{'s' if sent_count != 1 else ''} will be deleted automatically in <b>2 minutes</b>.\n"
+                        "◈ Save or forward them before then."
                     ),
                     parse_mode='HTML'
                 )
@@ -8045,8 +8129,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
-        await status_msg.edit_text(f"✅ **Sent {count}/{len(page_files)} Files (Page {current_page})!**", parse_mode='Markdown')
-        track_message_for_deletion(context, chat_id, status_msg.message_id, USER_TEXT_DELETE_SECONDS)
+        result_text = f"✅ Sent {sent_count}/{len(page_files)} files on page {current_page}."
+        if failed_count:
+            result_text += f"\n⚠️ {failed_count} could not be delivered. You can choose those versions individually."
+        if status_msg:
+            try:
+                await status_msg.edit_text(result_text)
+            except Exception:
+                logger.info("Could not update Send This Page status for movie %s", movie_id)
+            track_message_for_deletion(
+                context, chat_id, status_msg.message_id, USER_TEXT_DELETE_SECONDS
+            )
         return
     
     # === NEW: SCAN INFO POPUP ===
