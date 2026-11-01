@@ -5701,14 +5701,27 @@ def get_movie_delivery_data(movie_id):
 
         category = rows[0][0] or ""
         poster_url = rows[0][1]
-        qualities = [
-            (row[2] or 'Available version', row[3], row[4], row[5], row[6], row[7])
-            for row in rows
-            if (row[3] and str(row[3]).strip()) or (row[4] and str(row[4]).strip())
-        ]
+        qualities = []
+        for row in rows:
+            # Preserve a valid source even if an optional metadata column is
+            # missing from a row returned by a legacy/custom cursor wrapper.
+            row_values = tuple(row)
+            url = row_values[3] if len(row_values) > 3 else None
+            file_id = row_values[4] if len(row_values) > 4 else None
+            if not ((url and str(url).strip()) or (file_id and str(file_id).strip())):
+                continue
+            qualities.append((
+                row_values[2] if len(row_values) > 2 and row_values[2]
+                else 'Available version',
+                url,
+                file_id,
+                row_values[5] if len(row_values) > 5 else None,
+                row_values[6] if len(row_values) > 6 else None,
+                row_values[7] if len(row_values) > 7 else None,
+            ))
         return qualities, (category, poster_url)
     except Exception as e:
-        logger.error(f"Error fetching delivery data for {movie_id}: {e}")
+        logger.exception("Error fetching delivery data for movie_id=%s", movie_id)
         return [], ("", None)
     finally:
         if conn:
@@ -7131,7 +7144,18 @@ async def process_movie_exact_match(
     if is_superseded_user_update(update, context.bot):
         return
     if not qualities:
-        legacy_source = await run_interactive(get_legacy_movie_source, movie_id)
+        # Retry through the existing quality lookup before telling users a
+        # title has no files. The combined metadata query can fail separately.
+        qualities = await run_interactive(get_all_movie_qualities, movie_id)
+        if is_superseded_user_update(update, context.bot):
+            return
+        if qualities:
+            category, poster_url = await run_interactive(
+                get_movie_delivery_meta, movie_id
+            )
+        legacy_source = None
+        if not qualities:
+            legacy_source = await run_interactive(get_legacy_movie_source, movie_id)
         if is_superseded_user_update(update, context.bot):
             return
         if legacy_source:
