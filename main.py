@@ -5608,6 +5608,41 @@ def get_all_movie_qualities(movie_id):
             close_db_connection(conn)
 
 
+def get_movie_file_sources_compat(movie_id):
+    """Load file sources using only core movie_files columns."""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        # languages/extra_info were added later and may be absent if a remote
+        # database missed a migration. File delivery must not depend on them.
+        cur.execute("""
+            SELECT quality, url, file_id, file_size
+            FROM movie_files
+            WHERE movie_id = %s
+              AND (NULLIF(BTRIM(url), '') IS NOT NULL
+                   OR NULLIF(BTRIM(file_id), '') IS NOT NULL)
+            ORDER BY id
+        """, (movie_id,))
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            (row[0] or 'Available version', row[1], row[2], row[3], None, None)
+            for row in rows
+            if len(row) >= 4 and (
+                (row[1] and str(row[1]).strip())
+                or (row[2] and str(row[2]).strip())
+            )
+        ]
+    except Exception:
+        logger.exception("Could not load core file sources for movie_id=%s", movie_id)
+        return []
+    finally:
+        if conn:
+            close_db_connection(conn)
+
+
 def get_movie_delivery_meta(movie_id):
     """Load the small metadata row needed before rendering a file menu."""
     conn = get_db_connection()
@@ -7147,6 +7182,17 @@ async def process_movie_exact_match(
         # Retry through the existing quality lookup before telling users a
         # title has no files. The combined metadata query can fail separately.
         qualities = await run_interactive(get_all_movie_qualities, movie_id)
+        if is_superseded_user_update(update, context.bot):
+            return
+        if not qualities:
+            qualities = await run_interactive(
+                get_movie_file_sources_compat, movie_id
+            )
+            if qualities:
+                logger.warning(
+                    "Using core-column file source fallback for movie_id=%s",
+                    movie_id,
+                )
         if is_superseded_user_update(update, context.bot):
             return
         if qualities:
