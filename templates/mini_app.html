@@ -9,7 +9,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=availability-4"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=daily-picks-1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=20261101-mood-picks-2">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -91,14 +91,14 @@
         <section class="movie-row daily-picks-row" id="rowDailyPicks" aria-labelledby="dailyPicksTitle">
             <div class="row-header daily-picks-header">
                 <div>
-                    <span class="daily-picks-kicker">AAJ KI KHAAS PICKS</span>
-                    <div class="row-header-left" id="dailyPicksTitle"><i class="fas fa-sparkles" aria-hidden="true"></i> Aaj ke 3</div>
-                    <p class="daily-picks-subtitle">Aaj ke liye khaas picks · kal phir nayi</p>
+                    <span class="daily-picks-kicker">TODAY'S PICKS</span>
+                    <div class="row-header-left" id="dailyPicksTitle"><i class="fas fa-sparkles" aria-hidden="true"></i> Three for today</div>
+                    <p class="daily-picks-subtitle">Fresh picks every day</p>
                 </div>
                 <span class="daily-picks-date" id="dailyPicksDate">Fresh today</span>
             </div>
             <div class="horizontal-scroll daily-picks-scroll" id="dailyPicksScroll" aria-live="polite">
-                <div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Aaj ki picks aa rahi hain…</span></div>
+                <div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Loading today's picks…</span></div>
             </div>
         </section>
 
@@ -206,59 +206,59 @@
         </section>
         <section class="browse-surprise-panel">
             <div>
-                <span class="browse-kicker">AAJ KI KHAAS PICK</span>
-                <h2>Flimfy, mera mood pakdo.</h2>
-                <p>Bas apni vibe batao. Pick dhoondhna FlimfyBox ka kaam.</p>
+                <span class="browse-kicker">MOOD PICK</span>
+                <h2>Tell us what you feel like watching.</h2>
+                <p>Choose a mood and FlimfyBox will find a title to match.</p>
             </div>
-            <button class="browse-surprise-button" id="moodReaderToggle" type="button" aria-expanded="false" aria-controls="moodReader" onclick="toggleMoodReader()"><i class="fas fa-wand-magic-sparkles"></i> Mood batao</button>
+            <button class="browse-surprise-button" id="moodReaderToggle" type="button" aria-expanded="false" aria-controls="moodReader" onclick="toggleMoodReader()"><i class="fas fa-wand-magic-sparkles"></i> Choose a mood</button>
         </section>
         <section class="mood-reader" id="moodReader" hidden aria-label="Choose a movie mood">
             <div class="mood-reader-question">
                 <span class="mood-reader-step">01</span>
-                <div><strong>Aaj kya dekhne ka mood hai?</strong><small>Ek vibe choose karo</small></div>
+                <div><strong>What are you in the mood for?</strong><small>Choose a vibe</small></div>
             </div>
             <div class="mood-reader-options" data-mood-group="mood" role="group" aria-label="Choose a mood">
-                <button type="button" data-mood-value="fun" aria-pressed="false" onclick="setMoodReaderChoice('mood','fun',this)"><span>😂</span><b>Hasna hai</b></button>
-                <button type="button" data-mood-value="mind" aria-pressed="false" onclick="setMoodReaderChoice('mood','mind',this)"><span>🧠</span><b>Dimaag hilao</b></button>
-                <button type="button" data-mood-value="action" aria-pressed="false" onclick="setMoodReaderChoice('mood','action',this)"><span>💥</span><b>Action chahiye</b></button>
-                <button type="button" data-mood-value="heart" aria-pressed="false" onclick="setMoodReaderChoice('mood','heart',this)"><span>💗</span><b>Dil wali</b></button>
-                <button type="button" data-mood-value="anime" aria-pressed="false" onclick="setMoodReaderChoice('mood','anime',this)"><span>🌀</span><b>Anime mood</b></button>
-                <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('mood','any',this)"><span>🎲</span><b>Kuch bhi</b></button>
+                <button type="button" data-mood-value="fun" aria-pressed="false" onclick="setMoodReaderChoice('mood','fun',this)"><span>😂</span><b>Comedy</b></button>
+                <button type="button" data-mood-value="mind" aria-pressed="false" onclick="setMoodReaderChoice('mood','mind',this)"><span>🧠</span><b>Mind-bending</b></button>
+                <button type="button" data-mood-value="action" aria-pressed="false" onclick="setMoodReaderChoice('mood','action',this)"><span>💥</span><b>Action</b></button>
+                <button type="button" data-mood-value="heart" aria-pressed="false" onclick="setMoodReaderChoice('mood','heart',this)"><span>💗</span><b>Heartfelt</b></button>
+                <button type="button" data-mood-value="anime" aria-pressed="false" onclick="setMoodReaderChoice('mood','anime',this)"><span>🌀</span><b>Anime</b></button>
+                <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('mood','any',this)"><span>🎲</span><b>Surprise me</b></button>
             </div>
             <div class="mood-reader-filter-row">
                 <div class="mood-reader-filter">
                     <span class="mood-reader-step">02</span>
-                    <div><strong>Language</strong><small>Jo tumhe pasand ho</small></div>
+                    <div><strong>Language</strong><small>Choose your preference</small></div>
                     <div class="mood-reader-chips" data-mood-group="language" role="group" aria-label="Choose a language">
-                        <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('language','any',this)">Koi bhi</button>
+                        <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('language','any',this)">Any</button>
                         <button type="button" data-mood-value="hindi" aria-pressed="false" onclick="setMoodReaderChoice('language','hindi',this)">Hindi</button>
                         <button type="button" data-mood-value="english" aria-pressed="false" onclick="setMoodReaderChoice('language','english',this)">English</button>
                     </div>
                 </div>
                 <div class="mood-reader-filter">
                     <span class="mood-reader-step">03</span>
-                    <div><strong>Kahan mile?</strong><small>Pick ka type</small></div>
+                    <div><strong>Availability</strong><small>Where can you watch?</small></div>
                     <div class="mood-reader-chips" data-mood-group="availability" role="group" aria-label="Choose title availability">
-                        <button type="button" data-mood-value="available" aria-pressed="true" onclick="setMoodReaderChoice('availability','available',this)">Available</button>
-                        <button type="button" data-mood-value="all" aria-pressed="false" onclick="setMoodReaderChoice('availability','all',this)">Sab titles</button>
+                        <button type="button" data-mood-value="available" aria-pressed="true" onclick="setMoodReaderChoice('availability','available',this)">Available now</button>
+                        <button type="button" data-mood-value="all" aria-pressed="false" onclick="setMoodReaderChoice('availability','all',this)">Any title</button>
                     </div>
                 </div>
             </div>
             <div class="mood-reader-actions">
-                <span><i class="fas fa-sparkles" aria-hidden="true"></i> Pick tumhare mood, Browse filter aur FlimfyBox catalogue se</span>
-                <button type="button" id="moodReaderSubmit" onclick="surpriseMe()"><i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i> Meri pick dikhao</button>
+                <span><i class="fas fa-sparkles" aria-hidden="true"></i> Matched to your mood and FlimfyBox catalogue</span>
+                <button type="button" id="moodReaderSubmit" onclick="surpriseMe()"><i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i> Find my pick</button>
             </div>
         </section>
         <section class="surprise-recommendation" id="surpriseRecommendation" hidden aria-live="polite">
             <div class="mood-pick-heading">
                 <span class="mood-pick-orb"><i class="fas fa-sparkles" aria-hidden="true"></i></span>
-                <div><span class="mood-pick-kicker">FLIMFYBOX NE CHUNA</span><strong>Tumhari pick</strong></div>
+                <div><span class="mood-pick-kicker">PICKED FOR YOU</span><strong>Your pick</strong></div>
             </div>
             <p class="mood-pick-explanation" id="moodPickExplanation"></p>
             <div class="movie-grid surprise-result-grid" id="surpriseResult"></div>
             <div class="mood-pick-feedback" id="moodPickFeedback" hidden>
-                <button type="button" class="mood-pick-liked" onclick="handleMoodReaderFeedback('liked')"><i class="fas fa-bullseye" aria-hidden="true"></i> Bilkul sahi pakda</button>
-                <button type="button" class="mood-pick-again" onclick="handleMoodReaderFeedback('skip')"><i class="fas fa-shuffle" aria-hidden="true"></i> Ek aur pick</button>
+                <button type="button" class="mood-pick-liked" onclick="handleMoodReaderFeedback('liked')"><i class="fas fa-bullseye" aria-hidden="true"></i> Good match</button>
+                <button type="button" class="mood-pick-again" onclick="handleMoodReaderFeedback('skip')"><i class="fas fa-shuffle" aria-hidden="true"></i> Show another</button>
             </div>
         </section>
         <div class="browse-type-toggle" role="group" aria-label="Browse content type">
@@ -408,6 +408,6 @@
     </nav>
 
     <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-reviews-merge-1"></script>
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=daily-picks-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=20261101-mood-picks-2"></script>
 </body>
 </html>

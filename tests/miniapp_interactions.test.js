@@ -148,7 +148,7 @@ test('Mood Reader offers its choices and passes filters and Telegram identity to
     assert.equal(calls[0].timeout, 16000);
     assert.equal(recommendation.hidden, false);
     assert.equal(feedback.hidden, false);
-    assert.match(explanation.textContent, /action wali movies se match ki/);
+    assert.match(explanation.textContent, /Matched your action mood/);
     assert.equal(events[0][0], 'surprise_impression');
     assert.equal(submit.disabled, false);
 
@@ -164,11 +164,12 @@ test('Mood Reader backend enforces catalogue filters and accepts its feedback si
     const route = webRoutes.slice(routeStart, routeEnd);
     assert.match(template, /id="moodReader"[\s\S]*data-mood-value="anime"/);
     assert.match(template, /data-mood-value="hindi"[\s\S]*data-mood-value="english"/);
-    assert.match(route, /AND NOT COALESCE\(m\.is_unreleased, FALSE\)/);
+    assert.match(route, /WHERE NOT COALESCE\(m\.is_unreleased, FALSE\)/);
     assert.match(route, /where_availability/);
     assert.match(route, /matched_genres/);
+    assert.doesNotMatch(route, /poster_url IS NOT NULL/);
     assert.match(webRoutes, /'mood_pick_liked',[\s\S]*'mood_pick_skipped'/);
-    assert.match(template, /daily-picks-1/);
+    assert.match(template, /20261101-mood-picks-2/);
 });
 
 test('changing a Mood Reader filter aborts the stale network request and unlocks the picker', async () => {
@@ -250,7 +251,7 @@ test('Daily Picks show three available released titles and remember card opens',
     assert.deepEqual(rendered.map(movie => movie.id), [1, 2, 5]);
     assert.equal(row.style.display, '');
     assert.equal(scroll.innerHTML, 'three-cards');
-    assert.equal(dateLabel.textContent, 'Aaj · Sat, 31 Oct');
+    assert.equal(dateLabel.textContent, 'Today · Sat, 31 Oct');
     cards[0].handler();
     assert.equal(events[0][0], 'daily_pick_click');
     assert.equal(events[0][1], 1);
@@ -264,11 +265,19 @@ test('Daily Picks backend rotates by India date, filters to available titles, an
     const route = webRoutes.slice(routeStart, routeEnd);
     assert.match(template, /id="rowDailyPicks"[\s\S]*id="dailyPicksScroll"/);
     assert.match(route, /timezone\(timedelta\(hours=5, minutes=30\)\)/);
-    assert.match(route, /AND NOT COALESCE\(m\.is_unreleased, FALSE\)/);
+    assert.match(route, /WHERE NOT COALESCE\(m\.is_unreleased, FALSE\)/);
     assert.match(route, /random\.Random\(seed\)\.shuffle/);
+    assert.doesNotMatch(route, /poster_url IS NOT NULL/);
     assert.match(route, /top_pool\[:3\]/);
     assert.match(webRoutes, /'daily_pick_click'/);
     assert.match(previewHarness, /'home\/daily-picks': set\(\)/);
+});
+
+test('Daily Picks start independently of the full catalogue request', () => {
+    const startup = source.slice(source.indexOf('// Start'));
+    const homeRenderer = source.slice(source.indexOf('function renderHome(movies)'), source.indexOf('function showCatalogueHeroFallback'));
+    assert.match(startup, /startInitialHomeLoading\(\);[\s\S]{0,180}loadDailyPicks\(\);\s*loadMovies\(\);/);
+    assert.doesNotMatch(homeRenderer, /loadDailyPicks\(\);/);
 });
 
 test('local preview fixtures return a matching mood pick and a stable available daily three', () => {

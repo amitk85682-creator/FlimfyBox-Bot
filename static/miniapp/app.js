@@ -632,7 +632,7 @@ const tg = window.Telegram?.WebApp || {
             if (explanation) explanation.textContent = '';
             submit.disabled = true;
             submit.setAttribute('aria-busy', 'true');
-            result.innerHTML = '<div class="mood-reader-loading"><span class="mood-reader-loading-mark"><i class="fas fa-sparkles" aria-hidden="true"></i></span><strong>FlimfyBox tumhara mood padh raha hai…</strong><span>Ek sahi pick dhoondh raha hai</span></div>';
+            result.innerHTML = '<div class="mood-reader-loading"><span class="mood-reader-loading-mark"><i class="fas fa-sparkles" aria-hidden="true"></i></span><strong>Finding a match for your mood…</strong><span>Searching the FlimfyBox catalogue</span></div>';
             try {
                 const params = new URLSearchParams({
                     type: browseType,
@@ -648,9 +648,9 @@ const tg = window.Telegram?.WebApp || {
                 );
                 const data = await response.json();
                 if (requestId !== moodPickRequestId) return;
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Pick nahi mil payi.');
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not find a pick.');
                 if (!data.movie) {
-                    result.innerHTML = `<div class="surprise-empty"><i class="fas fa-face-meh" aria-hidden="true"></i><strong>Is choice mein pick nahi mili</strong><span>${escapeHtml(data.message || 'Language ya Available filter badal kar dekho.')}</span></div>`;
+                    result.innerHTML = `<div class="surprise-empty"><i class="fas fa-face-meh" aria-hidden="true"></i><strong>No matching titles found</strong><span>${escapeHtml(data.message || 'Try changing the language or availability filter.')}</span></div>`;
                     return;
                 }
                 const movie = data.movie;
@@ -668,18 +668,18 @@ const tg = window.Telegram?.WebApp || {
                 result.innerHTML = renderCards([movie], 'grid-card', false);
                 if (explanation) {
                     const moodLabels = {
-                        fun: 'hansne wali', mind: 'dimaag hilane wali', action: 'action wali',
-                        heart: 'dil wali', anime: 'anime vibe', any: 'random'
+                        fun: 'comedy', mind: 'mind-bending', action: 'action',
+                        heart: 'heartfelt', anime: 'anime', any: 'surprise'
                     };
                     let reason = data.mood_match && moodReaderSelections.mood !== 'any'
-                        ? `${moodLabels[moodReaderSelections.mood]} movies se match ki.`
+                        ? `Matched your ${moodLabels[moodReaderSelections.mood]} mood.`
                         : moodReaderSelections.mood !== 'any'
-                            ? 'Exact mood match nahi mila, isliye closest pick dhoondhi.'
-                            : 'Tumhare Browse filter se ek fresh pick nikali.';
-                    if (data.personalized) reason += ' Tumhari FlimfyBox activity bhi dhyan mein rakhi.';
-                    else reason += ' Jitni activity badhegi, picks utni personal hongi.';
+                            ? 'No exact mood match, so this is the closest pick.'
+                            : 'A fresh pick from your Browse filters.';
+                    if (data.personalized) reason += ' Your FlimfyBox activity helped shape this pick.';
+                    else reason += ' Picks get more personal as you use FlimfyBox.';
                     if (Array.isArray(data.matched_genres) && data.matched_genres.length) {
-                        reason += ` Genre: ${data.matched_genres.slice(0, 2).join(', ')}.`;
+                        reason += ` Genres: ${data.matched_genres.slice(0, 2).join(', ')}.`;
                     }
                     explanation.textContent = reason;
                 }
@@ -692,7 +692,7 @@ const tg = window.Telegram?.WebApp || {
                 }
             } catch (error) {
                 if (requestId !== moodPickRequestId) return;
-                result.innerHTML = `<div class="surprise-empty"><i class="fas fa-cloud-arrow-down" aria-hidden="true"></i><strong>Pick load nahi hui</strong><span>${escapeHtml(error.message || 'Connection check karke dobara try karo.')}</span><button type="button" onclick="surpriseMe()">Dobara try karo</button></div>`;
+                result.innerHTML = `<div class="surprise-empty"><i class="fas fa-cloud-arrow-down" aria-hidden="true"></i><strong>Your pick could not load</strong><span>${escapeHtml(error.message || 'Check your connection and try again.')}</span><button type="button" onclick="surpriseMe()">Try again</button></div>`;
             } finally {
                 if (requestId === moodPickRequestId) {
                     if (moodPickController === controller) moodPickController = null;
@@ -718,8 +718,8 @@ const tg = window.Telegram?.WebApp || {
             const buttons = document.querySelectorAll('.mood-pick-feedback button');
             buttons.forEach(button => { button.disabled = true; });
             const liked = document.querySelector('.mood-pick-liked');
-            if (liked) liked.innerHTML = '<i class="fas fa-check" aria-hidden="true"></i> Samajh gaya ✨';
-            showToast('Agli pick mein is vibe ko yaad rakhunga');
+            if (liked) liked.innerHTML = '<i class="fas fa-check" aria-hidden="true"></i> Got it ✨';
+            showToast('I’ll use this for your next pick');
         };
 
         // Utility
@@ -1848,19 +1848,19 @@ const tg = window.Telegram?.WebApp || {
             const controller = new AbortController();
             dailyPickController = controller;
             row.style.display = '';
-            scroll.innerHTML = '<div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Aaj ki picks aa rahi hain…</span></div>';
+            scroll.innerHTML = '<div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Loading today’s picks…</span></div>';
             try {
                 const response = await fetchWithTimeout('/api/home/daily-picks', {
                     headers: telegramAuthHeaders(), signal: controller.signal
                 });
                 const data = await response.json();
                 if (requestId !== dailyPickRequestId) return;
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Aaj ki picks abhi load nahi hui.');
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Today’s picks could not load.');
                 const picks = (Array.isArray(data.movies) ? data.movies : [])
                     .filter(movie => movie && movie.is_available === true && !movie.is_unreleased)
                     .slice(0, 3);
                 if (!picks.length) {
-                    scroll.innerHTML = '<div class="daily-picks-empty" role="status"><strong>Aaj koi nayi pick nahi mili</strong><span>Thodi der baad dobara dekho.</span><button type="button" onclick="retryDailyPicks()">Dobara try karo</button></div>';
+                    scroll.innerHTML = '<div class="daily-picks-empty" role="status"><strong>No picks available today</strong><span>Check back in a little while.</span><button type="button" onclick="retryDailyPicks()">Try again</button></div>';
                 } else {
                     picks.forEach(movie => {
                         if (!allMovies.some(item => String(item.id) === String(movie.id))) allMovies.push(movie);
@@ -1875,12 +1875,12 @@ const tg = window.Telegram?.WebApp || {
                 }
                 if (dateLabel) {
                     const label = data.date_label || data.date || 'Fresh today';
-                    dateLabel.textContent = data.personalized ? 'Tumhari pasand' : `Aaj · ${label}`;
+                    dateLabel.textContent = data.personalized ? 'Picked for you' : `Today · ${label}`;
                 }
             } catch (error) {
                 if (requestId !== dailyPickRequestId) return;
-                scroll.innerHTML = `<div class="daily-picks-empty" role="status"><strong>Aaj ki picks load nahi hui</strong><span>${escapeHtml(error.message || 'Connection check karke try karo.')}</span><button type="button" onclick="retryDailyPicks()">Dobara try karo</button></div>`;
-                if (dateLabel) dateLabel.textContent = 'Dobara try karo';
+                scroll.innerHTML = `<div class="daily-picks-empty" role="status"><strong>Today’s picks could not load</strong><span>${escapeHtml(error.message || 'Check your connection and try again.')}</span><button type="button" onclick="retryDailyPicks()">Try again</button></div>`;
+                if (dateLabel) dateLabel.textContent = 'Try again';
             } finally {
                 if (requestId === dailyPickRequestId && dailyPickController === controller) dailyPickController = null;
             }
@@ -1993,7 +1993,6 @@ const tg = window.Telegram?.WebApp || {
                     });
             }
 
-            loadDailyPicks();
             loadWatchStreak();
 
             const catalogueRows = [
@@ -3376,6 +3375,8 @@ document.addEventListener('keydown', (e) => {
         syncTelegramBackButton();
         setupMotionEffects();
         startInitialHomeLoading();
+        // Load this independent section without waiting for the full catalogue API.
+        loadDailyPicks();
         loadMovies();
         
         // 🪄 NAYA JUGAD: URL se query nikal kar auto-search karna

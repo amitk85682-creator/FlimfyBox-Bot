@@ -1127,8 +1127,7 @@ def register_webapp_routes(
                        m.rating, m.genre, m.category, m.language, m.content_type,
                        {has_file_sql} AS is_available
                 FROM movies m
-                WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
-                  AND NOT COALESCE(m.is_unreleased, FALSE)
+                WHERE NOT COALESCE(m.is_unreleased, FALSE)
                   AND {has_file_sql}
                 ORDER BY m.id DESC
                 LIMIT 1200
@@ -2033,8 +2032,7 @@ def register_webapp_routes(
                            m.category, m.language, m.content_type,
                            {has_file_sql} AS is_available
                     FROM movies m
-                    WHERE m.poster_url IS NOT NULL AND m.poster_url <> ''
-                      AND NOT COALESCE(m.is_unreleased, FALSE)
+                    WHERE NOT COALESCE(m.is_unreleased, FALSE)
                       {where_availability}{where_type}
                     ORDER BY m.id DESC
                     LIMIT 1200
@@ -2075,7 +2073,7 @@ def register_webapp_routes(
                 })
 
             if not candidates:
-                message = 'Is language, Browse type aur availability mein koi title nahi mila. Filter badal kar dekho.'
+                message = 'No titles match these filters. Try changing the language, Browse type, or availability.'
                 cur.close()
                 return jsonify({'status': 'success', 'type': browse_type, 'movie': None, 'message': message})
 
@@ -2090,7 +2088,8 @@ def register_webapp_routes(
             row = selected['row']
             movie = {
                 'id': row[0], 'title': row[1], 'year': row[2] or '',
-                'image': row[3], 'rating': row[4] or 'N/A', 'genre': row[5] or '',
+                'image': row[3] or '/static/miniapp/poster-placeholder.svg',
+                'rating': row[4] or 'N/A', 'genre': row[5] or '',
                 'category': row[6] or 'Movies', 'language': row[7] or '',
                 'content_type': row[8] or 'Movie', 'source': 'local',
                 'is_available': bool(row[9]),
