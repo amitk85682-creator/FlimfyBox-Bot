@@ -8,7 +8,7 @@ import psycopg2
 from datetime import datetime, timedelta, timezone
 import requests
 import time
-from html import unescape as html_unescape
+from html import escape as html_escape, unescape as html_unescape
 from urllib.parse import urlparse
 from urllib.parse import quote
 from urllib.parse import parse_qsl
@@ -1231,7 +1231,6 @@ def register_webapp_routes(
                             (user_id, movie_id, event_type, source, metadata)
                         VALUES (%s, NULL, 'daily_checkin', 'miniapp', %s::jsonb)
                     """, (user['id'], json.dumps({'date': today_text})))
-                conn.commit()
 
             cur.execute("""
                 SELECT DISTINCT metadata->>'date'
@@ -1252,6 +1251,46 @@ def register_webapp_routes(
             while streak_day in checkin_dates:
                 current_streak += 1
                 streak_day -= timedelta(days=1)
+
+            ticket_earned = False
+            tickets_earned_count = 0
+            if request.method == 'POST' and current_streak >= 7:
+                run_start = (today - timedelta(days=current_streak - 1)).isoformat()
+                cur.execute("""
+                    SELECT metadata->>'streak_days'
+                    FROM user_recommendation_events
+                    WHERE user_id = %s AND event_type = 'priority_ticket_earned'
+                      AND metadata->>'run_start' = %s
+                """, (user['id'], run_start))
+                already_awarded = {row[0] for row in cur.fetchall() if row[0]}
+                for milestone_day in range(7, current_streak + 1, 7):
+                    if str(milestone_day) in already_awarded:
+                        continue
+                    reward_day = (today - timedelta(days=current_streak - milestone_day)).isoformat()
+                    cur.execute("""
+                        INSERT INTO user_recommendation_events
+                            (user_id, movie_id, event_type, source, metadata)
+                        VALUES (%s, NULL, 'priority_ticket_earned', 'streak', %s::jsonb)
+                    """, (user['id'], json.dumps({
+                        'date': reward_day,
+                        'run_start': run_start,
+                        'streak_days': milestone_day,
+                    })))
+                    ticket_earned = True
+                    tickets_earned_count += 1
+            cur.execute("""
+                SELECT COALESCE(SUM(CASE
+                    WHEN event_type = 'priority_ticket_earned' THEN 1
+                    WHEN event_type = 'priority_ticket_used' THEN -1
+                    ELSE 0
+                END), 0)
+                FROM user_recommendation_events
+                WHERE user_id = %s
+                  AND event_type IN ('priority_ticket_earned', 'priority_ticket_used')
+            """, (user['id'],))
+            priority_tickets = max(0, int((cur.fetchone() or [0])[0] or 0))
+            if request.method == 'POST':
+                conn.commit()
 
             def longest_streak(days):
                 best = run_length = 0
@@ -1310,6 +1349,9 @@ def register_webapp_routes(
                 'total_checkins': len(checkin_dates),
                 'checked_in_today': today in checkin_dates,
                 'new_checkin': new_checkin,
+                'ticket_earned': ticket_earned,
+                'tickets_earned_count': tickets_earned_count,
+                'priority_tickets': priority_tickets,
                 'next_milestone': next_milestone,
                 'badges': earned_badges,
                 'week': week,
@@ -2870,10 +2912,78 @@ def register_webapp_routes(
             user_id = 0
             username = ''
             first_name = 'WebApp User'
-        
-        request_id = store_user_request(
-            user_id, username, first_name, title, None, None
-        )
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Could not save request'}), 500
+        priority_request = False
+        priority_ticket_used = False
+        priority_tickets = 0
+        try:
+            cur = conn.cursor()
+            use_ticket = False
+            if authenticated_user:
+                # This row lock serializes spending against check-ins and other
+                # requests so one priority ticket cannot be used twice.
+                upsert_miniapp_user(cur, authenticated_user)
+                cur.execute("""
+                    SELECT COALESCE(SUM(CASE
+                        WHEN event_type = 'priority_ticket_earned' THEN 1
+                        WHEN event_type = 'priority_ticket_used' THEN -1
+                        ELSE 0
+                    END), 0)
+                    FROM user_recommendation_events
+                    WHERE user_id = %s
+                      AND event_type IN ('priority_ticket_earned', 'priority_ticket_used')
+                """, (user_id,))
+                priority_tickets = max(0, int((cur.fetchone() or [0])[0] or 0))
+                use_ticket = priority_tickets > 0
+
+            cur.execute("""
+                INSERT INTO user_requests
+                    (user_id, username, first_name, movie_title, group_id,
+                     message_id, priority)
+                VALUES (%s, %s, %s, %s, NULL, NULL, %s)
+                ON CONFLICT ON CONSTRAINT user_requests_unique_constraint DO NOTHING
+                RETURNING id
+            """, (user_id, username, first_name, title, use_ticket))
+            inserted = cur.fetchone()
+            if inserted:
+                request_id = inserted[0]
+                priority_request = use_ticket
+                if use_ticket:
+                    cur.execute("""
+                        INSERT INTO user_recommendation_events
+                            (user_id, movie_id, event_type, source, metadata)
+                        VALUES (%s, NULL, 'priority_ticket_used', 'movie_request', %s::jsonb)
+                    """, (user_id, json.dumps({
+                        'request_id': request_id, 'title': title,
+                    })))
+                    priority_ticket_used = True
+                    priority_tickets -= 1
+            else:
+                # Repeating an existing title keeps its status but never spends
+                # another reward ticket.
+                cur.execute("""
+                    UPDATE user_requests
+                    SET requested_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s AND movie_title = %s
+                    RETURNING id, priority
+                """, (user_id, title))
+                existing_request = cur.fetchone()
+                if not existing_request:
+                    raise RuntimeError('The request could not be confirmed after saving.')
+                request_id = existing_request[0]
+                priority_request = bool(existing_request[1])
+
+            conn.commit()
+            cur.close()
+        except Exception as error:
+            conn.rollback()
+            logger.error('Could not save Mini App request: %s', error)
+            return jsonify({'status': 'error', 'message': 'Could not save request'}), 500
+        finally:
+            close_db_connection(conn)
         
         if request_id:
             # 🔥 FIX: Web App se aayi request ko turant Admin Channel me send karein
@@ -2886,11 +2996,16 @@ def register_webapp_routes(
                     # Beautiful Admin Notification Format
                     msg_text = (
                         f"🎬 <b>New WebApp Request!</b> 🎬\n\n"
-                        f"Movie: <b>{title}</b>\n"
-                        f"User: {first_name} (<code>{user_id}</code>)\n"
+                        f"Movie: <b>{html_escape(title)}</b>\n"
+                        f"User: {html_escape(first_name)} (<code>{user_id}</code>)\n"
                     )
+                    if priority_request:
+                        msg_text += (
+                            "\n⚡ <b>PRIORITY REQUEST</b>\n"
+                            "Boost earned from a FlimfyBox streak.\n"
+                        )
                     if username:
-                        msg_text += f"Username: @{username}\n"
+                        msg_text += f"Username: @{html_escape(username)}\n"
                     msg_text += f"From: 🌐 Web Portal"
     
                     # Inline Buttons for Admin
@@ -2925,7 +3040,15 @@ def register_webapp_routes(
                 'request_id': request_id,
                 'guest': user_id <= 0,
                 'admin_notified': admin_notified,
+                'priority_request': priority_request,
+                'priority_ticket_used': priority_ticket_used,
+                'priority_tickets': priority_tickets,
             }
+            if priority_ticket_used:
+                response['message'] = (
+                    'Priority request sent.' if admin_notified
+                    else 'Priority request saved, but team notification could not be sent.'
+                )
             if user_id <= 0:
                 response['message'] = (
                     'Request saved. Open this page inside Telegram to receive a DM.'

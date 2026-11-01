@@ -91,6 +91,7 @@ const tg = window.Telegram?.WebApp || {
         let watchStreakRequestId = 0;
         let watchStreakController = null;
         let watchStreakCheckinPending = false;
+        let priorityRequestTickets = 0;
         let catalogueAvailability = 'available';
         let catalogueRequestId = 0;
         let catalogueController = null;
@@ -1926,6 +1927,25 @@ const tg = window.Telegram?.WebApp || {
             loadDailyPicks();
         };
 
+        function updatePriorityTicketDisplay(value) {
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed)) return;
+            priorityRequestTickets = Math.max(0, Math.floor(parsed));
+            const reward = document.getElementById('watchStreakReward');
+            const count = document.getElementById('watchStreakTickets');
+            const hint = document.getElementById('watchStreakRewardHint');
+            if (reward) reward.dataset.ready = priorityRequestTickets > 0 ? 'true' : 'false';
+            if (count) {
+                count.textContent = String(priorityRequestTickets);
+                count.setAttribute('aria-label', `${priorityRequestTickets} priority request tickets ready`);
+            }
+            if (hint) {
+                hint.textContent = priorityRequestTickets > 0
+                    ? 'Your next new Mini App request gets a PRIORITY tag.'
+                    : 'Earn 1 every 7 days in a row. Tickets stay until used.';
+            }
+        }
+
         function renderWatchStreak(data, celebrate = false) {
             const card = document.getElementById('watchStreakCard');
             if (!card) return;
@@ -1953,12 +1973,13 @@ const tg = window.Telegram?.WebApp || {
                     ? `You’re on a ${streak}-day streak. Come back tomorrow to keep it going.`
                     : (streak
                         ? `Check in today to keep your ${streak}-day streak going.`
-                        : 'Check in once a day to build your streak and earn badges.');
+                        : 'Check in once a day to build your streak and earn request boosts.');
             }
             if (count) count.textContent = String(streak);
             if (bestLabel) {
                 bestLabel.textContent = `Best ${best} · ${Math.max(0, Number(data.total_checkins) || 0)} visits`;
             }
+            updatePriorityTicketDisplay(data.priority_tickets);
             if (button) {
                 button.disabled = checkedIn || watchStreakCheckinPending;
                 button.dataset.checked = checkedIn ? 'true' : 'false';
@@ -2004,9 +2025,15 @@ const tg = window.Telegram?.WebApp || {
                     card.classList.remove('is-celebrating');
                     void card.offsetWidth;
                     card.classList.add('is-celebrating');
-                    showToast(`Badge unlocked: ${unlocked.name}!`);
+                    showToast(data.ticket_earned
+                        ? `${Math.max(1, Number(data.tickets_earned_count) || 1)} priority request ticket${Number(data.tickets_earned_count) === 1 ? '' : 's'} earned!`
+                        : `Badge unlocked: ${unlocked.name}!`);
                     try { tg.HapticFeedback.notificationOccurred('success'); } catch (_error) {}
                     setTimeout(() => card.classList.remove('is-celebrating'), 650);
+                } else if (data.ticket_earned) {
+                    const earnedCount = Math.max(1, Number(data.tickets_earned_count) || 1);
+                    showToast(`${earnedCount} priority request ticket${earnedCount === 1 ? '' : 's'} earned!`);
+                    try { tg.HapticFeedback.notificationOccurred('success'); } catch (_error) {}
                 } else if (data.new_checkin) {
                     showToast('Daily check-in saved. See you tomorrow!');
                     try { tg.HapticFeedback.notificationOccurred('success'); } catch (_error) {}
@@ -3482,9 +3509,18 @@ document.addEventListener('keydown', (e) => {
             const d = await response.json();
                 if (response.ok && d.status === 'success') {
                     tg.HapticFeedback.notificationOccurred('success');
-                    showToast(d.guest
-                        ? '✅ Request saved. Open in Telegram for a DM.'
-                        : '✅ Request sent!');
+                    updatePriorityTicketDisplay(d.priority_tickets);
+                    showToast(d.priority_ticket_used
+                        ? (d.admin_notified === false
+                            ? 'Priority request saved, but our team alert failed.'
+                            : '⚡ Priority request sent. Streak ticket used.')
+                        : (d.guest
+                            ? '✅ Request saved. Open in Telegram for a DM.'
+                            : (d.priority_request
+                                ? '✅ Your request is marked priority.'
+                                : (d.admin_notified === false
+                                    ? 'Request saved, but our team alert failed.'
+                                    : '✅ Request sent!'))));
                 }
                 else throw new Error(d.message || 'Could not send the request. Please try again.');
             } catch (error) {

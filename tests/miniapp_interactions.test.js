@@ -6,6 +6,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../static/miniapp/app.js'), 'utf8');
 const template = fs.readFileSync(path.join(__dirname, '../templates/mini_app.html'), 'utf8');
 const webRoutes = fs.readFileSync(path.join(__dirname, '../webapp_routes.py'), 'utf8');
+const dbMigrations = fs.readFileSync(path.join(__dirname, '../db_migrations.py'), 'utf8');
 const previewHarness = fs.readFileSync(path.join(__dirname, 'miniapp_preview.py'), 'utf8');
 const samplePreview = require('./miniapp_preview_node.js');
 
@@ -306,7 +307,7 @@ test('local preview fixtures return a matching mood pick and a stable available 
 });
 
 test('Watch Streak is read-only on load and checks in only after an authenticated tap', async () => {
-    const loader = section('function renderWatchStreak(data, celebrate = false)', 'function renderHome(movies)');
+    const loader = section('function updatePriorityTicketDisplay(value)', 'function renderHome(movies)');
     const elements = {
         watchStreakCard: { hidden: true, classList: { add() {}, remove() {} }, offsetWidth: 0 },
         watchStreakHeading: { textContent: '' },
@@ -314,6 +315,9 @@ test('Watch Streak is read-only on load and checks in only after an authenticate
         watchStreakCount: { textContent: '' },
         watchStreakBest: { textContent: '' },
         watchStreakCheckin: { disabled: false, dataset: {}, innerHTML: '' },
+        watchStreakReward: { dataset: {} },
+        watchStreakTickets: { textContent: '', setAttribute() {} },
+        watchStreakRewardHint: { textContent: '' },
         watchStreakProgressLabel: { textContent: '' },
         watchStreakProgressBar: { style: {}, parentElement: { setAttribute() {} } },
         watchStreakBadges: { innerHTML: '' },
@@ -325,7 +329,7 @@ test('Watch Streak is read-only on load and checks in only after an authenticate
     }));
     const calls = [];
     const toasts = [];
-    const api = runtime(`let watchStreakLoaded = false; let watchStreakRequestId = 0; let watchStreakController = null; let watchStreakCheckinPending = false; ${loader}`, {
+    const api = runtime(`let watchStreakLoaded = false; let watchStreakRequestId = 0; let watchStreakController = null; let watchStreakCheckinPending = false; let priorityRequestTickets = 0; ${loader}`, {
         AbortController,
         setTimeout: () => 1,
         clearTimeout() {},
@@ -338,16 +342,19 @@ test('Watch Streak is read-only on load and checks in only after an authenticate
             const checkedIn = options.method === 'POST';
             return { ok: true, status: 200, json: async () => ({
                 status: 'success',
-                current_streak: checkedIn ? 3 : 2,
-                best_streak: checkedIn ? 3 : 2, total_checkins: 12,
+                current_streak: checkedIn ? 7 : 6,
+                best_streak: checkedIn ? 7 : 6, total_checkins: 12,
                 checked_in_today: checkedIn,
                 new_checkin: checkedIn,
+                ticket_earned: checkedIn,
+                tickets_earned_count: checkedIn ? 1 : 0,
+                priority_tickets: checkedIn ? 1 : 0,
                 next_milestone: checkedIn
-                    ? { days: 7, name: 'Weekly Regular' }
-                    : { days: 3, name: 'Fresh Start' },
+                    ? { days: 14, name: 'Film Fan' }
+                    : { days: 7, name: 'Weekly Regular' },
                 badges: [
-                    { days: 3, name: 'Fresh Start', unlocked: checkedIn, newly_unlocked: checkedIn },
-                    { days: 7, name: 'Weekly Regular', unlocked: false, newly_unlocked: false },
+                    { days: 3, name: 'Fresh Start', unlocked: true, newly_unlocked: false },
+                    { days: 7, name: 'Weekly Regular', unlocked: checkedIn, newly_unlocked: checkedIn },
                 ],
                 week
             }) };
@@ -363,10 +370,10 @@ test('Watch Streak is read-only on load and checks in only after an authenticate
     assert.equal(calls[0].options.headers['X-Telegram-Init-Data'], 'signed-streak-fixture');
     assert.equal(calls[0].options.body, undefined);
     assert.equal(elements.watchStreakCard.hidden, false);
-    assert.equal(elements.watchStreakCount.textContent, '2');
-    assert.match(elements.watchStreakMessage.textContent, /Check in today to keep your 2-day streak going/);
+    assert.equal(elements.watchStreakCount.textContent, '6');
+    assert.match(elements.watchStreakMessage.textContent, /Check in today to keep your 6-day streak going/);
     assert.equal(elements.watchStreakCheckin.disabled, false);
-    assert.match(elements.watchStreakProgressLabel.textContent, /1 check-in to Fresh Start/);
+    assert.match(elements.watchStreakProgressLabel.textContent, /1 check-in to Weekly Regular/);
     assert.match(elements.watchStreakWeek.innerHTML, /Su/);
     assert.match(elements.watchStreakWeek.innerHTML, /is-today/);
 
@@ -377,8 +384,10 @@ test('Watch Streak is read-only on load and checks in only after an authenticate
     assert.deepEqual(JSON.parse(calls[1].options.body), {});
     assert.equal(elements.watchStreakCheckin.disabled, true);
     assert.match(elements.watchStreakCheckin.innerHTML, /Checked in/);
-    assert.equal(elements.watchStreakCount.textContent, '3');
-    assert.match(toasts.at(-1), /Badge unlocked: Fresh Start/);
+    assert.equal(elements.watchStreakCount.textContent, '7');
+    assert.equal(elements.watchStreakTickets.textContent, '1');
+    assert.match(elements.watchStreakRewardHint.textContent, /PRIORITY tag/);
+    assert.match(toasts.at(-1), /priority request ticket/);
 });
 
 test('Watch Streak check-ins are authenticated, daily-deduplicated, and backed by stored event dates', () => {
@@ -397,15 +406,34 @@ test('Watch Streak check-ins are authenticated, daily-deduplicated, and backed b
     assert.match(route, /best_streak/);
     assert.match(route, /next_milestone/);
     assert.match(route, /newly_unlocked/);
+    assert.match(route, /priority_ticket_earned/);
+    assert.match(route, /priority_tickets/);
+});
+
+test('seven-day streak rewards become persistent priority movie requests', () => {
+    const requestStart = webRoutes.indexOf("@flask_app.route('/api/request'");
+    const requestEnd = webRoutes.indexOf("@flask_app.route('/api/my-list'", requestStart + 1);
+    assert.ok(requestStart >= 0 && requestEnd > requestStart, 'Mini App request endpoint exists');
+    const requestRoute = webRoutes.slice(requestStart, requestEnd);
+    assert.match(requestRoute, /priority_ticket_earned/);
+    assert.match(requestRoute, /priority_ticket_used/);
+    assert.match(requestRoute, /PRIORITY REQUEST/);
+    assert.match(requestRoute, /priority_ticket_used/);
+    assert.match(requestRoute, /priority_request/);
+    assert.match(dbMigrations, /ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS priority BOOLEAN/);
+    assert.match(dbMigrations, /\(19, _migration_19\)/);
+    assert.match(template, /id="watchStreakTickets"/);
 });
 
 test('both request actions authenticate, deduplicate concurrent clicks, and allow retry', async () => {
     let finish;
     const calls = [];
+    const toasts = [];
     const api = runtime(
         section('const pendingRequests = new Set();', '// 🛡️ NAYA:'), {
         telegramAuthHeaders: () => ({ 'X-Telegram-Init-Data': 'signed-fixture' }),
-        tg: { HapticFeedback: { notificationOccurred() {} } }, showToast() {},
+        tg: { HapticFeedback: { notificationOccurred() {} } }, showToast: message => toasts.push(message),
+        updatePriorityTicketDisplay() {},
         fetchWithTimeout: (url, options) => {
             calls.push({ url, options });
             return new Promise(resolve => { finish = resolve; });
@@ -420,8 +448,11 @@ test('both request actions authenticate, deduplicate concurrent clicks, and allo
     await pending;
     const retry = api.requestSilent('A title');
     assert.equal(calls.length, 2);
-    finish({ ok: true, json: async () => ({ status: 'success' }) });
+    finish({ ok: true, json: async () => ({
+        status: 'success', priority_ticket_used: true, priority_request: true, priority_tickets: 0
+    }) });
     await retry;
+    assert.match(toasts.at(-1), /Priority request sent/);
 });
 
 test('a failed next catalogue page retains loaded cards and retries the same page', async () => {

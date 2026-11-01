@@ -123,7 +123,8 @@ def _migration_1(conn):
                 requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 notified BOOLEAN DEFAULT FALSE,
                 group_id BIGINT,
-                message_id BIGINT
+                message_id BIGINT,
+                priority BOOLEAN NOT NULL DEFAULT FALSE
             )
         """)
         cur.execute("""
@@ -203,6 +204,7 @@ def _migration_2(conn):
         "ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS languages TEXT DEFAULT ''",
         "ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS extra_info TEXT DEFAULT ''",
         "ALTER TABLE movie_files ADD COLUMN IF NOT EXISTS file_unique_id TEXT",
+        "ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS priority BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS caption TEXT",
         "ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_file_id TEXT",
         "ALTER TABLE channel_posts ADD COLUMN IF NOT EXISTS media_type TEXT DEFAULT 'photo'",
@@ -246,6 +248,7 @@ def _migration_3(conn):
         "CREATE INDEX IF NOT EXISTS idx_movies_year ON movies (year)",
         "CREATE INDEX IF NOT EXISTS idx_user_requests_movie_title ON user_requests (movie_title)",
         "CREATE INDEX IF NOT EXISTS idx_user_requests_user_id ON user_requests (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_user_requests_priority ON user_requests (priority, requested_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias ON movie_aliases (alias)",
         "CREATE INDEX IF NOT EXISTS idx_movie_aliases_alias_norm_trgm ON movie_aliases USING gin (regexp_replace(LOWER(alias), '[^a-z0-9]', '', 'g') gin_trgm_ops)",
         "CREATE INDEX IF NOT EXISTS idx_movie_files_movie_id ON movie_files (movie_id)",
@@ -640,6 +643,19 @@ def _migration_18(conn):
         """)
 
 
+def _migration_19(conn):
+    """Persist priority status for requests boosted by Watch Streak rewards."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE user_requests
+            ADD COLUMN IF NOT EXISTS priority BOOLEAN NOT NULL DEFAULT FALSE
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_user_requests_priority
+            ON user_requests (priority, requested_at DESC)
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -659,6 +675,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (16, _migration_16),
     (17, _migration_17),
     (18, _migration_18),
+    (19, _migration_19),
 )
 
 

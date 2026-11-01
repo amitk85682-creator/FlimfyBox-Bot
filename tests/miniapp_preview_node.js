@@ -106,7 +106,7 @@ function dailyCheckinFor(day, performCheckin = false) {
     return {
         status: 'success', current_streak: checkedInToday ? 4 : 3,
         best_streak: 6, total_checkins: 12, checked_in_today: checkedInToday,
-        new_checkin: newCheckin,
+        new_checkin: newCheckin, ticket_earned: false, tickets_earned_count: 0, priority_tickets: 0,
         next_milestone: { days: 7, name: 'Weekly Regular' },
         badges: [
             { days: 3, name: 'Fresh Start', unlocked: true, newly_unlocked: false },
