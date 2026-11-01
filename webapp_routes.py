@@ -1199,7 +1199,7 @@ def register_webapp_routes(
         finally:
             close_db_connection(conn)
 
-    @flask_app.route('/api/home/daily-checkin', methods=['POST'])
+    @flask_app.route('/api/home/daily-checkin', methods=['GET', 'POST'])
     def post_home_daily_checkin():
         user, error = require_telegram_user()
         if error:
@@ -1212,50 +1212,107 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            # This upsert locks the user's row, so simultaneous Mini App opens
-            # cannot create multiple check-ins for the same day.
-            upsert_miniapp_user(cur, user)
-            cur.execute("""
-                SELECT 1
-                FROM user_recommendation_events
-                WHERE user_id = %s AND event_type = 'daily_checkin'
-                  AND metadata->>'date' = %s
-                LIMIT 1
-            """, (user['id'], today_text))
-            new_checkin = cur.fetchone() is None
-            if new_checkin:
+            new_checkin = False
+            if request.method == 'POST':
+                # Lock the user's row so simultaneous check-ins remain
+                # idempotent: one user can earn only one visit per India day.
+                upsert_miniapp_user(cur, user)
                 cur.execute("""
-                    INSERT INTO user_recommendation_events
-                        (user_id, movie_id, event_type, source, metadata)
-                    VALUES (%s, NULL, 'daily_checkin', 'miniapp', %s::jsonb)
-                """, (user['id'], json.dumps({'date': today_text})))
-            conn.commit()
-            cutoff = (today - timedelta(days=365)).isoformat()
+                    SELECT 1
+                    FROM user_recommendation_events
+                    WHERE user_id = %s AND event_type = 'daily_checkin'
+                      AND metadata->>'date' = %s
+                    LIMIT 1
+                """, (user['id'], today_text))
+                new_checkin = cur.fetchone() is None
+                if new_checkin:
+                    cur.execute("""
+                        INSERT INTO user_recommendation_events
+                            (user_id, movie_id, event_type, source, metadata)
+                        VALUES (%s, NULL, 'daily_checkin', 'miniapp', %s::jsonb)
+                    """, (user['id'], json.dumps({'date': today_text})))
+                conn.commit()
+
             cur.execute("""
                 SELECT DISTINCT metadata->>'date'
                 FROM user_recommendation_events
                 WHERE user_id = %s AND event_type = 'daily_checkin'
-                  AND metadata->>'date' >= %s
-            """, (user['id'], cutoff))
-            checkin_dates = {row[0] for row in cur.fetchall() if row[0]}
+                  AND metadata->>'date' <= %s
+            """, (user['id'], today_text))
+            checkin_dates = set()
+            for row in cur.fetchall():
+                try:
+                    checkin_dates.add(datetime.strptime(row[0], '%Y-%m-%d').date())
+                except (TypeError, ValueError):
+                    continue
+
+            # Before today's explicit tap, an unbroken streak ends yesterday.
+            streak_day = today if today in checkin_dates else today - timedelta(days=1)
             current_streak = 0
-            for days_ago in range(366):
-                day_text = (today - timedelta(days=days_ago)).isoformat()
-                if day_text not in checkin_dates:
-                    break
+            while streak_day in checkin_dates:
                 current_streak += 1
+                streak_day -= timedelta(days=1)
+
+            def longest_streak(days):
+                best = run_length = 0
+                previous_day = None
+                for checkin_day in sorted(days):
+                    run_length = (
+                        run_length + 1
+                        if previous_day and checkin_day == previous_day + timedelta(days=1)
+                        else 1
+                    )
+                    best = max(best, run_length)
+                    previous_day = checkin_day
+                return best
+
+            best_streak = longest_streak(checkin_dates)
+            best_before_today = longest_streak(checkin_dates - {today})
+
+            milestones = [
+                {'days': 3, 'name': 'Fresh Start'},
+                {'days': 7, 'name': 'Weekly Regular'},
+                {'days': 14, 'name': 'Film Fan'},
+                {'days': 30, 'name': 'Flimfy Legend'},
+                {'days': 60, 'name': 'Super Fan'},
+                {'days': 100, 'name': 'Century Club'},
+            ]
+            next_milestone = next(
+                (item for item in milestones if item['days'] > current_streak),
+                None,
+            )
+            if next_milestone is None:
+                next_days = ((current_streak // 100) + 1) * 100
+                next_milestone = {'days': next_days, 'name': f'{next_days}-Day Legend'}
+            earned_badges = [
+                {
+                    **item,
+                    'unlocked': best_streak >= item['days'],
+                    'newly_unlocked': (
+                        new_checkin
+                        and best_before_today < item['days'] <= best_streak
+                    ),
+                }
+                for item in milestones
+            ]
             week = []
             for days_ago in range(6, -1, -1):
                 day = today - timedelta(days=days_ago)
                 day_text = day.isoformat()
                 week.append({
                     'date': day_text, 'label': day.strftime('%a')[:2],
-                    'done': day_text in checkin_dates, 'is_today': day_text == today_text,
+                    'done': day in checkin_dates, 'is_today': day == today,
                 })
             cur.close()
             return jsonify({
                 'status': 'success', 'current_streak': current_streak,
-                'checked_in_today': True, 'new_checkin': new_checkin, 'week': week,
+                'best_streak': best_streak,
+                'total_checkins': len(checkin_dates),
+                'checked_in_today': today in checkin_dates,
+                'new_checkin': new_checkin,
+                'next_milestone': next_milestone,
+                'badges': earned_badges,
+                'week': week,
             })
         except Exception as error:
             conn.rollback()

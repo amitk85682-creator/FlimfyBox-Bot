@@ -90,6 +90,7 @@ const tg = window.Telegram?.WebApp || {
         let watchStreakLoaded = false;
         let watchStreakRequestId = 0;
         let watchStreakController = null;
+        let watchStreakCheckinPending = false;
         let catalogueAvailability = 'available';
         let catalogueRequestId = 0;
         let catalogueController = null;
@@ -1925,9 +1926,132 @@ const tg = window.Telegram?.WebApp || {
             loadDailyPicks();
         };
 
+        function renderWatchStreak(data, celebrate = false) {
+            const card = document.getElementById('watchStreakCard');
+            if (!card) return;
+            const streak = Math.max(0, Number(data.current_streak) || 0);
+            const best = Math.max(0, Number(data.best_streak) || 0);
+            const checkedIn = data.checked_in_today === true;
+            const heading = document.getElementById('watchStreakHeading');
+            const message = document.getElementById('watchStreakMessage');
+            const count = document.getElementById('watchStreakCount');
+            const bestLabel = document.getElementById('watchStreakBest');
+            const button = document.getElementById('watchStreakCheckin');
+            const progressLabel = document.getElementById('watchStreakProgressLabel');
+            const progressBar = document.getElementById('watchStreakProgressBar');
+            const progressTrack = progressBar?.parentElement;
+            const badges = document.getElementById('watchStreakBadges');
+            const week = document.getElementById('watchStreakWeek');
+
+            if (heading) {
+                heading.textContent = checkedIn
+                    ? 'You’re checked in today'
+                    : (streak ? 'Keep your streak alive' : 'Start your streak today');
+            }
+            if (message) {
+                message.textContent = checkedIn
+                    ? `You’re on a ${streak}-day streak. Come back tomorrow to keep it going.`
+                    : (streak
+                        ? `Check in today to keep your ${streak}-day streak going.`
+                        : 'Check in once a day to build your streak and earn badges.');
+            }
+            if (count) count.textContent = String(streak);
+            if (bestLabel) {
+                bestLabel.textContent = `Best ${best} · ${Math.max(0, Number(data.total_checkins) || 0)} visits`;
+            }
+            if (button) {
+                button.disabled = checkedIn || watchStreakCheckinPending;
+                button.dataset.checked = checkedIn ? 'true' : 'false';
+                button.innerHTML = checkedIn
+                    ? '<i class="fas fa-check" aria-hidden="true"></i><span>Checked in</span>'
+                    : (watchStreakCheckinPending
+                        ? '<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>Checking in…</span>'
+                        : '<i class="fas fa-bolt" aria-hidden="true"></i><span>Check in today</span>');
+            }
+
+            const next = data.next_milestone;
+            const nextDays = Math.max(1, Number(next?.days) || 3);
+            const progress = Math.min(100, Math.round(streak / nextDays * 100));
+            const remaining = Math.max(0, nextDays - streak);
+            if (progressLabel) {
+                progressLabel.textContent = next
+                    ? `${remaining} ${remaining === 1 ? 'check-in' : 'check-ins'} to ${next.name}`
+                    : 'All streak badges earned';
+            }
+            if (progressBar) progressBar.style.width = `${progress}%`;
+            if (progressTrack) progressTrack.setAttribute('aria-valuenow', String(progress));
+
+            if (badges) {
+                const earned = Array.isArray(data.badges) ? data.badges : [];
+                badges.innerHTML = earned.map(badge => `
+                    <span class="watch-streak-badge ${badge.unlocked ? 'is-earned' : ''}" role="listitem" aria-label="${escapeHtml(badge.name)}, ${badge.unlocked ? 'earned' : 'locked'}">
+                        <i class="fas ${badge.unlocked ? 'fa-award' : 'fa-lock'}" aria-hidden="true"></i>
+                        <span>${escapeHtml(badge.name)}</span><span>${Number(badge.days) || 0}d</span>
+                    </span>`).join('');
+            }
+            if (week) {
+                week.innerHTML = (Array.isArray(data.week) ? data.week : []).map(day => `
+                    <span class="watch-streak-day ${day.done ? 'is-done' : ''} ${day.is_today ? 'is-today' : ''}" role="listitem" aria-label="${escapeHtml(day.label)}${day.done ? ', checked in' : ', not checked in'}">
+                        <span>${escapeHtml(day.label)}</span><span class="watch-streak-day-dot" aria-hidden="true"></span>
+                    </span>`).join('');
+            }
+            card.hidden = false;
+
+            if (celebrate && data.new_checkin) {
+                const unlocked = (Array.isArray(data.badges) ? data.badges : [])
+                    .find(badge => badge.newly_unlocked);
+                if (unlocked) {
+                    card.classList.remove('is-celebrating');
+                    void card.offsetWidth;
+                    card.classList.add('is-celebrating');
+                    showToast(`Badge unlocked: ${unlocked.name}!`);
+                    try { tg.HapticFeedback.notificationOccurred('success'); } catch (_error) {}
+                    setTimeout(() => card.classList.remove('is-celebrating'), 650);
+                } else if (data.new_checkin) {
+                    showToast('Daily check-in saved. See you tomorrow!');
+                    try { tg.HapticFeedback.notificationOccurred('success'); } catch (_error) {}
+                }
+            }
+        }
+
         async function loadWatchStreak() {
             const card = document.getElementById('watchStreakCard');
-            if (!card || watchStreakLoaded) return;
+            if (!card || watchStreakLoaded || watchStreakCheckinPending) return;
+            if (watchStreakController) watchStreakController.abort();
+            const requestId = ++watchStreakRequestId;
+            const controller = new AbortController();
+            watchStreakController = controller;
+            try {
+                const response = await fetchWithTimeout('/api/home/daily-checkin', {
+                    method: 'GET',
+                    headers: telegramAuthHeaders(),
+                    signal: controller.signal
+                });
+                const data = await response.json();
+                if (requestId !== watchStreakRequestId) return;
+                if (response.status === 401) {
+                    watchStreakLoaded = true;
+                    card.hidden = true;
+                    return;
+                }
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not load your streak.');
+                renderWatchStreak(data);
+                watchStreakLoaded = true;
+            } catch (error) {
+                if (requestId !== watchStreakRequestId) return;
+                console.warn('Daily streak is temporarily unavailable:', error);
+                card.hidden = true;
+            } finally {
+                if (requestId === watchStreakRequestId && watchStreakController === controller) watchStreakController = null;
+            }
+        }
+
+        window.checkInToday = async function() {
+            const button = document.getElementById('watchStreakCheckin');
+            if (!button || button.disabled || watchStreakCheckinPending) return;
+            watchStreakCheckinPending = true;
+            button.disabled = true;
+            button.innerHTML = '<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>Checking in…</span>';
             if (watchStreakController) watchStreakController.abort();
             const requestId = ++watchStreakRequestId;
             const controller = new AbortController();
@@ -1941,38 +2065,21 @@ const tg = window.Telegram?.WebApp || {
                 });
                 const data = await response.json();
                 if (requestId !== watchStreakRequestId) return;
-                if (response.status === 401) {
-                    watchStreakLoaded = true;
-                    card.hidden = true;
-                    return;
-                }
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Streak load nahi hui.');
-                const streak = Math.max(0, Number(data.current_streak) || 0);
-                const heading = document.getElementById('watchStreakHeading');
-                const message = document.getElementById('watchStreakMessage');
-                const count = document.getElementById('watchStreakCount');
-                const week = document.getElementById('watchStreakWeek');
-                if (heading) heading.textContent = streak ? 'Aaj ka din count ho gaya' : 'Aaj se shuru karo';
-                if (message) {
-                    message.textContent = data.new_checkin
-                        ? (streak > 1 ? `Aaj ka check-in ho gaya — ${streak} din lagataar!` : 'Aaj se naya streak shuru — kal phir aana ✨')
-                        : `Aaj ka check-in ho chuka — tumhara streak ${streak} din ka hai.`;
-                }
-                if (count) count.textContent = String(streak);
-                if (week) week.innerHTML = (Array.isArray(data.week) ? data.week : []).map(day => `
-                    <span class="watch-streak-day ${day.done ? 'is-done' : ''} ${day.is_today ? 'is-today' : ''}" role="listitem" aria-label="${escapeHtml(day.label)}${day.done ? ', complete' : ', not complete'}">
-                        <span>${escapeHtml(day.label)}</span><span class="watch-streak-day-dot" aria-hidden="true"></span>
-                    </span>`).join('');
-                card.hidden = false;
+                if (response.status === 401) throw new Error('Open FlimfyBox inside Telegram to check in.');
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not save your check-in. Try again.');
+                renderWatchStreak(data, true);
                 watchStreakLoaded = true;
             } catch (error) {
                 if (requestId !== watchStreakRequestId) return;
-                console.warn('Daily streak is temporarily unavailable:', error);
-                card.hidden = true;
+                console.warn('Daily check-in failed:', error);
+                showToast(error.message || 'Check-in failed. Please try again.');
+                button.disabled = false;
+                button.innerHTML = '<i class="fas fa-bolt" aria-hidden="true"></i><span>Try check-in again</span>';
             } finally {
+                if (requestId === watchStreakRequestId) watchStreakCheckinPending = false;
                 if (requestId === watchStreakRequestId && watchStreakController === controller) watchStreakController = null;
             }
-        }
+        };
 
         function renderHome(movies) {
             if (heroTimer) {

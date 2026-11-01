@@ -295,21 +295,28 @@ test('local preview fixtures return a matching mood pick and a stable available 
     assert.deepEqual(today.map(movie => movie.id), sameDay.map(movie => movie.id));
     assert.ok(today.every(movie => movie.is_available === true && !movie.is_unreleased));
 
-    const checkin = samplePreview.dailyCheckinFor('2099-03-12');
-    assert.equal(checkin.current_streak, 4);
-    assert.equal(checkin.week.length, 7);
-    assert.equal(checkin.week.at(-1).is_today, true);
+    const status = samplePreview.dailyCheckinFor('2099-03-12');
+    assert.equal(status.checked_in_today, false);
+    assert.equal(status.week.length, 7);
+    assert.equal(status.week.at(-1).is_today, true);
+    const checkin = samplePreview.dailyCheckinFor('2099-03-12', true);
+    assert.equal(checkin.checked_in_today, true);
     assert.equal(checkin.new_checkin, true);
-    assert.equal(samplePreview.dailyCheckinFor('2099-03-12').new_checkin, false);
+    assert.equal(samplePreview.dailyCheckinFor('2099-03-12', true).new_checkin, false);
 });
 
-test('Watch Streak posts an authenticated daily check-in and renders the seven-day progress', async () => {
-    const loader = section('async function loadWatchStreak()', 'function renderHome(movies)');
+test('Watch Streak is read-only on load and checks in only after an authenticated tap', async () => {
+    const loader = section('function renderWatchStreak(data, celebrate = false)', 'function renderHome(movies)');
     const elements = {
-        watchStreakCard: { hidden: true },
+        watchStreakCard: { hidden: true, classList: { add() {}, remove() {} }, offsetWidth: 0 },
         watchStreakHeading: { textContent: '' },
         watchStreakMessage: { textContent: '' },
         watchStreakCount: { textContent: '' },
+        watchStreakBest: { textContent: '' },
+        watchStreakCheckin: { disabled: false, dataset: {}, innerHTML: '' },
+        watchStreakProgressLabel: { textContent: '' },
+        watchStreakProgressBar: { style: {}, parentElement: { setAttribute() {} } },
+        watchStreakBadges: { innerHTML: '' },
         watchStreakWeek: { innerHTML: '' }
     };
     const week = Array.from({ length: 7 }, (_unused, index) => ({
@@ -317,14 +324,32 @@ test('Watch Streak posts an authenticated daily check-in and renders the seven-d
         done: index >= 4, is_today: index === 6
     }));
     const calls = [];
-    const api = runtime(`let watchStreakLoaded = false; let watchStreakRequestId = 0; let watchStreakController = null; ${loader}`, {
+    const toasts = [];
+    const api = runtime(`let watchStreakLoaded = false; let watchStreakRequestId = 0; let watchStreakController = null; let watchStreakCheckinPending = false; ${loader}`, {
         AbortController,
+        setTimeout: () => 1,
+        clearTimeout() {},
         document: { getElementById: id => elements[id] || null },
         telegramAuthHeaders: () => ({ 'X-Telegram-Init-Data': 'signed-streak-fixture' }),
+        tg: { HapticFeedback: { notificationOccurred() {} } },
+        showToast: message => toasts.push(message),
         fetchWithTimeout: async (url, options) => {
             calls.push({ url, options });
+            const checkedIn = options.method === 'POST';
             return { ok: true, status: 200, json: async () => ({
-                status: 'success', current_streak: 4, new_checkin: true, week
+                status: 'success',
+                current_streak: checkedIn ? 3 : 2,
+                best_streak: checkedIn ? 3 : 2, total_checkins: 12,
+                checked_in_today: checkedIn,
+                new_checkin: checkedIn,
+                next_milestone: checkedIn
+                    ? { days: 7, name: 'Weekly Regular' }
+                    : { days: 3, name: 'Fresh Start' },
+                badges: [
+                    { days: 3, name: 'Fresh Start', unlocked: checkedIn, newly_unlocked: checkedIn },
+                    { days: 7, name: 'Weekly Regular', unlocked: false, newly_unlocked: false },
+                ],
+                week
             }) };
         },
         escapeHtml: value => String(value), console: { warn() {} }
@@ -334,14 +359,26 @@ test('Watch Streak posts an authenticated daily check-in and renders the seven-d
     await api.loadWatchStreak();
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, '/api/home/daily-checkin');
-    assert.equal(calls[0].options.method, 'POST');
+    assert.equal(calls[0].options.method, 'GET');
     assert.equal(calls[0].options.headers['X-Telegram-Init-Data'], 'signed-streak-fixture');
-    assert.deepEqual(JSON.parse(calls[0].options.body), {});
+    assert.equal(calls[0].options.body, undefined);
     assert.equal(elements.watchStreakCard.hidden, false);
-    assert.equal(elements.watchStreakCount.textContent, '4');
-    assert.match(elements.watchStreakMessage.textContent, /4 din lagataar/);
+    assert.equal(elements.watchStreakCount.textContent, '2');
+    assert.match(elements.watchStreakMessage.textContent, /Check in today to keep your 2-day streak going/);
+    assert.equal(elements.watchStreakCheckin.disabled, false);
+    assert.match(elements.watchStreakProgressLabel.textContent, /1 check-in to Fresh Start/);
     assert.match(elements.watchStreakWeek.innerHTML, /Su/);
     assert.match(elements.watchStreakWeek.innerHTML, /is-today/);
+
+    await api.checkInToday();
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].options.method, 'POST');
+    assert.equal(calls[1].options.headers['X-Telegram-Init-Data'], 'signed-streak-fixture');
+    assert.deepEqual(JSON.parse(calls[1].options.body), {});
+    assert.equal(elements.watchStreakCheckin.disabled, true);
+    assert.match(elements.watchStreakCheckin.innerHTML, /Checked in/);
+    assert.equal(elements.watchStreakCount.textContent, '3');
+    assert.match(toasts.at(-1), /Badge unlocked: Fresh Start/);
 });
 
 test('Watch Streak check-ins are authenticated, daily-deduplicated, and backed by stored event dates', () => {
@@ -352,9 +389,14 @@ test('Watch Streak check-ins are authenticated, daily-deduplicated, and backed b
     assert.match(template, /id="watchStreakCard"[\s\S]*id="watchStreakWeek"/);
     assert.match(route, /require_telegram_user\(\)/);
     assert.match(route, /upsert_miniapp_user\(cur, user\)/);
+    assert.match(route, /methods=\['GET', 'POST'\]/);
+    assert.match(route, /if request\.method == 'POST':/);
     assert.match(route, /metadata->>'date' = %s/);
     assert.match(route, /current_streak/);
     assert.match(route, /checked_in_today/);
+    assert.match(route, /best_streak/);
+    assert.match(route, /next_milestone/);
+    assert.match(route, /newly_unlocked/);
 });
 
 test('both request actions authenticate, deduplicate concurrent clicks, and allow retry', async () => {

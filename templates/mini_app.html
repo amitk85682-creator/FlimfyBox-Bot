@@ -105,13 +105,34 @@
         <section class="watch-streak-card" id="watchStreakCard" hidden aria-labelledby="watchStreakHeading" aria-live="polite">
             <span class="watch-streak-icon" aria-hidden="true"><i class="fas fa-fire-flame-curved"></i></span>
             <div class="watch-streak-main">
-                <span class="watch-streak-kicker">ROZ KA STREAK</span>
-                <h2 id="watchStreakHeading">Aaj ka din count ho gaya</h2>
-                <p id="watchStreakMessage">Roz ek baar aao, apna streak banao.</p>
-                <div class="watch-streak-week" id="watchStreakWeek" role="list" aria-label="Pichhle saat din ka streak"></div>
-            </div>
-            <div class="watch-streak-count" aria-label="Current daily streak">
-                <strong id="watchStreakCount">0</strong><span>din</span>
+                <div class="watch-streak-topline">
+                    <div>
+                        <span class="watch-streak-kicker">YOUR DAILY STREAK</span>
+                        <h2 id="watchStreakHeading">Start your streak today</h2>
+                    </div>
+                    <div class="watch-streak-count" aria-label="Current daily streak">
+                        <strong id="watchStreakCount">0</strong><span>days</span>
+                    </div>
+                </div>
+                <p id="watchStreakMessage">Check in once a day and build your streak.</p>
+                <div class="watch-streak-action-row">
+                    <button class="watch-streak-checkin" id="watchStreakCheckin" type="button" onclick="checkInToday()">
+                        <i class="fas fa-bolt" aria-hidden="true"></i><span>Check in today</span>
+                    </button>
+                    <span class="watch-streak-best" id="watchStreakBest">Best: 0 days</span>
+                </div>
+                <div class="watch-streak-milestone">
+                    <div class="watch-streak-milestone-copy">
+                        <span>Next badge</span>
+                        <strong id="watchStreakProgressLabel">3 days to Fresh Start</strong>
+                    </div>
+                    <div class="watch-streak-progress" role="progressbar" aria-label="Progress to next streak badge" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <span id="watchStreakProgressBar"></span>
+                    </div>
+                </div>
+                <div class="watch-streak-badges" id="watchStreakBadges" role="list" aria-label="Streak badges"></div>
+                <div class="watch-streak-week" id="watchStreakWeek" role="list" aria-label="Last seven days"></div>
+                <span class="watch-streak-note">One check-in per day. You don’t need to watch a movie.</span>
             </div>
         </section>
 

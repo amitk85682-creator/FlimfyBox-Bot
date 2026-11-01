@@ -88,9 +88,10 @@ function dailyPicksFor(day, catalogue = movies) {
         .slice(0, 3);
 }
 
-function dailyCheckinFor(day) {
-    const newCheckin = !previewCheckinDays.has(day);
-    previewCheckinDays.add(day);
+function dailyCheckinFor(day, performCheckin = false) {
+    const newCheckin = performCheckin && !previewCheckinDays.has(day);
+    if (performCheckin) previewCheckinDays.add(day);
+    const checkedInToday = previewCheckinDays.has(day);
     const week = [];
     for (let daysAgo = 6; daysAgo >= 0; daysAgo -= 1) {
         const date = new Date(new Date(`${day}T00:00:00Z`).getTime() - daysAgo * 86400000).toISOString().slice(0, 10);
@@ -98,11 +99,23 @@ function dailyCheckinFor(day) {
         week.push({
             date,
             label: dateForLabel.toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' }).slice(0, 2),
-            done: daysAgo <= 3,
+            done: (daysAgo > 0 && daysAgo <= 3) || (daysAgo === 0 && checkedInToday),
             is_today: daysAgo === 0,
         });
     }
-    return { status: 'success', current_streak: 4, checked_in_today: true, new_checkin: newCheckin, week };
+    return {
+        status: 'success', current_streak: checkedInToday ? 4 : 3,
+        best_streak: 6, total_checkins: 12, checked_in_today: checkedInToday,
+        new_checkin: newCheckin,
+        next_milestone: { days: 7, name: 'Weekly Regular' },
+        badges: [
+            { days: 3, name: 'Fresh Start', unlocked: true, newly_unlocked: false },
+            { days: 7, name: 'Weekly Regular', unlocked: false, newly_unlocked: false },
+            { days: 14, name: 'Film Fan', unlocked: false, newly_unlocked: false },
+            { days: 30, name: 'Flimfy Legend', unlocked: false, newly_unlocked: false },
+        ],
+        week,
+    };
 }
 
 function json(res, statusCode, body) {
@@ -125,13 +138,13 @@ function serveStatic(reqPath, res) {
 
 const server = http.createServer((req, res) => {
     const requestUrl = new URL(req.url, `http://127.0.0.1:${PORT}`);
-    if (req.method === 'POST' && requestUrl.pathname === '/api/home/daily-checkin') {
-        req.resume();
+    if ((req.method === 'GET' || req.method === 'POST') && requestUrl.pathname === '/api/home/daily-checkin') {
+        if (req.method === 'POST') req.resume();
         const parts = new Intl.DateTimeFormat('en-CA', {
             timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit'
         }).formatToParts(new Date());
         const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
-        return json(res, 200, dailyCheckinFor(`${values.year}-${values.month}-${values.day}`));
+        return json(res, 200, dailyCheckinFor(`${values.year}-${values.month}-${values.day}`, req.method === 'POST'));
     }
     if (req.method !== 'GET') return json(res, 403, { status: 'error', message: 'This preview is read-only.' });
     if (requestUrl.pathname === '/' || requestUrl.pathname === '/preview') {
