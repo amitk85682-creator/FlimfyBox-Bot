@@ -1033,15 +1033,29 @@ def register_webapp_routes(
         except (TypeError, ValueError):
             return None
 
+    def telegram_photo_url(user):
+        photo_url = str(user.get('photo_url') or '').strip()[:2048]
+        parsed_photo_url = urlparse(photo_url)
+        if (
+            parsed_photo_url.scheme.lower() != 'https'
+            or not parsed_photo_url.netloc
+            or parsed_photo_url.username
+            or parsed_photo_url.password
+        ):
+            return ''
+        return photo_url
+
     def upsert_miniapp_user(cur, user):
+        photo_url = telegram_photo_url(user)
         cur.execute("""
-            INSERT INTO miniapp_users (user_id, username, first_name, last_seen)
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            INSERT INTO miniapp_users (user_id, username, first_name, photo_url, last_seen)
+            VALUES (%s, %s, %s, NULLIF(%s, ''), CURRENT_TIMESTAMP)
             ON CONFLICT (user_id) DO UPDATE SET
                 username = EXCLUDED.username,
                 first_name = EXCLUDED.first_name,
+                photo_url = COALESCE(EXCLUDED.photo_url, miniapp_users.photo_url),
                 last_seen = CURRENT_TIMESTAMP
-        """, (user['id'], user.get('username', ''), user.get('first_name', '')))
+        """, (user['id'], user.get('username', ''), user.get('first_name', ''), photo_url))
 
     def require_telegram_user():
         user = telegram_user_from_request()
@@ -1331,14 +1345,15 @@ def register_webapp_routes(
                 client_message_id = str(uuid.UUID(str(payload.get('client_id') or '')))
             except (ValueError, TypeError, AttributeError):
                 return jsonify({'status': 'error', 'message': 'Invalid message id. Please retry.'}), 400
+        after_id = request.args.get('after_id', type=int) if request.method == 'GET' else None
 
         conn = get_db_connection()
         if not conn:
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            upsert_miniapp_user(cur, user)
             if request.method == 'POST':
+                upsert_miniapp_user(cur, user)
                 cur.execute("""
                     INSERT INTO global_chat_messages
                         (user_id, username, first_name, message, source, client_message_id)
@@ -1387,20 +1402,24 @@ def register_webapp_routes(
                     'message': {
                         'id': row[0], 'is_mine': True, 'username': row[2] or '',
                         'first_name': row[3] or 'User', 'message': row[4],
+                        'photo_url': telegram_photo_url(user),
                         'created_at': created_at.isoformat() if created_at else '',
                         'source': row[6] or 'miniapp', 'client_id': str(row[7]),
                         'relay_status': relay_status,
                     }
                 })
 
-            after_id = request.args.get('after_id', type=int)
-            if after_id and after_id > 0:
+            if after_id is None or after_id < 0:
+                upsert_miniapp_user(cur, user)
+                conn.commit()
+            if after_id is not None and after_id >= 0:
                 cur.execute("""
                     SELECT m.id, m.user_id, m.username, m.first_name, m.message,
                        m.created_at, m.source, m.client_message_id,
-                       COALESCE(o.status, 'sent')
+                       COALESCE(o.status, 'sent'), u.photo_url
                     FROM global_chat_messages m
                     LEFT JOIN global_chat_relay_outbox o ON o.message_id = m.id
+                    LEFT JOIN miniapp_users u ON u.user_id = m.user_id
                     WHERE m.id > %s
                     ORDER BY m.id ASC
                     LIMIT 100
@@ -1410,9 +1429,10 @@ def register_webapp_routes(
                 cur.execute("""
                     SELECT m.id, m.user_id, m.username, m.first_name, m.message,
                        m.created_at, m.source, m.client_message_id,
-                       COALESCE(o.status, 'sent')
+                       COALESCE(o.status, 'sent'), u.photo_url
                     FROM global_chat_messages m
                     LEFT JOIN global_chat_relay_outbox o ON o.message_id = m.id
+                    LEFT JOIN miniapp_users u ON u.user_id = m.user_id
                     ORDER BY m.id DESC
                     LIMIT 80
                 """)
@@ -1429,6 +1449,7 @@ def register_webapp_routes(
                     'message': row[4], 'created_at': created_at.isoformat() if created_at else '',
                     'source': row[6] or 'miniapp',
                     'client_id': str(row[7]) if row[7] else '', 'relay_status': row[8] or 'sent',
+                    'photo_url': row[9] or '',
                 })
 
             cur.execute("""

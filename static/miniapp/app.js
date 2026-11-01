@@ -97,6 +97,8 @@ const tg = window.Telegram?.WebApp || {
         let globalChatCursor = 0;
         let globalChatHasLoaded = false;
         let globalChatLoading = false;
+        let globalChatSessionId = 0;
+        let globalChatPollController = null;
         const globalChatMessageNodes = new Map();
         let detailsController = null;
         let searchController = null;
@@ -844,11 +846,17 @@ const tg = window.Telegram?.WebApp || {
         window.closeInfoModal = function() {
             document.getElementById('infoModal').classList.remove('open');
             document.getElementById('infoModal').classList.remove('chat-modal');
-            if (globalChatTimer) {
-                clearInterval(globalChatTimer);
-                globalChatTimer = null;
-            }
+            stopGlobalChatSession();
         };
+
+        function stopGlobalChatSession() {
+            globalChatSessionId += 1;
+            if (globalChatTimer) clearInterval(globalChatTimer);
+            globalChatTimer = null;
+            globalChatPollController?.abort();
+            globalChatPollController = null;
+            globalChatLoading = false;
+        }
 
         function setupMotionEffects() {
             if (!('IntersectionObserver' in window)) return;
@@ -870,10 +878,7 @@ const tg = window.Telegram?.WebApp || {
 
         window.showInfoPanel = function(title, body, icon = 'circle-info', actions = '') {
             closeMorePanel();
-            if (title !== 'Global Chat' && globalChatTimer) {
-                clearInterval(globalChatTimer);
-                globalChatTimer = null;
-            }
+            if (title !== 'Global Chat') stopGlobalChatSession();
             document.getElementById('infoModalTitle').textContent = title;
             document.getElementById('infoModalBody').innerHTML = body;
             document.getElementById('infoModalIcon').innerHTML = `<i class="fas fa-${icon}"></i>`;
@@ -899,7 +904,7 @@ const tg = window.Telegram?.WebApp || {
 
         window.showGlobalChat = function() {
             closeMorePanel();
-            if (globalChatTimer) clearInterval(globalChatTimer);
+            stopGlobalChatSession();
             globalChatCursor = 0;
             globalChatHasLoaded = false;
             globalChatLoading = false;
@@ -915,17 +920,17 @@ const tg = window.Telegram?.WebApp || {
                         <div class="chat-room-sync"><i class="fab fa-telegram"></i><span>Telegram group</span></div>
                     </header>
                     <div class="chat-messages" aria-live="polite" aria-relevant="additions text" role="log">
-                        <div class="chat-loading"><span class="chat-loading-orbit"><i class="fas fa-comment-dots"></i></span><strong>Chat load ho rahi hai</strong><span>Bas ek second…</span></div>
+                        <div class="chat-loading"><span class="chat-loading-orbit"><i class="fas fa-comment-dots"></i></span><strong>Loading chat…</strong><span>Just a moment.</span></div>
                     </div>
-                    <button class="chat-jump-bottom" type="button" onclick="scrollGlobalChatToBottom()"><i class="fas fa-arrow-down"></i> Naye messages</button>
+                    <button class="chat-jump-bottom" type="button" onclick="scrollGlobalChatToBottom()"><i class="fas fa-arrow-down"></i> New messages</button>
                     <form class="chat-composer" onsubmit="sendGlobalChat(event)">
                         <div class="chat-input-wrap">
-                            <textarea class="chat-input" maxlength="3800" rows="1" autocomplete="off" placeholder="Message likho…" aria-label="Write a message"></textarea>
+                            <textarea class="chat-input" maxlength="3800" rows="1" autocomplete="off" placeholder="Write a message…" aria-label="Write a message"></textarea>
                             <span class="chat-counter" aria-live="polite">0 / 3800</span>
                         </div>
                         <button class="chat-send" type="submit" aria-label="Send message" disabled><i class="fas fa-paper-plane"></i></button>
                     </form>
-                    <div class="chat-footnote"><i class="fas fa-arrows-left-right"></i> Mini App aur Telegram group ke messages yahan saath dikhenge</div>
+                    <div class="chat-footnote"><i class="fas fa-arrows-left-right"></i> Messages are shared with the linked Telegram group.</div>
                 </div>
             `, 'comment', '');
             document.getElementById('infoModal').classList.add('chat-modal');
@@ -961,14 +966,18 @@ const tg = window.Telegram?.WebApp || {
         };
 
         window.loadGlobalChat = function() {
-            if (globalChatLoading) return;
+            if (globalChatLoading || !document.getElementById('infoModal')?.classList.contains('chat-modal')) return;
             globalChatLoading = true;
-            const url = globalChatHasLoaded && globalChatCursor
+            const sessionId = globalChatSessionId;
+            const pollController = new AbortController();
+            globalChatPollController = pollController;
+            const url = globalChatHasLoaded
                 ? `/api/global-chat?after_id=${encodeURIComponent(globalChatCursor)}`
                 : '/api/global-chat';
-            fetchWithTimeout(url, { headers: globalChatHeaders() })
+            fetchWithTimeout(url, { headers: globalChatHeaders(), signal: pollController.signal })
                 .then(response => response.json().then(data => ({ ok: response.ok, data })))
                 .then(({ ok, data }) => {
+                    if (sessionId !== globalChatSessionId) return;
                     if (!ok) throw new Error(data.message || 'Could not load Global Chat.');
                     const messages = document.querySelector('.chat-messages');
                     if (!messages) return;
@@ -1008,13 +1017,19 @@ const tg = window.Telegram?.WebApp || {
                     else if (incoming.length) document.querySelector('.chat-jump-bottom')?.classList.add('is-visible');
                 })
                 .catch(error => {
+                    if (sessionId !== globalChatSessionId || error.name === 'AbortError') return;
                     setGlobalChatConnection(false);
                     if (!globalChatHasLoaded) {
                         const messages = document.querySelector('.chat-messages');
-                        if (messages) messages.innerHTML = `<div class="chat-empty chat-error"><span class="chat-empty-icon"><i class="fas fa-cloud-arrow-down"></i></span><strong>Abhi chat load nahi hui</strong><span>${escapeHtml(error.message)}</span><button type="button" onclick="loadGlobalChat()">Dobara try karo</button></div>`;
+                        if (messages) messages.innerHTML = `<div class="chat-empty chat-error"><span class="chat-empty-icon"><i class="fas fa-cloud-arrow-down"></i></span><strong>Chat could not be loaded</strong><span>${escapeHtml(error.message)}</span><button type="button" onclick="loadGlobalChat()">Try again</button></div>`;
                     }
                 })
-                .finally(() => { globalChatLoading = false; });
+                .finally(() => {
+                    if (sessionId === globalChatSessionId) {
+                        globalChatLoading = false;
+                        if (globalChatPollController === pollController) globalChatPollController = null;
+                    }
+                });
         };
 
         window.sendGlobalChat = function(event) {
@@ -1024,9 +1039,12 @@ const tg = window.Telegram?.WebApp || {
             const message = input.value.trim();
             if (!message) return;
             const clientId = createGlobalChatUuid();
+            const telegramUser = tg.initDataUnsafe?.user || {};
             const optimistic = {
                 id: `local-${clientId}`, client_id: clientId, is_mine: true,
-                first_name: 'You', message, created_at: new Date().toISOString(),
+                first_name: telegramUser.first_name || 'You',
+                username: telegramUser.username || '', photo_url: telegramUser.photo_url || '',
+                message, created_at: new Date().toISOString(),
                 source: 'miniapp', relay_status: 'pending'
             };
             upsertGlobalChatMessage(optimistic);
@@ -1048,14 +1066,14 @@ const tg = window.Telegram?.WebApp || {
                     body: JSON.stringify({ message, client_id: clientId })
                 });
                 const data = await response.json();
-                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Message send nahi hua.');
+                if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Message could not be sent.');
                 if (data.message) upsertGlobalChatMessage(data.message);
                 setGlobalChatConnection(true);
                 const input = document.querySelector('.chat-input');
                 if (input && document.activeElement !== input) input.focus({ preventScroll: true });
             } catch (error) {
                 updateGlobalChatDelivery(node?.dataset.messageId, 'failed');
-                showToast(error.message || 'Message send nahi hua. Retry button dabao.');
+                showToast(error.message || 'Message could not be sent. Use the retry button.');
             }
         }
 
@@ -1075,7 +1093,11 @@ const tg = window.Telegram?.WebApp || {
             messages.querySelector('.chat-empty')?.remove();
             const key = item.client_id ? `client:${item.client_id}` : `id:${item.id}`;
             let article = globalChatMessageNodes.get(key);
-            const author = item.first_name || (item.username ? `@${item.username}` : 'Community member');
+            const displayName = item.first_name || 'Community member';
+            const username = String(item.username || '').trim().replace(/^@/, '');
+            const handle = username ? `@${username}` : '';
+            const author = handle || displayName;
+            const photoUrl = globalChatAvatarUrl(item.photo_url);
             const time = item.created_at
                 ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                 : '';
@@ -1084,14 +1106,16 @@ const tg = window.Telegram?.WebApp || {
             const dayLabel = Number.isNaN(createdAt.getTime()) ? '' : formatGlobalChatDay(createdAt);
             const text = escapeHtml(item.message).replace(/\r?\n/g, '<br>');
             const isMine = Boolean(item.is_mine);
+            const initial = escapeHtml(author.trim().slice(0, 1).toUpperCase() || '•');
+            const avatar = `<span class="chat-avatar" role="img" aria-label="Profile photo for ${escapeHtml(author)}"><span class="chat-avatar-fallback" aria-hidden="true">${initial}</span>${photoUrl ? `<img src="${escapeHtml(photoUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.hidden=true">` : ''}</span>`;
             const markup = `
-                ${!isMine ? `<div class="chat-avatar" aria-hidden="true">${escapeHtml(author.trim().slice(0, 1).toUpperCase() || '•')}</div>` : ''}
+                ${isMine ? '' : avatar}
                 <div class="chat-message-body">
-                    ${!isMine ? `<div class="chat-message-author">${escapeHtml(author)}</div>` : ''}
+                    <div class="chat-message-author"><span class="chat-author-name">${escapeHtml(displayName)}</span>${handle ? `<span class="chat-author-handle">${escapeHtml(handle)}</span>` : ''}</div>
                     <div class="chat-bubble"><div class="chat-text">${text}</div>
                         <div class="chat-bubble-meta"><time>${escapeHtml(time)}</time>${isMine ? `<span class="chat-delivery" aria-live="polite"></span>` : ''}</div>
                     </div>
-                </div>`;
+                </div>${isMine ? avatar : ''}`;
             if (!article) {
                 article = document.createElement('article');
                 article.className = `chat-message ${isMine ? 'chat-message--mine' : 'chat-message--other'}`;
@@ -1172,7 +1196,18 @@ const tg = window.Telegram?.WebApp || {
         }
 
         function showGlobalChatEmptyState(messages) {
-            messages.innerHTML = `<div class="chat-empty"><span class="chat-empty-icon"><i class="fas fa-comments"></i></span><strong>Yeh chat abhi khaali hai</strong><span>Pehla message tum bhejo 👋</span></div>`;
+            messages.innerHTML = `<div class="chat-empty"><span class="chat-empty-icon"><i class="fas fa-comments"></i></span><strong>No messages yet</strong><span>Start the conversation.</span></div>`;
+        }
+
+        function globalChatAvatarUrl(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            try {
+                const parsed = new URL(raw);
+                return parsed.protocol === 'https:' ? parsed.href : '';
+            } catch (_error) {
+                return '';
+            }
         }
 
         function setGlobalChatConnection(connected) {

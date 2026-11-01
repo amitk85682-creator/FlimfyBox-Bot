@@ -631,6 +631,15 @@ def _migration_17(conn):
         """)
 
 
+def _migration_18(conn):
+    """Store Telegram profile photos for Global Chat participants."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE miniapp_users
+            ADD COLUMN IF NOT EXISTS photo_url TEXT
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -649,6 +658,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (15, _migration_15),
     (16, _migration_16),
     (17, _migration_17),
+    (18, _migration_18),
 )
 
 
