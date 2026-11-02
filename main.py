@@ -37,8 +37,45 @@ auto_batch_lock = asyncio.Lock()
 # ==================== 1. LOGGING SETUP (SABSE PEHLE YEH AAYEGA) ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # Change from INFO to DEBUG if needed
+    level=logging.INFO
 )
+
+
+class _CredentialRedactionFilter(logging.Filter):
+    def filter(self, record):
+        try:
+            message = record.getMessage()
+            message = re.sub(
+                r'(?i)([?&](?:api_key|apikey)=)[^&\s"<>]+',
+                r'\1[REDACTED]',
+                message,
+            )
+            message = re.sub(
+                r'(?i)(/bot)\d+:[A-Za-z0-9_-]{20,}',
+                r'\1[REDACTED]',
+                message,
+            )
+            record.msg = message
+            record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+_credential_redaction_filter = _CredentialRedactionFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_credential_redaction_filter)
+
+# HTTP debug logs include full request URLs, which may contain Telegram and
+# metadata-provider credentials. Keep transport libraries quiet in production.
+for _quiet_logger_name in (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "telegram",
+    "aiohttp.client",
+):
+    logging.getLogger(_quiet_logger_name).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ==================== CACHING ====================
@@ -497,6 +534,7 @@ messages_to_auto_delete = defaultdict(list)
 BATCH_SESSION = {
     'active': False, 'movie_id': None, 'movie_title': None,
     'file_count': 0, 'admin_id': None, 'batch_id': None,
+    'identity_reviewed_movie_id': None,
 }
 SUPER_BATCH_SESSION = {
     'active': False, 'admin_id': None, 'files': [],
@@ -3116,7 +3154,7 @@ def _batch_item_fetch(item_id):
                        media_type, file_id, file_unique_id, file_name, file_size,
                        caption, evidence, state, stage, attempts, movie_id,
                        movie_file_id, storage_map, storage_pending_chat,
-                       retry_after_at
+                       retry_after_at, error_class, error_detail
                 FROM ingestion_batch_items WHERE id = %s
                 """,
                 (item_id,),
@@ -3137,7 +3175,7 @@ def _batch_items_fetch(batch_id, unfinished_only=False):
                        media_type, file_id, file_unique_id, file_name, file_size,
                        caption, evidence, state, stage, attempts, movie_id,
                        movie_file_id, storage_map, storage_pending_chat,
-                       retry_after_at
+                       retry_after_at, error_class, error_detail
                 FROM ingestion_batch_items WHERE batch_id = %s
             """
             if unfinished_only:
@@ -4385,12 +4423,79 @@ def extract_tmdb_poster_from_url(tmdb_url: str) -> Optional[str]:
         pass
     return None
 
+
+def _tmdb_find_by_imdb_id(imdb_id: str, timeout: int = 10) -> dict:
+    """Reuse TMDb's IMDb-ID resolution across poster, cast, and trailer lookups."""
+    normalized_id = str(imdb_id or "").strip()
+    if not re.fullmatch(r"tt\d{7,8}", normalized_id) or not TMDB_API_KEY:
+        return {}
+
+    function_state = _tmdb_find_by_imdb_id.__dict__
+    cache = function_state.setdefault("cache", {})
+    cache_lock = function_state.get("cache_lock")
+    if cache_lock is None:
+        cache_lock = function_state.setdefault("cache_lock", threading.Lock())
+
+    now = time.monotonic()
+    with cache_lock:
+        cached = cache.get(normalized_id)
+        if cached and cached[0] > now:
+            return cached[1]
+        if cached:
+            cache.pop(normalized_id, None)
+        inflight = function_state.setdefault("inflight", {})
+        lookup_lock = inflight.setdefault(normalized_id, threading.Lock())
+
+    try:
+        with lookup_lock:
+            now = time.monotonic()
+            with cache_lock:
+                cached = cache.get(normalized_id)
+                if cached and cached[0] > now:
+                    return cached[1]
+                if cached:
+                    cache.pop(normalized_id, None)
+
+            try:
+                response = requests.get(
+                    f"https://api.themoviedb.org/3/find/{quote(normalized_id)}",
+                    params={"api_key": TMDB_API_KEY, "external_source": "imdb_id"},
+                    timeout=timeout,
+                ).json()
+                if not isinstance(response, dict) or response.get("success") is False:
+                    return {}
+                if "movie_results" not in response and "tv_results" not in response:
+                    return {}
+            except Exception as exc:
+                logger.warning(
+                    "TMDb IMDb lookup failed for %s (%s)",
+                    normalized_id,
+                    type(exc).__name__,
+                )
+                return {}
+
+            with cache_lock:
+                cache[normalized_id] = (time.monotonic() + 900, response)
+                if len(cache) > 512:
+                    expired_ids = [
+                        cache_id for cache_id, (expires_at, _payload) in cache.items()
+                        if expires_at <= time.monotonic()
+                    ]
+                    for cache_id in expired_ids:
+                        cache.pop(cache_id, None)
+                    while len(cache) > 512:
+                        cache.pop(next(iter(cache)))
+            return response
+    finally:
+        with cache_lock:
+            if function_state.get("inflight", {}).get(normalized_id) is lookup_lock:
+                function_state["inflight"].pop(normalized_id, None)
+
 def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
     """Fetch cast list from TMDB using IMDb ID, return comma-separated string."""
     try:
         api_key = TMDB_API_KEY
-        find_url = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={api_key}&external_source=imdb_id"
-        resp = requests.get(find_url, timeout=10).json()
+        resp = _tmdb_find_by_imdb_id(imdb_id, timeout=10)
         tmdb_results = resp.get('movie_results', [])
         if not tmdb_results:
             tmdb_results = resp.get('tv_results', [])
@@ -4404,7 +4509,7 @@ def fetch_cast_from_imdb(imdb_id: str, limit: int = 5) -> str:
         if cast:
             return ', '.join([c['name'] for c in cast])
     except Exception as e:
-        logger.error(f"Failed to fetch cast for {imdb_id}: {e}")
+        logger.error("Failed to fetch cast for %s (%s)", imdb_id, type(e).__name__)
     return ""
 
 
@@ -4420,11 +4525,7 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
     candidates = []
     try:
         if imdb_id and str(imdb_id).startswith('tt'):
-            find_response = requests.get(
-                f"https://api.themoviedb.org/3/find/{quote(str(imdb_id))}",
-                params={'api_key': api_key, 'external_source': 'imdb_id'},
-                timeout=8
-            ).json()
+            find_response = _tmdb_find_by_imdb_id(imdb_id, timeout=8)
             candidates = [
                 (item, 'movie') for item in find_response.get('movie_results', [])
             ] + [
@@ -4485,7 +4586,7 @@ def fetch_tmdb_trailer_key(title: str, year: str = "", imdb_id: str = None, cate
             if preferred:
                 return normalize_trailer_key(preferred[0]['key'])
     except Exception as exc:
-        logger.warning("TMDb trailer lookup failed for '%s': %s", title, exc)
+        logger.warning("TMDb trailer lookup failed for '%s' (%s)", title, type(exc).__name__)
     return None
 
 
@@ -4524,11 +4625,7 @@ def fetch_tmdb_artwork(
     try:
         candidates = []
         if imdb_id and str(imdb_id).startswith("tt"):
-            found = requests.get(
-                f"https://api.themoviedb.org/3/find/{quote(str(imdb_id))}",
-                params={"api_key": api_key, "external_source": "imdb_id"},
-                timeout=8,
-            ).json()
+            found = _tmdb_find_by_imdb_id(imdb_id, timeout=8)
             candidates = [
                 (item, "movie") for item in found.get("movie_results", [])
             ] + [
@@ -4605,7 +4702,7 @@ def fetch_tmdb_artwork(
         )
         return normalize_artwork_url(poster_url), normalize_artwork_url(backdrop_url)
     except Exception as exc:
-        logger.warning("TMDb artwork lookup failed for '%s': %s", title, exc)
+        logger.warning("TMDb artwork lookup failed for '%s' (%s)", title, type(exc).__name__)
         return None, None
 
 # ==================== NEW METADATA HELPER FUNCTIONS ====================
@@ -4623,16 +4720,8 @@ def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
     if not imdb_id or not re.match(r"^tt\d{7,8}$", str(imdb_id).strip()):
         return None
 
-    tmdb_api_key = TMDB_API_KEY
     try:
-        response = requests.get(
-            f"https://api.themoviedb.org/3/find/{str(imdb_id).strip()}",
-            params={
-                "api_key": tmdb_api_key,
-                "external_source": "imdb_id",
-            },
-            timeout=10,
-        ).json()
+        response = _tmdb_find_by_imdb_id(imdb_id, timeout=10)
         preferred = (
             ["tv_results", "movie_results"]
             if any(token in str(hint_category).lower() for token in ("series", "tv", "web"))
@@ -4643,7 +4732,7 @@ def resolve_tmdb_id_from_imdb(imdb_id: str, hint_category: str = ""):
             if results and results[0].get("id") is not None:
                 return int(results[0]["id"])
     except Exception as exc:
-        logger.warning("TMDB identity lookup failed for %s: %s", imdb_id, exc)
+        logger.warning("TMDB identity lookup failed for %s (%s)", imdb_id, type(exc).__name__)
     return None
 
 
@@ -4765,7 +4854,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
 
             return title, year, poster_url, genre, imdb_id, rating, plot, category, {}
         except Exception as e:
-            logger.error(f"Adult TMDb Fetch Error: {e}")
+            logger.error("Adult TMDb Fetch Error (%s)", type(e).__name__)
             return None
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4829,8 +4918,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             poster_url = normalize_artwork_url(omdb_resp.get('Poster'))
             if imdb_id and imdb_id != 'N/A':
                 try:
-                    tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
-                    t_resp = requests.get(tmdb_find, timeout=10).json()
+                    t_resp = _tmdb_find_by_imdb_id(imdb_id, timeout=10)
                     results = (
                         t_resp.get('tv_results', [])
                         if omdb_type == 'series'
@@ -4858,8 +4946,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 tmdb_id = None
                 if include_seasons and category in ["Web Series", "Anime", "Adult"]:
                     if not tmdb_id and imdb_id:
-                        tmdb_find = f"https://api.themoviedb.org/3/find/{imdb_id}?api_key={tmdb_api_key}&external_source=imdb_id"
-                        t_resp = requests.get(tmdb_find, timeout=10).json()
+                        t_resp = _tmdb_find_by_imdb_id(imdb_id, timeout=10)
                         tv_res = t_resp.get('tv_results', [])
                         if tv_res: tmdb_id = tv_res[0].get('id')
                     if tmdb_id:
@@ -4879,7 +4966,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                                         ep_num = str(ep.get('episode_number'))
                                         episodes_info[ep_num] = {'air_date': ep.get('air_date', '')}
                                 except Exception as ep_e:
-                                    logger.error(f"Episode fetch error: {ep_e}")
+                                    logger.error("Episode fetch error (%s)", type(ep_e).__name__)
                                 seasons_data[str(s_num)] = {
                                     "year": int(s_year) if s_year.isdigit() else 0,
                                     "poster": s_poster,
@@ -4888,7 +4975,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                                     "episodes": episodes_info
                                 }
             except Exception as e:
-                logger.error(f"Seasons Fetch Error: {e}")
+                logger.error("Seasons Fetch Error (%s)", type(e).__name__)
                 
             logger.info(f"✅ OMDb Success: '{title}' ({year}) [{category}]")
             return title, year, normalize_artwork_url(poster_url), genre, imdb_id, rating, plot, category, seasons_data
@@ -4976,7 +5063,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                                 ep_num = str(ep.get('episode_number'))
                                 episodes_info[ep_num] = {'air_date': ep.get('air_date', '')}
                         except Exception as ep_e:
-                            logger.error(f"Episode fetch error: {ep_e}")
+                            logger.error("Episode fetch error (%s)", type(ep_e).__name__)
                         seasons_data[str(s_num)] = {
                             "year": int(s_year) if s_year.isdigit() else 0,
                             "poster": s_poster,
@@ -4985,13 +5072,13 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                             "episodes": episodes_info
                         }
         except Exception as e:
-            logger.error(f"Seasons Fetch Error: {e}")
+            logger.error("Seasons Fetch Error (%s)", type(e).__name__)
             
         logger.info(f"✅ TMDb Success: '{title}' ({year}) [{category}]")
         return title, year, poster_url, genre, imdb_id, rating, plot, category, seasons_data
 
     except Exception as e:
-        logger.error(f"Metadata Fetch Error: {e}")
+        logger.error("Metadata Fetch Error (%s)", type(e).__name__)
         return None
 
 # ==================== AI INTENT ANALYSIS ====================
@@ -8145,7 +8232,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Session ko off kar do taaki aur files save na hon
         BATCH_SESSION.update({
             'active': False, 'movie_id': None, 'movie_title': None,
-            'file_count': 0, 'admin_id': None, 'year': '', 'category': ''
+            'file_count': 0, 'admin_id': None, 'year': '', 'category': '',
+            'identity_reviewed_movie_id': None,
         })
 
         await query.answer("🛑 Batch Stopped & Cleaned!", show_alert=True)
@@ -9598,7 +9686,7 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_id=movie_id,
                 movie_metadata={
                     "title": title, "year": year, "category": category,
-                    "language": "Hindi",
+                    "language": "Hindi", "identity_reviewed_movie_id": movie_id,
                 },
             )
 
@@ -9606,7 +9694,8 @@ async def batch_id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'active': True, 'movie_id': movie_id, 'movie_title': title,
                 'file_count': file_count, 'admin_id': update.effective_user.id,
                 'batch_id': batch_id,
-                'language': 'Hindi', 'category': category
+                'language': 'Hindi', 'category': category,
+                'identity_reviewed_movie_id': movie_id,
             })
             batch_upload_coordinator.begin(
                 update.effective_user.id, movie_id, update.update_id,
@@ -9800,7 +9889,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_id=movie_id,
                 movie_metadata={
                     "title": title, "year": year, "category": category,
-                    "language": language,
+                    "language": language, "identity_reviewed_movie_id": movie_id,
                 },
             )
 
@@ -9812,7 +9901,8 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'admin_id': user_id,
                 'batch_id': batch_id,
                 'language': language,
-                'category': category
+                'category': category,
+                'identity_reviewed_movie_id': movie_id,
             })
             batch_upload_coordinator.begin(
                 user_id, movie_id, update.update_id,
@@ -9849,6 +9939,7 @@ async def batch_add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         BATCH_SESSION.update({
             "active": False, "movie_id": None, "movie_title": None,
             "batch_id": None, "admin_id": None,
+            "identity_reviewed_movie_id": None,
         })
         coordinator_session["start_failed"] = True
         batch_upload_coordinator.mark_ready(user_id)
@@ -10995,10 +11086,16 @@ async def _pm_save_file_locked(
     if isinstance(evidence, str):
         evidence = json.loads(evidence)
     reviewed = evidence.get('reviewed_movie_id') == movie_id
+    admin_selected_movie_id = session_state.get('identity_reviewed_movie_id')
+    admin_selected_title = (
+        admin_selected_movie_id is not None
+        and str(admin_selected_movie_id) == str(movie_id)
+    )
     if not reviewed:
         try:
             await run_async(validate_file_target, get_db_connection, close_db_connection,
-                            movie_id, cap_data, fn_data)
+                            movie_id, cap_data, fn_data,
+                            allow_title_variant=admin_selected_title)
         except AmbiguousMovieIdentity as exc:
             if batch_item_id:
                 await run_async(_batch_item_update, batch_item_id, state='failed',
@@ -11076,7 +11173,7 @@ async def _pm_save_file_locked(
         await checkpoint(
             state="skipped", stage="completed", movie_id=movie_id,
             error_class="QualityDowngrade",
-            error_detail="A better existing quality was retained",
+            error_detail=f"A better existing quality was retained: {existing or 'unknown'}",
         )
         return None
 
@@ -11436,6 +11533,7 @@ async def _resume_batch_item(bot, job, row):
             "file_count": 0,
             "admin_id": admin_id,
             "batch_id": batch_id,
+            "identity_reviewed_movie_id": metadata.get("identity_reviewed_movie_id"),
             "year": str(year) if year else "",
             "category": category or "",
             "language": language or "",
@@ -11491,6 +11589,7 @@ async def _resume_batch_item(bot, job, row):
         BATCH_SESSION.update({
             "active": False, "movie_id": None, "movie_title": None,
             "file_count": 0, "admin_id": None, "batch_id": None,
+            "identity_reviewed_movie_id": None,
             "year": "", "category": "", "language": "",
         })
 
@@ -11523,6 +11622,62 @@ async def _recover_interrupted_batches(application):
         try:
             if not await run_async(_batch_job_claim, batch_id):
                 continue
+            initial_rows = await run_async(_batch_items_fetch, batch_id, False)
+            movie_id = job[7] or next(
+                (row[15] for row in initial_rows if row[15]), None
+            )
+            batch_metadata = _evidence_dict(job[8])
+            first_file_update_id = next(
+                (row[2] for row in initial_rows if row[2] is not None), None
+            )
+            admin_started_movie_batch = (
+                kind == "movie"
+                and movie_id is not None
+                and job[5] is not None
+                and first_file_update_id is not None
+                and int(first_file_update_id) != int(job[5])
+            )
+            if (
+                admin_started_movie_batch
+                and str(batch_metadata.get("identity_reviewed_movie_id"))
+                != str(movie_id)
+            ):
+                # Older /batch and /batchid jobs predate the persisted marker.
+                # Their start update is the admin command, while automatic
+                # batches start on the same update as their first file.
+                batch_metadata["identity_reviewed_movie_id"] = movie_id
+                await run_async(
+                    _batch_job_update,
+                    batch_id,
+                    movie_metadata=batch_metadata,
+                )
+                job = (*job[:8], batch_metadata, *job[9:])
+                requeued_title_variants = 0
+                for item in initial_rows:
+                    if (
+                        len(item) > 21
+                        and
+                        item[12] == "failed"
+                        and item[20] == "AmbiguousMovieIdentity"
+                        and str(item[21] or "").startswith(
+                            "File title conflicts with catalogue #"
+                        )
+                    ):
+                        await run_async(
+                            _batch_item_update,
+                            item[0],
+                            state="pending",
+                            attempts=0,
+                            error_class=None,
+                            error_detail=None,
+                            retry_after_at=None,
+                        )
+                        requeued_title_variants += 1
+                if requeued_title_variants:
+                    logger.info(
+                        "Recovered %s admin-selected title variant file(s) in batch %s",
+                        requeued_title_variants, batch_id,
+                    )
             await run_async(_batch_items_retry_due, batch_id)
             rows = await run_async(_batch_items_fetch, batch_id, True)
             deferred_item = False
@@ -11600,6 +11755,7 @@ async def _recover_interrupted_batches(application):
                 )
                 if movie_data:
                     title, year, category, language = movie_data
+                    movie_metadata = _evidence_dict(job[8])
                     BATCH_SESSION.update({
                         "active": True,
                         "movie_id": movie_id,
@@ -11607,6 +11763,9 @@ async def _recover_interrupted_batches(application):
                         "file_count": 0,
                         "admin_id": admin_id,
                         "batch_id": batch_id,
+                        "identity_reviewed_movie_id": movie_metadata.get(
+                            "identity_reviewed_movie_id"
+                        ),
                         "year": str(year) if year else "",
                         "category": category or "",
                         "language": language or "",
@@ -12078,7 +12237,8 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'active': True, 'movie_id': movie_id, 'movie_title': title,
                 'file_count': file_count, 'admin_id': user.id,
                 'batch_id': batch_id,
-                'year': str(year) if year else "", 'category': category, 'language': movie_lang
+                'year': str(year) if year else "", 'category': category, 'language': movie_lang,
+                'identity_reviewed_movie_id': None,
             })
             try:
                 await run_async(
@@ -12216,11 +12376,34 @@ async def pm_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
         else:
-            await _safe_batch_status_edit(
-                upload_status,
-                "❌ **Save Failed or Blocked!**\nYa toh error aaya, ya DB mein pehle se better print (downgrade) hai. Logs check karein.", 
-                parse_mode='Markdown'
-            )
+            item_state = await run_async(_batch_item_fetch, batch_item_id)
+            if item_state and item_state[12] == "skipped":
+                detail = item_state[20] or "QualityDowngrade"
+                detail_text = item_state[21] if len(item_state) > 21 else ""
+                await _safe_batch_status_edit(
+                    upload_status,
+                    f"⏭️ File skipped ({detail}): {detail_text or 'an equal or better quality is already stored.'}",
+                )
+            elif item_state:
+                stage = item_state[13] or "unknown stage"
+                error_class = item_state[20] or "UnknownError"
+                detail_text = item_state[21] if len(item_state) > 21 else ""
+                batch_id = BATCH_SESSION.get("batch_id") or ""
+                explanation = (
+                    f"\n{detail_text}"
+                    if error_class == "AmbiguousMovieIdentity" and detail_text
+                    else ""
+                )
+                await _safe_batch_status_edit(
+                    upload_status,
+                    f"❌ Save failed at {stage} ({error_class}).{explanation}\n"
+                    f"The file checkpoint is retained. Use /batchstatus {batch_id} for details.",
+                )
+            else:
+                await _safe_batch_status_edit(
+                    upload_status,
+                    "❌ The file was not saved. Its checkpoint is retained; check /batchstatus for the reason.",
+                )
     
 async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user:
@@ -12367,6 +12550,7 @@ async def batch_done_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             'active': False, 'movie_id': None, 'movie_title': None, 
             'file_count': 0, 'admin_id': None, 'year': '', 'category': '', 
             'extracted_thumb': None, 'batch_id': None,
+            'identity_reviewed_movie_id': None,
         })
         batch_upload_coordinator.finish(admin_id)
 
@@ -13583,10 +13767,7 @@ async def fetch_adult_metadata_combo(
                 elif t_imdb:
                     # IMDB ID se TMDB poster
                     try:
-                        tmdb_api_key = TMDB_API_KEY
-                        find_url = f"https://api.themoviedb.org/3/find/{t_imdb}?api_key={tmdb_api_key}&external_source=imdb_id"
-                        find_resp = await run_async(requests.get, find_url, timeout=8)
-                        find_data = find_resp.json()
+                        find_data = _tmdb_find_by_imdb_id(t_imdb, timeout=8)
                         all_results = find_data.get("movie_results", []) + find_data.get("tv_results", [])
                         for r in all_results:
                             if r.get("poster_path"):

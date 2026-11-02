@@ -2,6 +2,8 @@ import ast
 import logging
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -20,6 +22,8 @@ def _load_main_functions(names, extra_globals=None):
     namespace = {
         "os": os,
         "re": re,
+        "threading": threading,
+        "time": time,
         "quote": quote,
         "TMDB_API_KEY": "synthetic-test-key",
         "logger": logging.getLogger("test_metadata_category"),
@@ -59,7 +63,7 @@ class _ProviderRequests:
 def _fetch_by_imdb(omdb_payload, monkeypatch):
     monkeypatch.setenv("OMDB_API_KEY", "synthetic-test-key")
     env = _load_main_functions(
-        {"fetch_movie_metadata", "normalize_artwork_url"},
+        {"_tmdb_find_by_imdb_id", "fetch_movie_metadata", "normalize_artwork_url"},
         {"requests": _ProviderRequests(omdb_payload)},
     )
     return env["fetch_movie_metadata"]("tt34866681")

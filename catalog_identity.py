@@ -4,6 +4,7 @@ Popularity, language and artwork are not evidence that two titles are the same.
 """
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
 
 class AmbiguousMovieIdentity(ValueError):
@@ -152,7 +153,9 @@ def find_existing_upload(connect, close, evidence):
         close(conn)
 
 
-def validate_file_target(connect, close, movie_id, caption, filename):
+def validate_file_target(
+    connect, close, movie_id, caption, filename, *, allow_title_variant=False
+):
     """Check every file, not just the first/representative file of a batch."""
     conflict = evidence_conflict(caption, filename)
     if conflict:
@@ -169,7 +172,19 @@ def validate_file_target(connect, close, movie_id, caption, filename):
             raise AmbiguousMovieIdentity('The selected catalogue title no longer exists')
         for item in (caption, filename):
             name = title_key(item.get('title'))
-            if name and name not in {'unknown', 'unknown movie', 'file'} and name != title_key(row[0]):
+            if (
+                name
+                and name not in {'unknown', 'unknown movie', 'file'}
+                and name != title_key(row[0])
+                and not (
+                    allow_title_variant
+                    and SequenceMatcher(
+                        None,
+                        re.sub(r'[^a-z0-9]', '', name),
+                        re.sub(r'[^a-z0-9]', '', title_key(row[0])),
+                    ).ratio() >= 0.82
+                )
+            ):
                 raise AmbiguousMovieIdentity(f'File title conflicts with catalogue #{movie_id} ({row[0]})')
             year = release_year(item.get('year'))
             kind = media_kind(item.get('category'), item.get('extra_info'))

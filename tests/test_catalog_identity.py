@@ -70,6 +70,37 @@ def test_every_file_is_checked_against_the_target_not_only_batch_representative(
     assert conn.closed
 
 
+def test_admin_selected_title_variant_is_allowed_but_year_and_type_stay_checked():
+    selected = Connection(single=('Paachuvum Albhuthavilakkum', 2023, 'Movie'))
+    validate_file_target(
+        lambda:selected, lambda c:c.close(), 6111,
+        {'title':'Pachuvum Athbutha Vilakkum','year':'2023','category':'Movies'},
+        {'title':'Pachuvum Athbutha Vilakkum','year':'2023','category':'Movies'},
+        allow_title_variant=True,
+    )
+    assert selected.closed
+
+    unrelated = Connection(single=('Paachuvum Albhuthavilakkum', 2023, 'Movie'))
+    with pytest.raises(AmbiguousMovieIdentity, match='title conflicts'):
+        validate_file_target(
+            lambda:unrelated, lambda c:c.close(), 6111,
+            {'title':'Dabangg 2','year':'2023','category':'Movies'},
+            {'title':'Dabangg 2','year':'2023','category':'Movies'},
+            allow_title_variant=True,
+        )
+    assert unrelated.closed
+
+    wrong_year = Connection(single=('Paachuvum Albhuthavilakkum', 2023, 'Movie'))
+    with pytest.raises(AmbiguousMovieIdentity, match='year 2024'):
+        validate_file_target(
+            lambda:wrong_year, lambda c:c.close(), 6111,
+            {'year':'2024','category':'Movies'},
+            {'year':'2024','category':'Movies'},
+            allow_title_variant=True,
+        )
+    assert wrong_year.closed
+
+
 def test_existing_anime_series_can_use_its_stored_seasons_to_identify_tv():
     row=local_row(3,2025,'Anime')+({'1':{'year':2025}},)
     conn=Connection([row])
@@ -103,12 +134,12 @@ def test_known_imdb_missing_from_tmdb_never_borrows_another_titles_trailer_or_ar
         return SimpleNamespace(json=lambda:{'movie_results':[],'tv_results':[]})
     from urllib.parse import quote
     from typing import Optional
-    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key',
+    ns=_load_functions({'_tmdb_find_by_imdb_id','fetch_tmdb_artwork','fetch_tmdb_trailer_key',
         'normalize_artwork_url','normalize_trailer_key'},
         {'requests':SimpleNamespace(get=get),'TMDB_API_KEY':'test','quote':quote,'Optional':Optional})
     assert ns['fetch_tmdb_artwork']('Obsession','2025','tt39330776','Web Series')==(None,None)
     assert ns['fetch_tmdb_trailer_key']('Obsession','2025','tt39330776','Web Series') is None
-    assert len(calls)==2 and all('/find/tt39330776' in url for url in calls)
+    assert len(calls)==1 and all('/find/tt39330776' in url for url in calls)
 
 
 def test_tmdb_find_uses_requested_media_type_and_rejects_sentinel_trailer_keys():
@@ -130,7 +161,7 @@ def test_tmdb_find_uses_requested_media_type_and_rejects_sentinel_trailer_keys()
         raise AssertionError(url)
     from urllib.parse import quote
     from typing import Optional
-    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key',
+    ns=_load_functions({'_tmdb_find_by_imdb_id','fetch_tmdb_artwork','fetch_tmdb_trailer_key',
         'normalize_artwork_url','normalize_trailer_key'},
         {'requests':SimpleNamespace(get=get),'TMDB_API_KEY':'test','quote':quote,'Optional':Optional})
     assert ns['fetch_tmdb_artwork']('Obsession','2025','tt39330776','Web Series') == (
@@ -138,6 +169,22 @@ def test_tmdb_find_uses_requested_media_type_and_rejects_sentinel_trailer_keys()
     )
     assert ns['fetch_tmdb_trailer_key']('Obsession','2025','tt39330776','Web Series') == 'AbCdEf12345'
     assert any('/tv/20/videos' in url for url in calls)
+
+
+def test_tmdb_imdb_resolution_is_cached_for_related_metadata_lookups():
+    calls=[]
+    payload={'movie_results':[{'id':816590}], 'tv_results':[]}
+    from urllib.parse import quote
+    ns=_load_functions({'_tmdb_find_by_imdb_id'}, {
+        'requests':SimpleNamespace(get=lambda url, **kwargs: (
+            calls.append((url, kwargs)) or SimpleNamespace(json=lambda:payload)
+        )),
+        'TMDB_API_KEY':'test', 'quote':quote,
+    })
+    first=ns['_tmdb_find_by_imdb_id']('tt13781128')
+    second=ns['_tmdb_find_by_imdb_id']('tt13781128')
+    assert first==second==payload
+    assert len(calls)==1
 
 
 def test_tmdb_find_never_uses_movie_art_or_trailer_for_a_verified_series():
@@ -149,7 +196,7 @@ def test_tmdb_find_never_uses_movie_art_or_trailer_for_a_verified_series():
         })
     from urllib.parse import quote
     from typing import Optional
-    ns=_load_functions({'fetch_tmdb_artwork','fetch_tmdb_trailer_key',
+    ns=_load_functions({'_tmdb_find_by_imdb_id','fetch_tmdb_artwork','fetch_tmdb_trailer_key',
         'normalize_artwork_url','normalize_trailer_key'},
         {'requests':SimpleNamespace(get=get),'TMDB_API_KEY':'test','quote':quote,'Optional':Optional})
     assert ns['fetch_tmdb_artwork']('Obsession','2025','tt39330776','Web Series') == (None,None)

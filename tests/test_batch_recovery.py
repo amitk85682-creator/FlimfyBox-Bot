@@ -487,6 +487,8 @@ def test_recovery_continues_to_later_items_and_restores_movie_session():
         "BATCH_SESSION": {},
         "SUPER_BATCH_SESSION": {},
         "_batch_job_claim": lambda _batch_id: True,
+        "_evidence_dict": lambda value: value if isinstance(value, dict) else {},
+        "_batch_items_retry_due": lambda _batch_id: None,
         "_batch_item_retry_failed": lambda *_args: (_ for _ in ()).throw(
             AssertionError("startup recovery must not retry failed items")
         ),
@@ -516,6 +518,7 @@ def test_recovery_continues_to_later_items_and_restores_movie_session():
     assert resumed == [1, 2]
     assert namespace["BATCH_SESSION"]["active"] is True
     assert namespace["BATCH_SESSION"]["movie_id"] == 55
+    assert namespace["BATCH_SESSION"]["identity_reviewed_movie_id"] == 55
     assert namespace["_RECOVERED_BATCH_IDS"] == {batch_id}
     assert job_updates[-1][1]["status"] == "collecting"
     assert job_updates[-1][1]["lease_owner"] == "process-1"

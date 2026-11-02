@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 import unicodedata
 import pytest
@@ -28,6 +29,7 @@ def _load_functions(names, namespace=None):
         "re": re,
         "json": json,
         "time": time,
+        "threading": threading,
         "asyncio": asyncio,
         "GEMINI_RECONCILIATION_TIMEOUT_SECONDS": 25,
         "unicodedata": unicodedata,
