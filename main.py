@@ -26,7 +26,7 @@ from flask_cors import CORS
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse, quote, unquote
 from collections import defaultdict
-from telegram.error import RetryAfter, TelegramError
+from telegram.error import NetworkError, RetryAfter, TelegramError
 from typing import Optional
 from psycopg2 import pool
 from io import BytesIO
@@ -17810,6 +17810,26 @@ def register_handlers(application: Application):
     application.add_error_handler(error_handler)
 
 
+async def _initialize_bot_with_retries(application, bot_number, max_attempts=5):
+    """Retry the startup getMe handshake when Telegram returns a transient network error."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await application.initialize()
+            return
+        except NetworkError:
+            if attempt >= max_attempts:
+                raise
+            delay_seconds = min(2 ** attempt, 12)
+            logger.warning(
+                "Telegram startup handshake failed for Bot %s; retrying %s/%s in %ss.",
+                bot_number,
+                attempt + 1,
+                max_attempts,
+                delay_seconds,
+            )
+            await asyncio.sleep(delay_seconds)
+
+
 async def main():
     """Main function to run MULTIPLE bots concurrently"""
     logger.info("🚀 Starting Multi-Bot System...")
@@ -17872,6 +17892,7 @@ async def main():
     for i, token in enumerate(tokens):
         if _shutdown_requested.is_set():
             break
+        startup_stage = "application initialization / Telegram getMe"
         try:
             logger.info(f"🔹 Initializing Bot {i+1}...")
 
@@ -17888,7 +17909,8 @@ async def main():
 
             register_handlers(app)
 
-            await app.initialize()
+            await _initialize_bot_with_retries(app, i + 1)
+            startup_stage = "bot command menu setup"
             try:
                 await asyncio.wait_for(
                     app.bot.set_my_commands(PUBLIC_BOT_COMMANDS),
@@ -17896,18 +17918,29 @@ async def main():
                 )
             except Exception as error:
                 logger.warning('Bot command menu setup skipped for bot %s (%s)', i + 1, type(error).__name__)
+            startup_stage = "application start"
             await app.start()
+            startup_stage = "interrupted batch recovery"
             await _recover_interrupted_batches(app)
+            startup_stage = "Telegram polling startup"
             await app.updater.start_polling(drop_pending_updates=False)
             worker_tasks.append(asyncio.create_task(auto_delete_worker(app)))
             worker_tasks.append(asyncio.create_task(_batch_recovery_loop(app)))
             apps.append(app)
 
+            startup_stage = "bot identity verification"
             bot_info = await app.bot.get_me()
             logger.info(f"✅ Bot {i+1} Started: @{bot_info.username}")
 
         except Exception as e:
-            logger.error(f"❌ Failed to start Bot {i+1}: {e}")
+            safe_error = str(e).replace(str(token), "[REDACTED]")[:240]
+            logger.error(
+                "❌ Failed to start Bot %s during %s: %s: %s",
+                i + 1,
+                startup_stage,
+                type(e).__name__,
+                safe_error,
+            )
 
     if not apps:
         logger.error("❌ No bots could be started.")
