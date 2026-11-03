@@ -17810,24 +17810,30 @@ def register_handlers(application: Application):
     application.add_error_handler(error_handler)
 
 
-async def _initialize_bot_with_retries(application, bot_number, max_attempts=5):
+async def _initialize_bot_with_retries(application, bot_number):
     """Retry the startup getMe handshake when Telegram returns a transient network error."""
-    for attempt in range(1, max_attempts + 1):
+    attempt = 0
+    while not _shutdown_requested.is_set():
+        attempt += 1
         try:
             await application.initialize()
-            return
-        except NetworkError:
-            if attempt >= max_attempts:
-                raise
-            delay_seconds = min(2 ** attempt, 12)
+            return True
+        except NetworkError as error:
+            delay_seconds = min(2 ** min(attempt, 6), 60)
             logger.warning(
-                "Telegram startup handshake failed for Bot %s; retrying %s/%s in %ss.",
+                "Telegram startup handshake failed for Bot %s (%s, attempt %s); retrying in %ss.",
                 bot_number,
-                attempt + 1,
-                max_attempts,
+                type(error).__name__,
+                attempt,
                 delay_seconds,
             )
-            await asyncio.sleep(delay_seconds)
+            shutdown_requested = await asyncio.to_thread(
+                _shutdown_requested.wait,
+                delay_seconds,
+            )
+            if shutdown_requested:
+                return False
+    return False
 
 
 async def main():
@@ -17909,7 +17915,8 @@ async def main():
 
             register_handlers(app)
 
-            await _initialize_bot_with_retries(app, i + 1)
+            if not await _initialize_bot_with_retries(app, i + 1):
+                break
             startup_stage = "bot command menu setup"
             try:
                 await asyncio.wait_for(
