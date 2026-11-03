@@ -17820,11 +17820,28 @@ async def _initialize_bot_with_retries(application, bot_number):
             return True
         except NetworkError as error:
             delay_seconds = min(2 ** min(attempt, 6), 60)
+            # PTB wraps the underlying HTTP transport failure in NetworkError.
+            # Keep the useful reason in Render logs, but never risk emitting
+            # the bot token if a transport error includes a request URL.
+            bot_token = getattr(getattr(application, "bot", None), "token", "")
+            safe_error = str(error)
+            if bot_token:
+                safe_error = safe_error.replace(bot_token, "[REDACTED]")
+            safe_error = safe_error[:240] or "No error details provided"
+            cause = error.__cause__
+            cause_summary = ""
+            if cause is not None:
+                safe_cause = str(cause)
+                if bot_token:
+                    safe_cause = safe_cause.replace(bot_token, "[REDACTED]")
+                cause_summary = f"; cause={type(cause).__name__}: {safe_cause[:240]}"
             logger.warning(
-                "Telegram startup handshake failed for Bot %s (%s, attempt %s); retrying in %ss.",
+                "Telegram startup handshake failed for Bot %s (%s, attempt %s): %s%s; retrying in %ss.",
                 bot_number,
                 type(error).__name__,
                 attempt,
+                safe_error,
+                cause_summary,
                 delay_seconds,
             )
             shutdown_requested = await asyncio.to_thread(
