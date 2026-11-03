@@ -17810,6 +17810,70 @@ def register_handlers(application: Application):
     application.add_error_handler(error_handler)
 
 
+def _probe_startup_http(url, trust_env, token_to_redact=None):
+    """Return a credential-safe summary of an outbound HTTPS probe."""
+    session = requests.Session()
+    session.trust_env = trust_env
+    try:
+        response = session.get(
+            url,
+            timeout=(3, 5),
+            allow_redirects=False,
+        )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        useful_headers = {}
+        for name in ("Server", "Via", "CF-Ray"):
+            value = response.headers.get(name)
+            if value:
+                if token_to_redact:
+                    value = value.replace(token_to_redact, "[REDACTED]")
+                useful_headers[name] = value[:100]
+        api_ok = payload.get("ok") if isinstance(payload, dict) else None
+        return (
+            f"HTTP {response.status_code}; api_ok={api_ok}; "
+            f"headers={useful_headers or 'none'}"
+        )
+    except requests.exceptions.RequestException as error:
+        # Avoid printing exception text: it can contain proxy credentials or
+        # the Telegram token embedded in the request URL.
+        return f"{type(error).__name__}"
+    finally:
+        session.close()
+
+
+async def _log_startup_network_diagnostics(token):
+    """Compare Telegram and generic HTTPS with/without environment proxies."""
+    proxy_variables = (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+        "http_proxy", "https_proxy", "all_proxy",
+    )
+    configured_proxies = [name for name in proxy_variables if os.environ.get(name)]
+    logger.warning(
+        "Telegram startup diagnostic: proxy environment variables set=%s",
+        ",".join(configured_proxies) or "none",
+    )
+
+    telegram_url = f"https://api.telegram.org/bot{token}/getMe"
+    google_url = "https://www.google.com/generate_204"
+    probe_specs = (
+        ("Telegram (environment settings)", telegram_url, True),
+        ("Telegram (direct, environment ignored)", telegram_url, False),
+        ("HTTPS (environment settings)", google_url, True),
+        ("HTTPS (direct, environment ignored)", google_url, False),
+    )
+    results = await asyncio.gather(
+        *(
+            asyncio.to_thread(_probe_startup_http, url, trust_env, token)
+            for _, url, trust_env in probe_specs
+        )
+    )
+    for (label, _, _), result in zip(probe_specs, results):
+        logger.warning("Telegram startup diagnostic %s: %s", label, result)
+
+
 async def _initialize_bot_with_retries(application, bot_number):
     """Retry the startup getMe handshake when Telegram returns a transient network error."""
     attempt = 0
@@ -17820,6 +17884,8 @@ async def _initialize_bot_with_retries(application, bot_number):
             return True
         except NetworkError as error:
             delay_seconds = min(2 ** min(attempt, 6), 60)
+            if attempt == 1:
+                await _log_startup_network_diagnostics(application.bot.token)
             # PTB wraps the underlying HTTP transport failure in NetworkError.
             # Keep the useful reason in Render logs, but never risk emitting
             # the bot token if a transport error includes a request URL.
