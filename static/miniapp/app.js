@@ -2935,6 +2935,30 @@ document.addEventListener('keydown', (e) => {
             }
             renderState();
         }
+        window.retryCurrentDetailSources = function(kind = 'all') {
+            const movie = activeMovie;
+            const detailsPage = document.getElementById('detailsPage');
+            if (!movie || !detailsPage?.classList.contains('open')) return;
+            const requestId = detailsRequestId;
+            const signal = detailsController?.signal;
+            if (signal?.aborted) return;
+            const isTMDB = movie.source === 'tmdb' || /^tmdb_\d+$/.test(String(movie.id || ''));
+            if (kind === 'all' || kind === 'ratings') {
+                loadMovieRatingSources(movie, isTMDB, requestId, signal, 0, true);
+            }
+            if (kind === 'all' || kind === 'reviews') {
+                loadFlimfyCommunityReviews(movie, requestId, signal, 0, null, true);
+            }
+            if (kind === 'all' || kind === 'personal') {
+                if (isTMDB) {
+                    renderUnavailableCommunityRating(movie.title || 'this title');
+                } else if (movie.is_upcoming) {
+                    renderLockedCommunityRating(movie.title || 'this title');
+                } else {
+                    renderCommunityRating(movie.id, movie.title || 'this title', requestId, signal);
+                }
+            }
+        };
         window.scrollToDetailDownloads = function() {
             const target = document.getElementById('dpLinks');
             if (!target) return;
@@ -3141,8 +3165,13 @@ document.addEventListener('keydown', (e) => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
                     if (isAbortError(error)) return;
                     console.error('Details load failed:', error);
-                    detailsDescription.innerText = 'Details are temporarily unavailable. You can go back and try again.';
-                    document.getElementById('dpLinks').innerHTML = '<button class="btn-request" type="button" onclick="retryActiveDetails()"><i class="fas fa-rotate-right"></i> Retry details</button>';
+                    const knownDescription = String(movie.description || '').trim();
+                    detailsDescription.innerText = knownDescription && knownDescription !== 'No description available.'
+                        ? knownDescription
+                        : 'The story details could not be refreshed. The title information above is still available.';
+                    const seasonsContainer = document.getElementById('dpSeasons');
+                    seasonsContainer.replaceChildren();
+                    document.getElementById('dpLinks').innerHTML = '<div class="detail-load-error" role="status"><p>Movie versions could not be loaded just now.</p><button class="detail-retry-button" type="button" onclick="retryActiveDetails()"><i class="fas fa-rotate-right"></i> Retry details</button></div>';
                     detailsPage.classList.remove('is-loading');
                 });
         };
@@ -3416,7 +3445,17 @@ document.addEventListener('keydown', (e) => {
                     .catch(error => {
                         if (requestId !== detailsRequestId || isAbortError(error)) return;
                         const summary = container.querySelector('.community-rating-summary');
-                        if (summary) summary.textContent = 'Rating is temporarily unavailable. Try again later.';
+                        if (summary) {
+                            summary.textContent = 'Your rating could not be loaded. Try again.';
+                            if (!container.querySelector('.community-rating-retry')) {
+                                const retry = document.createElement('button');
+                                retry.type = 'button';
+                                retry.className = 'community-rating-retry';
+                                retry.innerHTML = '<i class="fas fa-rotate-right" aria-hidden="true"></i> Retry rating';
+                                retry.addEventListener('click', () => window.retryCurrentDetailSources('personal'));
+                                summary.after(retry);
+                            }
+                        }
                     });
         };
         function previewCommunityStars(container, value) {

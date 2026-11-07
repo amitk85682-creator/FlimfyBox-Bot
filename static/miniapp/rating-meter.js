@@ -77,6 +77,15 @@
         return element;
     }
 
+    function retryCurrentDetailsButton(label, className, retryKind) {
+        const button = node('button', className || 'detail-retry-button', label || 'Try again');
+        button.type = 'button';
+        button.addEventListener('click', () => {
+            if (typeof root.retryCurrentDetailSources === 'function') root.retryCurrentDetailSources(retryKind);
+        });
+        return button;
+    }
+
     function formatReviewDate(value) {
         if (!value) return '';
         const date = new Date(value);
@@ -155,6 +164,10 @@
         }
         read.append(node('span', 'verdict-audience-dot'), node('span', 'verdict-audience-read-copy', audienceCopy));
         container.append(read);
+        const sources = Object.values(payload?.source_status || {});
+        if (payload?.cache_status === 'unavailable' || sources.includes('unavailable')) {
+            container.append(retryCurrentDetailsButton('Retry ratings', 'detail-retry-button verdict-retry', 'ratings'));
+        }
 
         const scale = node('div', 'verdict-scale');
         scale.hidden = summary.score === null;
@@ -288,6 +301,7 @@
         }
         if (payload?.status !== 'success' && payload?.status !== undefined) {
             container.append(node('p', 'review-empty', 'Reviews are temporarily unavailable.'));
+            container.append(retryCurrentDetailsButton('Retry reviews', 'detail-retry-button review-retry', 'reviews'));
             return;
         }
 
@@ -333,6 +347,9 @@
             container.append(node('p', 'flimfy-review-readonly', 'More audience reviews will appear when this title is linked.'));
         } else if ((payload?.tmdb_unavailable || payload?.flimfy_unavailable) && reviews.length) {
             container.append(node('p', 'flimfy-review-readonly', 'Some audience reviews could not be loaded.'));
+        }
+        if (payload?.tmdb_unavailable || payload?.flimfy_unavailable) {
+            container.append(retryCurrentDetailsButton('Retry unavailable feeds', 'detail-retry-button review-retry', 'reviews'));
         }
 
         if (payload?.can_review) {
@@ -416,7 +433,8 @@
         renderUnavailable(meterContainer, reviewsContainer) {
             this.render(meterContainer, null, {
                 imdb: { score: null, votes: null },
-                tmdb: { score: null, votes: null }
+                tmdb: { score: null, votes: null },
+                cache_status: 'unavailable'
             });
             const copy = meterContainer?.querySelector('.verdict-audience-read-copy');
             if (copy && summarize(ratingsByContainer.get(meterContainer) || {}).sourceCount === 0) {
