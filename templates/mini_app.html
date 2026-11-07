@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    {% set miniapp_asset_version = '20261107-detail-cache-2' %}
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#101113">
@@ -9,7 +10,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=availability-4"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=20261107-live-cache-1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v={{ miniapp_asset_version }}">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -435,7 +436,7 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=20261107-live-cache-1"></script>
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=20261107-live-cache-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v={{ miniapp_asset_version }}"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v={{ miniapp_asset_version }}"></script>
 </body>
 </html>

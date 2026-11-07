@@ -2623,16 +2623,96 @@ document.addEventListener('keydown', (e) => {
                 .filter(Boolean).join(' • ') || 'Genre unavailable';
             document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
         }
-        function loadMovieRatingSources(movie, isTMDB, requestId, signal, refreshAttempt = 0) {
+        const DETAIL_CACHE_PREFIX = 'flimfybox:detail:v2:';
+        const DETAIL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+        const DETAIL_RATING_FRESH_MS = 5 * 60 * 1000;
+        const DETAIL_REVIEWS_FRESH_MS = 60 * 1000;
+        function readDetailCache(key, freshForMs) {
+            try {
+                if (typeof localStorage === 'undefined') return null;
+                const stored = JSON.parse(localStorage.getItem(DETAIL_CACHE_PREFIX + key) || 'null');
+                const savedAt = Number(stored?.savedAt);
+                if (!stored?.value || !Number.isFinite(savedAt)) return null;
+                const age = Math.max(0, Date.now() - savedAt);
+                if (age > DETAIL_CACHE_RETENTION_MS) {
+                    localStorage.removeItem(DETAIL_CACHE_PREFIX + key);
+                    return null;
+                }
+                const storedFreshFor = Number.isFinite(Number(stored.freshForMs))
+                    ? Number(stored.freshForMs) : freshForMs;
+                return { value: stored.value, isFresh: age < storedFreshFor, savedAt };
+            } catch (_error) {
+                return null;
+            }
+        }
+        function writeDetailCache(key, value, freshForMs) {
+            try {
+                if (typeof localStorage === 'undefined') return;
+                localStorage.setItem(DETAIL_CACHE_PREFIX + key, JSON.stringify({
+                    savedAt: Date.now(),
+                    freshForMs: Math.max(0, Number(freshForMs) || 0),
+                    value
+                }));
+            } catch (_error) {
+                // Storage may be disabled or full; the network path remains authoritative.
+            }
+        }
+        function hasProviderRating(payload) {
+            return Boolean(window.FlimfyVerdict?.summarize(payload || {}).score !== null);
+        }
+        function detailMediaType(movie) {
+            const typeHint = [movie?.media_type, movie?.content_type, movie?.category]
+                .filter(Boolean).join(' ').toLowerCase();
+            return /\b(tv|series|web\s*series)\b/.test(typeHint) ? 'tv' : 'movie';
+        }
+        function mergeRatingCache(previous, incoming) {
+            const merged = { ...(previous || {}), ...(incoming || {}) };
+            let retainedStaleScore = false;
+            for (const provider of ['imdb', 'tmdb']) {
+                const fresh = incoming?.[provider];
+                const saved = previous?.[provider];
+                if ((!fresh || fresh.score === null || fresh.score === undefined)
+                    && saved && saved.score !== null && saved.score !== undefined) {
+                    merged[provider] = saved;
+                    retainedStaleScore = true;
+                }
+            }
+            if (retainedStaleScore) merged.cache_status = 'stale_cached';
+            return merged;
+        }
+        function ratingDetailCacheKey(movie) {
+            const id = String(movie?.id || '').trim();
+            const tmdbId = String(movie?.tmdb_id || '').trim();
+            const imdbId = String(movie?.imdb_id || '').trim();
+            return `rating:${id}:${tmdbId}:${imdbId}:${detailMediaType(movie)}`;
+        }
+        function reviewDetailCacheKey(movie, source) {
+            return `reviews:${String(movie?.id || '').trim()}:${String(movie?.tmdb_id || '').trim()}:${detailMediaType(movie)}:${source}`;
+        }
+        function backgroundDetailRefreshDelay(attempt) {
+            return Math.min(1200 * (2 ** Math.max(0, attempt)), 6000) + Math.floor(Math.random() * 400);
+        }
+        function loadMovieRatingSources(movie, isTMDB, requestId, signal, refreshAttempt = 0, forceRefresh = false) {
             const meterContainer = document.getElementById('flimfyVerdict');
             if (!window.FlimfyVerdict) return;
-            if (refreshAttempt === 0) window.FlimfyVerdict.renderLoading(meterContainer);
+            const cacheKey = ratingDetailCacheKey(movie);
+            const cached = readDetailCache(cacheKey, DETAIL_RATING_FRESH_MS);
+            const savedRating = cached && hasProviderRating(cached.value) ? cached.value : null;
+            if (savedRating) {
+                window.FlimfyVerdict.render(meterContainer, null, {
+                    ...savedRating,
+                    cache_status: cached.isFresh ? 'fresh' : 'stale_cached'
+                });
+                if (!forceRefresh && cached.isFresh) return Promise.resolve(savedRating);
+            } else if (refreshAttempt === 0) {
+                window.FlimfyVerdict.renderLoading(meterContainer);
+            }
             const endpoint = window.FlimfyVerdict.endpointFor(movie, isTMDB);
             if (!endpoint) {
-                window.FlimfyVerdict.renderUnavailable(meterContainer);
-                return;
+                if (!savedRating) window.FlimfyVerdict.renderUnavailable(meterContainer);
+                return Promise.resolve(null);
             }
-            fetchWithTimeout(endpoint, { signal })
+            return fetchWithTimeout(endpoint, { signal }, 4500)
                 .then(async response => {
                     const data = await response.json();
                     if (!response.ok || data.status !== 'success') {
@@ -2642,17 +2722,34 @@ document.addEventListener('keydown', (e) => {
                 })
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
-                    window.FlimfyVerdict.render(meterContainer, null, data);
-                    if (['refreshing', 'stale'].includes(data.cache_status) && refreshAttempt < 4) {
+                    const merged = mergeRatingCache(savedRating, data);
+                    if (hasProviderRating(merged)) {
+                        const cacheFreshFor = data.cache_status === 'fresh' ? DETAIL_RATING_FRESH_MS : 0;
+                        writeDetailCache(cacheKey, merged, cacheFreshFor);
+                        window.FlimfyVerdict.render(meterContainer, null, merged);
+                    } else if (savedRating) {
+                        window.FlimfyVerdict.render(meterContainer, null, {
+                            ...savedRating, cache_status: 'stale_cached'
+                        });
+                    } else {
+                        window.FlimfyVerdict.render(meterContainer, null, data);
+                    }
+                    if (['refreshing', 'stale'].includes(data.cache_status) && refreshAttempt < 2) {
                         window.setTimeout(() => {
                             if (requestId !== detailsRequestId || signal?.aborted) return;
-                            loadMovieRatingSources(movie, isTMDB, requestId, signal, refreshAttempt + 1);
-                        }, 1000);
+                            loadMovieRatingSources(movie, isTMDB, requestId, signal, refreshAttempt + 1, true);
+                        }, backgroundDetailRefreshDelay(refreshAttempt));
                     }
                 })
                 .catch(error => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id) || isAbortError(error)) return;
-                    if (refreshAttempt === 0) window.FlimfyVerdict.renderUnavailable(meterContainer);
+                    if (savedRating) {
+                        window.FlimfyVerdict.render(meterContainer, null, {
+                            ...savedRating, cache_status: 'stale_cached'
+                        });
+                    } else if (refreshAttempt === 0) {
+                        window.FlimfyVerdict.renderUnavailable(meterContainer);
+                    }
                 });
         }
         function bindFlimfyReviewForm(container, movieId, movie, requestId, signal) {
@@ -2684,7 +2781,7 @@ document.addEventListener('keydown', (e) => {
                     }
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
                     showToast('✓ FlimfyBox review saved');
-                    loadFlimfyCommunityReviews(movie, requestId, signal);
+                    loadFlimfyCommunityReviews(movie, requestId, signal, 0, null, true);
                 } catch (error) {
                     if (requestId !== detailsRequestId || isAbortError(error)) return;
                     if (status) status.textContent = error.message || 'Could not save your review.';
@@ -2692,25 +2789,36 @@ document.addEventListener('keydown', (e) => {
                 }
             });
         }
-        function loadFlimfyCommunityReviews(movie, requestId, signal, refreshAttempt = 0) {
+        function loadFlimfyCommunityReviews(movie, requestId, signal, refreshAttempt = 0, refreshOnly = null, forceRefresh = false) {
             const container = document.getElementById('flimfyReviews');
             if (!container || !window.FlimfyVerdict) return;
             const rawId = String(movie?.id || '').trim();
             const movieId = rawId;
             const isCatalogued = /^\d+$/.test(movieId) && movie.source !== 'tmdb';
             const tmdbId = String(movie?.tmdb_id || rawId.replace(/^tmdb_/, '')).trim();
-            const typeHint = [movie?.media_type, movie?.content_type, movie?.category]
-                .filter(Boolean).join(' ').toLowerCase();
-            const mediaType = /\b(tv|series|web\s*series)\b/.test(typeHint) ? 'tv' : 'movie';
+            const mediaType = detailMediaType(movie);
             const isExternalTitle = movie?.source === 'tmdb' || /^tmdb_\d+$/.test(rawId);
             const audienceEndpoint = isExternalTitle && /^\d+$/.test(tmdbId)
                 ? `/api/tmdb/${mediaType}/${encodeURIComponent(tmdbId)}/audience-reviews`
                 : isCatalogued
                     ? `/api/movie/${encodeURIComponent(movieId)}/audience-reviews`
                     : null;
-            if (refreshAttempt === 0) window.FlimfyVerdict.renderReviews(container, { status: 'loading' });
+            const flimfyCacheKey = reviewDetailCacheKey(movie, 'flimfybox');
+            const tmdbCacheKey = reviewDetailCacheKey(movie, 'tmdb');
+            const savedFlimfy = readDetailCache(flimfyCacheKey, DETAIL_REVIEWS_FRESH_MS);
+            const savedTmdb = readDetailCache(tmdbCacheKey, DETAIL_REVIEWS_FRESH_MS);
+            const state = {
+                flimfy: savedFlimfy?.value || null,
+                tmdb: savedTmdb?.value || null,
+                flimfyLoading: false,
+                tmdbLoading: false,
+                flimfyUnavailable: false,
+                tmdbUnavailable: false
+            };
+            if (!isCatalogued) state.flimfy = { status: 'success', reviews: [], review_count: 0, can_review: false };
+            if (!audienceEndpoint) state.tmdb = { status: 'success', reviews: [], review_count: 0, linked: false };
 
-            const requestReviewPayload = (endpoint, headers = {}) => fetchWithTimeout(endpoint, { signal, headers })
+            const requestReviewPayload = (endpoint, headers = {}, timeoutMs = 4000) => fetchWithTimeout(endpoint, { signal, headers }, timeoutMs)
                 .then(async response => {
                     const data = await response.json();
                     if (!response.ok || data.status !== 'success') {
@@ -2718,46 +2826,114 @@ document.addEventListener('keydown', (e) => {
                     }
                     return data;
                 });
-            const flimfyRequest = isCatalogued
-                ? requestReviewPayload(`/api/movie/${encodeURIComponent(movieId)}/reviews`, telegramAuthHeaders())
-                : Promise.resolve({ status: 'success', reviews: [], review_count: 0, can_review: false });
-            const tmdbRequest = audienceEndpoint
-                ? requestReviewPayload(audienceEndpoint)
-                : Promise.resolve({ status: 'success', reviews: [], review_count: 0, linked: false });
-
-            Promise.allSettled([flimfyRequest, tmdbRequest]).then(([flimfyResult, tmdbResult]) => {
-                if (requestId !== detailsRequestId || String(activeMovie?.id) !== rawId || signal?.aborted) return;
-                const flimfy = flimfyResult.status === 'fulfilled' ? flimfyResult.value : null;
-                const tmdb = tmdbResult.status === 'fulfilled' ? tmdbResult.value : null;
-                if (!flimfy && !tmdb) {
+            const isCurrent = () => requestId === detailsRequestId
+                && String(activeMovie?.id) === rawId && !signal?.aborted;
+            const renderState = () => {
+                if (!isCurrent()) return;
+                const hasCachedOrReturnedFeed = Boolean(state.flimfy || state.tmdb);
+                const anyLoading = state.flimfyLoading || state.tmdbLoading;
+                if (!hasCachedOrReturnedFeed && anyLoading) {
+                    window.FlimfyVerdict.renderReviews(container, { status: 'loading' });
+                    return;
+                }
+                if (!hasCachedOrReturnedFeed && state.flimfyUnavailable && state.tmdbUnavailable) {
                     window.FlimfyVerdict.renderReviews(container, { status: 'unavailable' });
                     return;
                 }
+                const flimfy = state.flimfy;
+                const tmdb = state.tmdb;
                 window.FlimfyVerdict.renderReviews(container, {
                     status: 'success',
                     reviews: flimfy?.reviews || [],
-                    review_count: flimfy?.review_count || 0,
+                    review_count: flimfy?.review_count ?? 0,
                     user_review: flimfy?.user_review || '',
                     can_review: Boolean(flimfy?.can_review),
                     is_catalogued: isCatalogued,
                     is_upcoming: Boolean(movie?.is_upcoming || flimfy?.is_upcoming),
                     tmdb_reviews: tmdb?.reviews || [],
-                    tmdb_review_count: tmdb?.review_count || 0,
-                    tmdb_cache_status: tmdb?.cache_status || (audienceEndpoint && !tmdb ? 'unavailable' : 'fresh'),
-                    tmdb_linked: tmdb?.linked !== false,
-                    tmdb_unavailable: Boolean(audienceEndpoint && !tmdb),
-                    flimfy_unavailable: Boolean(isCatalogued && !flimfy)
+                    tmdb_review_count: tmdb?.review_count ?? 0,
+                    tmdb_cache_status: tmdb?.cache_status
+                        || (state.tmdbUnavailable ? 'unavailable' : state.tmdbLoading ? 'refreshing' : 'fresh'),
+                    tmdb_linked: tmdb ? tmdb.linked !== false : Boolean(audienceEndpoint),
+                    tmdb_unavailable: state.tmdbUnavailable,
+                    flimfy_unavailable: state.flimfyUnavailable,
+                    tmdb_loading: state.tmdbLoading,
+                    flimfy_loading: state.flimfyLoading
                 });
-                if (isCatalogued && flimfy) {
+                if (isCatalogued && flimfy?.can_review !== undefined) {
                     bindFlimfyReviewForm(container, movieId, movie, requestId, signal);
                 }
-                if (tmdb?.cache_status === 'stale' && refreshAttempt < 4) {
-                    window.setTimeout(() => {
-                        if (requestId !== detailsRequestId || signal?.aborted) return;
-                        loadFlimfyCommunityReviews(movie, requestId, signal, refreshAttempt + 1);
-                    }, 1000);
+            };
+            const persistFlimfyReviews = data => {
+                const value = {
+                    status: 'success',
+                    reviews: Array.isArray(data.reviews) ? data.reviews : [],
+                    review_count: Number.isFinite(Number(data.review_count)) ? Number(data.review_count) : 0,
+                    is_upcoming: Boolean(data.is_upcoming)
+                };
+                writeDetailCache(flimfyCacheKey, value, DETAIL_REVIEWS_FRESH_MS);
+            };
+            const acceptSource = (source, data) => {
+                if (!isCurrent()) return;
+                if (source === 'flimfybox') {
+                    state.flimfy = data;
+                    state.flimfyLoading = false;
+                    state.flimfyUnavailable = false;
+                    persistFlimfyReviews(data);
+                } else {
+                    state.tmdbLoading = false;
+                    state.tmdbUnavailable = false;
+                    state.tmdb = data;
+                    if (data.linked !== false && data.cache_status === 'fresh') {
+                        writeDetailCache(tmdbCacheKey, {
+                            status: 'success', source: 'TMDb', linked: true,
+                            reviews: Array.isArray(data.reviews) ? data.reviews : [],
+                            review_count: Number.isFinite(Number(data.review_count)) ? Number(data.review_count) : 0,
+                            cache_status: 'fresh'
+                        }, DETAIL_REVIEWS_FRESH_MS);
+                    }
                 }
-            });
+                renderState();
+                if (source === 'tmdb' && data.cache_status === 'stale' && refreshAttempt < 2) {
+                    window.setTimeout(() => {
+                        if (!isCurrent()) return;
+                        loadFlimfyCommunityReviews(movie, requestId, signal, refreshAttempt + 1, 'tmdb');
+                    }, backgroundDetailRefreshDelay(refreshAttempt));
+                }
+            };
+            const rejectSource = source => {
+                if (!isCurrent()) return;
+                if (source === 'flimfybox') {
+                    state.flimfyLoading = false;
+                    state.flimfyUnavailable = true;
+                } else {
+                    state.tmdbLoading = false;
+                    state.tmdbUnavailable = true;
+                }
+                renderState();
+            };
+
+            const skipFlimfy = refreshOnly === 'tmdb';
+            if (isCatalogued && !skipFlimfy) {
+                state.flimfyLoading = true;
+                requestReviewPayload(`/api/movie/${encodeURIComponent(movieId)}/reviews`, telegramAuthHeaders(), 3500)
+                    .then(data => acceptSource('flimfybox', data))
+                    .catch(() => rejectSource('flimfybox'));
+            }
+            const skipTmdb = refreshOnly === 'flimfy'
+                || (!forceRefresh && savedTmdb?.isFresh && Boolean(audienceEndpoint));
+            if (audienceEndpoint && !skipTmdb) {
+                state.tmdbLoading = true;
+                requestReviewPayload(audienceEndpoint, {}, 4000)
+                    .then(data => acceptSource('tmdb', data))
+                    .catch(() => rejectSource('tmdb'));
+            } else if (audienceEndpoint && savedTmdb?.value) {
+                state.tmdb = {
+                    ...savedTmdb.value,
+                    cache_status: savedTmdb.isFresh ? 'fresh' : 'stale_cached'
+                };
+            }
+            renderState();
         }
         window.scrollToDetailDownloads = function() {
             const target = document.getElementById('dpLinks');
@@ -2848,7 +3024,7 @@ document.addEventListener('keydown', (e) => {
             const cachedDetails = movieDetailsCache.get(String(id));
             const detailsRequest = cachedDetails
                 ? Promise.resolve({ status: 'success', movie: cachedDetails })
-                : fetchWithTimeout(`/api/movie/${id}`, { signal: detailsController.signal })
+                : fetchWithTimeout(`/api/movie/${id}`, { signal: detailsController.signal }, 7000)
                 .then(async res => {
                     let data;
                     try {
@@ -3216,6 +3392,7 @@ document.addEventListener('keydown', (e) => {
                     button.className = 'community-rating-star';
                     button.dataset.rating = String(value);
                     button.setAttribute('aria-label', `Rate ${value} out of 5`);
+                    button.setAttribute('aria-pressed', 'false');
                     button.textContent = '☆';
                     button.addEventListener('mouseenter', () => previewCommunityStars(container, value));
                     button.addEventListener('mouseleave', () => previewCommunityStars(container, Number(container.dataset.selectedRating || 0)));
@@ -3229,7 +3406,7 @@ document.addEventListener('keydown', (e) => {
                 return fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     signal,
                     headers: telegramAuthHeaders()
-                })
+                }, 3500)
                     .then(response => response.json().then(data => ({ ok: response.ok, data })))
                     .then(({ ok, data }) => {
                         if (!ok || data.status !== 'success') throw new Error(data.message || 'Rating unavailable');
@@ -3252,6 +3429,9 @@ document.addEventListener('keydown', (e) => {
         function selectCommunityRating(value, container) {
                 container.dataset.selectedRating = String(value);
                 previewCommunityStars(container, value);
+                container.querySelectorAll('.community-rating-star').forEach(button => {
+                    button.setAttribute('aria-pressed', Number(button.dataset.rating) === value ? 'true' : 'false');
+                });
                 const submit = container.querySelector('.community-rating-submit');
                 if (submit) {
                     submit.disabled = container.dataset.canRate !== 'true';
@@ -3269,6 +3449,7 @@ document.addEventListener('keydown', (e) => {
                     const selected = own && Number(button.dataset.rating) <= own;
                     button.classList.toggle('selected', Boolean(selected));
                     button.textContent = selected ? '★' : '☆';
+                    button.setAttribute('aria-pressed', own && Number(button.dataset.rating) === Number(own) ? 'true' : 'false');
                     button.disabled = !canRate;
                 });
                 container.dataset.selectedRating = data.user_rating ? String(data.user_rating) : '';

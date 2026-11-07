@@ -146,6 +146,10 @@
             audienceCopy = summary.score === null
                 ? 'Some rating sources are unavailable. Try again soon.'
                 : 'Based on available audience ratings. Some sources are unavailable.';
+        } else if (payload?.cache_status === 'unlinked' && summary.score === null) {
+            audienceCopy = 'No rating source is linked to this title yet.';
+        } else if (payload?.cache_status === 'not_configured' && summary.score === null) {
+            audienceCopy = 'Rating sources are not available right now.';
         } else if (payload?.cache_status === 'unavailable' && summary.score === null) {
             audienceCopy = 'Ratings are temporarily unavailable. Try again soon.';
         }
@@ -237,7 +241,10 @@
         const importedCount = safeReviewCount(payload?.tmdb_review_count, importedReviews.length);
         const crossSourceDuplicates = crossSourceDuplicateIds.size;
         const total = Math.max(0, localCount + importedCount - crossSourceDuplicates);
-        return { reviews: merged, total, crossSourceDuplicates };
+        const loading = Boolean(payload?.tmdb_loading || payload?.flimfy_loading);
+        const incomplete = Boolean(loading || payload?.tmdb_unavailable || payload?.flimfy_unavailable
+            || payload?.tmdb_linked === false);
+        return { reviews: merged, total, crossSourceDuplicates, incomplete, loading };
     }
 
     function reviewTimestamp(review) {
@@ -256,7 +263,7 @@
     }
 
     function renderReviews(container, payload = {}) {
-        const { reviews, total } = mergeReviews(payload);
+        const { reviews, total, incomplete, loading } = mergeReviews(payload);
         const heading = node('div', 'detail-section-heading');
         heading.append(
             node('span', 'section-kicker', 'FLIMFYBOX REVIEWS'),
@@ -264,9 +271,11 @@
         );
         const countLabel = payload?.status === 'loading' ? 'Loading…'
             : payload?.status !== undefined && payload?.status !== 'success' ? 'Unavailable'
-                : `${total.toLocaleString()} ${total === 1 ? 'review' : 'reviews'}`;
+                : incomplete
+                    ? total > 0 ? `At least ${total.toLocaleString()} ${total === 1 ? 'review' : 'reviews'}` : loading ? 'Updating…' : 'Count unavailable'
+                    : `${total.toLocaleString()} ${total === 1 ? 'review' : 'reviews'}`;
         heading.append(node('span', 'review-count', countLabel));
-        if (payload?.tmdb_cache_status === 'stale' || payload?.tmdb_cache_status === 'refreshing') {
+        if (loading || payload?.tmdb_cache_status === 'stale' || payload?.tmdb_cache_status === 'refreshing') {
             heading.append(node('span', 'review-refresh-state', 'Updating'));
         } else if (payload?.tmdb_cache_status === 'stale_cached') {
             heading.append(node('span', 'review-refresh-state', 'Saved'));
@@ -283,11 +292,16 @@
         }
 
         if (!reviews.length) {
-            container.append(node('p', 'review-empty', payload?.is_upcoming
+            const emptyCopy = payload?.is_upcoming
                 ? 'Reviews open after this title is released.'
                 : payload?.tmdb_unavailable || payload?.flimfy_unavailable
-                    ? 'Reviews are temporarily unavailable. Please try again later.'
-                    : 'No reviews yet. Be the first to share what you thought.'));
+                    ? 'Some reviews could not be loaded. Please try again later.'
+                    : loading
+                        ? 'Checking available review sources…'
+                    : payload?.tmdb_linked === false
+                        ? 'No FlimfyBox member reviews yet. Audience reviews are not linked for this title.'
+                        : 'No reviews yet. Be the first to share what you thought.';
+            container.append(node('p', 'review-empty', emptyCopy));
         } else {
             const list = node('div', 'flimfy-review-list');
             reviews.forEach(review => {

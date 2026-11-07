@@ -141,6 +141,53 @@ test('rating and review status distinguish a background refresh from saved outag
     });
 });
 
+test('review counts stay unconfirmed when a provider failed or is not linked', () => {
+    withDocument(() => {
+        const unlinked = new Element('section');
+        meter.renderReviews(unlinked, {
+            status: 'success', review_count: 0, reviews: [],
+            tmdb_review_count: 0, tmdb_reviews: [], tmdb_linked: false
+        });
+        assert.equal(unlinked.querySelector('.review-count').textContent, 'Count unavailable');
+        assert.match(all(unlinked, 'review-empty')[0].textContent, /Audience reviews are not linked/);
+
+        const failed = new Element('section');
+        meter.renderReviews(failed, {
+            status: 'success', review_count: 2,
+            reviews: [{ id: 1, author: 'Member', content: 'Known member review.' }],
+            tmdb_unavailable: true, tmdb_linked: true
+        });
+        assert.equal(failed.querySelector('.review-count').textContent, 'At least 2 reviews');
+        assert.equal(all(failed, 'flimfy-review-copy').length, 1);
+
+        const confirmedEmpty = new Element('section');
+        meter.renderReviews(confirmedEmpty, {
+            status: 'success', review_count: 0, reviews: [],
+            tmdb_review_count: 0, tmdb_reviews: [], tmdb_linked: true
+        });
+        assert.equal(confirmedEmpty.querySelector('.review-count').textContent, '0 reviews');
+        assert.match(all(confirmedEmpty, 'review-empty')[0].textContent, /No reviews yet/);
+    });
+});
+
+test('rating meter distinguishes an unlinked title from a provider outage', () => {
+    withDocument(() => {
+        const unlinked = new Element('section');
+        meter.render(unlinked, null, {
+            imdb: { score: null }, tmdb: { score: null }, cache_status: 'unlinked'
+        });
+        assert.equal(all(unlinked, 'verdict-audience-read-copy')[0].textContent,
+            'No rating source is linked to this title yet.');
+
+        const unavailable = new Element('section');
+        meter.render(unavailable, null, {
+            imdb: { score: null }, tmdb: { score: null }, cache_status: 'unavailable'
+        });
+        assert.equal(all(unavailable, 'verdict-audience-read-copy')[0].textContent,
+            'Ratings are temporarily unavailable. Try again soon.');
+    });
+});
+
 test('detail template places one aggregate and personal stars in the same rating card', () => {
     const template = fs.readFileSync(path.join(__dirname, '../templates/mini_app.html'), 'utf8');
     assert.equal((template.match(/id="flimfyVerdict"/g) || []).length, 1);

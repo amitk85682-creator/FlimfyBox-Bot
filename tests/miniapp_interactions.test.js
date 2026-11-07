@@ -170,7 +170,7 @@ test('Mood Reader backend enforces catalogue filters and accepts its feedback si
     assert.match(route, /matched_genres/);
     assert.doesNotMatch(route, /poster_url IS NOT NULL/);
     assert.match(webRoutes, /'mood_pick_liked',[\s\S]*'mood_pick_skipped'/);
-    assert.match(template, /20261107-live-cache-1/);
+    assert.match(template, /\{% set miniapp_asset_version = '20261107-detail-cache-2' %\}/);
 });
 
 test('changing a Mood Reader filter aborts the stale network request and unlocks the picker', async () => {

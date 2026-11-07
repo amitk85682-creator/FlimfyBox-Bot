@@ -233,6 +233,31 @@ def test_concurrent_tmdb_review_misses_share_one_provider_request(webapp_factory
     assert len(calls) == 1
 
 
+def test_concurrent_rating_source_misses_share_one_provider_request(webapp_factory, monkeypatch):
+    monkeypatch.delenv('OMDB_API_KEY', raising=False)
+    app, _, _ = webapp_factory()
+    calls = []
+    calls_lock = threading.Lock()
+
+    def provider_get(_url, **_kwargs):
+        with calls_lock:
+            calls.append(1)
+        time.sleep(0.1)
+        return ProviderResponse(tmdb_detail(42, score=7.9, votes=850))
+
+    monkeypatch.setattr(route_requests, 'get', provider_get)
+
+    def request_rating(_index):
+        return app.test_client().get('/api/tmdb/movie/42/rating-sources')
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        responses = list(executor.map(request_rating, range(5)))
+
+    assert all(response.status_code == 200 for response in responses)
+    assert all(response.json['tmdb']['score'] == 7.9 for response in responses)
+    assert len(calls) == 1
+
+
 def test_reviews_without_tmdb_key_do_not_call_provider(webapp_factory, monkeypatch):
     app, _, _ = webapp_factory(tmdb_api_key='')
 
@@ -324,7 +349,26 @@ def test_one_provider_timeout_returns_partial_ratings(webapp_factory, monkeypatc
     assert response.status_code == 200
     assert response.json['imdb']['score'] is None
     assert response.json['tmdb'] == {'score': 7.4, 'votes': 88}
+    assert response.json['source_status']['imdb'] == 'unavailable'
+    assert response.json['source_status']['tmdb'] == 'fresh'
     assert 'reviews' not in response.json
+
+
+def test_rating_sources_report_unlinked_identity_without_calling_providers(webapp_factory, monkeypatch):
+    connection = FakeConnection(fetchone_result=(None, None, 'Movie', 'Movie'))
+    app, _, _ = webapp_factory(connection=connection)
+
+    def unexpected_provider_call(*_args, **_kwargs):
+        pytest.fail('providers must not be called without a linked provider identity')
+
+    monkeypatch.setattr(route_requests, 'get', unexpected_provider_call)
+    response = app.test_client().get('/api/movie/12/rating-sources')
+
+    assert response.status_code == 200
+    assert response.json['cache_status'] == 'unlinked'
+    assert response.json['source_status'] == {'imdb': 'unlinked', 'tmdb': 'unlinked'}
+    assert response.json['imdb'] == {'score': None, 'votes': None}
+    assert response.json['tmdb'] == {'score': None, 'votes': None}
 
 
 def test_tmdb_zero_votes_does_not_create_a_zero_star_score(webapp_factory, monkeypatch):

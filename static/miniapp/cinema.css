@@ -626,9 +626,13 @@ body{padding-left:var(--sidebar-width);padding-bottom:35px}
 .community-rating-title{color:#e6e7f2;font:750 12px/1.3 'Manrope',sans-serif}
 .community-rating-intro,.community-rating-note,.community-rating-locked-copy{margin:0;color:#9298ad;font-size:9px;line-height:1.55}
 .community-rating-stars{display:flex;gap:6px;margin:11px 0 9px}
-.community-rating-star{display:grid;width:40px;height:40px;place-items:center;border:1px solid var(--border-strong);border-radius:11px;background:var(--surface-2);font-size:21px}
-.community-rating-star.selected,.community-rating-star.preview{border-color:#e1bd7066;background:#e1bd701b;color:#e5c271}
-.community-rating-star:disabled{cursor:not-allowed;opacity:.5}
+.community-rating-star{display:grid;width:40px;height:40px;place-items:center;border:1px solid color-mix(in srgb,var(--border-strong),var(--muted) 35%);border-radius:11px;background:var(--surface-2);color:var(--text);font-size:23px;font-weight:800;line-height:1;cursor:pointer;transition:transform .16s var(--ease),border-color .16s,background .16s,color .16s,box-shadow .16s}
+.community-rating-star:hover:not(:disabled){transform:translateY(-2px);border-color:#f2cc70;background:color-mix(in srgb,var(--surface-2) 78%,#f2cc70 22%);color:color-mix(in srgb,var(--text) 30%,#8a6400 70%)}
+.community-rating-star:active:not(:disabled){transform:translateY(0) scale(.94)}
+.community-rating-star:focus-visible{outline:2px solid #f4d47f;outline-offset:3px;box-shadow:0 0 0 5px #e1bd7026}
+.community-rating-star.selected,.community-rating-star.preview{border-color:#f2cc70;background:linear-gradient(145deg,#554322,#322a25);color:#ffda79;text-shadow:0 0 12px #ffd96f88;box-shadow:inset 0 1px #ffffff18,0 3px 12px #e1bd7024}
+:root[data-theme="light"] .community-rating-star.selected,:root[data-theme="light"] .community-rating-star.preview{background:linear-gradient(145deg,#fff3c8,#f2dfaa);color:#705100;text-shadow:none;box-shadow:inset 0 1px #ffffffc0,0 3px 12px #8a640022}
+.community-rating-star:disabled{cursor:not-allowed;opacity:.78}
 .community-rating-submit{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:34px;margin:0 0 6px;padding:0 12px;border:1px solid #ac9bff55;border-radius:10px;background:linear-gradient(120deg,#8c75f3,#6f5ddd);color:#fff;font-size:10px;font-weight:800;transition:transform .18s var(--ease),filter .18s,opacity .18s}
 .community-rating-submit:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.08)}
 .community-rating-submit:disabled{cursor:not-allowed;opacity:.48}

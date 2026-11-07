@@ -28,6 +28,24 @@ _RATING_SOURCE_EXECUTOR = ThreadPoolExecutor(
 _PROVIDER_REFRESH_EXECUTOR = ThreadPoolExecutor(
     max_workers=4, thread_name_prefix='miniapp-provider-refresh'
 )
+_RATING_SOURCE_CAPACITY = threading.BoundedSemaphore(64)
+_PROVIDER_REFRESH_CAPACITY = threading.BoundedSemaphore(64)
+
+
+def _submit_limited(executor, capacity, function, *args, **kwargs):
+    """Bound running plus queued provider jobs; return None when saturated."""
+    if not capacity.acquire(blocking=False):
+        return None
+    try:
+        future = executor.submit(function, *args, **kwargs)
+    except RuntimeError:
+        capacity.release()
+        return None
+    except Exception:
+        capacity.release()
+        raise
+    future.add_done_callback(lambda _future: capacity.release())
+    return future
 
 CANONICAL_GENRES = [
     ('action', 'Action', 'Action & Adventure', 'Fast, explosive, and high-stakes viewing.'),
@@ -203,7 +221,7 @@ def register_webapp_routes(
     omdb_rating_inflight = {}
     provider_failure_ttl = 60
     provider_stale_retry_ttl = 30
-    rating_source_cache_ttl = 15
+    rating_source_cache_ttl = 5 * 60
     new_releases_refresh_lock = threading.Lock()
     release_success_ttl = 7 * 24 * 60 * 60
     release_negative_ttl = 6 * 60 * 60
@@ -225,9 +243,30 @@ def register_webapp_routes(
     tmdb_rating_cache_ttl = configured_ttl('MINIAPP_TMDB_RATING_CACHE_SECONDS', 6 * 60 * 60)
     omdb_rating_cache_ttl = configured_ttl('MINIAPP_OMDB_RATING_CACHE_SECONDS', 6 * 60 * 60)
     tmdb_review_cache_ttl = configured_ttl('MINIAPP_TMDB_REVIEW_CACHE_SECONDS', 6 * 60 * 60)
-    rating_source_cache_ttl = configured_ttl('MINIAPP_RATING_RESPONSE_CACHE_SECONDS', 15)
+    rating_source_cache_ttl = configured_ttl('MINIAPP_RATING_RESPONSE_CACHE_SECONDS', 5 * 60)
     provider_failure_ttl = configured_ttl('MINIAPP_PROVIDER_FAILURE_CACHE_SECONDS', 60)
     provider_stale_retry_ttl = configured_ttl('MINIAPP_PROVIDER_STALE_RETRY_SECONDS', 30)
+
+    detail_api_path = re.compile(
+        r'^/api/(?:movie/\d+/(?:rating-sources|rating|reviews|audience-reviews)'
+        r'|tmdb/(?:movie|tv)/\d+/(?:rating-sources|audience-reviews))$'
+    )
+
+    @flask_app.before_request
+    def start_detail_api_timer():
+        if detail_api_path.fullmatch(request.path):
+            request.environ['flimfy_detail_api_started'] = time.perf_counter()
+
+    @flask_app.after_request
+    def log_detail_api_duration(response):
+        started = request.environ.pop('flimfy_detail_api_started', None)
+        if started is not None:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                'miniapp_detail_api route=%s status=%s duration_ms=%.1f',
+                request.path, response.status_code, elapsed_ms,
+            )
+        return response
 
     def local_movie_has_file_sql(alias='m'):
         return f"""(
@@ -256,6 +295,11 @@ def register_webapp_routes(
         attempts=2, request_timeout=6, stale_while_revalidate=False,
         include_cache_state=False, _refresh_event=None, response_validator=None,
     ):
+        started_at = time.perf_counter()
+        is_detail_provider = cache_key.startswith((
+            'movie-rating-details:', 'movie-audience-reviews:'
+        ))
+
         def packed(data, cache_hit, cache_state):
             if include_cache_state:
                 return data, cache_hit, cache_state
@@ -273,6 +317,8 @@ def register_webapp_routes(
                 owner = True
             elif cached and cached[0] > now:
                 logger.debug('TMDB cache hit: %s', cache_key)
+                if is_detail_provider:
+                    logger.info('miniapp_provider_cache provider=TMDb key=%s state=hit', cache_key)
                 cache_state = cached[2] if len(cached) > 2 else (
                     'fresh' if cached[1] is not None else 'unavailable'
                 )
@@ -287,21 +333,36 @@ def register_webapp_routes(
                 if wait_event is None:
                     wait_event = threading.Event()
                     tmdb_request_inflight[cache_key] = wait_event
-                    _PROVIDER_REFRESH_EXECUTOR.submit(
+                    submitted = _submit_limited(
+                        _PROVIDER_REFRESH_EXECUTOR, _PROVIDER_REFRESH_CAPACITY,
                         tmdb_cached_request,
                         path, params, cache_key, negative, ttl_seconds,
                         attempts, request_timeout, False, include_cache_state,
                         wait_event, response_validator,
                     )
+                    if submitted is None:
+                        tmdb_request_inflight.pop(cache_key, None)
+                        wait_event.set()
+                        if stale_data is not None:
+                            release_cache[cache_key] = (
+                                time.time() + provider_stale_retry_ttl, stale_data, 'stale'
+                            )
+                        logger.warning('TMDB background refresh queue full: %s', cache_key)
                 logger.debug('TMDB stale cache served; refresh scheduled: %s', cache_key)
+                if is_detail_provider:
+                    logger.info('miniapp_provider_cache provider=TMDb key=%s state=stale refresh=scheduled', cache_key)
                 return packed(stale_data, True, 'stale')
             if not owner and wait_event is None:
                 wait_event = threading.Event()
                 tmdb_request_inflight[cache_key] = wait_event
                 owner = True
                 logger.debug('TMDB cache miss: %s', cache_key)
+                if is_detail_provider:
+                    logger.info('miniapp_provider_cache provider=TMDb key=%s state=miss', cache_key)
             else:
                 logger.debug('TMDB request joined in-flight fetch: %s', cache_key)
+                if is_detail_provider:
+                    logger.info('miniapp_provider_cache provider=TMDb key=%s state=inflight_join', cache_key)
 
         if not owner:
             if isinstance(request_timeout, (tuple, list)):
@@ -325,12 +386,19 @@ def register_webapp_routes(
         try:
             for attempt in range(attempt_limit if TMDB_API_KEY else 0):
                 try:
+                    provider_started = time.perf_counter()
                     response = requests.get(
                         f'https://api.themoviedb.org/3/{path}',
                         params=request_params,
                         headers={'User-Agent': 'FlimfyBox/1.0'},
                         timeout=request_timeout,
                     )
+                    if is_detail_provider:
+                        logger.info(
+                            'miniapp_provider_request provider=TMDb key=%s http_status=%s duration_ms=%.1f',
+                            cache_key, response.status_code,
+                            (time.perf_counter() - provider_started) * 1000,
+                        )
                     if response.status_code == 429:
                         failure_reason = 'Rate limited'
                         logger.warning('TMDB provider rate limited request: %s', cache_key)
@@ -355,6 +423,13 @@ def register_webapp_routes(
                     break
                 except (requests.RequestException, ValueError) as error:
                     failure_reason = type(error).__name__
+                    if is_detail_provider:
+                        logger.warning(
+                            'miniapp_provider_request provider=TMDb key=%s outcome=failure type=%s duration_ms=%.1f',
+                            cache_key, failure_reason,
+                            (time.perf_counter() - provider_started) * 1000
+                            if 'provider_started' in locals() else 0.0,
+                        )
                     if attempt + 1 == attempt_limit:
                         # Never log request exception text; it may contain the API key.
                         logger.warning('TMDB provider request failed: %s (%s)', cache_key, failure_reason)
@@ -380,6 +455,11 @@ def register_webapp_routes(
                 release_cache[cache_key] = (completed_at + failure_ttl, None, 'unavailable')
             return packed(None, False, 'unavailable')
         finally:
+            if is_detail_provider and _refresh_event is not None:
+                logger.info(
+                    'miniapp_provider_refresh provider=TMDb key=%s duration_ms=%.1f',
+                    cache_key, (time.perf_counter() - started_at) * 1000,
+                )
             with release_cache_lock:
                 tmdb_request_inflight.pop(cache_key, None)
             wait_event.set()
@@ -516,6 +596,7 @@ def register_webapp_routes(
     def fetch_omdb_rating(imdb_id, api_key):
         if not api_key or not re.fullmatch(r'tt\d{7,8}', str(imdb_id or '')):
             return None
+        provider_started = time.perf_counter()
         try:
             response = requests.get(
                 'https://www.omdbapi.com/',
@@ -523,11 +604,20 @@ def register_webapp_routes(
                 headers={'User-Agent': 'FlimfyBox/1.0'},
                 timeout=(1, 1.5),
             )
+            logger.info(
+                'miniapp_provider_request provider=OMDb key=%s http_status=%s duration_ms=%.1f',
+                imdb_id, response.status_code,
+                (time.perf_counter() - provider_started) * 1000,
+            )
             response.raise_for_status()
             payload = response.json()
         except (requests.RequestException, ValueError, TypeError) as error:
             # Never include the requests error text: it can contain OMDb's key.
-            logger.info('IMDb score lookup unavailable for %s (%s)', imdb_id, type(error).__name__)
+            logger.warning(
+                'miniapp_provider_request provider=OMDb key=%s outcome=failure type=%s duration_ms=%.1f',
+                imdb_id, type(error).__name__,
+                (time.perf_counter() - provider_started) * 1000,
+            )
             return None
         if not isinstance(payload, dict) or payload.get('Response') != 'True':
             logger.info('IMDb score unavailable from OMDb for %s', imdb_id)
@@ -538,6 +628,7 @@ def register_webapp_routes(
         return {'score': score, 'votes': rating_vote_text(payload.get('imdbVotes'))}
 
     def _finish_omdb_rating_refresh(imdb_id, api_key, event, stale_data=None):
+        refresh_started = time.perf_counter()
         try:
             result = fetch_omdb_rating(imdb_id, api_key)
             completed_at = time.time()
@@ -553,6 +644,11 @@ def register_webapp_routes(
                 omdb_rating_cache[imdb_id] = cache_value
             return result
         finally:
+            if stale_data is not None:
+                logger.info(
+                    'miniapp_provider_refresh provider=OMDb key=%s duration_ms=%.1f',
+                    imdb_id, (time.perf_counter() - refresh_started) * 1000,
+                )
             with omdb_rating_cache_lock:
                 omdb_rating_inflight.pop(imdb_id, None)
             event.set()
@@ -563,6 +659,7 @@ def register_webapp_routes(
             cached = omdb_rating_cache.get(imdb_id)
             if cached and cached[0] > now:
                 logger.debug('OMDb rating cache hit for %s', imdb_id)
+                logger.info('miniapp_provider_cache provider=OMDb key=%s state=hit', imdb_id)
                 state = cached[2] if len(cached) > 2 else 'fresh'
                 return cached[1], 'stale_cached' if state == 'stale' else state
             stale_data = cached[1] if cached and cached[1] is not None else None
@@ -571,19 +668,30 @@ def register_webapp_routes(
                 if event is None:
                     event = threading.Event()
                     omdb_rating_inflight[imdb_id] = event
-                    _PROVIDER_REFRESH_EXECUTOR.submit(
+                    submitted = _submit_limited(
+                        _PROVIDER_REFRESH_EXECUTOR, _PROVIDER_REFRESH_CAPACITY,
                         _finish_omdb_rating_refresh, imdb_id, api_key, event, stale_data
                     )
+                    if submitted is None:
+                        omdb_rating_inflight.pop(imdb_id, None)
+                        event.set()
+                        omdb_rating_cache[imdb_id] = (
+                            time.time() + provider_stale_retry_ttl, stale_data, 'stale'
+                        )
+                        logger.warning('OMDb background refresh queue full for %s', imdb_id)
                 logger.debug('OMDb stale rating served; refresh scheduled for %s', imdb_id)
+                logger.info('miniapp_provider_cache provider=OMDb key=%s state=stale refresh=scheduled', imdb_id)
                 return stale_data, 'stale'
             if event is None:
                 event = threading.Event()
                 omdb_rating_inflight[imdb_id] = event
                 owner = True
                 logger.debug('OMDb rating cache miss for %s', imdb_id)
+                logger.info('miniapp_provider_cache provider=OMDb key=%s state=miss', imdb_id)
             else:
                 owner = False
                 logger.debug('OMDb rating request joined in-flight fetch for %s', imdb_id)
+                logger.info('miniapp_provider_cache provider=OMDb key=%s state=inflight_join', imdb_id)
 
         if not owner:
             event.wait(3.0)
@@ -612,9 +720,11 @@ def register_webapp_routes(
         omdb_key = os.environ.get('OMDB_API_KEY', '').strip()
         deadline = time.monotonic() + 2.35
         futures = {}
+        provider_queue_full = set()
 
         if TMDB_API_KEY and tmdb_id:
-            futures['tmdb'] = _RATING_SOURCE_EXECUTOR.submit(
+            future = _submit_limited(
+                _RATING_SOURCE_EXECUTOR, _RATING_SOURCE_CAPACITY,
                 tmdb_cached_request,
                 f'{media_type}/{tmdb_id}',
                 {'append_to_response': 'external_ids'},
@@ -622,17 +732,33 @@ def register_webapp_routes(
                 False, tmdb_rating_cache_ttl, 2, (1, 1.5), True, True,
                 response_validator=lambda value: value.get('id') is not None,
             )
+            if future:
+                futures['tmdb'] = future
+            else:
+                provider_queue_full.add('tmdb')
+                logger.warning('Rating provider queue full: provider=TMDb key=%s', cache_key)
         if omdb_key and imdb_id:
-            futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
-                cached_omdb_rating, imdb_id, omdb_key
+            future = _submit_limited(
+                _RATING_SOURCE_EXECUTOR, _RATING_SOURCE_CAPACITY,
+                cached_omdb_rating, imdb_id, omdb_key,
             )
+            if future:
+                futures['imdb'] = future
+            else:
+                provider_queue_full.add('imdb')
+                logger.warning('Rating provider queue full: provider=OMDb key=%s', cache_key)
 
         if futures:
             wait(tuple(futures.values()), timeout=max(0, deadline - time.monotonic()))
 
         detail_data = None
         tmdb_score = None
-        tmdb_state = 'unavailable' if TMDB_API_KEY and tmdb_id else 'not_configured'
+        tmdb_state = (
+            'refreshing' if 'tmdb' in provider_queue_full
+            else 'unlinked' if not tmdb_id
+            else 'unavailable' if TMDB_API_KEY
+            else 'not_configured'
+        )
         if futures.get('tmdb') and futures['tmdb'].done():
             try:
                 detail_result = futures['tmdb'].result()
@@ -663,15 +789,27 @@ def register_webapp_routes(
             if isinstance(external_ids, dict):
                 imdb_id = str(external_ids.get('imdb_id') or '').strip()
         if omdb_key and re.fullmatch(r'tt\d{7,8}', imdb_id or '') and not futures.get('imdb'):
-            futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
-                cached_omdb_rating, imdb_id, omdb_key
+            future = _submit_limited(
+                _RATING_SOURCE_EXECUTOR, _RATING_SOURCE_CAPACITY,
+                cached_omdb_rating, imdb_id, omdb_key,
             )
-            remaining = max(0, deadline - time.monotonic())
-            if remaining:
-                wait((futures['imdb'],), timeout=remaining)
+            if future:
+                futures['imdb'] = future
+                remaining = max(0, deadline - time.monotonic())
+                if remaining:
+                    wait((future,), timeout=remaining)
+            else:
+                provider_queue_full.add('imdb')
+                logger.warning('Rating provider queue full: provider=OMDb key=%s', cache_key)
 
         imdb_score = None
-        imdb_state = 'unavailable' if omdb_key and imdb_id else 'not_configured'
+        imdb_state = (
+            'refreshing' if 'imdb' in provider_queue_full
+            else 'unavailable' if omdb_key and imdb_id
+            else 'not_configured' if imdb_id
+            else 'refreshing' if futures.get('tmdb') and not futures['tmdb'].done()
+            else 'unlinked'
+        )
         if futures.get('imdb') and futures['imdb'].done():
             try:
                 imdb_score, imdb_state = futures['imdb'].result()
@@ -694,16 +832,19 @@ def register_webapp_routes(
             cache_status = 'stale'
         elif 'stale_cached' in statuses:
             cache_status = 'stale_cached'
-        elif any(future and not future.done() for future in futures.values()):
+        elif any(future and not future.done() for future in futures.values()) or 'refreshing' in statuses:
             cache_status = 'refreshing'
         elif 'unavailable' in statuses and (tmdb_score or imdb_score):
             cache_status = 'partial'
         elif not tmdb_score and not imdb_score:
-            cache_status = (
-                'unavailable'
-                if 'unavailable' in statuses or statuses <= {'not_configured'}
-                else 'empty'
-            )
+            if statuses == {'unlinked'}:
+                cache_status = 'unlinked'
+            elif statuses <= {'unlinked', 'not_configured'}:
+                cache_status = 'not_configured'
+            elif 'unavailable' in statuses:
+                cache_status = 'unavailable'
+            else:
+                cache_status = 'empty'
         else:
             cache_status = 'fresh'
 
@@ -711,6 +852,7 @@ def register_webapp_routes(
             'status': 'success',
             'imdb': imdb_score or {'score': None, 'votes': None},
             'tmdb': tmdb_score or {'score': None, 'votes': None},
+            'source_status': {'imdb': imdb_state, 'tmdb': tmdb_state},
             'cache_status': cache_status,
         }
         if cache_status == 'stale':
@@ -727,9 +869,17 @@ def register_webapp_routes(
             rating_source_cache[cache_key] = (time.time() + ttl, result)
         return result
 
-    def _refresh_rating_sources(cache_key, media_type, tmdb_id, imdb_id, event, previous=None):
+    def _refresh_rating_sources(cache_key, media_type, tmdb_id, imdb_id, event, previous=None, background=False):
+        refresh_started = time.perf_counter()
         try:
-            return _fetch_rating_sources(cache_key, media_type, tmdb_id, imdb_id, previous)
+            result = _fetch_rating_sources(cache_key, media_type, tmdb_id, imdb_id, previous)
+            if background:
+                logger.info(
+                    'miniapp_provider_refresh key=%s cache_status=%s duration_ms=%.1f',
+                    cache_key, result.get('cache_status'),
+                    (time.perf_counter() - refresh_started) * 1000,
+                )
+            return result
         finally:
             with rating_source_cache_lock:
                 rating_source_inflight.pop(cache_key, None)
@@ -742,9 +892,17 @@ def register_webapp_routes(
             cached = rating_source_cache.get(cache_key)
             if cached and cached[0] > now:
                 logger.debug('Rating response cache hit: %s', cache_key)
+                logger.info('miniapp_rating_cache key=%s state=hit', cache_key)
                 cached_result = cached[1]
                 if cached_result.get('cache_status') == 'stale':
-                    return {**cached_result, 'cache_status': 'stale_cached'}
+                    return {
+                        **cached_result,
+                        'cache_status': 'stale_cached',
+                        'source_status': {
+                            key: 'stale_cached' if value == 'stale' else value
+                            for key, value in cached_result.get('source_status', {}).items()
+                        },
+                    }
                 return cached_result
             stale_result = cached[1] if cached and any(
                 (cached[1].get(provider) or {}).get('score') is not None
@@ -755,20 +913,33 @@ def register_webapp_routes(
                 if event is None:
                     event = threading.Event()
                     rating_source_inflight[cache_key] = event
-                    _PROVIDER_REFRESH_EXECUTOR.submit(
+                    submitted = _submit_limited(
+                        _PROVIDER_REFRESH_EXECUTOR, _PROVIDER_REFRESH_CAPACITY,
                         _refresh_rating_sources, cache_key, media_type,
-                        tmdb_id, imdb_id, event, stale_result,
+                        tmdb_id, imdb_id, event, stale_result, True,
                     )
+                    if submitted is None:
+                        rating_source_inflight.pop(cache_key, None)
+                        event.set()
+                        stale_cached_result = {**stale_result, 'cache_status': 'stale_cached'}
+                        rating_source_cache[cache_key] = (
+                            time.time() + provider_stale_retry_ttl, stale_cached_result
+                        )
+                        logger.warning('Rating background refresh queue full: %s', cache_key)
+                        return stale_cached_result
                 logger.debug('Stale rating response served; provider refresh scheduled: %s', cache_key)
+                logger.info('miniapp_rating_cache key=%s state=stale refresh=scheduled', cache_key)
                 return {**stale_result, 'cache_status': 'stale'}
             if event is None:
                 event = threading.Event()
                 rating_source_inflight[cache_key] = event
                 owner = True
                 logger.debug('Rating response cache miss: %s', cache_key)
+                logger.info('miniapp_rating_cache key=%s state=miss', cache_key)
             else:
                 owner = False
                 logger.debug('Rating request joined in-flight refresh: %s', cache_key)
+                logger.info('miniapp_rating_cache key=%s state=inflight_join', cache_key)
 
         if not owner:
             event.wait(3.5)
@@ -780,6 +951,7 @@ def register_webapp_routes(
                 'status': 'success',
                 'imdb': {'score': None, 'votes': None},
                 'tmdb': {'score': None, 'votes': None},
+                'source_status': {'imdb': 'refreshing', 'tmdb': 'refreshing'},
                 'cache_status': 'refreshing',
             }
         return _refresh_rating_sources(
