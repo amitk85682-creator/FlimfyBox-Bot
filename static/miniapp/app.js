@@ -2623,10 +2623,10 @@ document.addEventListener('keydown', (e) => {
                 .filter(Boolean).join(' • ') || 'Genre unavailable';
             document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
         }
-        function loadMovieRatingSources(movie, isTMDB, requestId, signal) {
+        function loadMovieRatingSources(movie, isTMDB, requestId, signal, refreshAttempt = 0) {
             const meterContainer = document.getElementById('flimfyVerdict');
             if (!window.FlimfyVerdict) return;
-            window.FlimfyVerdict.renderLoading(meterContainer);
+            if (refreshAttempt === 0) window.FlimfyVerdict.renderLoading(meterContainer);
             const endpoint = window.FlimfyVerdict.endpointFor(movie, isTMDB);
             if (!endpoint) {
                 window.FlimfyVerdict.renderUnavailable(meterContainer);
@@ -2643,10 +2643,16 @@ document.addEventListener('keydown', (e) => {
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id)) return;
                     window.FlimfyVerdict.render(meterContainer, null, data);
+                    if (['refreshing', 'stale'].includes(data.cache_status) && refreshAttempt < 4) {
+                        window.setTimeout(() => {
+                            if (requestId !== detailsRequestId || signal?.aborted) return;
+                            loadMovieRatingSources(movie, isTMDB, requestId, signal, refreshAttempt + 1);
+                        }, 1000);
+                    }
                 })
                 .catch(error => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(movie.id) || isAbortError(error)) return;
-                    window.FlimfyVerdict.renderUnavailable(meterContainer);
+                    if (refreshAttempt === 0) window.FlimfyVerdict.renderUnavailable(meterContainer);
                 });
         }
         function bindFlimfyReviewForm(container, movieId, movie, requestId, signal) {
@@ -2686,7 +2692,7 @@ document.addEventListener('keydown', (e) => {
                 }
             });
         }
-        function loadFlimfyCommunityReviews(movie, requestId, signal) {
+        function loadFlimfyCommunityReviews(movie, requestId, signal, refreshAttempt = 0) {
             const container = document.getElementById('flimfyReviews');
             if (!container || !window.FlimfyVerdict) return;
             const rawId = String(movie?.id || '').trim();
@@ -2702,7 +2708,7 @@ document.addEventListener('keydown', (e) => {
                 : isCatalogued
                     ? `/api/movie/${encodeURIComponent(movieId)}/audience-reviews`
                     : null;
-            window.FlimfyVerdict.renderReviews(container, { status: 'loading' });
+            if (refreshAttempt === 0) window.FlimfyVerdict.renderReviews(container, { status: 'loading' });
 
             const requestReviewPayload = (endpoint, headers = {}) => fetchWithTimeout(endpoint, { signal, headers })
                 .then(async response => {
@@ -2737,12 +2743,19 @@ document.addEventListener('keydown', (e) => {
                     is_upcoming: Boolean(movie?.is_upcoming || flimfy?.is_upcoming),
                     tmdb_reviews: tmdb?.reviews || [],
                     tmdb_review_count: tmdb?.review_count || 0,
+                    tmdb_cache_status: tmdb?.cache_status || (audienceEndpoint && !tmdb ? 'unavailable' : 'fresh'),
                     tmdb_linked: tmdb?.linked !== false,
                     tmdb_unavailable: Boolean(audienceEndpoint && !tmdb),
                     flimfy_unavailable: Boolean(isCatalogued && !flimfy)
                 });
                 if (isCatalogued && flimfy) {
                     bindFlimfyReviewForm(container, movieId, movie, requestId, signal);
+                }
+                if (tmdb?.cache_status === 'stale' && refreshAttempt < 4) {
+                    window.setTimeout(() => {
+                        if (requestId !== detailsRequestId || signal?.aborted) return;
+                        loadFlimfyCommunityReviews(movie, requestId, signal, refreshAttempt + 1);
+                    }, 1000);
                 }
             });
         }
@@ -3173,13 +3186,10 @@ document.addEventListener('keydown', (e) => {
             if (!container) return;
             container.dataset.selectedRating = '';
             container.dataset.submitting = 'false';
+            container.dataset.canRate = 'false';
             container.innerHTML = `
-                <div class="community-rating-heading">
-                    <div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title">Your take on ${escapeHtml(title)}</h2></div>
-                    <span class="community-rating-mark"><i class="fas fa-star"></i></span>
-                </div>
-                <p class="community-rating-note">Community ratings appear when this title is part of the FlimfyBox catalogue.</p>
-                <div class="community-rating-summary">This discovery title is not yet rateable here.</div>
+                <div class="community-rating-heading"><strong class="community-rating-title">Your rating</strong></div>
+                <p class="community-rating-note">Ratings are available for titles in the FlimfyBox catalogue.</p>
             `;
         }
         function renderLockedCommunityRating(title) {
@@ -3187,22 +3197,18 @@ document.addEventListener('keydown', (e) => {
             if (!container) return;
             container.dataset.selectedRating = '';
             container.dataset.submitting = 'false';
+            container.dataset.canRate = 'false';
             container.innerHTML = `
-                <div class="community-rating-heading"><div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title">Rate ${escapeHtml(title)}</h2></div><span class="community-rating-mark"><i class="fas fa-lock"></i></span></div>
-                <div class="community-rating-stars is-locked" aria-label="Rating locked">
-                    <span class="rating-lock"><i class="fas fa-lock"></i></span>
-                    <span class="community-rating-locked-copy">Rating available after release</span>
-                </div>
-                <div class="community-rating-summary"><strong>Community Rating</strong><br>Rating available after release.</div>
+                <div class="community-rating-heading"><strong class="community-rating-title">Your rating</strong><span class="community-rating-locked-copy">Available after release</span></div>
+                <p class="community-rating-note">You can rate ${escapeHtml(title)} after it is released.</p>
             `;
         }
         window.renderCommunityRating = function(movieId, title, requestId = detailsRequestId, signal = detailsController?.signal) {
                 const container = document.getElementById('communityRating');
                 if (!container) return;
                 container.dataset.movieId = String(movieId);
-                container.innerHTML = '<div class="community-rating-heading"><div><span class="section-kicker">FLIMFYBOX COMMUNITY</span><h2 class="community-rating-title"></h2></div><span class="community-rating-mark"><i class="fas fa-star"></i></span></div><div class="community-rating-intro">Your rating joins the FlimfyBox community score.</div><div class="community-rating-stars"></div><button type="button" class="community-rating-submit" disabled>Save my rating <i class="fas fa-arrow-right"></i></button><div class="community-rating-summary">Loading FlimfyBox ratings…</div>';
+                container.innerHTML = '<div class="community-rating-heading"><strong class="community-rating-title">Your rating</strong><span class="community-rating-note">Add your score</span></div><div class="community-rating-stars" role="group" aria-label="Your rating out of five"></div><button type="button" class="community-rating-submit" disabled>Save my rating <i class="fas fa-arrow-right"></i></button><div class="community-rating-summary" aria-live="polite">Loading rating controls…</div>';
                 container.dataset.selectedRating = '';
-                container.querySelector('.community-rating-title').textContent = `Rate ${title}`;
                 const stars = container.querySelector('.community-rating-stars');
                 for (let value = 1; value <= 5; value += 1) {
                     const button = document.createElement('button');
@@ -3220,7 +3226,7 @@ document.addEventListener('keydown', (e) => {
                     'click',
                     () => submitCommunityRating(movieId, container)
                 );
-                fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
+                return fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     signal,
                     headers: telegramAuthHeaders()
                 })
@@ -3232,7 +3238,8 @@ document.addEventListener('keydown', (e) => {
                     })
                     .catch(error => {
                         if (requestId !== detailsRequestId || isAbortError(error)) return;
-                        container.querySelector('.community-rating-summary').textContent = 'Rating temporarily unavailable';
+                        const summary = container.querySelector('.community-rating-summary');
+                        if (summary) summary.textContent = 'Rating is temporarily unavailable. Try again later.';
                     });
         };
         function previewCommunityStars(container, value) {
@@ -3246,25 +3253,38 @@ document.addEventListener('keydown', (e) => {
                 container.dataset.selectedRating = String(value);
                 previewCommunityStars(container, value);
                 const submit = container.querySelector('.community-rating-submit');
-                if (submit) submit.disabled = false;
+                if (submit) {
+                    submit.disabled = container.dataset.canRate !== 'true';
+                    submit.innerHTML = `${container.dataset.hasRating === 'true' ? 'Update my rating' : 'Save my rating'} <i class="fas fa-arrow-right"></i>`;
+                }
                 const summary = container.querySelector('.community-rating-summary');
-                if (summary) summary.textContent = `You selected ${value} / 5. Tap Save my rating to submit it.`;
+                if (summary) summary.textContent = `You selected ${value} / 5. Tap ${container.dataset.hasRating === 'true' ? 'Update' : 'Save'} my rating to submit it.`;
         }
         function updateCommunityRating(container, data) {
                 const own = data.user_rating;
+                const canRate = Boolean(data.can_rate);
+                container.dataset.canRate = canRate ? 'true' : 'false';
+                container.dataset.hasRating = own ? 'true' : 'false';
                 container.querySelectorAll('.community-rating-star').forEach((button) => {
                     const selected = own && Number(button.dataset.rating) <= own;
                     button.classList.toggle('selected', Boolean(selected));
                     button.textContent = selected ? '★' : '☆';
-                    button.disabled = !data.can_rate;
+                    button.disabled = !canRate;
                 });
                 container.dataset.selectedRating = data.user_rating ? String(data.user_rating) : '';
                 const submit = container.querySelector('.community-rating-submit');
-                if (submit) submit.disabled = !data.can_rate || !data.user_rating;
+                if (submit) {
+                    submit.disabled = !canRate || !data.user_rating;
+                    submit.innerHTML = `${data.user_rating ? 'Update my rating' : 'Save my rating'} <i class="fas fa-arrow-right"></i>`;
+                }
                 const summary = container.querySelector('.community-rating-summary');
-                summary.innerHTML = data.count
-                    ? `<strong>${Number(data.average).toFixed(1)} <span>/ 5</span></strong><span> · ${data.count} community rating${data.count === 1 ? '' : 's'}${own ? ` · Your rating ${own}/5` : ''}</span>`
-                    : '<strong>No ratings yet</strong><span> · Be the first to rate this title.</span>';
+                if (summary) {
+                    const count = Number(data.count) || 0;
+                    const countCopy = count ? `${count} member rating${count === 1 ? '' : 's'}` : 'No member ratings yet';
+                    const ownCopy = own ? ` · Your rating: ${own}/5` : '';
+                    const accessCopy = canRate ? '' : ' · Open FlimfyBox in Telegram to rate';
+                    summary.textContent = `${countCopy}${ownCopy}${accessCopy}`;
+                }
                 const meter = document.getElementById('flimfyVerdict');
                 if (meter && String(container.dataset.movieId || '') === String(activeMovie?.id || '')) {
                     window.FlimfyVerdict?.setCommunityRating(meter, data);
@@ -3274,15 +3294,17 @@ document.addEventListener('keydown', (e) => {
                 if (container.dataset.submitting === 'true') return;
                 const value = Number(container.dataset.selectedRating || 0);
                 if (!value) {
-                    container.querySelector('.community-rating-summary').textContent = 'Select a star first.';
+                    const summary = container.querySelector('.community-rating-summary');
+                    if (summary) summary.textContent = 'Select a star first.';
                     return;
                 }
                 container.dataset.submitting = 'true';
                 container.querySelectorAll('.community-rating-star').forEach(button => { button.disabled = true; });
                 const submit = container.querySelector('.community-rating-submit');
                 if (submit) submit.disabled = true;
-                container.querySelector('.community-rating-summary').textContent = 'Saving your rating…';
-                fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
+                const summary = container.querySelector('.community-rating-summary');
+                if (summary) summary.textContent = 'Saving your rating…';
+                return fetchWithTimeout(`/api/movie/${encodeURIComponent(movieId)}/rating`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -3300,10 +3322,11 @@ document.addEventListener('keydown', (e) => {
                     .catch(error => {
                         if (String(container.dataset.movieId || '') !== String(movieId)
                             || String(activeMovie?.id || '') !== String(movieId)) return;
-                        container.querySelector('.community-rating-summary').textContent = error.message;
-                        container.querySelectorAll('.community-rating-star').forEach(button => { button.disabled = false; });
+                        const summary = container.querySelector('.community-rating-summary');
+                        if (summary) summary.textContent = error.message;
+                        container.querySelectorAll('.community-rating-star').forEach(button => { button.disabled = container.dataset.canRate !== 'true'; });
                         const submit = container.querySelector('.community-rating-submit');
-                        if (submit) submit.disabled = !container.dataset.selectedRating;
+                        if (submit) submit.disabled = container.dataset.canRate !== 'true' || !container.dataset.selectedRating;
                     })
                     .finally(() => { container.dataset.submitting = 'false'; });
         }

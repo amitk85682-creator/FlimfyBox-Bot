@@ -1,5 +1,9 @@
 """IMDb and TMDb ratings used by the mini-app movie detail page."""
 
+import concurrent.futures
+import threading
+import time
+
 import pytest
 
 from .conftest import FakeConnection
@@ -34,6 +38,7 @@ def test_local_movie_audience_reviews_keep_tmdb_attribution_and_safe_source_link
     calls = []
     reviews = {
         'results': [{
+            'id': 'rev-123',
             'author': 'A TMDb reviewer',
             'content': '<p>Sharp, tense &amp; beautifully acted.</p>',
             'author_details': {'rating': 8.5},
@@ -64,6 +69,7 @@ def test_local_movie_audience_reviews_keep_tmdb_attribution_and_safe_source_link
     assert response.json['review_count'] == 23
     assert response.json['linked'] is True
     assert response.json['reviews'][0] == {
+        'id': 'rev-123',
         'author': 'A TMDb reviewer',
         'content': 'Sharp, tense & beautifully acted.',
         'rating': 8.5,
@@ -91,10 +97,152 @@ def test_tmdb_series_audience_reviews_use_the_tv_review_endpoint(webapp_factory,
     assert response.status_code == 200
     assert response.json == {
         'status': 'success', 'source': 'TMDb', 'reviews': [],
-        'review_count': 0, 'linked': True,
+        'review_count': 0, 'cache_status': 'fresh', 'linked': True,
     }
     assert calls and '/tv/77/reviews' in calls[0]
     assert connection.queries == []
+
+
+def test_expired_tmdb_reviews_return_saved_data_while_refreshing_and_keep_it_on_failure(
+    webapp_factory, monkeypatch
+):
+    monkeypatch.setenv('MINIAPP_TMDB_REVIEW_CACHE_SECONDS', '1')
+    app, _, _ = webapp_factory()
+    calls = []
+    refresh_started = threading.Event()
+    finish_refresh = threading.Event()
+    review_payload = {
+        'results': [{
+            'id': 'saved-review', 'author': 'Saved reviewer',
+            'content': 'The cached review remains available during an outage.',
+            'author_details': {'rating': 8},
+        }],
+        'total_results': 1,
+    }
+
+    def provider_get(_url, **_kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return ProviderResponse(review_payload)
+        refresh_started.set()
+        finish_refresh.wait(2)
+        raise route_requests.ConnectionError('provider unavailable')
+
+    monkeypatch.setattr(route_requests, 'get', provider_get)
+    client = app.test_client()
+    first = client.get('/api/tmdb/movie/42/audience-reviews')
+    assert first.json['cache_status'] == 'fresh'
+    time.sleep(1.05)
+
+    stale = client.get('/api/tmdb/movie/42/audience-reviews')
+    assert stale.status_code == 200
+    assert stale.json['cache_status'] == 'stale'
+    assert stale.json['reviews'][0]['id'] == 'saved-review'
+    assert refresh_started.wait(1)
+
+    finish_refresh.set()
+    deadline = time.monotonic() + 2
+    saved_during_backoff = None
+    while time.monotonic() < deadline:
+        saved_during_backoff = client.get('/api/tmdb/movie/42/audience-reviews')
+        if saved_during_backoff.json.get('cache_status') == 'stale_cached':
+            break
+        time.sleep(0.02)
+
+    assert saved_during_backoff.status_code == 200
+    assert saved_during_backoff.json['cache_status'] == 'stale_cached'
+    assert saved_during_backoff.json['reviews'][0]['id'] == 'saved-review'
+    assert len(calls) == 2
+
+
+def test_expired_rating_sources_keep_last_good_scores_during_provider_outage(
+    webapp_factory, monkeypatch
+):
+    monkeypatch.setenv('OMDB_API_KEY', 'synthetic-omdb-key')
+    monkeypatch.setenv('MINIAPP_TMDB_RATING_CACHE_SECONDS', '1')
+    monkeypatch.setenv('MINIAPP_OMDB_RATING_CACHE_SECONDS', '1')
+    monkeypatch.setenv('MINIAPP_RATING_RESPONSE_CACHE_SECONDS', '1')
+    connection = FakeConnection(fetchone_result=('tt1234567', 42, 'Movie', 'Movie'))
+    app, _, _ = webapp_factory(connection=connection)
+    calls = {'tmdb': 0, 'omdb': 0}
+    calls_lock = threading.Lock()
+    outage_seen = threading.Event()
+
+    def provider_get(url, **_kwargs):
+        source = 'omdb' if 'omdbapi.com' in url else 'tmdb'
+        with calls_lock:
+            calls[source] += 1
+            call_number = calls[source]
+            if calls['tmdb'] > 1 and calls['omdb'] > 1:
+                outage_seen.set()
+        if call_number > 1:
+            raise route_requests.ConnectionError(f'{source} unavailable')
+        if source == 'omdb':
+            return ProviderResponse({
+                'Response': 'True', 'imdbRating': '8.2', 'imdbVotes': '125,500'
+            })
+        return ProviderResponse(tmdb_detail(42, score=7.6, votes=2100))
+
+    monkeypatch.setattr(route_requests, 'get', provider_get)
+    client = app.test_client()
+    first = client.get('/api/movie/12/rating-sources')
+    assert first.json['imdb']['score'] == 8.2
+    assert first.json['tmdb']['score'] == 7.6
+    time.sleep(1.05)
+
+    stale = client.get('/api/movie/12/rating-sources')
+    assert stale.status_code == 200
+    assert stale.json['imdb']['score'] == 8.2
+    assert stale.json['tmdb']['score'] == 7.6
+    assert stale.json['cache_status'] == 'stale'
+    assert outage_seen.wait(2)
+
+    deadline = time.monotonic() + 2
+    cached = None
+    while time.monotonic() < deadline:
+        cached = client.get('/api/movie/12/rating-sources')
+        if cached.json.get('cache_status') == 'stale_cached':
+            break
+        time.sleep(0.02)
+    assert cached.status_code == 200
+    assert cached.json['imdb']['score'] == 8.2
+    assert cached.json['tmdb']['score'] == 7.6
+    assert cached.json['cache_status'] == 'stale_cached'
+
+
+def test_concurrent_tmdb_review_misses_share_one_provider_request(webapp_factory, monkeypatch):
+    app, _, _ = webapp_factory()
+    calls = []
+    calls_lock = threading.Lock()
+
+    def provider_get(_url, **_kwargs):
+        with calls_lock:
+            calls.append(1)
+        time.sleep(0.1)
+        return ProviderResponse({'results': [], 'total_results': 0})
+
+    monkeypatch.setattr(route_requests, 'get', provider_get)
+
+    def request_reviews(_index):
+        return app.test_client().get('/api/tmdb/movie/42/audience-reviews')
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        responses = list(executor.map(request_reviews, range(5)))
+
+    assert all(response.status_code == 200 for response in responses)
+    assert len(calls) == 1
+
+
+def test_reviews_without_tmdb_key_do_not_call_provider(webapp_factory, monkeypatch):
+    app, _, _ = webapp_factory(tmdb_api_key='')
+
+    def unexpected_provider_call(*_args, **_kwargs):
+        pytest.fail('TMDb should not be called without a server-side key')
+
+    monkeypatch.setattr(route_requests, 'get', unexpected_provider_call)
+    response = app.test_client().get('/api/tmdb/movie/42/audience-reviews')
+
+    assert response.status_code == 503
 
 
 def test_local_movie_scores_are_cached_without_fetching_tmdb_reviews(webapp_factory, monkeypatch):

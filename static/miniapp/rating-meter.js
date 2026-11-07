@@ -2,32 +2,28 @@
     'use strict';
 
     const providerDefinitions = [
-        { key: 'imdb', label: 'IMDb', scale: 10, mark: 'i', quantity: 'votes' },
-        { key: 'tmdb', label: 'TMDb', scale: 10, mark: 'T', quantity: 'votes' },
-        { key: 'flimfy', label: 'FlimfyBox', scale: 5, mark: 'F', quantity: 'ratings' }
+        { key: 'imdb', label: 'IMDb', scale: 10 },
+        { key: 'tmdb', label: 'TMDb', scale: 10 },
+        { key: 'flimfy', label: 'FlimfyBox', scale: 5 }
     ];
     const ratingsByContainer = new WeakMap();
 
-    function normalizedScore(value, maximum = 10) {
-        if (typeof value === 'boolean' || value === null || value === undefined || value === '') return null;
+    function validScore(value, maximum = 10) {
+        if (typeof value === 'boolean' || value === null || value === undefined
+            || value === '' || (typeof value === 'string' && value.trim() === '')) return null;
         const score = Number(value);
         if (!Number.isFinite(score) || score < 0 || score > maximum) return null;
-        return Math.round(score * 10) / 10;
-    }
-
-    function providerDisplayScore(payload, key) {
-        const provider = payload?.[key];
-        const definition = providerDefinitions.find(item => item.key === key);
-        const score = normalizedScore(provider?.score, definition?.scale || 10);
-        const hasVotes = provider?.votes !== null && provider?.votes !== undefined && provider?.votes !== '';
-        if (score === null || (hasVotes && Number(provider.votes) === 0)) return null;
         return score;
     }
 
     function providerScore(payload, key) {
+        const provider = payload?.[key];
         const definition = providerDefinitions.find(item => item.key === key);
-        const score = providerDisplayScore(payload, key);
-        return score === null || !definition ? null : Math.round(score * (10 / definition.scale) * 10) / 10;
+        const score = validScore(provider?.score, definition?.scale || 10);
+        const hasVotes = provider?.votes !== null && provider?.votes !== undefined && provider?.votes !== '';
+        const votes = hasVotes ? Number(String(provider.votes).replace(/,/g, '').trim()) : null;
+        if (score === null || !definition || (hasVotes && (!Number.isFinite(votes) || votes <= 0))) return null;
+        return score * (10 / definition.scale);
     }
 
     function summarize(payload = {}) {
@@ -45,7 +41,7 @@
 
     function verdictForSummary(summary) {
         const score = summary?.score;
-        if (!Number.isFinite(score)) return { label: 'Too early to call', tone: 'quiet' };
+        if (!Number.isFinite(score)) return { label: 'Not enough ratings yet', tone: 'quiet' };
         if (score >= 8) return { label: 'A standout pick', tone: 'excellent' };
         if (score >= 7) return { label: 'Worth your night', tone: 'positive' };
         if (score >= 6) return { label: 'See the trailer first', tone: 'curious' };
@@ -53,24 +49,9 @@
     }
 
     function audienceRead(payload = {}) {
-        const available = providerDefinitions
-            .map(provider => ({ ...provider, score: providerScore(payload, provider.key) }))
-            .filter(provider => provider.score !== null);
-        if (!available.length) return 'IMDb, TMDb and FlimfyBox ratings will appear here when available.';
-        if (available.length === 1) return `${available[0].label} is the only rating available so far.`;
-        const values = available.map(provider => provider.score);
-        const gap = Math.round((Math.max(...values) - Math.min(...values)) * 10) / 10;
-        const names = available.length === 2
-            ? `${available[0].label} + ${available[1].label}`
-            : `${available[0].label}, ${available[1].label} + ${available[2].label}`;
-        if (available.length === 2 && available[0].key === 'imdb' && available[1].key === 'tmdb') {
-            if (gap <= 0.5) return `IMDb + TMDb are in sync · ${gap.toFixed(1)} apart.`;
-            if (gap >= 1.5) return `A split verdict · scores differ by ${gap.toFixed(1)}.`;
-            return `Close scores · ${gap.toFixed(1)} apart.`;
-        }
-        if (gap <= 0.5) return `${names} are in sync · ${gap.toFixed(1)} apart.`;
-        if (gap >= 1.5) return `A split verdict · sources span ${gap.toFixed(1)} points.`;
-        return `${names} are close · ${gap.toFixed(1)} apart.`;
+        return summarize(payload).score === null
+            ? 'Not enough ratings yet.'
+            : 'Based on available audience ratings.';
     }
 
     function endpointFor(movie, isTMDB = false) {
@@ -96,16 +77,6 @@
         return element;
     }
 
-    function formatVotes(votes, quantity = 'votes') {
-        if (votes === null || votes === undefined || votes === '') return `${quantity} unavailable`;
-        const raw = String(votes).trim();
-        const numeric = Number(raw.replace(/,/g, ''));
-        const formatted = Number.isFinite(numeric) && numeric >= 0
-            ? Math.round(numeric).toLocaleString()
-            : raw;
-        return `${formatted} ${quantity}`;
-    }
-
     function formatReviewDate(value) {
         if (!value) return '';
         const date = new Date(value);
@@ -128,54 +99,22 @@
         }
     }
 
-    function renderSources(container, payload) {
-        const sourceGrid = node('div', 'verdict-source-grid');
-        providerDefinitions.forEach(provider => {
-            const rating = payload?.[provider.key] || {};
-            const score = providerDisplayScore(payload, provider.key);
-            const card = node('div', `verdict-source-card ${provider.key}`);
-            const meta = node('div', 'verdict-source-meta');
-            meta.append(node('span', 'verdict-source-mark', provider.mark));
-            meta.append(node('span', 'verdict-source-name', provider.label));
-            const value = node('strong', 'verdict-source-score');
-            value.append(node('span', '', score === null ? '—' : score.toFixed(1)));
-            if (score !== null) value.append(node('span', 'verdict-source-unit', `/${provider.scale}`));
-            const hasRatingCount = rating.votes !== null && rating.votes !== undefined && rating.votes !== '';
-            const noRatingsYet = provider.key === 'flimfy'
-                && hasRatingCount && Number(rating.votes) === 0;
-            const votes = node('span', 'verdict-source-votes', noRatingsYet
-                ? 'No member ratings yet'
-                : score === null
-                    ? 'Not available'
-                    : formatVotes(rating.votes, provider.quantity));
-            const rail = node('span', 'verdict-source-rail');
-            const fill = node('span', 'verdict-source-fill');
-            fill.style.width = score === null ? '0%' : `${score * (100 / provider.scale)}%`;
-            rail.append(fill);
-            card.append(meta, value, votes, rail);
-            sourceGrid.append(card);
-        });
-        container.append(sourceGrid);
-        container.append(node('p', 'verdict-method', 'Equal mean · FlimfyBox /5 is scaled to /10 · each source count stays separate.'));
-    }
-
     function renderMeter(container, payload) {
         const summary = summarize(payload?.scores || payload || {});
         const scores = payload?.scores || payload || {};
         const verdict = verdictForSummary(summary);
         const heading = node('div', 'verdict-heading');
         const brand = node('span', 'verdict-brand');
-        brand.append(node('span', 'verdict-brand-icon', 'F'), node('span', '', 'FLIMFY VERDICT'));
+        brand.append(node('span', 'verdict-brand-icon', 'F'), node('span', '', 'FLIMFYBOX RATING'));
         heading.append(brand);
-        heading.append(node('span', 'verdict-source-count', `${summary.sourceCount} ${summary.sourceCount === 1 ? 'SIGNAL' : 'SIGNALS'}`));
         container.append(heading);
 
         const hero = node('div', 'verdict-hero');
         const scoreLockup = node('div', 'verdict-score-lockup');
         scoreLockup.setAttribute('role', 'img');
         scoreLockup.setAttribute('aria-label', summary.score === null
-            ? 'Flimfy Verdict: not enough data'
-            : `Flimfy Verdict: ${summary.score.toFixed(1)} out of 10`);
+            ? 'FlimfyBox rating: not enough ratings yet'
+            : `FlimfyBox rating: ${summary.score.toFixed(1)} out of 10`);
         scoreLockup.append(
             node('strong', 'verdict-score', summary.score === null ? '—' : summary.score.toFixed(1)),
             node('span', 'verdict-score-scale', '/10')
@@ -184,16 +123,37 @@
         answer.append(
             node('span', 'verdict-question', 'Worth your night?'),
             node('strong', 'verdict-answer-label', verdict.label),
-            node('span', 'verdict-identity', summary.score === null ? 'Waiting for verified ratings' : 'A quick read of the ratings')
+            node('span', 'verdict-identity', summary.score === null ? 'Waiting for audience ratings' : 'One score from available audience ratings')
         );
         hero.append(scoreLockup, answer);
         container.append(hero);
 
         const read = node('div', 'verdict-audience-read');
-        read.append(node('span', 'verdict-audience-dot'), node('span', 'verdict-audience-read-copy', audienceRead(scores)));
+        let audienceCopy = audienceRead(scores);
+        if (payload?.cache_status === 'stale') {
+            audienceCopy = summary.score === null
+                ? 'Checking for fresh ratings…'
+                : 'Showing saved ratings · Refreshing in the background.';
+        } else if (payload?.cache_status === 'stale_cached') {
+            audienceCopy = summary.score === null
+                ? 'Showing saved ratings while providers recover.'
+                : 'Showing saved ratings · We’ll check again soon.';
+        } else if (payload?.cache_status === 'refreshing') {
+            audienceCopy = summary.score === null
+                ? 'Loading audience ratings…'
+                : 'Checking for fresh ratings…';
+        } else if (payload?.cache_status === 'partial') {
+            audienceCopy = summary.score === null
+                ? 'Some rating sources are unavailable. Try again soon.'
+                : 'Based on available audience ratings. Some sources are unavailable.';
+        } else if (payload?.cache_status === 'unavailable' && summary.score === null) {
+            audienceCopy = 'Ratings are temporarily unavailable. Try again soon.';
+        }
+        read.append(node('span', 'verdict-audience-dot'), node('span', 'verdict-audience-read-copy', audienceCopy));
         container.append(read);
 
         const scale = node('div', 'verdict-scale');
+        scale.hidden = summary.score === null;
         const track = node('div', 'verdict-scale-track');
         const fill = node('span', 'verdict-scale-fill');
         const marker = node('span', 'verdict-scale-marker');
@@ -206,37 +166,119 @@
         labels.append(node('span', '', 'LOW'), node('span', '', 'GOOD'), node('span', '', 'GREAT'));
         scale.append(labels);
         container.append(scale);
-        renderSources(container, scores);
+    }
+
+    function canonicalReviewUrl(value) {
+        const safeUrl = trustedTmdbReviewUrl(value);
+        if (!safeUrl) return '';
+        try {
+            const url = new URL(safeUrl);
+            url.search = '';
+            url.hash = '';
+            url.pathname = url.pathname.replace(/\/$/, '');
+            return url.href;
+        } catch (_error) {
+            return '';
+        }
+    }
+
+    function reviewSource(review) {
+        return String(review?.review_source || review?.source || '').toLowerCase().includes('tmdb')
+            ? 'tmdb' : 'flimfybox';
+    }
+
+    function mergeReviews(payload = {}) {
+        const localReviews = Array.isArray(payload?.reviews)
+            ? payload.reviews.slice(0, 10).map(review => ({ ...review, review_source: 'flimfybox' }))
+            : [];
+        const importedReviews = Array.isArray(payload?.tmdb_reviews)
+            ? payload.tmdb_reviews.slice(0, 5).map(review => ({ ...review, review_source: 'tmdb' }))
+            : [];
+        const merged = [];
+        const seen = new Map();
+        const crossSourceDuplicateIds = new Set();
+        [...localReviews, ...importedReviews].forEach((review, index) => {
+            const source = reviewSource(review);
+            const canonicalUrl = canonicalReviewUrl(review.url);
+            const sourceId = String(review.id ?? review.review_id ?? '').trim();
+            const identity = canonicalUrl
+                ? `url:${canonicalUrl}`
+                : sourceId ? `id:${source}:${sourceId}` : '';
+            if (identity && seen.has(identity)) {
+                const previous = seen.get(identity);
+                if (previous.source !== source && identity.startsWith('url:')) {
+                    crossSourceDuplicateIds.add(identity);
+                }
+                // Keep the original provider's author and source when both feeds contain the same linked review.
+                if (previous.source !== 'tmdb' && source === 'tmdb') {
+                    merged[previous.index] = {
+                        ...review,
+                        review_source: 'tmdb',
+                        _mergeIndex: merged[previous.index]?._mergeIndex ?? index
+                    };
+                    seen.set(identity, { source, index: previous.index });
+                }
+                return;
+            }
+            const item = { ...review, review_source: source, _mergeIndex: index };
+            if (identity) seen.set(identity, { source, index: merged.length });
+            merged.push(item);
+        });
+        merged.sort((left, right) => {
+            const leftTime = reviewTimestamp(left);
+            const rightTime = reviewTimestamp(right);
+            if (leftTime === null && rightTime === null) return left._mergeIndex - right._mergeIndex;
+            if (leftTime === null) return 1;
+            if (rightTime === null) return -1;
+            return rightTime - leftTime || left._mergeIndex - right._mergeIndex;
+        });
+        merged.forEach(review => { delete review._mergeIndex; });
+        const localCount = safeReviewCount(payload?.review_count, localReviews.length);
+        const importedCount = safeReviewCount(payload?.tmdb_review_count, importedReviews.length);
+        const crossSourceDuplicates = crossSourceDuplicateIds.size;
+        const total = Math.max(0, localCount + importedCount - crossSourceDuplicates);
+        return { reviews: merged, total, crossSourceDuplicates };
+    }
+
+    function reviewTimestamp(review) {
+        for (const value of [review?.updated_at, review?.created_at]) {
+            if (!value) continue;
+            const timestamp = new Date(value).getTime();
+            if (Number.isFinite(timestamp)) return timestamp;
+        }
+        return null;
+    }
+
+    function safeReviewCount(value, fallback) {
+        if (value === null || value === undefined || value === '') return fallback;
+        const count = Number(value);
+        return Number.isFinite(count) && count >= 0 ? Math.max(Math.floor(count), fallback) : fallback;
     }
 
     function renderReviews(container, payload = {}) {
-        const flimfyReviews = Array.isArray(payload?.reviews)
-            ? payload.reviews.slice(0, 10).map(review => ({ ...review, review_source: 'flimfybox' }))
-            : [];
-        const tmdbReviews = Array.isArray(payload?.tmdb_reviews)
-            ? payload.tmdb_reviews.slice(0, 5).map(review => ({ ...review, review_source: 'tmdb' }))
-            : [];
-        const reviews = [...flimfyReviews, ...tmdbReviews];
+        const { reviews, total } = mergeReviews(payload);
         const heading = node('div', 'detail-section-heading');
         heading.append(
             node('span', 'section-kicker', 'FLIMFYBOX REVIEWS'),
-            node('h2', '', 'Viewer reviews')
+            node('h2', '', 'Reviews')
         );
-        const flimfyCount = Number(payload?.review_count);
-        const tmdbCount = Number(payload?.tmdb_review_count);
-        const totalReviewCount = Math.max(Number.isFinite(flimfyCount) ? flimfyCount : 0, flimfyReviews.length)
-            + Math.max(Number.isFinite(tmdbCount) ? tmdbCount : 0, tmdbReviews.length);
-        heading.append(node('span', 'review-count', totalReviewCount
-            ? `${totalReviewCount.toLocaleString()} ${totalReviewCount === 1 ? 'review' : 'reviews'}`
-            : 'FlimfyBox'));
+        const countLabel = payload?.status === 'loading' ? 'Loading…'
+            : payload?.status !== undefined && payload?.status !== 'success' ? 'Unavailable'
+                : `${total.toLocaleString()} ${total === 1 ? 'review' : 'reviews'}`;
+        heading.append(node('span', 'review-count', countLabel));
+        if (payload?.tmdb_cache_status === 'stale' || payload?.tmdb_cache_status === 'refreshing') {
+            heading.append(node('span', 'review-refresh-state', 'Updating'));
+        } else if (payload?.tmdb_cache_status === 'stale_cached') {
+            heading.append(node('span', 'review-refresh-state', 'Saved'));
+        }
         container.append(heading);
 
         if (payload?.status === 'loading') {
-            container.append(node('p', 'review-empty', 'Loading member reviews…'));
+            container.append(node('p', 'review-empty', 'Loading reviews…'));
             return;
         }
         if (payload?.status !== 'success' && payload?.status !== undefined) {
-            container.append(node('p', 'review-empty', 'Member reviews are temporarily unavailable.'));
+            container.append(node('p', 'review-empty', 'Reviews are temporarily unavailable.'));
             return;
         }
 
@@ -251,18 +293,18 @@
             reviews.forEach(review => {
                 const card = node('article', 'flimfy-review-card');
                 const meta = node('div', 'flimfy-review-meta');
-                const isTmdbReview = review.review_source === 'tmdb';
-                meta.append(node('strong', 'flimfy-review-author', review.author || (isTmdbReview ? 'TMDb member' : 'FlimfyBox member')));
-                if (isTmdbReview) meta.append(node('span', 'flimfy-review-brand-pill', 'FlimfyBox'));
-                const date = formatReviewDate(review.created_at);
+                const isImportedReview = review.review_source === 'tmdb';
+                meta.append(node('strong', 'flimfy-review-author', review.author || (isImportedReview ? 'Audience member' : 'FlimfyBox member')));
+                meta.append(node('span', 'flimfy-review-provenance', isImportedReview ? 'Imported audience review' : 'Member review'));
+                const date = formatReviewDate(review.updated_at || review.created_at);
                 if (date) meta.append(node('span', 'flimfy-review-date', date));
-                const reviewRating = normalizedScore(review.rating, isTmdbReview ? 10 : 5);
-                if (reviewRating !== null) meta.append(node('span', 'flimfy-review-rating', `★ ${reviewRating.toFixed(1)} / ${isTmdbReview ? 10 : 5}`));
+                const reviewRating = validScore(review.rating, isImportedReview ? 10 : 5);
+                if (reviewRating !== null) meta.append(node('span', 'flimfy-review-rating', `★ ${(Math.round(reviewRating * 10) / 10).toFixed(1)} / ${isImportedReview ? 10 : 5}`));
                 card.append(meta, node('p', 'flimfy-review-copy', review.content || ''));
-                if (isTmdbReview) {
+                if (isImportedReview) {
                     const url = trustedTmdbReviewUrl(review.url);
                     if (url) {
-                        const sourceLink = node('a', 'tmdb-review-source-link', 'Read original on TMDb');
+                        const sourceLink = node('a', 'review-source-link', 'View original review');
                         sourceLink.href = url;
                         sourceLink.target = '_blank';
                         sourceLink.rel = 'noopener noreferrer';
@@ -273,17 +315,10 @@
             });
             container.append(list);
         }
-        if (tmdbReviews.length) {
-            container.append(node('p', 'flimfy-review-readonly', 'Public review excerpts are provided by TMDb.'));
-        }
-
         if (payload?.tmdb_linked === false) {
-            container.append(node('p', 'flimfy-review-readonly', 'TMDb reviews are not linked to this title yet.'));
-        } else if (payload?.tmdb_unavailable && reviews.length) {
-            container.append(node('p', 'flimfy-review-readonly', 'TMDb reviews are temporarily unavailable.'));
-        }
-        if (payload?.flimfy_unavailable && reviews.length) {
-            container.append(node('p', 'flimfy-review-readonly', 'FlimfyBox member reviews are temporarily unavailable.'));
+            container.append(node('p', 'flimfy-review-readonly', 'More audience reviews will appear when this title is linked.'));
+        } else if ((payload?.tmdb_unavailable || payload?.flimfy_unavailable) && reviews.length) {
+            container.append(node('p', 'flimfy-review-readonly', 'Some audience reviews could not be loaded.'));
         }
 
         if (payload?.can_review) {
@@ -310,7 +345,7 @@
             form.append(label, input, help, status, submit);
             container.append(form);
         } else if (payload?.is_catalogued && !payload?.is_upcoming) {
-            container.append(node('p', 'flimfy-review-readonly', 'Open FlimfyBox in Telegram to post or update a review.'));
+            container.append(node('p', 'flimfy-review-readonly', 'Open FlimfyBox in Telegram to post or update your review.'));
         }
     }
 
@@ -318,6 +353,7 @@
         summarize,
         verdictForSummary,
         audienceRead,
+        mergeReviews,
         endpointFor,
         render(meterContainer, reviewsContainer, payload) {
             if (meterContainer) {
@@ -342,7 +378,7 @@
             if (!meterContainer) return;
             const scores = { ...(ratingsByContainer.get(meterContainer) || {}) };
             const count = Number(data?.count);
-            const average = normalizedScore(data?.average, 5);
+            const average = validScore(data?.average, 5);
             scores.flimfy = {
                 score: Number.isFinite(count) && count > 0 ? average : null,
                 votes: Number.isFinite(count) && count > 0 ? count : 0
@@ -355,8 +391,8 @@
             if (meterContainer) {
                 ratingsByContainer.delete(meterContainer);
                 meterContainer.replaceChildren();
-                meterContainer.append(node('span', 'section-kicker', 'FLIMFY VERDICT'));
-                meterContainer.append(node('p', 'verdict-loading', 'Reading IMDb, TMDb + FlimfyBox ratings…'));
+                meterContainer.append(node('span', 'section-kicker', 'FLIMFYBOX RATING'));
+                meterContainer.append(node('p', 'verdict-loading', 'Loading audience ratings…'));
             }
             if (reviewsContainer) {
                 reviewsContainer.replaceChildren();

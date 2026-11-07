@@ -9,7 +9,7 @@
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=availability-4"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=20261101-mood-picks-2">
+    <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v=20261107-live-cache-1">
 </head>
 <body class="cinema screen-home">
     <aside class="desktop-sidebar" aria-label="Sidebar">
@@ -361,11 +361,13 @@
                             <div class="rich-desc" id="dpDesc">Loading story...</div>
                         </section>
                         <div id="castSection" class="cast-list"></div>
-                        <section class="community-rating" id="communityRating" aria-live="polite"></section>
                         <section class="flimfy-reviews-panel" id="flimfyReviews" aria-live="polite"></section>
                     </main>
                     <aside class="dp-side-column" aria-label="Ratings and available versions">
-                        <section class="verdict-meter-panel" id="flimfyVerdict" aria-live="polite" aria-label="Flimfy Verdict"></section>
+                        <section class="verdict-meter-panel" aria-label="FlimfyBox rating and your rating">
+                            <div id="flimfyVerdict" aria-live="polite"></div>
+                            <section class="community-rating" id="communityRating" aria-live="polite" aria-label="Your rating"></section>
+                        </section>
                         <div id="dpTrailerBtn" class="detail-request-actions"></div>
                         <div id="dpSeasons" class="seasons-container"></div>
                         <section class="dl-section" id="dpLinks" aria-live="polite"></section>
@@ -433,7 +435,7 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
-    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=flimfy-reviews-merge-1"></script>
-    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=20261101-mood-picks-2"></script>
+    <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v=20261107-live-cache-1"></script>
+    <script src="{{ url_for('static', filename='miniapp/app.js') }}?v=20261107-live-cache-1"></script>
 </body>
 </html>

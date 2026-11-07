@@ -133,6 +133,51 @@ test('Rate this scrolls smoothly to the FlimfyBox rating controls', () => {
     assert.equal(scrollOptions.block, 'start');
 });
 
+test('member rating shows only the personal score and can be updated in place', async () => {
+    const buttons = Array.from({ length: 5 }, (_, index) => ({
+        dataset: { rating: String(index + 1) }, disabled: false, textContent: '☆',
+        classList: { toggle() {} }
+    }));
+    const submit = { disabled: false, innerHTML: '' };
+    const summary = { textContent: '' };
+    const container = {
+        dataset: { movieId: '12', selectedRating: '', canRate: 'true' },
+        querySelector: selector => selector === '.community-rating-submit' ? submit : summary,
+        querySelectorAll: () => buttons
+    };
+    const meterContainer = {};
+    const requests = [];
+    const events = [];
+    const api = runtime(sourceSection('function previewCommunityStars', 'function normalizeTrailerKey'), {
+        document: { getElementById: id => id === 'flimfyVerdict' ? meterContainer : null },
+        FlimfyVerdict: { setCommunityRating: () => {} },
+        activeMovie: { id: 12 },
+        fetchWithTimeout: async (...args) => {
+            requests.push(args);
+            return { ok: true, json: async () => ({ status: 'success', average: 4.2, count: 11, user_rating: 2, can_rate: true }) };
+        },
+        telegramAuthHeaders: () => ({ 'X-Telegram-Init-Data': 'signed' }),
+        trackRecommendationEvent: (...event) => events.push(event)
+    });
+
+    api.updateCommunityRating(container, { average: 4.4, count: 10, user_rating: 4, can_rate: true });
+    assert.equal(summary.textContent, '10 member ratings · Your rating: 4/5');
+    assert.doesNotMatch(summary.textContent, /4\.4/);
+    assert.equal(submit.disabled, false);
+
+    api.selectCommunityRating(2, container);
+    assert.match(submit.innerHTML, /Update my rating/);
+    await api.submitCommunityRating(12, container);
+
+    assert.equal(requests[0][0], '/api/movie/12/rating');
+    assert.equal(requests[0][1].method, 'POST');
+    assert.deepEqual(JSON.parse(requests[0][1].body), { rating: 2 });
+    assert.equal(summary.textContent, '11 member ratings · Your rating: 2/5');
+    assert.equal(events[0][0], 'rating_submitted');
+    assert.equal(events[0][1], 12);
+    assert.equal(events[0][2].rating, 2);
+});
+
 test('member review form saves through the authenticated FlimfyBox endpoint and reloads', async () => {
     const listeners = {};
     const input = { value: 'A warm, funny story with a great ending.' };
@@ -216,4 +261,37 @@ test('one FlimfyBox review panel combines local and TMDb reviews using the corre
     assert.equal(renders.at(-1).reviews.length, 0);
     assert.equal(renders.at(-1).tmdb_reviews[0].author, 'TMDb member');
     assert.equal(renders.at(-1).is_catalogued, false);
+});
+
+test('one unavailable review provider does not hide the reviews returned by the other', async () => {
+    const container = {};
+    const endpoints = [];
+    const renders = [];
+    const api = runtime(sourceSection('function loadFlimfyCommunityReviews', 'window.scrollToDetailDownloads'), {
+        document: { getElementById: id => id === 'flimfyReviews' ? container : null },
+        FlimfyVerdict: { renderReviews: (_container, data) => renders.push(data) },
+        fetchWithTimeout: async endpoint => {
+            endpoints.push(endpoint);
+            if (endpoint.endsWith('/reviews')) {
+                return { ok: false, json: async () => ({ status: 'error', message: 'member store unavailable' }) };
+            }
+            return { ok: true, json: async () => ({
+                status: 'success', reviews: [{ id: 'tmdb-3', author: 'Audience reviewer' }],
+                review_count: 1, linked: true
+            }) };
+        },
+        telegramAuthHeaders: () => ({}),
+        activeMovie: { id: 77 },
+        detailsRequestId: 5,
+        isAbortError: error => error?.name === 'AbortError'
+    });
+
+    api.loadFlimfyCommunityReviews({ id: 77, tmdb_id: 900, source: 'local', content_type: 'Movie' }, 5, { aborted: false });
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(endpoints, ['/api/movie/77/reviews', '/api/movie/77/audience-reviews']);
+    assert.equal(renders.at(-1).status, 'success');
+    assert.equal(renders.at(-1).tmdb_reviews[0].author, 'Audience reviewer');
+    assert.equal(renders.at(-1).flimfy_unavailable, true);
+    assert.equal(renders.at(-1).tmdb_unavailable, false);
 });

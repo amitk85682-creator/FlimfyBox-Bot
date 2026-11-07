@@ -25,6 +25,9 @@ from fuzzywuzzy import process, fuzz
 _RATING_SOURCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=8, thread_name_prefix='miniapp-rating-source'
 )
+_PROVIDER_REFRESH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix='miniapp-provider-refresh'
+)
 
 CANONICAL_GENRES = [
     ('action', 'Action', 'Action & Adventure', 'Fast, explosive, and high-stakes viewing.'),
@@ -191,10 +194,16 @@ def register_webapp_routes(
 ):
     release_cache = {}
     release_cache_lock = threading.Lock()
+    tmdb_request_inflight = {}
     rating_source_cache = {}
     rating_source_cache_lock = threading.Lock()
-    rating_source_cache_ttl = 6 * 60 * 60
-    rating_source_failure_ttl = 60
+    rating_source_inflight = {}
+    omdb_rating_cache = {}
+    omdb_rating_cache_lock = threading.Lock()
+    omdb_rating_inflight = {}
+    provider_failure_ttl = 60
+    provider_stale_retry_ttl = 30
+    rating_source_cache_ttl = 15
     new_releases_refresh_lock = threading.Lock()
     release_success_ttl = 7 * 24 * 60 * 60
     release_negative_ttl = 6 * 60 * 60
@@ -205,6 +214,20 @@ def register_webapp_routes(
     home_response_cache_lock = threading.Lock()
     home_response_ttl = int(os.environ.get('MINIAPP_HOME_CACHE_SECONDS', '600'))
     availability_response_ttl = min(home_response_ttl, 60)
+
+    def configured_ttl(name, default):
+        try:
+            return max(1, min(int(os.environ.get(name, default)), 30 * 24 * 60 * 60))
+        except (TypeError, ValueError):
+            logger.warning('Invalid cache TTL setting %s; using default', name)
+            return default
+
+    tmdb_rating_cache_ttl = configured_ttl('MINIAPP_TMDB_RATING_CACHE_SECONDS', 6 * 60 * 60)
+    omdb_rating_cache_ttl = configured_ttl('MINIAPP_OMDB_RATING_CACHE_SECONDS', 6 * 60 * 60)
+    tmdb_review_cache_ttl = configured_ttl('MINIAPP_TMDB_REVIEW_CACHE_SECONDS', 6 * 60 * 60)
+    rating_source_cache_ttl = configured_ttl('MINIAPP_RATING_RESPONSE_CACHE_SECONDS', 15)
+    provider_failure_ttl = configured_ttl('MINIAPP_PROVIDER_FAILURE_CACHE_SECONDS', 60)
+    provider_stale_retry_ttl = configured_ttl('MINIAPP_PROVIDER_STALE_RETRY_SECONDS', 30)
 
     def local_movie_has_file_sql(alias='m'):
         return f"""(
@@ -230,50 +253,136 @@ def register_webapp_routes(
 
     def tmdb_cached_request(
         path, params, cache_key, negative=False, ttl_seconds=None,
-        attempts=2, request_timeout=6,
+        attempts=2, request_timeout=6, stale_while_revalidate=False,
+        include_cache_state=False, _refresh_event=None, response_validator=None,
     ):
+        def packed(data, cache_hit, cache_state):
+            if include_cache_state:
+                return data, cache_hit, cache_state
+            return data, cache_hit
+
         now = time.time()
+        owner = False
+        stale_data = None
+        wait_event = None
         with release_cache_lock:
             cached = release_cache.get(cache_key)
-            if cached and cached[0] > now:
-                return cached[1], True
-            stale_data = cached[1] if cached else None
+            stale_data = cached[1] if cached and cached[1] is not None else None
+            if _refresh_event is not None:
+                wait_event = _refresh_event
+                owner = True
+            elif cached and cached[0] > now:
+                logger.debug('TMDB cache hit: %s', cache_key)
+                cache_state = cached[2] if len(cached) > 2 else (
+                    'fresh' if cached[1] is not None else 'unavailable'
+                )
+                if cache_state == 'stale' and stale_while_revalidate:
+                    cache_state = 'stale_cached'
+                return packed(
+                    cached[1], True, cache_state,
+                )
+            if not owner:
+                wait_event = tmdb_request_inflight.get(cache_key)
+            if not owner and stale_data is not None and stale_while_revalidate:
+                if wait_event is None:
+                    wait_event = threading.Event()
+                    tmdb_request_inflight[cache_key] = wait_event
+                    _PROVIDER_REFRESH_EXECUTOR.submit(
+                        tmdb_cached_request,
+                        path, params, cache_key, negative, ttl_seconds,
+                        attempts, request_timeout, False, include_cache_state,
+                        wait_event, response_validator,
+                    )
+                logger.debug('TMDB stale cache served; refresh scheduled: %s', cache_key)
+                return packed(stale_data, True, 'stale')
+            if not owner and wait_event is None:
+                wait_event = threading.Event()
+                tmdb_request_inflight[cache_key] = wait_event
+                owner = True
+                logger.debug('TMDB cache miss: %s', cache_key)
+            else:
+                logger.debug('TMDB request joined in-flight fetch: %s', cache_key)
+
+        if not owner:
+            if isinstance(request_timeout, (tuple, list)):
+                wait_seconds = sum(float(part) for part in request_timeout)
+            else:
+                wait_seconds = float(request_timeout)
+            wait_seconds = min(max(wait_seconds * max(1, int(attempts)) + 0.5, 1), 20)
+            wait_event.wait(wait_seconds)
+            with release_cache_lock:
+                current = release_cache.get(cache_key)
+                if current and current[1] is not None:
+                    state = current[2] if len(current) > 2 else ('fresh' if current[0] > time.time() else 'stale')
+                    return packed(current[1], True, state)
+            return packed(stale_data, stale_data is not None, 'unavailable' if stale_data is None else 'stale')
+
         request_params = dict(params)
         request_params['api_key'] = TMDB_API_KEY
         response_data = None
         attempt_limit = max(1, int(attempts))
-        for attempt in range(attempt_limit):
-            try:
-                response = requests.get(
-                    f'https://api.themoviedb.org/3/{path}',
-                    params=request_params,
-                    headers={'User-Agent': 'FlimfyBox/1.0'},
-                    timeout=request_timeout,
-                )
-                if response.status_code in (429, 500, 502, 503, 504):
-                    if attempt + 1 < attempt_limit:
+        failure_reason = 'Unavailable'
+        try:
+            for attempt in range(attempt_limit if TMDB_API_KEY else 0):
+                try:
+                    response = requests.get(
+                        f'https://api.themoviedb.org/3/{path}',
+                        params=request_params,
+                        headers={'User-Agent': 'FlimfyBox/1.0'},
+                        timeout=request_timeout,
+                    )
+                    if response.status_code == 429:
+                        failure_reason = 'Rate limited'
+                        logger.warning('TMDB provider rate limited request: %s', cache_key)
+                        break
+                    if response.status_code >= 500 and attempt + 1 < attempt_limit:
+                        time.sleep(min(0.2 * (attempt + 1), 0.5))
                         continue
                     response.raise_for_status()
-                response.raise_for_status()
-                response_data = response.json()
-                break
-            except (requests.RequestException, ValueError) as error:
-                if attempt + 1 == attempt_limit:
-                    # requests errors can include the full URL (and api_key query).
-                    logger.warning('TMDB lookup failed for %s (%s)', cache_key, type(error).__name__)
-        if response_data is None and stale_data is not None:
-            # Keep the last usable response and allow a quick retry instead of
-            # caching an upstream outage as an empty catalogue for hours.
+                    response_data = response.json()
+                    if (
+                        not isinstance(response_data, dict)
+                        or response_data.get('success') is False
+                        or (
+                            response_validator is not None
+                            and not response_validator(response_data)
+                        )
+                    ):
+                        failure_reason = 'Invalid provider response'
+                        response_data = None
+                        logger.warning('TMDB provider returned unusable data: %s', cache_key)
+                        break
+                    break
+                except (requests.RequestException, ValueError) as error:
+                    failure_reason = type(error).__name__
+                    if attempt + 1 == attempt_limit:
+                        # Never log request exception text; it may contain the API key.
+                        logger.warning('TMDB provider request failed: %s (%s)', cache_key, failure_reason)
+
+            completed_at = time.time()
+            if response_data is not None:
+                ttl = ttl_seconds or release_success_ttl
+                with release_cache_lock:
+                    release_cache[cache_key] = (completed_at + ttl, response_data, 'fresh')
+                logger.debug('TMDB cache refreshed: %s', cache_key)
+                return packed(response_data, False, 'fresh')
+
+            if stale_data is not None:
+                with release_cache_lock:
+                    release_cache[cache_key] = (completed_at + provider_stale_retry_ttl, stale_data, 'stale')
+                logger.warning('TMDB refresh failed; retaining cached data: %s (%s)', cache_key, failure_reason)
+                return packed(stale_data, True, 'stale')
+
+            if not TMDB_API_KEY:
+                failure_reason = 'Not configured'
+            failure_ttl = release_negative_ttl if negative else provider_failure_ttl
             with release_cache_lock:
-                release_cache[cache_key] = (now + release_stale_retry_ttl, stale_data)
-            return stale_data, True
-        if response_data is None:
-            ttl = release_negative_ttl if negative else release_failure_ttl
-        else:
-            ttl = ttl_seconds or release_success_ttl
-        with release_cache_lock:
-            release_cache[cache_key] = (now + ttl, response_data)
-        return response_data, False
+                release_cache[cache_key] = (completed_at + failure_ttl, None, 'unavailable')
+            return packed(None, False, 'unavailable')
+        finally:
+            with release_cache_lock:
+                tmdb_request_inflight.pop(cache_key, None)
+            wait_event.set()
 
     def normalize_release_title(value):
         return re.sub(r'[^a-z0-9]', '', str(value or '').lower())
@@ -331,7 +440,7 @@ def register_webapp_routes(
             return None
         if not math.isfinite(score) or not 0 <= score <= 10:
             return None
-        return round(score, 1)
+        return score
 
     def rating_vote_text(value):
         if value is None:
@@ -363,7 +472,9 @@ def register_webapp_routes(
         )
         author_details = review.get('author_details') or {}
         review_rating = rating_number(author_details.get('rating')) if isinstance(author_details, dict) else None
+        review_id = str(review.get('id') or '').strip()
         return {
+            'id': review_id[:100] if re.fullmatch(r'[A-Za-z0-9_-]{1,100}', review_id) else None,
             'author': author,
             'content': content[:1200],
             'rating': review_rating,
@@ -373,13 +484,13 @@ def register_webapp_routes(
         }
 
     def load_tmdb_audience_reviews(media_type, tmdb_id):
-        if not TMDB_API_KEY:
-            return None
-        payload, _cache_hit = tmdb_cached_request(
+        payload, _cache_hit, cache_status = tmdb_cached_request(
             f'{media_type}/{tmdb_id}/reviews',
             {'language': 'en-US', 'page': 1},
             f'movie-audience-reviews:{media_type}:{tmdb_id}',
-            False, 6 * 60 * 60, 1, (1, 1.5),
+            False, tmdb_review_cache_ttl, 1, (1, 1.5),
+            stale_while_revalidate=True, include_cache_state=True,
+            response_validator=lambda value: isinstance(value.get('results'), list),
         )
         if not isinstance(payload, dict):
             return None
@@ -399,6 +510,7 @@ def register_webapp_routes(
             'source': 'TMDb',
             'reviews': reviews,
             'review_count': review_count,
+            'cache_status': cache_status,
         }
 
     def fetch_omdb_rating(imdb_id, api_key):
@@ -418,19 +530,81 @@ def register_webapp_routes(
             logger.info('IMDb score lookup unavailable for %s (%s)', imdb_id, type(error).__name__)
             return None
         if not isinstance(payload, dict) or payload.get('Response') != 'True':
+            logger.info('IMDb score unavailable from OMDb for %s', imdb_id)
             return None
         score = rating_number(payload.get('imdbRating'))
         if score is None:
             return None
         return {'score': score, 'votes': rating_vote_text(payload.get('imdbVotes'))}
 
-    def load_rating_sources(cache_key, media_type, tmdb_id=None, imdb_id=None):
-        now = time.time()
-        with rating_source_cache_lock:
-            cached = rating_source_cache.get(cache_key)
-            if cached and cached[0] > now:
-                return cached[1]
+    def _finish_omdb_rating_refresh(imdb_id, api_key, event, stale_data=None):
+        try:
+            result = fetch_omdb_rating(imdb_id, api_key)
+            completed_at = time.time()
+            if result is not None:
+                cache_value = (completed_at + omdb_rating_cache_ttl, result, 'fresh')
+                logger.debug('OMDb rating cache refreshed for %s', imdb_id)
+            elif stale_data is not None:
+                cache_value = (completed_at + provider_stale_retry_ttl, stale_data, 'stale')
+                logger.warning('OMDb rating refresh failed; retaining cached data for %s', imdb_id)
+            else:
+                cache_value = (completed_at + provider_failure_ttl, None, 'unavailable')
+            with omdb_rating_cache_lock:
+                omdb_rating_cache[imdb_id] = cache_value
+            return result
+        finally:
+            with omdb_rating_cache_lock:
+                omdb_rating_inflight.pop(imdb_id, None)
+            event.set()
 
+    def cached_omdb_rating(imdb_id, api_key):
+        now = time.time()
+        with omdb_rating_cache_lock:
+            cached = omdb_rating_cache.get(imdb_id)
+            if cached and cached[0] > now:
+                logger.debug('OMDb rating cache hit for %s', imdb_id)
+                state = cached[2] if len(cached) > 2 else 'fresh'
+                return cached[1], 'stale_cached' if state == 'stale' else state
+            stale_data = cached[1] if cached and cached[1] is not None else None
+            event = omdb_rating_inflight.get(imdb_id)
+            if stale_data is not None:
+                if event is None:
+                    event = threading.Event()
+                    omdb_rating_inflight[imdb_id] = event
+                    _PROVIDER_REFRESH_EXECUTOR.submit(
+                        _finish_omdb_rating_refresh, imdb_id, api_key, event, stale_data
+                    )
+                logger.debug('OMDb stale rating served; refresh scheduled for %s', imdb_id)
+                return stale_data, 'stale'
+            if event is None:
+                event = threading.Event()
+                omdb_rating_inflight[imdb_id] = event
+                owner = True
+                logger.debug('OMDb rating cache miss for %s', imdb_id)
+            else:
+                owner = False
+                logger.debug('OMDb rating request joined in-flight fetch for %s', imdb_id)
+
+        if not owner:
+            event.wait(3.0)
+            with omdb_rating_cache_lock:
+                current = omdb_rating_cache.get(imdb_id)
+                if current:
+                    state = current[2] if len(current) > 2 else (
+                        'fresh' if current[0] > time.time() else 'stale'
+                    )
+                    return current[1], state
+            return None, 'unavailable'
+
+        result = _finish_omdb_rating_refresh(imdb_id, api_key, event)
+        with omdb_rating_cache_lock:
+            current = omdb_rating_cache.get(imdb_id)
+            cache_state = current[2] if current and len(current) > 2 else (
+                'fresh' if current and current[0] > time.time() else 'unavailable'
+            )
+        return result, cache_state
+
+    def _fetch_rating_sources(cache_key, media_type, tmdb_id, imdb_id, previous=None):
         tmdb_id = str(tmdb_id or '').strip()
         imdb_id = str(imdb_id or '').strip()
         tmdb_id = tmdb_id if re.fullmatch(r'\d+', tmdb_id) else ''
@@ -445,11 +619,12 @@ def register_webapp_routes(
                 f'{media_type}/{tmdb_id}',
                 {'append_to_response': 'external_ids'},
                 f'movie-rating-details:{media_type}:{tmdb_id}',
-                False, 6 * 60 * 60, 1, (1, 1.5),
+                False, tmdb_rating_cache_ttl, 2, (1, 1.5), True, True,
+                response_validator=lambda value: value.get('id') is not None,
             )
         if omdb_key and imdb_id:
             futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
-                fetch_omdb_rating, imdb_id, omdb_key
+                cached_omdb_rating, imdb_id, omdb_key
             )
 
         if futures:
@@ -457,12 +632,22 @@ def register_webapp_routes(
 
         detail_data = None
         tmdb_score = None
+        tmdb_state = 'unavailable' if TMDB_API_KEY and tmdb_id else 'not_configured'
         if futures.get('tmdb') and futures['tmdb'].done():
             try:
-                detail_result, _cache_hit = futures['tmdb'].result()
-                detail_data = detail_result if isinstance(detail_result, dict) else None
+                detail_result = futures['tmdb'].result()
+                if len(detail_result) == 3:
+                    detail_data, _cache_hit, tmdb_state = detail_result
+                else:
+                    detail_data, _cache_hit = detail_result
+                    tmdb_state = 'fresh' if detail_data else 'unavailable'
+                detail_data = detail_data if isinstance(detail_data, dict) else None
             except Exception as error:
-                logger.debug('TMDb score future failed (%s)', type(error).__name__)
+                logger.debug('TMDb rating future failed for %s (%s)', cache_key, type(error).__name__)
+                tmdb_state = 'unavailable'
+        elif futures.get('tmdb'):
+            tmdb_state = 'refreshing'
+
         if detail_data:
             vote_count = detail_data.get('vote_count')
             try:
@@ -477,32 +662,129 @@ def register_webapp_routes(
             external_ids = detail_data.get('external_ids') or {}
             if isinstance(external_ids, dict):
                 imdb_id = str(external_ids.get('imdb_id') or '').strip()
-        if omdb_key and imdb_id and not futures.get('imdb'):
+        if omdb_key and re.fullmatch(r'tt\d{7,8}', imdb_id or '') and not futures.get('imdb'):
             futures['imdb'] = _RATING_SOURCE_EXECUTOR.submit(
-                fetch_omdb_rating, imdb_id, omdb_key
+                cached_omdb_rating, imdb_id, omdb_key
             )
             remaining = max(0, deadline - time.monotonic())
             if remaining:
                 wait((futures['imdb'],), timeout=remaining)
 
         imdb_score = None
+        imdb_state = 'unavailable' if omdb_key and imdb_id else 'not_configured'
         if futures.get('imdb') and futures['imdb'].done():
             try:
-                imdb_score = futures['imdb'].result()
+                imdb_score, imdb_state = futures['imdb'].result()
             except Exception as error:
-                logger.debug('IMDb score future failed (%s)', type(error).__name__)
+                logger.debug('OMDb rating future failed for %s (%s)', imdb_id, type(error).__name__)
+                imdb_state = 'unavailable'
+        elif futures.get('imdb'):
+            imdb_state = 'refreshing'
+
+        old_sources = previous or {}
+        if imdb_score is None and old_sources.get('imdb', {}).get('score') is not None:
+            imdb_score = old_sources['imdb']
+            imdb_state = 'stale'
+        if tmdb_score is None and old_sources.get('tmdb', {}).get('score') is not None:
+            tmdb_score = old_sources['tmdb']
+            tmdb_state = 'stale'
+
+        statuses = {tmdb_state, imdb_state}
+        if 'stale' in statuses:
+            cache_status = 'stale'
+        elif 'stale_cached' in statuses:
+            cache_status = 'stale_cached'
+        elif any(future and not future.done() for future in futures.values()):
+            cache_status = 'refreshing'
+        elif 'unavailable' in statuses and (tmdb_score or imdb_score):
+            cache_status = 'partial'
+        elif not tmdb_score and not imdb_score:
+            cache_status = (
+                'unavailable'
+                if 'unavailable' in statuses or statuses <= {'not_configured'}
+                else 'empty'
+            )
+        else:
+            cache_status = 'fresh'
 
         result = {
             'status': 'success',
             'imdb': imdb_score or {'score': None, 'votes': None},
             'tmdb': tmdb_score or {'score': None, 'votes': None},
+            'cache_status': cache_status,
         }
-        has_data = bool(imdb_score or tmdb_score)
-        has_pending = any(not future.done() for future in futures.values())
-        ttl = rating_source_cache_ttl if has_data and not has_pending else rating_source_failure_ttl
+        if cache_status == 'stale':
+            # Recombine promptly after the provider-level background refresh finishes.
+            ttl = 1
+        elif cache_status in {'unavailable', 'partial'}:
+            ttl = provider_failure_ttl
+        elif cache_status == 'refreshing':
+            # Let a detail-page refresh poll pick up a slow provider response quickly.
+            ttl = 1
+        else:
+            ttl = rating_source_cache_ttl
         with rating_source_cache_lock:
             rating_source_cache[cache_key] = (time.time() + ttl, result)
         return result
+
+    def _refresh_rating_sources(cache_key, media_type, tmdb_id, imdb_id, event, previous=None):
+        try:
+            return _fetch_rating_sources(cache_key, media_type, tmdb_id, imdb_id, previous)
+        finally:
+            with rating_source_cache_lock:
+                rating_source_inflight.pop(cache_key, None)
+            event.set()
+
+    def load_rating_sources(cache_key, media_type, tmdb_id=None, imdb_id=None):
+        now = time.time()
+        stale_result = None
+        with rating_source_cache_lock:
+            cached = rating_source_cache.get(cache_key)
+            if cached and cached[0] > now:
+                logger.debug('Rating response cache hit: %s', cache_key)
+                cached_result = cached[1]
+                if cached_result.get('cache_status') == 'stale':
+                    return {**cached_result, 'cache_status': 'stale_cached'}
+                return cached_result
+            stale_result = cached[1] if cached and any(
+                (cached[1].get(provider) or {}).get('score') is not None
+                for provider in ('imdb', 'tmdb')
+            ) else None
+            event = rating_source_inflight.get(cache_key)
+            if stale_result is not None:
+                if event is None:
+                    event = threading.Event()
+                    rating_source_inflight[cache_key] = event
+                    _PROVIDER_REFRESH_EXECUTOR.submit(
+                        _refresh_rating_sources, cache_key, media_type,
+                        tmdb_id, imdb_id, event, stale_result,
+                    )
+                logger.debug('Stale rating response served; provider refresh scheduled: %s', cache_key)
+                return {**stale_result, 'cache_status': 'stale'}
+            if event is None:
+                event = threading.Event()
+                rating_source_inflight[cache_key] = event
+                owner = True
+                logger.debug('Rating response cache miss: %s', cache_key)
+            else:
+                owner = False
+                logger.debug('Rating request joined in-flight refresh: %s', cache_key)
+
+        if not owner:
+            event.wait(3.5)
+            with rating_source_cache_lock:
+                current = rating_source_cache.get(cache_key)
+                if current:
+                    return current[1]
+            return {
+                'status': 'success',
+                'imdb': {'score': None, 'votes': None},
+                'tmdb': {'score': None, 'votes': None},
+                'cache_status': 'refreshing',
+            }
+        return _refresh_rating_sources(
+            cache_key, media_type, tmdb_id, imdb_id, event
+        )
 
     def get_release_discovery_pool(media_type, days, today, metrics):
         """Load the complete TMDB release window once, then reuse its candidates."""
@@ -1833,7 +2115,7 @@ def register_webapp_routes(
         """, (movie_id, user_id))
         own = cur.fetchone()
         return {
-            'average': round(float(average), 1) if count else 0,
+            'average': float(average) if count else 0,
             'count': int(count),
             'user_rating': int(own[0]) if own else None,
             'can_rate': own is None
@@ -2335,8 +2617,7 @@ def register_webapp_routes(
                     'is_upcoming': True, 'rating_locked': True
                 })
             result = rating_summary(cur, movie_id, user['id'] if user else None)
-            if not user:
-                result['can_rate'] = False
+            result['can_rate'] = bool(user)
             conn.commit()
             cur.close()
             return jsonify({'status': 'success', **result})
@@ -2364,9 +2645,11 @@ def register_webapp_routes(
 
             user = telegram_user_from_request()
             cur.execute("""
-                SELECT r.review,
+                SELECT r.id,
+                       r.review,
                        COALESCE(NULLIF(u.first_name, ''), 'FlimfyBox member'),
                        r.created_at,
+                       r.updated_at,
                        mr.rating
                 FROM movie_reviews r
                 LEFT JOIN miniapp_users u ON u.user_id = r.user_id
@@ -2378,10 +2661,13 @@ def register_webapp_routes(
             """, (movie_id,))
             reviews = [
                 {
-                    'content': row[0],
-                    'author': row[1],
-                    'created_at': row[2],
-                    'rating': row[3],
+                    'id': row[0],
+                    'content': row[1],
+                    'author': row[2],
+                    'created_at': row[3],
+                    'updated_at': row[4],
+                    'rating': row[5],
+                    'review_source': 'flimfybox',
                 }
                 for row in cur.fetchall()
             ]
@@ -2557,19 +2843,21 @@ def register_webapp_routes(
             return jsonify({'status': 'error', 'message': 'Database connection failed'}), 500
         try:
             cur = conn.cursor()
-            cur.execute("SELECT 1 FROM movies WHERE id = %s", (movie_id,))
-            if not cur.fetchone():
+            cur.execute("SELECT is_unreleased FROM movies WHERE id = %s", (movie_id,))
+            movie_row = cur.fetchone()
+            if not movie_row:
                 return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
+            if movie_row[0]:
+                return jsonify({'status': 'error', 'message': 'Ratings open after release.'}), 409
             upsert_miniapp_user(cur, user)
-            try:
-                cur.execute("""
-                    INSERT INTO movie_ratings (movie_id, user_id, rating)
-                    VALUES (%s, %s, %s)
-                """, (movie_id, user['id'], rating))
-            except psycopg2.errors.UniqueViolation:
-                conn.rollback()
-                return jsonify({'status': 'error', 'message': 'You have already rated this title.'}), 409
+            cur.execute("""
+                INSERT INTO movie_ratings (movie_id, user_id, rating)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (movie_id, user_id) DO UPDATE SET
+                    rating = EXCLUDED.rating
+            """, (movie_id, user['id'], rating))
             result = rating_summary(cur, movie_id, user['id'])
+            result['can_rate'] = True
             conn.commit()
             cur.close()
             return jsonify({'status': 'success', **result})

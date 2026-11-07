@@ -63,7 +63,7 @@ class FakeConnection:
 def webapp_factory(monkeypatch):
     from webapp_routes import register_webapp_routes
 
-    def factory(*, connection=None, store_user_request=None):
+    def factory(*, connection=None, store_user_request=None, tmdb_api_key='synthetic-tmdb-key'):
         app = Flask(__name__)
         captured = []
         connection = connection or FakeConnection()
@@ -87,7 +87,7 @@ def webapp_factory(monkeypatch):
             get_db_connection=get_connection,
             close_db_connection=close_connection,
             store_user_request=store_request,
-            TMDB_API_KEY='synthetic-tmdb-key',
+            TMDB_API_KEY=tmdb_api_key,
             logger=app.logger,
         )
         return app, captured, connection
