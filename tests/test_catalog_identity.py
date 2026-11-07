@@ -235,24 +235,80 @@ def test_review_assignment_is_owned_failed_state_only_and_transactional():
     assert conn.commits==0 and conn.rollbacks==1
 
 
-def test_missing_metadata_repair_uses_id_and_preserves_manual_fields():
-    reads=Connection(single=('tt39330776',2025,'Web Series'))
+def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fields():
+    row=(16972,'Obsession','tt39330776',None,2025,'Web Series','Bollywood',
+         'manual-poster','manual-backdrop','manual-trailer','Drama','N/A',
+         'Manual plot','Manual cast',{})
+    reads=Connection(single=row)
     writes=Connection()
+    writes.rowcount=1
     pool=iter([reads,writes])
-    lookups=[]
-    def metadata(*args,**kwargs):
-        lookups.append((args,kwargs))
-        return ('Obsession',2025,None,'Drama','tt39330776','N/A','Plot','Web Series',{})
-    ns=_load_functions({'auto_fetch_and_update_metadata', 'normalize_artwork_url', 'normalize_trailer_key'}, {
+    snapshot={
+        'imdb_id':'tt39330776','title':'Obsession','year':'2025','media_type':'tv',
+        'rating':'7.1','votes':'1,234','genre':'Drama','category':'Bollywood',
+        'poster_url':None,'description':None,'cast':None,
+    }
+    cached=[]
+    ns=_load_functions({
+        'auto_fetch_and_update_metadata','_metadata_identity_kind',
+        '_metadata_identity_matches',
+    }, {
         'get_db_connection':lambda:next(pool), 'close_db_connection':lambda c:c.close(),
-        'fetch_movie_metadata':metadata,
-        'fetch_tmdb_artwork':lambda *args:(None,None),
-        'fetch_tmdb_trailer_key':lambda *args:None})
+        'clean_catalog_title':lambda value,*_args:value,
+        'is_valid_imdb_id':lambda value:str(value or '').startswith('tt'),
+        '_fetch_omdb_snapshot':lambda imdb_id:(snapshot,'success'),
+        '_fetch_verified_tmdb_snapshot':lambda *_args:(None,'unavailable'),
+        '_upsert_movie_provider_snapshot':lambda *args:cached.append(args) or True,
+        '_refresh_tmdb_reviews_for_catalogue':lambda *_args:True,
+        'math':__import__('math'), 'json':__import__('json'),
+    })
     assert ns['auto_fetch_and_update_metadata'](16972,'Obsession')
-    assert lookups[0][0][0]=='tt39330776'
+    assert cached[0][0:3]==('imdb','tt39330776','tv')
     sql,params=writes.queries[-1]
-    assert 'WHERE id=%s AND imdb_id=%s' in sql and 'COALESCE' in sql
-    assert params[-2:]==(16972,'tt39330776') and writes.commits==1
+    assert 'poster_url = COALESCE(%s, poster_url)' in sql
+    assert 'title IS NOT DISTINCT FROM %s' in sql
+    assert sql.count('%s')==len(params)==23
+    assert params[7] is None and params[8] is None and params[9] is None
+    assert params[17:]==(16972,'Obsession',2025,'Web Series','tt39330776',None)
+    assert writes.commits==1
+
+
+def test_idless_tmdb_lookup_requires_unique_exact_title_year_and_type():
+    class Response:
+        def __init__(self,payload): self.payload=payload
+        def raise_for_status(self): pass
+        def json(self): return self.payload
+
+    records=[
+        {'id':10,'media_type':'movie','title':'Obsession','release_date':'2023-01-01'},
+        {'id':11,'media_type':'movie','title':'Obsession','release_date':'2026-01-01'},
+    ]
+    ns=_load_functions({'_search_tmdb_catalogue_identity'}, {
+        'TMDB_API_KEY':'test','clean_catalog_title':lambda value,*_args:value,
+        'requests':SimpleNamespace(get=lambda *_args,**_kwargs:Response({'total_pages':1,'results':records})),
+    })
+    candidate,title,status=ns['_search_tmdb_catalogue_identity']({
+        'id':99,'title':'Obsession','year':2026,'content_type':'Movie',
+    })
+    assert candidate['id']==11 and title=='Obsession' and status=='success'
+
+    records.append({'id':12,'media_type':'tv','name':'Obsession','first_air_date':'2026-01-01'})
+    candidate,_,status=ns['_search_tmdb_catalogue_identity']({
+        'id':99,'title':'Obsession','year':2026,'content_type':'Movie',
+    })
+    assert candidate is None and status=='unmatched'
+
+
+@pytest.mark.parametrize('country,language,genre,expected', [
+    ([{'iso_3166_1':'IN','name':'India'}],'hi','Drama','Bollywood'),
+    ([{'iso_3166_1':'IN','name':'India'}],'ta','Drama','South'),
+    ([{'iso_3166_1':'JP','name':'Japan'}],'ja','Animation','Anime'),
+    ([{'iso_3166_1':'US','name':'United States'}],'en','Drama','Hollywood'),
+    ([], 'en', 'Drama', ''),
+])
+def test_provider_signals_only_assign_supported_catalogue_categories(country,language,genre,expected):
+    ns=_load_functions({'_metadata_category_from_signals'})
+    assert ns['_metadata_category_from_signals'](country,language,genre)==expected
 
 
 def test_conflicting_file_stops_before_storage_copy():

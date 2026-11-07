@@ -4336,6 +4336,29 @@ def _metadata_identity_kind(content_type, category):
     return media_kind(content_type) or media_kind(category)
 
 
+def _metadata_category_from_signals(country, language='', genre=''):
+    country_tokens = set()
+    if isinstance(country, (list, tuple)):
+        for item in country:
+            if isinstance(item, dict):
+                country_tokens.update((str(item.get('iso_3166_1') or '').casefold(), str(item.get('name') or '').casefold()))
+            else:
+                country_tokens.add(str(item).casefold())
+    else:
+        country_tokens.update(re.split(r'[,/&|]', str(country or '').casefold()))
+    country_tokens = {token.strip() for token in country_tokens if token.strip()}
+    language_tokens = {token.strip() for token in re.split(r'[,/&|]', str(language or '').casefold()) if token.strip()}
+    genre_text = str(genre or '').casefold()
+    india = bool(country_tokens & {'in', 'india'})
+    if 'anime' in genre_text or (india is False and bool(country_tokens & {'jp', 'japan'}) and 'animation' in genre_text):
+        return 'Anime'
+    if india:
+        return 'South' if language_tokens & {'ta', 'te', 'ml', 'kn', 'tamil', 'telugu', 'malayalam', 'kannada'} else 'Bollywood'
+    if country_tokens & {'us', 'usa', 'united states', 'gb', 'uk', 'united kingdom', 'ca', 'canada', 'au', 'australia', 'nz', 'new zealand'}:
+        return 'Hollywood'
+    return ''
+
+
 def _metadata_identity_matches(local_title, local_year, local_kind, provider_title, provider_year, provider_kind, allow_missing_local_year=False):
     from catalog_identity import title_key, release_year
     local_title_key = title_key(local_title)
@@ -4370,6 +4393,34 @@ def _upsert_movie_provider_snapshot(provider, provider_item_id, media_type, payl
                     fetched_at = CURRENT_TIMESTAMP,
                     expires_at = EXCLUDED.expires_at
             """, (provider, str(provider_item_id), media_type, json.dumps(payload, allow_nan=False), max(60, int(ttl_seconds))))
+            try:
+                score = float(payload.get('rating'))
+                votes_raw = payload.get('vote_count') if provider == 'tmdb' else payload.get('votes')
+                votes_text = str(votes_raw or '').strip()
+                votes_count = int(re.sub(r'[^0-9]', '', votes_text) or 0)
+                if not math.isfinite(score) or not 0 <= score <= 10 or votes_count <= 0:
+                    raise ValueError('rating has no valid score/votes')
+                ttl_name = 'MINIAPP_TMDB_RATING_CACHE_SECONDS' if provider == 'tmdb' else 'MINIAPP_OMDB_RATING_CACHE_SECONDS'
+                try:
+                    rating_ttl = max(60, min(int(os.environ.get(ttl_name, 6 * 60 * 60)), 30 * 86400))
+                except (TypeError, ValueError):
+                    rating_ttl = 6 * 60 * 60
+                cur.execute("""
+                    INSERT INTO movie_provider_ratings_cache
+                        (provider, provider_item_id, media_type, score, votes, via, fetched_at, expires_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'))
+                    ON CONFLICT (provider, provider_item_id, media_type) DO UPDATE SET
+                        score = EXCLUDED.score, votes = EXCLUDED.votes, via = EXCLUDED.via,
+                        fetched_at = CURRENT_TIMESTAMP, expires_at = EXCLUDED.expires_at
+                """, (
+                    provider, str(provider_item_id), media_type, score, votes_text,
+                    str(payload.get('via') or ('TMDb' if provider == 'tmdb' else 'OMDb')),
+                    rating_ttl,
+                ))
+            except (TypeError, ValueError, OverflowError):
+                # A missing or zero-vote provider score must not clear a saved rating.
+                pass
         conn.commit()
         return True
     except Exception as exc:
@@ -4544,6 +4595,9 @@ def _fetch_omdb_snapshot(imdb_id):
         'year': year,
         'media_type': provider_kind,
         'genre': genre,
+        'category': _metadata_category_from_signals(
+            payload.get('Country'), payload.get('Language'), genre
+        ),
         'rating': payload.get('imdbRating') if str(payload.get('imdbRating') or '').strip().upper() not in {'', 'N/A'} else None,
         'votes': payload.get('imdbVotes') if str(payload.get('imdbVotes') or '').strip().upper() not in {'', 'N/A'} else None,
         'poster_url': normalize_artwork_url(payload.get('Poster')),
@@ -4554,16 +4608,80 @@ def _fetch_omdb_snapshot(imdb_id):
     return snapshot, 'success'
 
 
+def _search_tmdb_catalogue_identity(record):
+    """Resolve ID-less catalogue entries only from a unique exact title/year match."""
+    from catalog_identity import pick_tmdb_identity, release_year
+
+    title = clean_catalog_title(
+        record.get('title'), record.get('year'), record.get('content_type')
+    )
+    year = release_year(record.get('year'))
+    if not TMDB_API_KEY:
+        return None, title, 'unavailable'
+    if len(title) < 2 or not year:
+        return None, title, 'unmatched'
+
+    try:
+        params = {
+            'api_key': TMDB_API_KEY,
+            'query': title,
+            'include_adult': 'false',
+            'page': 1,
+        }
+        response = requests.get(
+            'https://api.themoviedb.org/3/search/multi',
+            params=params,
+            headers={'User-Agent': 'FlimfyBox/1.0'},
+            timeout=(3, 8),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get('results'), list):
+            return None, title, 'unavailable'
+        try:
+            total_pages = max(1, int(payload.get('total_pages') or 1))
+        except (TypeError, ValueError):
+            total_pages = 1
+        # Do not choose from a truncated search result set. Very common or noisy
+        # titles are left for review instead of receiving a guessed provider ID.
+        if total_pages > 5:
+            return None, title, 'unmatched'
+        results = list(payload['results'])
+        for page in range(2, total_pages + 1):
+            page_response = requests.get(
+                'https://api.themoviedb.org/3/search/multi',
+                params={**params, 'page': page},
+                headers={'User-Agent': 'FlimfyBox/1.0'},
+                timeout=(3, 8),
+            )
+            page_response.raise_for_status()
+            page_payload = page_response.json()
+            if not isinstance(page_payload, dict) or not isinstance(page_payload.get('results'), list):
+                return None, title, 'unavailable'
+            results.extend(page_payload['results'])
+        candidate = pick_tmdb_identity(results, title, year, '')
+        if not candidate or candidate.get('media_type') not in {'movie', 'tv'}:
+            return None, title, 'unmatched'
+        return candidate, title, 'success'
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        logger.warning('TMDb title lookup unavailable for catalogue item %s (%s)', record.get('id'), type(exc).__name__)
+        return None, title, 'unavailable'
+
+
 def _fetch_verified_tmdb_snapshot(record, reference_year=None):
     imdb_id = str(record.get('imdb_id') or '').strip()
     local_title = str(record.get('title') or '').strip()
     local_year = record.get('year')
     local_kind = _metadata_identity_kind(record.get('content_type'), record.get('category'))
-    if (not is_valid_imdb_id(imdb_id) and not record.get('tmdb_id')) or not local_title or not local_kind:
+    identity_title = clean_catalog_title(local_title, local_year or reference_year, record.get('content_type'))
+    has_imdb_id = is_valid_imdb_id(imdb_id)
+    if not local_title or not identity_title:
         return None, 'unmatched'
 
     try:
         if record.get('tmdb_id'):
+            if not local_kind:
+                return None, 'unmatched'
             media_type = 'tv' if local_kind == 'tv' else 'movie'
             response = requests.get(
                 f"https://api.themoviedb.org/3/{media_type}/{int(record['tmdb_id'])}",
@@ -4582,7 +4700,9 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
             if imdb_id and linked_imdb != imdb_id:
                 logger.warning('TMDb metadata identity conflict for catalogue item %s', record['id'])
                 return None, 'unmatched'
-        else:
+        elif has_imdb_id:
+            if not local_kind:
+                return None, 'unmatched'
             found = _tmdb_find_by_imdb_id(imdb_id, timeout=8)
             if not found:
                 return None, 'unavailable'
@@ -4595,7 +4715,7 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
             from catalog_identity import title_key
             for item in matches:
                 provider_title = item.get('name') if local_kind == 'tv' else item.get('title')
-                if title_key(provider_title) != title_key(local_title):
+                if title_key(provider_title) != title_key(identity_title):
                     continue
                 provider_date = item.get('first_air_date') if local_kind == 'tv' else item.get('release_date')
                 if local_year_key and release_year(provider_date) != local_year_key:
@@ -4623,12 +4743,37 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
                 linked_imdb = ''
             if imdb_id and linked_imdb != imdb_id:
                 return None, 'unmatched'
+        else:
+            candidate, identity_title, search_status = _search_tmdb_catalogue_identity(record)
+            if not candidate:
+                return None, search_status
+            media_type = candidate['media_type']
+            local_kind = media_type
+            try:
+                tmdb_id = int(candidate.get('id'))
+            except (TypeError, ValueError):
+                return None, 'unmatched'
+            if tmdb_id <= 0:
+                return None, 'unmatched'
+            response = requests.get(
+                f'https://api.themoviedb.org/3/{media_type}/{tmdb_id}',
+                params={'api_key': TMDB_API_KEY, 'append_to_response': 'external_ids,videos,credits'},
+                headers={'User-Agent': 'FlimfyBox/1.0'},
+                timeout=(3, 8),
+            )
+            response.raise_for_status()
+            details = response.json()
+            if not isinstance(details, dict):
+                return None, 'unavailable'
+            linked_imdb = str((details.get('external_ids') or {}).get('imdb_id') or '').strip()
+            if not is_valid_imdb_id(linked_imdb):
+                linked_imdb = ''
 
         provider_title = str((details.get('name') if media_type == 'tv' else details.get('title')) or '').strip()
         provider_date = details.get('first_air_date') if media_type == 'tv' else details.get('release_date')
         provider_year = str(provider_date or '')[:4]
         if not _metadata_identity_matches(
-            local_title, local_year or reference_year, local_kind,
+            identity_title, local_year or reference_year, local_kind,
             provider_title, provider_year, media_type,
         ):
             return None, 'unmatched'
@@ -4679,6 +4824,10 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
             'year': provider_year,
             'rating': details.get('vote_average'),
             'vote_count': details.get('vote_count'),
+            'category': _metadata_category_from_signals(
+                details.get('production_countries'), details.get('original_language'),
+                ', '.join(str(item.get('name')) for item in details.get('genres') or [] if item.get('name')),
+            ),
             'poster_url': normalize_artwork_url(f"https://image.tmdb.org/t/p/original{details.get('poster_path')}" if details.get('poster_path') else None),
             'backdrop_url': normalize_artwork_url(f"https://image.tmdb.org/t/p/original{details.get('backdrop_path')}" if details.get('backdrop_path') else None),
             'trailer_key': normalize_trailer_key(trailer),
@@ -4721,37 +4870,70 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     ))
     imdb_id = str(record.get('imdb_id') or '').strip()
     local_kind = _metadata_identity_kind(record['content_type'], record['category'])
-    if (not is_valid_imdb_id(imdb_id) and not record.get('tmdb_id')) or not local_kind:
+    has_provider_id = is_valid_imdb_id(imdb_id) or bool(record.get('tmdb_id'))
+    if not str(record.get('title') or '').strip() or (not has_provider_id and not record.get('year')):
         return False
+    original_record = dict(record)
+    identity_title = clean_catalog_title(
+        record['title'], record['year'], record.get('content_type')
+    )
 
     imdb_snapshot, imdb_status = (
         _fetch_omdb_snapshot(imdb_id) if is_valid_imdb_id(imdb_id)
         else (None, 'not_configured')
     )
-    omdb_matches = bool(imdb_snapshot and _metadata_identity_matches(
-        record['title'], record['year'], local_kind,
-        imdb_snapshot['title'], imdb_snapshot['year'], imdb_snapshot['media_type'],
-        allow_missing_local_year=True,
-    ))
+    omdb_kind = local_kind or ((imdb_snapshot or {}).get('media_type'))
+    omdb_matches = bool(
+        imdb_snapshot
+        and omdb_kind == imdb_snapshot.get('media_type')
+        and _metadata_identity_matches(
+            identity_title, record['year'], omdb_kind,
+            imdb_snapshot['title'], imdb_snapshot['year'], imdb_snapshot['media_type'],
+            allow_missing_local_year=True,
+        )
+    )
     if not omdb_matches:
         imdb_snapshot = None
     tmdb_snapshot, tmdb_status = _fetch_verified_tmdb_snapshot(
         record, (imdb_snapshot or {}).get('year')
     )
+    if tmdb_snapshot and not imdb_snapshot:
+        linked_imdb_id = str(tmdb_snapshot.get('imdb_id') or '').strip()
+        if is_valid_imdb_id(linked_imdb_id):
+            linked_snapshot, linked_status = _fetch_omdb_snapshot(linked_imdb_id)
+            imdb_status = linked_status
+            if (
+                linked_snapshot
+                and linked_snapshot.get('media_type') == tmdb_snapshot.get('media_type')
+                and _metadata_identity_matches(
+                    identity_title, record['year'], tmdb_snapshot['media_type'],
+                    linked_snapshot['title'], linked_snapshot['year'],
+                    linked_snapshot['media_type'], allow_missing_local_year=True,
+                )
+            ):
+                imdb_snapshot = linked_snapshot
     if not imdb_snapshot and not tmdb_snapshot:
         if imdb_status == 'unavailable' or tmdb_status == 'unavailable':
             return None
         return False
 
+    resolved_kind = (
+        (tmdb_snapshot or imdb_snapshot or {}).get('media_type') or local_kind
+    )
+    if resolved_kind not in {'movie', 'tv'}:
+        return False
     if imdb_snapshot:
-        _upsert_movie_provider_snapshot('imdb', imdb_id, local_kind, imdb_snapshot)
+        _upsert_movie_provider_snapshot(
+            'imdb', imdb_snapshot.get('imdb_id') or imdb_id, resolved_kind, imdb_snapshot
+        )
     if tmdb_snapshot:
-        _upsert_movie_provider_snapshot('tmdb', tmdb_snapshot['tmdb_id'], local_kind, tmdb_snapshot)
+        _upsert_movie_provider_snapshot('tmdb', tmdb_snapshot['tmdb_id'], resolved_kind, tmdb_snapshot)
 
     poster = (tmdb_snapshot or {}).get('poster_url') or (imdb_snapshot or {}).get('poster_url')
     backdrop = (tmdb_snapshot or {}).get('backdrop_url')
     trailer = (tmdb_snapshot or {}).get('trailer_key')
     genre = (imdb_snapshot or {}).get('genre') or (tmdb_snapshot or {}).get('genre')
+    category = (imdb_snapshot or {}).get('category') or (tmdb_snapshot or {}).get('category')
     description = (tmdb_snapshot or {}).get('description') or (imdb_snapshot or {}).get('description')
     cast = (tmdb_snapshot or {}).get('cast')
     try:
@@ -4779,6 +4961,8 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
                 year = CASE WHEN COALESCE(year, 0) = 0 THEN %s ELSE year END,
                 imdb_id = COALESCE(NULLIF(imdb_id, ''), NULLIF(%s, '')),
                 tmdb_id = COALESCE(tmdb_id, NULLIF(%s, '')::bigint),
+                content_type = CASE WHEN %s = 'tv' THEN 'Web Series' ELSE 'Movie' END,
+                category = COALESCE(NULLIF(%s, ''), category),
                 poster_url = COALESCE(%s, poster_url),
                 backdrop_poster_url = COALESCE(%s, backdrop_poster_url),
                 trailer_key = COALESCE(%s, trailer_key),
@@ -4789,22 +4973,21 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
                 seasons_data = CASE WHEN %s::jsonb IS NOT NULL AND %s::jsonb <> '{}'::jsonb
                                     THEN %s::jsonb ELSE seasons_data END
             WHERE id = %s
-              AND COALESCE(imdb_id, '') = COALESCE(%s, '')
-              AND COALESCE(year, 0) = %s
-              AND LOWER(content_type) = ANY(%s)
-              AND regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') =
-                  regexp_replace(LOWER(%s), '[^a-z0-9]', '', 'g')
+              AND title IS NOT DISTINCT FROM %s
+              AND year IS NOT DISTINCT FROM %s
+              AND content_type IS NOT DISTINCT FROM %s
+              AND imdb_id IS NOT DISTINCT FROM %s
+              AND tmdb_id IS NOT DISTINCT FROM %s
         """, (
             (tmdb_snapshot or imdb_snapshot)['title'], (tmdb_snapshot or imdb_snapshot)['title'],
             int((tmdb_snapshot or imdb_snapshot)['year']),
-            (tmdb_snapshot or {}).get('imdb_id'), (tmdb_snapshot or {}).get('tmdb_id'), poster, backdrop, trailer,
+            (tmdb_snapshot or {}).get('imdb_id'), (tmdb_snapshot or {}).get('tmdb_id'), resolved_kind, category, poster, backdrop, trailer,
             genre, rating, description, cast,
             json.dumps(seasons_data) if seasons_data else None,
             json.dumps(seasons_data) if seasons_data else None,
             json.dumps(seasons_data) if seasons_data else None,
-            movie_id, imdb_id or None, int(record['year'] or 0),
-            ['web series', 'tv series', 'tv', 'series'] if local_kind == 'tv' else ['movie', 'movies'],
-            record['title'],
+            movie_id, original_record['title'], original_record['year'],
+            original_record['content_type'], original_record['imdb_id'], original_record['tmdb_id'],
         ))
         if cur.rowcount != 1:
             conn.rollback()
@@ -4813,9 +4996,7 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         close_db_connection(conn)
         conn = None
         if tmdb_snapshot:
-            _refresh_tmdb_reviews_for_catalogue(tmdb_snapshot['tmdb_id'], local_kind)
-        if imdb_status == 'unavailable' or tmdb_status == 'unavailable':
-            return None
+            _refresh_tmdb_reviews_for_catalogue(tmdb_snapshot['tmdb_id'], resolved_kind)
         return True
     except Exception:
         if conn:
