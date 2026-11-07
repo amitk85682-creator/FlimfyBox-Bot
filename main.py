@@ -415,7 +415,19 @@ def normalize_mini_app_url(value: str) -> str:
 WEB_APP_URL = normalize_mini_app_url(
     os.environ.get('WEB_APP_URL', 'https://flimfybox-bot-yht0.onrender.com/webapp')
 )
-    # 👇👇👇 START COPY HERE 👇👇👇
+# Keep a small part of the shared database capacity available to Mini App
+# requests while bot ingestion/search workers are busy.
+DB_POOL_MAX_CONNECTIONS = 8
+DB_POOL_WEB_RESERVED_CONNECTIONS = 2
+DB_POOL_ACQUIRE_TIMEOUT_SECONDS = 4.0
+_db_pool_capacity = threading.BoundedSemaphore(DB_POOL_MAX_CONNECTIONS)
+_db_pool_bot_capacity = threading.BoundedSemaphore(
+    max(1, DB_POOL_MAX_CONNECTIONS - DB_POOL_WEB_RESERVED_CONNECTIONS)
+)
+_db_pool_lease_lock = threading.Lock()
+_db_pool_leases = {}
+
+# 👇👇👇 START COPY HERE 👇👇👇
 db_pool = None
 _startup_complete = threading.Event()
 _shutdown_requested = threading.Event()
@@ -424,10 +436,13 @@ try:
     pool_url = DATABASE_URL
     if pool_url:
         db_pool = psycopg2.pool.ThreadedConnectionPool(
-            2, 8,  # Supabase Free Tier (60 connections) ke liye optimized
+            4, DB_POOL_MAX_CONNECTIONS,
             dsn=pool_url, connect_timeout=10
         )
-        logger.info("✅ Database Connection Pool Created (Thread-Safe)!")
+        logger.info(
+            "✅ Database Connection Pool Created (max=%s; %s slots reserved for Mini App)",
+            DB_POOL_MAX_CONNECTIONS, DB_POOL_WEB_RESERVED_CONNECTIONS,
+        )
 except Exception as e:
     logger.error(f"❌ Error creating pool: {e}")
 # 👆👆👆 END COPY HERE 👆👆👆
@@ -2806,37 +2821,140 @@ def is_movie_posted_recently(movie_id, days=7):
 
 
 # 👇👇👇 START COPY HERE (New Function) 👇👇👇
-def get_db_connection():
-    """Pool se connection lene wala naya function"""
+def _checkout_db_connection(*, web_request=False):
+    """Wait briefly for a shared DB slot and discard stale pooled connections."""
     if not db_pool:
         logger.error("Database pool is not ready.")
         return None
-    try:
-        conn = db_pool.getconn()
-        # A previous query can leave a pooled connection in an aborted
-        # transaction. Reusing it makes catalogue searches silently fail and
-        # incorrectly fall back to TMDB request results.
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return conn
-    except Exception as e:
-        logger.error(f"Error getting connection from pool: {e}")
+    started = time.monotonic()
+    bot_slot_acquired = False
+    if not web_request:
+        bot_slot_acquired = _db_pool_bot_capacity.acquire(
+            timeout=DB_POOL_ACQUIRE_TIMEOUT_SECONDS
+        )
+        if not bot_slot_acquired:
+            with _db_pool_lease_lock:
+                active = len(_db_pool_leases)
+            logger.warning(
+                "db_pool_checkout_timeout role=bot wait_ms=%s active=%s max=%s",
+                int(DB_POOL_ACQUIRE_TIMEOUT_SECONDS * 1000), active,
+                DB_POOL_MAX_CONNECTIONS,
+            )
+            return None
+    if not _db_pool_capacity.acquire(timeout=DB_POOL_ACQUIRE_TIMEOUT_SECONDS):
+        if bot_slot_acquired:
+            _db_pool_bot_capacity.release()
+        with _db_pool_lease_lock:
+            active = len(_db_pool_leases)
+        logger.warning(
+            "db_pool_checkout_timeout role=%s wait_ms=%s active=%s max=%s",
+            'web' if web_request else 'bot',
+            int(DB_POOL_ACQUIRE_TIMEOUT_SECONDS * 1000), active,
+            DB_POOL_MAX_CONNECTIONS,
+        )
         return None
+
+    connection = None
+    lease_registered = False
+    try:
+        # psycopg2's pool does not queue callers when all connections are in
+        # use; the semaphores above provide bounded waiting before getconn().
+        # A pooled socket can also have been closed while idle, so test it
+        # before handing it to a route or bot handler.
+        for attempt in range(2):
+            connection = db_pool.getconn()
+            if connection.closed:
+                db_pool.putconn(connection, close=True)
+                connection = None
+                continue
+            try:
+                # Roll back any unfinished/aborted transaction. If this fails,
+                # discard the dead connection and let the pool replace it.
+                connection.rollback()
+            except Exception as error:
+                logger.warning(
+                    "Discarding unhealthy pooled DB connection (%s)",
+                    type(error).__name__,
+                )
+                db_pool.putconn(connection, close=True)
+                connection = None
+                continue
+
+            with _db_pool_lease_lock:
+                _db_pool_leases[id(connection)] = not web_request
+                active_connections = len(_db_pool_leases)
+            lease_registered = True
+            waited_ms = int((time.monotonic() - started) * 1000)
+            if waited_ms >= 100:
+                logger.info(
+                    "db_pool_checkout_wait role=%s wait_ms=%s active=%s max=%s",
+                    'web' if web_request else 'bot', waited_ms,
+                    active_connections, DB_POOL_MAX_CONNECTIONS,
+                )
+            return connection
+
+        logger.error(
+            "db_pool_checkout_unhealthy role=%s attempts=2",
+            'web' if web_request else 'bot',
+        )
+        return None
+    except Exception as e:
+        logger.error(
+            "Error getting DB connection role=%s type=%s",
+            'web' if web_request else 'bot', type(e).__name__,
+        )
+        return None
+    finally:
+        if not lease_registered:
+            if connection is not None:
+                try:
+                    db_pool.putconn(connection, close=True)
+                except Exception:
+                    pass
+            _db_pool_capacity.release()
+            if bot_slot_acquired:
+                _db_pool_bot_capacity.release()
+
+
+def get_db_connection():
+    """Get a pooled DB connection for bot work."""
+    return _checkout_db_connection(web_request=False)
+
+
+def get_web_db_connection():
+    """Get a pooled DB connection while preserving Mini App capacity."""
+    return _checkout_db_connection(web_request=True)
 
 def close_db_connection(conn):
     """Connection ko wapas pool me dalne ke liye helper"""
-    if db_pool and conn:
-        try:
-            # Never return an aborted transaction to the shared pool.
+    if not conn:
+        return
+    with _db_pool_lease_lock:
+        is_bot_lease = _db_pool_leases.pop(id(conn), None)
+    if is_bot_lease is None:
+        # Prevent duplicate cleanup paths from returning a connection twice;
+        # another request may already have checked it out again.
+        logger.debug("Ignoring duplicate or unmanaged DB connection return.")
+        return
+    try:
+        if db_pool:
             try:
                 conn.rollback()
-            except Exception:
-                pass
-            db_pool.putconn(conn)
-        except Exception:
-            pass
+                db_pool.putconn(conn)
+            except Exception as error:
+                logger.warning(
+                    "Discarding DB connection on return (%s)",
+                    type(error).__name__,
+                )
+                try:
+                    db_pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+    finally:
+        if is_bot_lease is not None:
+            _db_pool_capacity.release()
+            if is_bot_lease:
+                _db_pool_bot_capacity.release()
 
 
 def _get_user_request_stats(user_id):
@@ -16519,7 +16637,7 @@ register_webapp_routes(
     flask_app,
     api_movies_cache=api_movies_cache,
     search_cache=search_cache,
-    get_db_connection=get_db_connection,
+    get_db_connection=get_web_db_connection,
     close_db_connection=close_db_connection,
     store_user_request=store_user_request,
     TMDB_API_KEY=TMDB_API_KEY,

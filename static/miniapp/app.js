@@ -61,6 +61,7 @@ const tg = window.Telegram?.WebApp || {
         let activeMovie = null;
         let activeDetailsMovieId = null;
         const movieDetailsCache = new Map();
+        const movieDetailsCacheTtlMs = 5000;
         let savedMovieIds = new Set();
         let myListToggleInFlight = false;
         let myListRequestId = 0;
@@ -2913,7 +2914,8 @@ document.addEventListener('keydown', (e) => {
                 renderState();
             };
 
-            const skipFlimfy = refreshOnly === 'tmdb';
+            const skipFlimfy = refreshOnly === 'tmdb'
+                || (!forceRefresh && savedFlimfy?.isFresh && isCatalogued);
             if (isCatalogued && !skipFlimfy) {
                 state.flimfyLoading = true;
                 requestReviewPayload(`/api/movie/${encodeURIComponent(movieId)}/reviews`, telegramAuthHeaders(), 3500)
@@ -3012,13 +3014,15 @@ document.addEventListener('keydown', (e) => {
             } else if (movie.is_upcoming) {
                 renderLockedCommunityRating(movie.title || 'this title');
             } else {
-                renderCommunityRating(movie.id, movie.title || 'this title', requestId, detailsController.signal);
+                window.FlimfyVerdict?.renderLoading(
+                    document.getElementById('flimfyVerdict'),
+                    document.getElementById('flimfyReviews')
+                );
+                document.getElementById('communityRating').innerHTML = '<p class="community-rating-summary">Loading your rating…</p>';
             }
             document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
-            loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
-            loadFlimfyCommunityReviews(movie, requestId, detailsController.signal);
             // The card already contains the title, poster, year, rating and genre.
             // Show that immediately while files/cast finish loading in the background.
             detailsDescription.innerText = movie.description || 'Details and availability are loading…';
@@ -3041,11 +3045,21 @@ document.addEventListener('keydown', (e) => {
                 } else {
                     renderUnavailableAction(movie, isTMDB || movie.source === 'tmdb');
                 }
+                loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
+                loadFlimfyCommunityReviews(movie, requestId, detailsController.signal);
+                if (!isTMDB && movie.source !== 'tmdb' && !movie.is_upcoming) {
+                    renderCommunityRating(movie.id, movie.title || 'this title', requestId, detailsController.signal);
+                }
                 detailsPage.classList.remove('is-loading');
                 return;
             }
 
-            const cachedDetails = movieDetailsCache.get(String(id));
+            const cachedDetailsEntry = movieDetailsCache.get(String(id));
+            const cachedDetails = cachedDetailsEntry
+                && Date.now() - cachedDetailsEntry.cachedAt < movieDetailsCacheTtlMs
+                ? cachedDetailsEntry.movie
+                : null;
+            if (!cachedDetails && cachedDetailsEntry) movieDetailsCache.delete(String(id));
             const detailsRequest = cachedDetails
                 ? Promise.resolve({ status: 'success', movie: cachedDetails })
                 : fetchWithTimeout(`/api/movie/${id}`, { signal: detailsController.signal }, 7000)
@@ -3062,12 +3076,24 @@ document.addEventListener('keydown', (e) => {
                     return data;
                 });
 
+            let detailEnhancementsStarted = false;
+            const startDetailEnhancements = () => {
+                if (detailEnhancementsStarted || requestId !== detailsRequestId || detailsController.signal.aborted) return;
+                detailEnhancementsStarted = true;
+                renderCommunityRating(movie.id, movie.title || 'this title', requestId, detailsController.signal);
+                loadMovieRatingSources(movie, isTMDB, requestId, detailsController.signal);
+                loadFlimfyCommunityReviews(movie, requestId, detailsController.signal);
+            };
+
             detailsRequest
                 .then(data => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
+                    // Finish the title/files request before spending connections
+                    // on independent rating and review panels.
+                    startDetailEnhancements();
                     if (data.status === 'success') {
                         const m = data.movie;
-                        movieDetailsCache.set(String(id), m);
+                        movieDetailsCache.set(String(id), { movie: m, cachedAt: Date.now() });
                         activeMovie = { ...movie, ...m, source: 'local' };
                         setMovieDetailsMeta({ ...movie, ...m });
                         addRecentlyViewed(activeMovie);
@@ -3165,6 +3191,7 @@ document.addEventListener('keydown', (e) => {
                     if (requestId !== detailsRequestId || String(activeMovie?.id) !== String(id)) return;
                     if (isAbortError(error)) return;
                     console.error('Details load failed:', error);
+                    startDetailEnhancements();
                     const knownDescription = String(movie.description || '').trim();
                     detailsDescription.innerText = knownDescription && knownDescription !== 'No description available.'
                         ? knownDescription

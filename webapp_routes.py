@@ -5,6 +5,7 @@ import logging
 import json
 import math
 import psycopg2
+import functools
 from datetime import datetime, timedelta, timezone
 import requests
 import time
@@ -216,6 +217,10 @@ def register_webapp_routes(
     rating_source_cache = {}
     rating_source_cache_lock = threading.Lock()
     rating_source_inflight = {}
+    movie_detail_response_cache = {}
+    movie_detail_response_cache_lock = threading.Lock()
+    movie_detail_request_locks = [threading.Lock() for _ in range(64)]
+    movie_detail_cache_ttl = 2.0
     omdb_rating_cache = {}
     omdb_rating_cache_lock = threading.Lock()
     omdb_rating_inflight = {}
@@ -248,7 +253,7 @@ def register_webapp_routes(
     provider_stale_retry_ttl = configured_ttl('MINIAPP_PROVIDER_STALE_RETRY_SECONDS', 30)
 
     detail_api_path = re.compile(
-        r'^/api/(?:movie/\d+/(?:rating-sources|rating|reviews|audience-reviews)'
+        r'^/api/(?:movie/\d+(?:/(?:rating-sources|rating|reviews|audience-reviews))?'
         r'|tmdb/(?:movie|tv)/\d+/(?:rating-sources|audience-reviews))$'
     )
 
@@ -267,6 +272,45 @@ def register_webapp_routes(
                 request.path, response.status_code, elapsed_ms,
             )
         return response
+
+    def singleflight_movie_details(route_function):
+        """Coalesce rapid duplicate opens and briefly cache live file details."""
+        @functools.wraps(route_function)
+        def wrapped(movie_id):
+            key = int(movie_id)
+            request_lock = movie_detail_request_locks[key % len(movie_detail_request_locks)]
+            with request_lock:
+                now = time.monotonic()
+                with movie_detail_response_cache_lock:
+                    cached = movie_detail_response_cache.get(key)
+                    if cached and cached[0] > now:
+                        logger.info('miniapp_movie_details id=%s state=cache_hit', key)
+                        return jsonify(cached[1])
+                    if cached:
+                        movie_detail_response_cache.pop(key, None)
+
+                response = route_function(movie_id)
+                response_object = response[0] if isinstance(response, tuple) else response
+                status_code = response[1] if isinstance(response, tuple) else getattr(response_object, 'status_code', 200)
+                if status_code == 200:
+                    payload = response_object.get_json(silent=True)
+                    if isinstance(payload, dict) and payload.get('status') == 'success':
+                        with movie_detail_response_cache_lock:
+                            movie_detail_response_cache[key] = (
+                                time.monotonic() + movie_detail_cache_ttl, payload
+                            )
+                            if len(movie_detail_response_cache) > 512:
+                                expired = [
+                                    cache_key for cache_key, (expires_at, _value)
+                                    in movie_detail_response_cache.items()
+                                    if expires_at <= time.monotonic()
+                                ]
+                                for cache_key in expired[:128]:
+                                    movie_detail_response_cache.pop(cache_key, None)
+                                while len(movie_detail_response_cache) > 512:
+                                    movie_detail_response_cache.pop(next(iter(movie_detail_response_cache)))
+                return response
+        return wrapped
 
     def local_movie_has_file_sql(alias='m'):
         return f"""(
@@ -3041,6 +3085,7 @@ def register_webapp_routes(
             close_db_connection(conn)
 
     @flask_app.route('/api/movie/<int:movie_id>', methods=['GET'])
+    @singleflight_movie_details
     def get_movie_details(movie_id):
         if movie_id <= 0:
             return jsonify({'status': 'error', 'message': 'Movie not found'}), 404
