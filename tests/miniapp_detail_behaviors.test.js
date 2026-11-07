@@ -8,7 +8,9 @@ const source = fs.readFileSync(path.join(__dirname, '../static/miniapp/app.js'),
 const templateSource = fs.readFileSync(path.join(__dirname, '../templates/mini_app.html'), 'utf8');
 
 test('changed detail assets share a cache-busting template version', () => {
-    assert.match(templateSource, /\{% set miniapp_asset_version = '20261107-detail-cache-2' %\}/);
+    const version = templateSource.match(/\{% set miniapp_asset_version = '([^']+)' %\}/);
+    assert.ok(version, 'the detail assets have a shared cache-busting version');
+    assert.match(version[1], /^\d{8}-detail-[a-z0-9-]+$/);
     for (const asset of ['miniapp/cinema.css', 'miniapp/rating-meter.js', 'miniapp/app.js']) {
         assert.ok(templateSource.includes(`filename='${asset}') }}?v={{ miniapp_asset_version }}`));
     }

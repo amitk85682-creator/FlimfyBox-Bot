@@ -14,6 +14,7 @@ import uuid
 import requests
 import signal
 import sys
+import math
 import concurrent.futures
 from html import escape as html_escape
 from PIL import Image, ImageOps
@@ -4330,52 +4331,615 @@ def normalize_seasons_data(value):
     return {}
 
 
-def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
-    """Fill missing fields for one verified ID; never update namesakes by title."""
+def _metadata_identity_kind(content_type, category):
+    from catalog_identity import media_kind
+    return media_kind(content_type) or media_kind(category)
+
+
+def _metadata_identity_matches(local_title, local_year, local_kind, provider_title, provider_year, provider_kind, allow_missing_local_year=False):
+    from catalog_identity import title_key, release_year
+    local_title_key = title_key(local_title)
+    provider_title_key = title_key(provider_title)
+    local_year_key = release_year(local_year)
+    provider_year_key = release_year(provider_year)
+    return bool(
+        local_title_key
+        and local_title_key == provider_title_key
+        and provider_year_key
+        and ((allow_missing_local_year and not local_year_key) or local_year_key == provider_year_key)
+        and local_kind
+        and local_kind == provider_kind
+    )
+
+
+def _upsert_movie_provider_snapshot(provider, provider_item_id, media_type, payload, ttl_seconds=30 * 86400):
+    if provider not in {'tmdb', 'imdb'} or media_type not in {'movie', 'tv'} or not provider_item_id:
+        return False
     conn = get_db_connection()
     if not conn:
         return False
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT imdb_id, year, content_type FROM movies WHERE id=%s", (movie_id,))
-        identity = cur.fetchone()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO movie_provider_metadata_cache
+                    (provider, provider_item_id, media_type, payload, fetched_at, expires_at)
+                VALUES (%s, %s, %s, %s::jsonb, CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'))
+                ON CONFLICT (provider, provider_item_id, media_type) DO UPDATE SET
+                    payload = EXCLUDED.payload,
+                    fetched_at = CURRENT_TIMESTAMP,
+                    expires_at = EXCLUDED.expires_at
+            """, (provider, str(provider_item_id), media_type, json.dumps(payload, allow_nan=False), max(60, int(ttl_seconds))))
+        conn.commit()
+        return True
+    except Exception as exc:
+        conn.rollback()
+        logger.warning("Could not persist %s metadata snapshot (%s)", provider, type(exc).__name__)
+        return False
     finally:
         close_db_connection(conn)
-    if not identity or not identity[0]:
+
+
+def _refresh_tmdb_reviews_for_catalogue(tmdb_id, media_type):
+    if not TMDB_API_KEY or not tmdb_id or media_type not in {'movie', 'tv'}:
         return False
-    metadata = fetch_movie_metadata(identity[0], str(identity[1] or ""), hint_category=identity[2] or "")
-    if not metadata or metadata[4] != identity[0]:
+    try:
+        response = requests.get(
+            f'https://api.themoviedb.org/3/{media_type}/{int(tmdb_id)}/reviews',
+            params={'api_key': TMDB_API_KEY, 'language': 'en-US', 'page': 1},
+            headers={'User-Agent': 'FlimfyBox/1.0'},
+            timeout=(3, 8),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get('results'), list):
+            raise ValueError('invalid TMDb reviews payload')
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        logger.warning('TMDb review refresh unavailable for %s (%s)', tmdb_id, type(exc).__name__)
+        conn = get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO movie_provider_review_sync
+                            (provider, provider_item_id, media_type, status, review_count,
+                             fetched_at, last_attempt_at, expires_at, last_error)
+                        VALUES ('tmdb', %s, %s, 'error', 0, CURRENT_TIMESTAMP,
+                                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '60 seconds', %s)
+                        ON CONFLICT (provider, provider_item_id, media_type) DO UPDATE SET
+                            status = 'error', last_attempt_at = CURRENT_TIMESTAMP,
+                            expires_at = CURRENT_TIMESTAMP + INTERVAL '60 seconds',
+                            last_error = EXCLUDED.last_error
+                    """, (str(tmdb_id), media_type, type(exc).__name__))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            finally:
+                close_db_connection(conn)
         return False
-    _title, year, poster, genre, _imdb, rating, plot, _category, _seasons = metadata
-    poster = normalize_artwork_url(poster)
-    artwork_poster, backdrop = fetch_tmdb_artwork(_title, year, identity[0], identity[2] or "")
-    poster = poster or normalize_artwork_url(artwork_poster)
-    backdrop = normalize_artwork_url(backdrop)
-    trailer = normalize_trailer_key(fetch_tmdb_trailer_key(_title, year, identity[0], identity[2] or ""))
+
+    ttl_seconds = 6 * 60 * 60
+    try:
+        ttl_seconds = max(60, min(int(os.environ.get('MINIAPP_TMDB_REVIEW_CACHE_SECONDS', ttl_seconds)), 30 * 86400))
+    except (TypeError, ValueError):
+        pass
+    raw_reviews = payload.get('results') or []
+    try:
+        review_count = max(0, int(payload.get('total_results', len(raw_reviews))))
+    except (TypeError, ValueError):
+        review_count = len(raw_reviews)
     conn = get_db_connection()
     if not conn:
         return False
+    try:
+        with conn.cursor() as cur:
+            # Replace the page-one snapshot only after a successful provider response.
+            cur.execute("""
+                DELETE FROM movie_provider_reviews_cache
+                WHERE provider = 'tmdb' AND provider_item_id = %s AND media_type = %s
+            """, (str(tmdb_id), media_type))
+            for item in raw_reviews[:20]:
+                if not isinstance(item, dict):
+                    continue
+                review_id = str(item.get('id') or '').strip()
+                if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', review_id):
+                    continue
+                content = BeautifulSoup(str(item.get('content') or ''), 'html.parser').get_text(' ', strip=True)
+                content = re.sub(r'\s+', ' ', content).strip()[:1200]
+                if not content:
+                    continue
+                author = BeautifulSoup(str(item.get('author') or 'TMDb member'), 'html.parser').get_text(' ', strip=True)
+                author = re.sub(r'\s+', ' ', author).strip()[:100] or 'TMDb member'
+                raw_url = str(item.get('url') or '')
+                parsed_url = urlparse(raw_url)
+                safe_url = raw_url[:500] if (
+                    parsed_url.scheme == 'https' and parsed_url.hostname == 'www.themoviedb.org'
+                    and parsed_url.port in (None, 443)
+                    and re.fullmatch(r'/review/[A-Za-z0-9_-]+/?', parsed_url.path)
+                ) else ''
+                raw_rating = (item.get('author_details') or {}).get('rating') if isinstance(item.get('author_details'), dict) else None
+                try:
+                    review_rating = float(raw_rating) if raw_rating is not None else None
+                    if review_rating is not None and not 0 <= review_rating <= 10:
+                        review_rating = None
+                except (TypeError, ValueError):
+                    review_rating = None
+                created_at = None
+                try:
+                    raw_created = str(item.get('created_at') or '').replace('Z', '+00:00')
+                    created_at = datetime.fromisoformat(raw_created) if raw_created else None
+                except (TypeError, ValueError):
+                    pass
+                cur.execute("""
+                    INSERT INTO movie_provider_reviews_cache
+                        (provider, provider_item_id, media_type, review_id, author,
+                         content, rating, review_url, provider_created_at, fetched_at)
+                    VALUES ('tmdb', %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (provider, provider_item_id, media_type, review_id)
+                    DO UPDATE SET author = EXCLUDED.author, content = EXCLUDED.content,
+                        rating = EXCLUDED.rating, review_url = EXCLUDED.review_url,
+                        provider_created_at = EXCLUDED.provider_created_at,
+                        fetched_at = CURRENT_TIMESTAMP
+                """, (str(tmdb_id), media_type, review_id, author, content,
+                      review_rating, safe_url, created_at))
+            cur.execute("""
+                DELETE FROM movie_provider_reviews_cache
+                WHERE provider = 'tmdb' AND provider_item_id = %s AND media_type = %s
+                  AND fetched_at < CURRENT_TIMESTAMP - INTERVAL '180 days'
+            """, (str(tmdb_id), media_type))
+            cur.execute("""
+                INSERT INTO movie_provider_review_sync
+                    (provider, provider_item_id, media_type, status, review_count,
+                     fetched_at, last_success_at, last_attempt_at, expires_at, last_error)
+                VALUES ('tmdb', %s, %s, 'success', %s, CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'), NULL)
+                ON CONFLICT (provider, provider_item_id, media_type) DO UPDATE SET
+                    status = 'success', review_count = EXCLUDED.review_count,
+                    fetched_at = CURRENT_TIMESTAMP, last_success_at = CURRENT_TIMESTAMP,
+                    last_attempt_at = CURRENT_TIMESTAMP, expires_at = EXCLUDED.expires_at,
+                    last_error = NULL
+            """, (str(tmdb_id), media_type, review_count, ttl_seconds))
+        conn.commit()
+        return True
+    except Exception as exc:
+        conn.rollback()
+        logger.warning('TMDb review cache save failed for %s (%s)', tmdb_id, type(exc).__name__)
+        return False
+    finally:
+        close_db_connection(conn)
+
+
+def _fetch_omdb_snapshot(imdb_id):
+    api_key = os.environ.get('OMDB_API_KEY', '').strip()
+    if not api_key or not is_valid_imdb_id(imdb_id):
+        return None, 'not_configured'
+    try:
+        response = requests.get(
+            'https://www.omdbapi.com/',
+            params={'i': imdb_id, 'apikey': api_key, 'plot': 'full'},
+            headers={'User-Agent': 'FlimfyBox/1.0'},
+            timeout=(3, 8),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        logger.warning('OMDb metadata refresh unavailable for %s (%s)', imdb_id, type(exc).__name__)
+        return None, 'unavailable'
+    if not isinstance(payload, dict) or payload.get('Response') != 'True' or payload.get('imdbID') != imdb_id:
+        return None, 'unmatched'
+    provider_type = str(payload.get('Type') or '').casefold()
+    provider_kind = 'tv' if provider_type == 'series' else 'movie' if provider_type in {'movie', 'feature', 'short'} else ''
+    year = str(payload.get('Year') or '').split('–', 1)[0].strip()
+    genre = str(payload.get('Genre') or '').strip()
+    description = str(payload.get('Plot') or '').strip()
+    if genre.casefold() in {'', 'n/a', 'na', 'none', 'unknown'}:
+        genre = ''
+    if description.casefold() in {'', 'n/a', 'na', 'none', 'unknown'}:
+        description = ''
+    snapshot = {
+        'via': 'OMDb',
+        'imdb_id': imdb_id,
+        'title': str(payload.get('Title') or '').strip(),
+        'year': year,
+        'media_type': provider_kind,
+        'genre': genre,
+        'rating': payload.get('imdbRating') if str(payload.get('imdbRating') or '').strip().upper() not in {'', 'N/A'} else None,
+        'votes': payload.get('imdbVotes') if str(payload.get('imdbVotes') or '').strip().upper() not in {'', 'N/A'} else None,
+        'poster_url': normalize_artwork_url(payload.get('Poster')),
+        'description': description,
+    }
+    if not snapshot['title'] or not year.isdigit() or not provider_kind:
+        return None, 'unmatched'
+    return snapshot, 'success'
+
+
+def _fetch_verified_tmdb_snapshot(record, reference_year=None):
+    imdb_id = str(record.get('imdb_id') or '').strip()
+    local_title = str(record.get('title') or '').strip()
+    local_year = record.get('year')
+    local_kind = _metadata_identity_kind(record.get('content_type'), record.get('category'))
+    if (not is_valid_imdb_id(imdb_id) and not record.get('tmdb_id')) or not local_title or not local_kind:
+        return None, 'unmatched'
+
+    try:
+        if record.get('tmdb_id'):
+            media_type = 'tv' if local_kind == 'tv' else 'movie'
+            response = requests.get(
+                f"https://api.themoviedb.org/3/{media_type}/{int(record['tmdb_id'])}",
+                params={'api_key': TMDB_API_KEY, 'append_to_response': 'external_ids,videos,credits'},
+                headers={'User-Agent': 'FlimfyBox/1.0'},
+                timeout=(3, 8),
+            )
+            response.raise_for_status()
+            details = response.json()
+            if not isinstance(details, dict):
+                return None, 'unavailable'
+            external_ids = details.get('external_ids') or {}
+            linked_imdb = str(external_ids.get('imdb_id') or '').strip()
+            if not is_valid_imdb_id(linked_imdb):
+                linked_imdb = ''
+            if imdb_id and linked_imdb != imdb_id:
+                logger.warning('TMDb metadata identity conflict for catalogue item %s', record['id'])
+                return None, 'unmatched'
+        else:
+            found = _tmdb_find_by_imdb_id(imdb_id, timeout=8)
+            if not found:
+                return None, 'unavailable'
+            matches = found.get('tv_results' if local_kind == 'tv' else 'movie_results') or []
+            if not matches:
+                return None, 'unmatched' if 'movie_results' in found or 'tv_results' in found else 'unavailable'
+            from catalog_identity import release_year
+            local_year_key = release_year(local_year) or release_year(reference_year)
+            exact = []
+            from catalog_identity import title_key
+            for item in matches:
+                provider_title = item.get('name') if local_kind == 'tv' else item.get('title')
+                if title_key(provider_title) != title_key(local_title):
+                    continue
+                provider_date = item.get('first_air_date') if local_kind == 'tv' else item.get('release_date')
+                if local_year_key and release_year(provider_date) != local_year_key:
+                    continue
+                if not local_year_key:
+                    continue  # No year evidence: do not attach a new provider ID.
+                exact.append(item)
+            exact_ids = {int(item.get('id')) for item in exact if item.get('id') is not None}
+            if len(exact_ids) != 1:
+                return None, 'unmatched'
+            tmdb_id = next(iter(exact_ids))
+            media_type = 'tv' if local_kind == 'tv' else 'movie'
+            response = requests.get(
+                f'https://api.themoviedb.org/3/{media_type}/{tmdb_id}',
+                params={'api_key': TMDB_API_KEY, 'append_to_response': 'external_ids,videos,credits'},
+                headers={'User-Agent': 'FlimfyBox/1.0'},
+                timeout=(3, 8),
+            )
+            response.raise_for_status()
+            details = response.json()
+            if not isinstance(details, dict):
+                return None, 'unavailable'
+            linked_imdb = str((details.get('external_ids') or {}).get('imdb_id') or '').strip()
+            if not is_valid_imdb_id(linked_imdb):
+                linked_imdb = ''
+            if imdb_id and linked_imdb != imdb_id:
+                return None, 'unmatched'
+
+        provider_title = str((details.get('name') if media_type == 'tv' else details.get('title')) or '').strip()
+        provider_date = details.get('first_air_date') if media_type == 'tv' else details.get('release_date')
+        provider_year = str(provider_date or '')[:4]
+        if not _metadata_identity_matches(
+            local_title, local_year or reference_year, local_kind,
+            provider_title, provider_year, media_type,
+        ):
+            return None, 'unmatched'
+
+        videos = ((details.get('videos') or {}).get('results') or [])
+        trailer = next((
+            item.get('key') for item in videos
+            if item.get('site') == 'YouTube'
+            and item.get('type') in {'Trailer', 'Teaser'}
+            and item.get('official') is True
+            and normalize_trailer_key(item.get('key'))
+        ), None)
+        cast = ((details.get('credits') or {}).get('cast') or [])
+        season_map = {}
+        for season in details.get('seasons') or []:
+            season_number = season.get('season_number')
+            try:
+                season_number = int(season_number)
+            except (TypeError, ValueError):
+                continue
+            if season_number <= 0:
+                continue
+            air_date = str(season.get('air_date') or '')
+            try:
+                episode_count = max(0, int(season.get('episode_count') or 0))
+            except (TypeError, ValueError):
+                episode_count = 0
+            season_map[str(season_number)] = {
+                'year': int(air_date[:4]) if air_date[:4].isdigit() else 0,
+                'poster': normalize_artwork_url(
+                    f"https://image.tmdb.org/t/p/original{season.get('poster_path')}"
+                    if season.get('poster_path') else None
+                ),
+                'air_date': air_date,
+                'episode_count': episode_count,
+                'episodes': {},
+            }
+        runtime = details.get('runtime')
+        if media_type == 'tv':
+            episode_runtimes = details.get('episode_run_time') or []
+            runtime = next((value for value in episode_runtimes if isinstance(value, int) and value > 0), None)
+        snapshot = {
+            'tmdb_id': str(details.get('id') or ''),
+            'imdb_id': linked_imdb or imdb_id,
+            'media_type': media_type,
+            'title': provider_title,
+            'original_title': str((details.get('original_name') if media_type == 'tv' else details.get('original_title')) or '').strip(),
+            'year': provider_year,
+            'rating': details.get('vote_average'),
+            'vote_count': details.get('vote_count'),
+            'poster_url': normalize_artwork_url(f"https://image.tmdb.org/t/p/original{details.get('poster_path')}" if details.get('poster_path') else None),
+            'backdrop_url': normalize_artwork_url(f"https://image.tmdb.org/t/p/original{details.get('backdrop_path')}" if details.get('backdrop_path') else None),
+            'trailer_key': normalize_trailer_key(trailer),
+            'genre': ', '.join(str(item.get('name')) for item in details.get('genres') or [] if item.get('name')),
+            'description': str(details.get('overview') or '').strip(),
+            'cast': ', '.join(str(item.get('name')) for item in cast[:10] if item.get('name')),
+            'runtime': int(runtime) if isinstance(runtime, (int, float)) and not isinstance(runtime, bool) and runtime > 0 else None,
+            'seasons_data': season_map if media_type == 'tv' and season_map else None,
+        }
+        if not snapshot['tmdb_id'] or not provider_year.isdigit():
+            return None, 'unmatched'
+        return snapshot, 'success'
+    except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+        logger.warning('TMDb metadata refresh unavailable for catalogue item %s (%s)', record.get('id'), type(exc).__name__)
+        return None, 'unavailable'
+
+
+def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
+    """Refresh one movie only when title, year, media type, and provider IDs agree."""
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title, imdb_id, tmdb_id, year, content_type, category,
+                   poster_url, backdrop_poster_url, trailer_key, genre, rating,
+                   description, "cast", seasons_data
+            FROM movies WHERE id = %s
+        """, (movie_id,))
+        row = cur.fetchone()
+    finally:
+        close_db_connection(conn)
+    if not row:
+        return False
+    record = dict(zip(
+        ('id', 'title', 'imdb_id', 'tmdb_id', 'year', 'content_type', 'category',
+         'poster_url', 'backdrop_poster_url', 'trailer_key', 'genre', 'rating',
+         'description', 'cast', 'seasons_data'), row
+    ))
+    imdb_id = str(record.get('imdb_id') or '').strip()
+    local_kind = _metadata_identity_kind(record['content_type'], record['category'])
+    if (not is_valid_imdb_id(imdb_id) and not record.get('tmdb_id')) or not local_kind:
+        return False
+
+    imdb_snapshot, imdb_status = (
+        _fetch_omdb_snapshot(imdb_id) if is_valid_imdb_id(imdb_id)
+        else (None, 'not_configured')
+    )
+    omdb_matches = bool(imdb_snapshot and _metadata_identity_matches(
+        record['title'], record['year'], local_kind,
+        imdb_snapshot['title'], imdb_snapshot['year'], imdb_snapshot['media_type'],
+        allow_missing_local_year=True,
+    ))
+    if not omdb_matches:
+        imdb_snapshot = None
+    tmdb_snapshot, tmdb_status = _fetch_verified_tmdb_snapshot(
+        record, (imdb_snapshot or {}).get('year')
+    )
+    if not imdb_snapshot and not tmdb_snapshot:
+        if imdb_status == 'unavailable' or tmdb_status == 'unavailable':
+            return None
+        return False
+
+    if imdb_snapshot:
+        _upsert_movie_provider_snapshot('imdb', imdb_id, local_kind, imdb_snapshot)
+    if tmdb_snapshot:
+        _upsert_movie_provider_snapshot('tmdb', tmdb_snapshot['tmdb_id'], local_kind, tmdb_snapshot)
+
+    poster = (tmdb_snapshot or {}).get('poster_url') or (imdb_snapshot or {}).get('poster_url')
+    backdrop = (tmdb_snapshot or {}).get('backdrop_url')
+    trailer = (tmdb_snapshot or {}).get('trailer_key')
+    genre = (imdb_snapshot or {}).get('genre') or (tmdb_snapshot or {}).get('genre')
+    description = (tmdb_snapshot or {}).get('description') or (imdb_snapshot or {}).get('description')
+    cast = (tmdb_snapshot or {}).get('cast')
+    try:
+        tmdb_rating = float((tmdb_snapshot or {}).get('rating'))
+        if not math.isfinite(tmdb_rating) or not 0 <= tmdb_rating <= 10:
+            tmdb_rating = None
+    except (TypeError, ValueError):
+        tmdb_rating = None
+    try:
+        tmdb_votes = int((tmdb_snapshot or {}).get('vote_count') or 0)
+    except (TypeError, ValueError):
+        tmdb_votes = 0
+    rating = tmdb_rating if tmdb_snapshot and tmdb_votes > 0 else (imdb_snapshot or {}).get('rating')
+    seasons_data = (tmdb_snapshot or {}).get('seasons_data')
+
+    conn = get_db_connection()
+    if not conn:
+        return None
     try:
         cur = conn.cursor()
         cur.execute("SET LOCAL statement_timeout = '10s'")
-        cur.execute("""UPDATE movies
-                       SET genre=COALESCE(NULLIF(genre,''),%s),
-                           poster_url=CASE WHEN COALESCE(poster_url,'') !~* '^https?://' THEN COALESCE(%s, poster_url) ELSE poster_url END,
-                           backdrop_poster_url=CASE WHEN COALESCE(backdrop_poster_url,'') !~* '^https?://' THEN COALESCE(%s, backdrop_poster_url) ELSE backdrop_poster_url END,
-                           trailer_key=CASE WHEN trailer_key IS NULL OR trailer_key !~ '^[A-Za-z0-9_-]{11}$' OR LOWER(trailer_key)='not_found' THEN %s ELSE trailer_key END,
-                           year=COALESCE(NULLIF(year,0),%s),
-                           rating=COALESCE(NULLIF(NULLIF(rating,''),'N/A'),%s),
-                           description=COALESCE(NULLIF(description,''),%s)
-                       WHERE id=%s AND imdb_id=%s""",
-                    (genre, poster, backdrop, trailer, year or None,
-                     rating, plot, movie_id, identity[0]))
+        cur.execute("""
+            UPDATE movies
+            SET title = CASE WHEN BTRIM(COALESCE(%s, '')) <> '' THEN %s ELSE title END,
+                year = CASE WHEN COALESCE(year, 0) = 0 THEN %s ELSE year END,
+                imdb_id = COALESCE(NULLIF(imdb_id, ''), NULLIF(%s, '')),
+                tmdb_id = COALESCE(tmdb_id, NULLIF(%s, '')::bigint),
+                poster_url = COALESCE(%s, poster_url),
+                backdrop_poster_url = COALESCE(%s, backdrop_poster_url),
+                trailer_key = COALESCE(%s, trailer_key),
+                genre = COALESCE(NULLIF(%s, ''), genre),
+                rating = COALESCE(NULLIF(%s::text, ''), rating),
+                description = COALESCE(NULLIF(%s, ''), description),
+                "cast" = COALESCE(NULLIF(%s, ''), "cast"),
+                seasons_data = CASE WHEN %s::jsonb IS NOT NULL AND %s::jsonb <> '{}'::jsonb
+                                    THEN %s::jsonb ELSE seasons_data END
+            WHERE id = %s
+              AND COALESCE(imdb_id, '') = COALESCE(%s, '')
+              AND COALESCE(year, 0) = %s
+              AND LOWER(content_type) = ANY(%s)
+              AND regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') =
+                  regexp_replace(LOWER(%s), '[^a-z0-9]', '', 'g')
+        """, (
+            (tmdb_snapshot or imdb_snapshot)['title'], (tmdb_snapshot or imdb_snapshot)['title'],
+            int((tmdb_snapshot or imdb_snapshot)['year']),
+            (tmdb_snapshot or {}).get('imdb_id'), (tmdb_snapshot or {}).get('tmdb_id'), poster, backdrop, trailer,
+            genre, rating, description, cast,
+            json.dumps(seasons_data) if seasons_data else None,
+            json.dumps(seasons_data) if seasons_data else None,
+            json.dumps(seasons_data) if seasons_data else None,
+            movie_id, imdb_id or None, int(record['year'] or 0),
+            ['web series', 'tv series', 'tv', 'series'] if local_kind == 'tv' else ['movie', 'movies'],
+            record['title'],
+        ))
+        if cur.rowcount != 1:
+            conn.rollback()
+            return False
         conn.commit()
+        close_db_connection(conn)
+        conn = None
+        if tmdb_snapshot:
+            _refresh_tmdb_reviews_for_catalogue(tmdb_snapshot['tmdb_id'], local_kind)
+        if imdb_status == 'unavailable' or tmdb_status == 'unavailable':
+            return None
         return True
+    except Exception:
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            close_db_connection(conn)
+
+
+def _claim_movie_metadata_refresh_batch(limit=8):
+    conn = get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '10s'")
+            cur.execute("""
+                WITH candidates AS (
+                    SELECT m.id
+                    FROM movies m
+                    LEFT JOIN movie_metadata_sync s ON s.movie_id = m.id
+                    WHERE (s.movie_id IS NULL OR s.next_attempt_at <= CURRENT_TIMESTAMP)
+                      AND (s.lease_until IS NULL OR s.lease_until <= CURRENT_TIMESTAMP)
+                    ORDER BY
+                      CASE WHEN m.imdb_id ~ '^tt[0-9]{7,8}$' THEN 0 ELSE 1 END,
+                      CASE WHEN NULLIF(BTRIM(COALESCE(m.poster_url, '')), '') IS NULL THEN 0 ELSE 1 END,
+                      m.id
+                    LIMIT %s
+                    FOR UPDATE OF m SKIP LOCKED
+                ), claimed AS (
+                    INSERT INTO movie_metadata_sync
+                        (movie_id, status, attempts, next_attempt_at, lease_until, updated_at)
+                    SELECT id, 'processing', 1,
+                           CURRENT_TIMESTAMP + INTERVAL '15 minutes',
+                           CURRENT_TIMESTAMP + INTERVAL '10 minutes', CURRENT_TIMESTAMP
+                    FROM candidates
+                    ON CONFLICT (movie_id) DO UPDATE SET
+                        status = 'processing',
+                        attempts = movie_metadata_sync.attempts + 1,
+                        next_attempt_at = CURRENT_TIMESTAMP + INTERVAL '15 minutes',
+                        lease_until = CURRENT_TIMESTAMP + INTERVAL '10 minutes',
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING movie_id
+                )
+                SELECT m.id, m.title
+                FROM movies m JOIN claimed c ON c.movie_id = m.id
+                ORDER BY m.id
+            """, (max(1, min(int(limit), 32)),))
+            rows = cur.fetchall()
+        conn.commit()
+        return rows
     except Exception:
         conn.rollback()
         raise
     finally:
         close_db_connection(conn)
+
+
+def _finish_movie_metadata_refresh(movie_id, outcome):
+    conn = get_db_connection()
+    if not conn:
+        return
+    if outcome is True:
+        try:
+            refresh_days = max(1, min(int(os.environ.get('MOVIE_METADATA_REFRESH_DAYS', '30')), 365))
+        except (TypeError, ValueError):
+            refresh_days = 30
+        status, delay_seconds, error_text = 'success', refresh_days * 86400, None
+    elif outcome is False:
+        status, delay_seconds, error_text = 'skipped', 7 * 86400, 'Identity not verified or provider returned no matching title.'
+    else:
+        status, delay_seconds, error_text = 'error', 3600, 'Provider or database temporarily unavailable.'
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE movie_metadata_sync
+                SET status = %s,
+                    next_attempt_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'),
+                    lease_until = NULL,
+                    last_checked_at = CURRENT_TIMESTAMP,
+                    last_success_at = CASE WHEN %s = 'success' THEN CURRENT_TIMESTAMP ELSE last_success_at END,
+                    last_error = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE movie_id = %s
+            """, (status, delay_seconds, status, error_text, movie_id))
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        logger.warning('Could not update metadata refresh state for %s (%s)', movie_id, type(exc).__name__)
+    finally:
+        close_db_connection(conn)
+
+
+async def _refresh_movie_metadata_worker():
+    """Resumable, low-concurrency pass over the catalogue; leases survive restarts."""
+    logger.info('Movie metadata refresh worker started (identity checks enabled).')
+    semaphore = asyncio.Semaphore(4)
+
+    async def refresh_one(movie_id, title):
+        async with semaphore:
+            try:
+                outcome = await run_async(auto_fetch_and_update_metadata, movie_id, title)
+            except Exception as exc:
+                logger.warning('Metadata refresh failed for movie %s (%s)', movie_id, type(exc).__name__)
+                outcome = None
+            try:
+                await run_async(_finish_movie_metadata_refresh, movie_id, outcome)
+            except Exception as exc:
+                logger.warning('Metadata refresh state save failed for movie %s (%s)', movie_id, type(exc).__name__)
+
+    while not _shutdown_requested.is_set():
+        try:
+            rows = await run_async(_claim_movie_metadata_refresh_batch, 8)
+            if rows:
+                await asyncio.gather(*(refresh_one(movie_id, title) for movie_id, title in rows))
+                await asyncio.sleep(1)
+            else:
+                await asyncio.sleep(45)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning('Metadata refresh worker paused after database error (%s)', type(exc).__name__)
+            await asyncio.sleep(30)
 
 # ============================================================================
 # 🔍 GOOGLE SEARCH METADATA FETCHER (Premium Edition)
@@ -16199,34 +16763,82 @@ async def get_bot_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fix_missing_metadata(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    status = await update.message.reply_text("Checking missing metadata by verified identity…")
+    status = await update.message.reply_text("All catalogue metadata refresh has been queued. Existing verified data will stay available while it refreshes.")
 
-    def load_missing():
+    def schedule_refresh():
         conn = get_db_connection()
         if not conn:
             raise RuntimeError("Database unavailable")
         try:
             cur = conn.cursor()
             cur.execute("SET LOCAL statement_timeout = '10s'")
-            cur.execute("SELECT id, title FROM movies WHERE genre IS NULL OR poster_url IS NULL OR year IS NULL")
-            return cur.fetchall()
+            cur.execute("""
+                UPDATE movie_metadata_sync
+                SET status = 'pending', next_attempt_at = CURRENT_TIMESTAMP,
+                    lease_until = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE status <> 'processing'
+            """)
+            scheduled = cur.rowcount
+            cur.execute('SELECT COUNT(*) FROM movies')
+            total = int(cur.fetchone()[0] or 0)
+            conn.commit()
+            return total, scheduled
         finally:
             close_db_connection(conn)
 
     try:
-        rows = await run_async(load_missing)
-        fixed = 0
-        for index, (movie_id, title) in enumerate(rows):
-            try:
-                fixed += bool(await run_async(auto_fetch_and_update_metadata, movie_id, title))
-            except Exception as exc:
-                logger.warning("Metadata repair skipped id=%s (%s)", movie_id, type(exc).__name__)
-            if index % 10 == 0:
-                await _safe_batch_status_edit(status, f"Checked {index + 1}/{len(rows)}; filled {fixed}. Unverified identities are skipped.")
-        await _safe_batch_status_edit(status, f"Metadata check complete. Filled: {fixed}. Skipped / unavailable: {len(rows) - fixed}. Existing details were preserved.")
+        total, scheduled = await run_async(schedule_refresh)
+        await _safe_batch_status_edit(
+            status,
+            f"Queued a verified refresh across {total} catalogue entries. {scheduled} previously checked entries were scheduled again. The worker continues in the background; conflicting or unverified title/year/type identities are retained for review.",
+        )
     except Exception as exc:
         logger.error("Metadata repair failed (%s)", type(exc).__name__)
-        await _safe_batch_status_edit(status, "Metadata check failed; retry when the database is available.")
+        await _safe_batch_status_edit(status, "Metadata refresh could not be queued; retry when the database is available.")
+
+
+async def metadata_refresh_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    conn = get_db_connection()
+    if not conn:
+        await update.message.reply_text('Database is temporarily unavailable.')
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE s.status = 'success') AS refreshed,
+                   COUNT(*) FILTER (WHERE s.status = 'processing') AS processing,
+                   COUNT(*) FILTER (WHERE s.status = 'skipped') AS needs_review,
+                   COUNT(*) FILTER (WHERE s.status = 'error') AS retrying,
+                   COUNT(*) FILTER (WHERE s.movie_id IS NULL) AS waiting
+            FROM movies m
+            LEFT JOIN movie_metadata_sync s ON s.movie_id = m.id
+        """)
+        row = cur.fetchone() or (0, 0, 0, 0, 0, 0)
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE status = 'success'),
+                   COUNT(*) FILTER (WHERE status = 'error'),
+                   COALESCE(SUM(review_count) FILTER (WHERE status = 'success'), 0)
+            FROM movie_provider_review_sync WHERE provider = 'tmdb'
+        """)
+        review_row = cur.fetchone() or (0, 0, 0)
+        conn.commit()
+        await update.message.reply_text(
+            'Catalogue refresh status\n'
+            f"Movies: {row[0]} | refreshed: {row[1]} | processing: {row[2]}\n"
+            f"Waiting: {row[5]} | identity review: {row[3]} | retrying: {row[4]}\n"
+            f"TMDb review cache: {review_row[0]} titles available, {review_row[1]} provider errors; "
+            f"{int(review_row[2] or 0)} reported reviews.\n"
+            'FlimfyBox member reviews remain in their existing review table. IMDb written reviews are not imported.'
+        )
+    except Exception as exc:
+        conn.rollback()
+        logger.warning('Metadata refresh status unavailable (%s)', type(exc).__name__)
+        await update.message.reply_text('Metadata refresh status is temporarily unavailable.')
+    finally:
+        close_db_connection(conn)
 
 async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -17880,6 +18492,7 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("batchresolve", batch_resolve_command))
     application.add_handler(CommandHandler("batchretry", batch_retry_command))
     application.add_handler(CommandHandler("fixdata", fix_missing_metadata))
+    application.add_handler(CommandHandler("metadatastatus", metadata_refresh_status))
     application.add_handler(CommandHandler("post", post_to_topic_command))
     
     # ✅ FIX: group=2 — Sirf PM (Private Chat) mein hi pm_file_listener chalega
@@ -18173,6 +18786,7 @@ async def main():
                 'or GLOBAL_CHAT_GROUP_ID is invalid.'
             )
     worker_tasks.append(asyncio.create_task(keep_miniapp_alive_worker()))
+    worker_tasks.append(asyncio.create_task(_refresh_movie_metadata_worker()))
     _startup_complete.set()
     logger.info("✅ Startup complete; service is ready.")
 

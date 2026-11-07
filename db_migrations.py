@@ -656,6 +656,98 @@ def _migration_19(conn):
         """)
 
 
+def _migration_20(conn):
+    """Persist provider snapshots, review cache status, and resumable metadata refreshes."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_provider_metadata_cache (
+                provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'imdb')),
+                provider_item_id VARCHAR(32) NOT NULL,
+                media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'tv')),
+                payload JSONB NOT NULL,
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (provider, provider_item_id, media_type)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_provider_ratings_cache (
+                provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'imdb')),
+                provider_item_id VARCHAR(32) NOT NULL,
+                media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'tv')),
+                score NUMERIC(4, 2) NOT NULL CHECK (score >= 0 AND score <= 10),
+                votes TEXT,
+                via TEXT NOT NULL,
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (provider, provider_item_id, media_type)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_provider_reviews_cache (
+                provider TEXT NOT NULL CHECK (provider IN ('tmdb')),
+                provider_item_id VARCHAR(32) NOT NULL,
+                media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'tv')),
+                review_id VARCHAR(100) NOT NULL,
+                author TEXT NOT NULL,
+                content TEXT NOT NULL,
+                rating NUMERIC(4, 2),
+                review_url TEXT NOT NULL DEFAULT '',
+                provider_created_at TIMESTAMPTZ,
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (provider, provider_item_id, media_type, review_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_provider_review_sync (
+                provider TEXT NOT NULL CHECK (provider IN ('tmdb')),
+                provider_item_id VARCHAR(32) NOT NULL,
+                media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'tv')),
+                status TEXT NOT NULL CHECK (status IN ('success', 'error')),
+                review_count INTEGER NOT NULL DEFAULT 0 CHECK (review_count >= 0),
+                fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_success_at TIMESTAMPTZ,
+                last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMPTZ NOT NULL,
+                last_error TEXT,
+                PRIMARY KEY (provider, provider_item_id, media_type)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS movie_metadata_sync (
+                movie_id INTEGER PRIMARY KEY REFERENCES movies(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'processing', 'success', 'skipped', 'error')),
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                lease_until TIMESTAMPTZ,
+                last_checked_at TIMESTAMPTZ,
+                last_success_at TIMESTAMPTZ,
+                last_error TEXT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_movie_metadata_sync_due
+            ON movie_metadata_sync (next_attempt_at, lease_until, movie_id)
+        """)
+        for table_name in (
+            "movie_provider_metadata_cache",
+            "movie_provider_ratings_cache",
+            "movie_provider_reviews_cache",
+            "movie_provider_review_sync",
+            "movie_metadata_sync",
+        ):
+            cur.execute(f"ALTER TABLE {table_name} ENABLE ROW LEVEL SECURITY")
+        cur.execute("""
+            INSERT INTO movie_metadata_sync
+                (movie_id, status, attempts, next_attempt_at, updated_at)
+            SELECT id, 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            FROM movies
+            ON CONFLICT (movie_id) DO NOTHING
+        """)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -676,6 +768,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (17, _migration_17),
     (18, _migration_18),
     (19, _migration_19),
+    (20, _migration_20),
 )
 
 

@@ -13,10 +13,12 @@ class Element {
         this.style = {};
         this.attributes = {};
         this.hidden = false;
+        this.listeners = {};
     }
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     setAttribute(name, value) { this.attributes[name] = value; }
+    addEventListener(type, handler) { this.listeners[type] = handler; }
     querySelector(selector) {
         const className = selector.startsWith('.') ? selector.slice(1) : '';
         const visit = item => item.className.split(/\s+/).includes(className)

@@ -2915,7 +2915,8 @@ document.addEventListener('keydown', (e) => {
             };
 
             const skipFlimfy = refreshOnly === 'tmdb'
-                || (!forceRefresh && savedFlimfy?.isFresh && isCatalogued);
+                || (!forceRefresh && savedFlimfy?.isFresh && isCatalogued
+                    && typeof savedFlimfy.value?.can_review === 'boolean');
             if (isCatalogued && !skipFlimfy) {
                 state.flimfyLoading = true;
                 requestReviewPayload(`/api/movie/${encodeURIComponent(movieId)}/reviews`, telegramAuthHeaders(), 3500)
