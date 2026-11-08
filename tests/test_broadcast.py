@@ -4,6 +4,7 @@ import telegram
 from telegram import Chat, Message, PhotoSize, Update
 from telegram.ext import filters
 from datetime import datetime, timezone
+from telegram.error import NetworkError, RetryAfter, TimedOut
 
 from tests.test_filename_identity_ingestion import _load_functions
 
@@ -22,6 +23,15 @@ def run_immediate(coroutine):
     except StopIteration as finished:
         return finished.value
     raise AssertionError('The test coroutine unexpectedly suspended.')
+
+
+class ImmediateAsyncioShim:
+    def __init__(self): self.sleeps=[]
+    class Semaphore:
+        async def __aenter__(self): return self
+        async def __aexit__(self,*_args): return False
+    def semaphore(self): return self.Semaphore()
+    async def sleep(self,delay): self.sleeps.append(delay)
 
 
 def test_broadcast_recipients_include_all_tracked_user_sources():
@@ -167,3 +177,64 @@ def test_caption_broadcast_sends_photo_with_readable_fallback_caption():
     assert calls[0]['caption']=='Happy <b>Diwali</b>'
     assert calls[1]['caption']=='Happy Diwali'
     assert calls[1]['parse_mode'] is None
+
+
+def test_safe_send_rebuilds_request_coroutine_after_timeout():
+    attempts=[]
+    asyncio_shim=ImmediateAsyncioShim()
+
+    async def request():
+        attempts.append(len(attempts)+1)
+        if len(attempts)==1:
+            raise TimedOut('Timed out')
+        return 'delivered'
+
+    ns=_load_functions({'safe_send'}, {
+        'inspect':__import__('inspect'),'asyncio':SimpleNamespace(
+            sleep=asyncio_shim.sleep,
+        ),
+        '_send_semaphore':asyncio_shim.semaphore(),
+        '_last_send_time':0,'time':__import__('time'),
+        'NetworkError':NetworkError,'RetryAfter':RetryAfter,
+        'TelegramError':telegram.error.TelegramError,
+        'timedelta':__import__('datetime').timedelta,
+        'logger':__import__('logging').getLogger('test_safe_send'),
+    })
+
+    assert run_immediate(ns['safe_send'](request))=='delivered'
+    assert attempts==[1,2]
+    assert asyncio_shim.sleeps[0]==0.5
+
+
+def test_telegram_profile_tracking_does_not_require_missing_activity_unique_index():
+    class Cursor:
+        def __init__(self,rowcount): self.rowcount=rowcount; self.queries=[]
+        def execute(self,sql,params=None): self.queries.append((sql,params))
+        def close(self): pass
+
+    class Connection:
+        def __init__(self,rowcount): self.cur=Cursor(rowcount); self.committed=False; self.rolled_back=False
+        def cursor(self): return self.cur
+        def commit(self): self.committed=True
+        def rollback(self): self.rolled_back=True
+
+    user=SimpleNamespace(id=8438574164,username='viewer',first_name='Viewer')
+    for updated, expect_insert in ((1,False),(0,True)):
+        conn=Connection(updated)
+        ns=_load_functions({'record_telegram_user'}, {
+            'get_db_connection':lambda conn=conn:conn,
+            'close_db_connection':lambda _conn:None,
+            'logger':__import__('logging').getLogger('test_user_record'),
+        })
+
+        ns['record_telegram_user'](user,user.id)
+
+        sql_text='\n'.join(sql for sql,_params in conn.cur.queries)
+        assert 'pg_advisory_xact_lock' in sql_text
+        activity_sql='\n'.join(
+            sql for sql,_params in conn.cur.queries
+            if 'user_activity' in sql
+        )
+        assert 'ON CONFLICT' not in activity_sql
+        assert conn.committed and not conn.rolled_back
+        assert ('INSERT INTO user_activity' in sql_text)==expect_insert

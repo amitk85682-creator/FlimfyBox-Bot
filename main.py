@@ -15,6 +15,7 @@ import requests
 import signal
 import sys
 import math
+import inspect
 import concurrent.futures
 from html import escape as html_escape
 from PIL import Image, ImageOps
@@ -1019,36 +1020,48 @@ def schedule_recommendation_event(*, user_id, event_type, source, movie_id=None,
 _send_semaphore = asyncio.Semaphore(25)  # Max 25 concurrent outgoing messages
 _last_send_time = 0
 
-async def safe_send(coro, max_retries=3):
-    """
-    🛡️ Global Anti-FloodWait Shield.
-    Har high-risk outgoing message isse guzrega.
-    - Semaphore se max 25 concurrent sends
-    - Min 40ms gap (≈25 msg/sec)
-    - RetryAfter auto-catch + wait + retry
-    """
+async def safe_send(send_factory, max_retries=3):
+    """Send with bounded retries; the factory creates a fresh coroutine per attempt."""
+    if not callable(send_factory):
+        raise TypeError('safe_send requires a callable that creates a fresh Telegram request')
+
     global _last_send_time
+    max_retries = max(1, min(int(max_retries), 5))
     for attempt in range(max_retries):
-        async with _send_semaphore:
-            now = time.time()
-            gap = now - _last_send_time
-            if gap < 0.04:
-                await asyncio.sleep(0.04 - gap)
-            _last_send_time = time.time()
-            try:
-                return await coro
-            except RetryAfter as e:
-                wait = e.retry_after + 1
-                logger.warning(f"⏳ FloodWait! Waiting {wait}s (attempt {attempt+1}/{max_retries})")
-                await asyncio.sleep(wait)
-            except (TelegramError, Exception) as e:
-                if 'flood' in str(e).lower():
-                    logger.warning(f"⏳ Possible flood error, waiting 5s: {e}")
-                    await asyncio.sleep(5)
-                else:
-                    logger.error(f"safe_send error: {e}")
-                    if attempt == max_retries - 1:
-                        raise
+        try:
+            async with _send_semaphore:
+                now = time.time()
+                gap = now - _last_send_time
+                if gap < 0.04:
+                    await asyncio.sleep(0.04 - gap)
+                _last_send_time = time.time()
+                request = send_factory()
+                if not inspect.isawaitable(request):
+                    raise TypeError('safe_send factory must return an awaitable')
+                return await request
+        except RetryAfter as error:
+            if attempt == max_retries - 1:
+                raise
+            retry_after = error.retry_after
+            delay = retry_after.total_seconds() if isinstance(retry_after, timedelta) else float(retry_after)
+            delay = max(0.0, min(delay, 300.0)) + 1.0
+            logger.warning(
+                'Telegram rate limit; retrying after %.1fs (attempt %s/%s)',
+                delay, attempt + 1, max_retries,
+            )
+            await asyncio.sleep(delay)
+        except NetworkError as error:
+            if attempt == max_retries - 1:
+                logger.error('safe_send network failure after retries: %s', type(error).__name__)
+                raise
+            delay = min(0.5 * (2 ** attempt), 4.0)
+            logger.warning(
+                'safe_send network failure (%s); retrying in %.1fs (attempt %s/%s)',
+                type(error).__name__, delay, attempt + 1, max_retries,
+            )
+            await asyncio.sleep(delay)
+        except TelegramError:
+            raise
     return None
 
 
@@ -4158,15 +4171,24 @@ def record_telegram_user(user, chat_id=None):
                 first_name = EXCLUDED.first_name,
                 last_seen = CURRENT_TIMESTAMP
         """, (user_id, username, first_name))
+        # Older production databases may not have the UNIQUE(user_id) index
+        # required by ON CONFLICT. Serialize per user, update if present, insert
+        # otherwise; this also repairs existing duplicate rows without deleting data.
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(1179407958, hashtext(%s))",
+            (str(user_id),),
+        )
         cur.execute("""
-            INSERT INTO user_activity (user_id, username, first_name, chat_id, last_seen)
-            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) DO UPDATE SET
-                username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name,
-                chat_id = EXCLUDED.chat_id,
+            UPDATE user_activity
+            SET username = %s, first_name = %s, chat_id = %s,
                 last_seen = CURRENT_TIMESTAMP
-        """, (user_id, username, first_name, chat_id))
+            WHERE user_id = %s
+        """, (username, first_name, chat_id, user_id))
+        if cur.rowcount == 0:
+            cur.execute("""
+                INSERT INTO user_activity (user_id, username, first_name, chat_id, last_seen)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            """, (user_id, username, first_name, chat_id))
         conn.commit()
         cur.close()
     except Exception as e:
@@ -4587,7 +4609,11 @@ def _fetch_omdb_snapshot(imdb_id):
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError, TypeError) as exc:
-        logger.warning('OMDb metadata refresh unavailable for %s (%s)', imdb_id, type(exc).__name__)
+        status_code = getattr(getattr(exc, 'response', None), 'status_code', None)
+        logger.warning(
+            'OMDb metadata refresh unavailable for %s (error_class=%s http_status=%s)',
+            imdb_id, type(exc).__name__, status_code or 'n/a',
+        )
         return None, 'unavailable'
     if not isinstance(payload, dict) or payload.get('Response') != 'True' or payload.get('imdbID') != imdb_id:
         return None, 'unmatched'
@@ -6122,7 +6148,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
                 # Optional heads-up text with premium mention
                 try:
-                    await safe_send(context.bot.send_message(
+                    await safe_send(lambda: context.bot.send_message(
                         chat_id=user_id,
                         text=(
                             f"<b>━━━━━ 🎉 𝗚𝗼𝗼𝗱 𝗡𝗲𝘄𝘀! ━━━━━</b>\n\n"
@@ -6137,7 +6163,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
                 warning_msg = None
                 try:
-                    warning_msg = await safe_send(context.bot.copy_message(
+                    warning_msg = await safe_send(lambda: context.bot.copy_message(
                         chat_id=user_id,
                         from_chat_id=get_primary_dump_channel_id(),
                         message_id=3384
@@ -6155,12 +6181,12 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                 if is_file_id:
                     # try video then document
                     try:
-                        sent_msg = await safe_send(context.bot.send_video(
+                        sent_msg = await safe_send(lambda: context.bot.send_video(
                             chat_id=user_id, video=val, caption=caption_text,
                             parse_mode='HTML', reply_markup=join_keyboard
                         ))
                     except telegram.error.BadRequest:
-                        sent_msg = await safe_send(context.bot.send_document(
+                        sent_msg = await safe_send(lambda: context.bot.send_document(
                             chat_id=user_id, document=val, caption=caption_text,
                             parse_mode='HTML', reply_markup=join_keyboard
                         ))
@@ -6169,7 +6195,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     parts = val.split('/')
                     from_chat_id = int("-100" + parts[-2])
                     msg_id = int(parts[-1])
-                    sent_msg = await safe_send(context.bot.copy_message(
+                    sent_msg = await safe_send(lambda: context.bot.copy_message(
                         chat_id=user_id,
                         from_chat_id=from_chat_id,
                         message_id=msg_id,
@@ -6179,7 +6205,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
                     ))
 
                 elif val.startswith("http"):
-                    sent_msg = await safe_send(context.bot.send_message(
+                    sent_msg = await safe_send(lambda: context.bot.send_message(
                         chat_id=user_id,
                         text=f"{caption_text}\n\n<b>Link:</b> {val}",
                         parse_mode='HTML',
@@ -6189,7 +6215,7 @@ async def notify_users_for_movie(context: ContextTypes.DEFAULT_TYPE, movie_title
 
                 else:
                     # last fallback: try send as document
-                    sent_msg = await safe_send(context.bot.send_document(
+                    sent_msg = await safe_send(lambda: context.bot.send_document(
                         chat_id=user_id,
                         document=val,
                         caption=caption_text,
@@ -7051,7 +7077,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 else:
                     from_chat_id = f"@{parts[-2]}"
 
-                sent_msg = await safe_send(context.bot.copy_message(
+                sent_msg = await safe_send(lambda: context.bot.copy_message(
                     chat_id=target_chat_id,
                     from_chat_id=from_chat_id,
                     message_id=msg_id,
@@ -7065,7 +7091,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not sent_msg and file_id:
             clean_file_id = str(file_id).strip()
             try:
-                sent_msg = await safe_send(context.bot.send_video(
+                sent_msg = await safe_send(lambda: context.bot.send_video(
                     chat_id=target_chat_id,
                     video=clean_file_id,
                     caption=caption_text,
@@ -7074,7 +7100,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 ))
             except telegram.error.BadRequest:
                 try:
-                    sent_msg = await safe_send(context.bot.send_document(
+                    sent_msg = await safe_send(lambda: context.bot.send_document(
                         chat_id=target_chat_id,
                         document=clean_file_id,
                         caption=caption_text,
@@ -7621,7 +7647,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_index = int(parts[2])
                     
                     # ✅ STICKER bhejo "Fetching file" text ki jagah
-                    status_msg = await safe_send(context.bot.copy_message(
+                    status_msg = await safe_send(lambda: context.bot.copy_message(
                         chat_id=chat_id,
                         from_chat_id=-1003893346701,
                         message_id=8675
@@ -17372,7 +17398,7 @@ async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TY
                 extra['message_thread_id'] = topic_id
 
             if media_type == "photo" and media_file_id:
-                sent = await safe_send(context.bot.send_photo(
+                sent = await safe_send(lambda: context.bot.send_photo(
                     chat_id      = new_channel_id,
                     photo        = media_file_id,
                     caption      = caption or "",
@@ -17381,7 +17407,7 @@ async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TY
                     **extra
                 ))
             elif media_type == "video" and media_file_id:
-                sent = await safe_send(context.bot.send_video(
+                sent = await safe_send(lambda: context.bot.send_video(
                     chat_id      = new_channel_id,
                     video        = media_file_id,
                     caption      = caption or "",
@@ -17390,7 +17416,7 @@ async def restore_posts_command(update: Update, context: ContextTypes.DEFAULT_TY
                     **extra
                 ))
             elif caption:
-                sent = await safe_send(context.bot.send_message(
+                sent = await safe_send(lambda: context.bot.send_message(
                     chat_id      = new_channel_id,
                     text         = caption,
                     parse_mode   = 'Markdown',
@@ -18379,7 +18405,7 @@ async def upcoming_reminder_worker(app: Application):
                 try:
                     today = datetime.utcnow().date()
                     if release_requested and release_date and release_date <= today:
-                        await safe_send(app.bot.send_message(
+                        await safe_send(lambda: app.bot.send_message(
                             chat_id=int(user_id),
                             text=(
                                 f"🔔 <b>{html_escape(title or 'This title')}</b> is now released!\n\n"
@@ -18390,7 +18416,7 @@ async def upcoming_reminder_worker(app: Application):
                         ))
                         await run_async(_mark_upcoming_notification, notification_id, 'release')
                     if availability_requested and local_available:
-                        await safe_send(app.bot.send_message(
+                        await safe_send(lambda: app.bot.send_message(
                             chat_id=int(user_id),
                             text=(
                                 f"📥 <b>{html_escape(title or 'This title')}</b> is now available for download!\n\n"
@@ -18406,7 +18432,7 @@ async def upcoming_reminder_worker(app: Application):
             watchlist_rows = await run_async(_claim_pending_watchlist_availability_notifications)
             for user_id, movie_id, title in watchlist_rows:
                 try:
-                    sent_message = await safe_send(app.bot.send_message(
+                    sent_message = await safe_send(lambda: app.bot.send_message(
                         chat_id=int(user_id),
                         text=(
                             f"📥 <b>{html_escape(title or 'This title')}</b> is now available on FlimfyBox!\n\n"
