@@ -16237,19 +16237,47 @@ def _broadcast_is_html_parse_error(error):
     ))
 
 
-async def _send_broadcast_to_user(bot, user_id, message_text):
-    """Retry rate-limited sends once and fall back to readable plain text for bad HTML."""
+async def _send_broadcast_to_user(bot, user_id, message_text, media_message=None):
+    """Send text or supported caption media, retry rate limits, and tolerate bad HTML."""
     text = message_text
     parse_mode = 'HTML'
     plain_fallback = False
+
+    media_method = None
+    media_field = None
+    if media_message:
+        for attr, method_name, field_name in (
+            ('photo', 'send_photo', 'photo'),
+            ('video', 'send_video', 'video'),
+            ('document', 'send_document', 'document'),
+            ('animation', 'send_animation', 'animation'),
+            ('audio', 'send_audio', 'audio'),
+            ('voice', 'send_voice', 'voice'),
+        ):
+            media = getattr(media_message, attr, None)
+            if media:
+                media_method = getattr(bot, method_name)
+                media_field = (field_name, media[-1].file_id if attr == 'photo' else media.file_id)
+                break
+
     for attempt in range(3):
         try:
-            await bot.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True,
-            )
+            if media_method:
+                media_kwargs = {
+                    'chat_id': user_id,
+                    media_field[0]: media_field[1],
+                    'caption': text or None,
+                }
+                if text:
+                    media_kwargs['parse_mode'] = parse_mode
+                await media_method(**media_kwargs)
+            else:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=True,
+                )
             return plain_fallback
         except telegram.error.RetryAfter as error:
             if attempt >= 2:
@@ -16284,9 +16312,12 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("⛔ Admin only command.")
         return
 
-    raw_text = message.text or ''
+    raw_text = message.text or message.caption or ''
     message_text = re.sub(r'^/broadcast(?:@\w+)?\s*', '', raw_text, count=1, flags=re.I).strip()
-    if not message_text:
+    media_message = message if any(getattr(message, media_type, None) for media_type in (
+        'photo', 'video', 'document', 'animation', 'audio', 'voice',
+    )) else None
+    if not message_text and not media_message:
         await message.reply_text(
             "Usage: /broadcast <b>Message title</b>\n\nYour message here..."
         )
@@ -16328,7 +16359,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for processed, user_id in enumerate(all_users, start=1):
         try:
             used_plain_fallback = await _send_broadcast_to_user(
-                context.bot, user_id, message_text,
+                context.bot, user_id, message_text, media_message,
             )
             success_count += 1
             plain_fallback_count += int(used_plain_fallback)
@@ -18730,6 +18761,9 @@ def register_handlers(application: Application):
     यह फंक्शन हर बॉट पर लॉजिक (Handlers) सेट करेगा।
     ताकि तीनों बॉट्स सेम काम करें।
     """
+    broadcast_caption_filter = filters.CaptionRegex(
+        r'(?i)^/broadcast(?:@\w+)?(?:\s|$)'
+    )
     # -----------------------------------------------------------
     # 1. NEW REQUEST SYSTEM HANDLER (With 2 Min Timeout)
     # -----------------------------------------------------------
@@ -18788,8 +18822,14 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("aliases", list_aliases))
     application.add_handler(CommandHandler("aliasbulk", bulk_add_aliases))
     # Add handler to collect media groups in private chats for post_query albums
-    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE, global_album_cacher), group=-2)
-    application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE, collect_post_query_album), group=-1)
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE & ~broadcast_caption_filter,
+        global_album_cacher,
+    ), group=-2)
+    application.add_handler(MessageHandler(
+        (filters.PHOTO | filters.VIDEO) & filters.ChatType.PRIVATE & ~broadcast_caption_filter,
+        collect_post_query_album,
+    ), group=-1)
     application.add_handler(MessageHandler((filters.PHOTO | filters.VIDEO) & filters.CaptionRegex(r'^/post_query'), admin_post_query))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^/post_query'), admin_post_query_text))
     application.add_handler(MessageHandler(filters.Regex(r'^/post18'), admin_post_18))
@@ -18797,7 +18837,10 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("restore", restore_posts_command))
 
     # 🚀 NEW: Add this line to catch the poster image
-    application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_admin_poster), group=0)
+    application.add_handler(MessageHandler(
+        filters.PHOTO & filters.ChatType.PRIVATE & ~broadcast_caption_filter,
+        handle_admin_poster,
+    ), group=0)
 
     # 🚀 SUPER BATCH COMMANDS
     # ✅ superbatch_listener HATA DIYA — ab pm_file_listener hi "muh" hai
@@ -18815,7 +18858,10 @@ def register_handlers(application: Application):
 
     
     # ✅ FIX: group=1 जोड़ा गया ताकि यह दूसरे फाइल्स को ब्लॉक न करे
-    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.FORWARDED, batch18_listener), group=1)
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.FORWARDED & ~broadcast_caption_filter,
+        batch18_listener,
+    ), group=1)
     
     # Batch Commands
     application.add_handler(CommandHandler("batch", batch_add_command))
@@ -18832,9 +18878,17 @@ def register_handlers(application: Application):
     # Channel ya group se koi bhi message yahan nahi aayega
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE &
-        (filters.Document.ALL | filters.VIDEO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND)),
+        (filters.Document.ALL | filters.VIDEO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND)) &
+        ~broadcast_caption_filter,
         pm_file_listener
     ), group=2)
+
+    # Broadcast captions are not recognized by CommandHandler. Handle them
+    # explicitly after excluding them from the generic media listeners above.
+    application.add_handler(MessageHandler(
+        filters.CAPTION & broadcast_caption_filter,
+        broadcast_message,
+    ))
 
     # The dedicated bridge group is saved as chat history, not sent through
     # the movie-search handler. A later handler group also captures commands.

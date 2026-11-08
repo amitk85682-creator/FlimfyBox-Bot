@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 import telegram
+from telegram import Chat, Message, PhotoSize, Update
+from telegram.ext import filters
+from datetime import datetime, timezone
 
 from tests.test_filename_identity_ingestion import _load_functions
 
@@ -49,6 +52,27 @@ def test_broadcast_recipients_include_all_tracked_user_sources():
     assert conn.closed
 
 
+def test_caption_command_filter_matches_photo_broadcast_caption():
+    broadcast_caption=filters.CaptionRegex(r'(?i)^/broadcast(?:@\w+)?(?:\s|$)')
+    caption_filter=filters.CAPTION & broadcast_caption
+    message=Message(
+        message_id=1,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=22,type='private'),
+        caption='/broadcast@FlimfyBoxBot Happy Diwali',
+        photo=[PhotoSize(file_id='photo',file_unique_id='photo-unique',width=20,height=20)],
+    )
+    update=Update(update_id=1,message=message)
+
+    assert caption_filter.check_update(update)
+    assert not (filters.PHOTO & filters.ChatType.PRIVATE & ~broadcast_caption).check_update(update)
+    assert not (
+        filters.ChatType.PRIVATE
+        & (filters.Document.ALL | filters.VIDEO | filters.PHOTO | (filters.TEXT & ~filters.COMMAND))
+        & ~broadcast_caption
+    ).check_update(update)
+
+
 def test_broadcast_returns_an_immediate_ack_when_database_lookup_fails():
     events=[]
 
@@ -56,7 +80,9 @@ def test_broadcast_returns_an_immediate_ack_when_database_lookup_fails():
         async def edit_text(self,text): events.append(('edit',text))
 
     class Message:
-        text='/broadcast Hello'
+        text=None
+        caption='/broadcast Hello'
+        photo=[SimpleNamespace(file_id='source-photo')]
         async def reply_text(self,text):
             events.append(('reply',text))
             return Status()
@@ -113,3 +139,31 @@ def test_invalid_broadcast_html_retries_as_plain_text():
     assert calls[0]['parse_mode']=='HTML'
     assert calls[1]['parse_mode'] is None
     assert calls[1]['text']=='Hello & everyone there'
+
+
+def test_caption_broadcast_sends_photo_with_readable_fallback_caption():
+    calls=[]
+
+    class Bot:
+        async def send_photo(self,**kwargs):
+            calls.append(kwargs)
+            if len(calls)==1:
+                raise telegram.error.BadRequest("Can't parse entities: Unsupported start tag")
+
+    ns=_load_functions({
+        '_send_broadcast_to_user','_broadcast_is_html_parse_error',
+    }, {
+        'telegram':telegram,'asyncio':AsyncioShim(),
+        'BeautifulSoup':__import__('bs4').BeautifulSoup,
+    })
+    photo_message=SimpleNamespace(photo=[SimpleNamespace(file_id='source-photo')])
+
+    used_fallback=run_immediate(ns['_send_broadcast_to_user'](
+        Bot(),22,'Happy <b>Diwali</b>',photo_message
+    ))
+
+    assert used_fallback is True
+    assert calls[0]['photo']=='source-photo'
+    assert calls[0]['caption']=='Happy <b>Diwali</b>'
+    assert calls[1]['caption']=='Happy Diwali'
+    assert calls[1]['parse_mode'] is None
