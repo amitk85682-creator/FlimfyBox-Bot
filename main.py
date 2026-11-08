@@ -4359,6 +4359,18 @@ def _metadata_category_from_signals(country, language='', genre=''):
     return ''
 
 
+def _metadata_release_state(value):
+    """Return a validated ISO date and its current unreleased state."""
+    release_date = str(value or '').strip()
+    if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', release_date):
+        return None, None
+    try:
+        release_day = datetime.strptime(release_date, '%Y-%m-%d').date()
+    except (TypeError, ValueError):
+        return None, None
+    return release_date, release_day > datetime.now(timezone.utc).date()
+
+
 def _metadata_identity_matches(local_title, local_year, local_kind, provider_title, provider_year, provider_kind, allow_missing_local_year=False):
     from catalog_identity import title_key, release_year
     local_title_key = title_key(local_title)
@@ -4584,10 +4596,22 @@ def _fetch_omdb_snapshot(imdb_id):
     year = str(payload.get('Year') or '').split('–', 1)[0].strip()
     genre = str(payload.get('Genre') or '').strip()
     description = str(payload.get('Plot') or '').strip()
+    language = str(payload.get('Language') or '').strip()
+    released = str(payload.get('Released') or '').strip()
+    runtime_text = str(payload.get('Runtime') or '').strip()
+    try:
+        release_date = datetime.strptime(released, '%d %b %Y').date().isoformat()
+    except (TypeError, ValueError):
+        release_date = None
+    runtime_match = re.search(r'\b(\d{1,4})\s*min\b', runtime_text, re.I)
+    runtime = int(runtime_match.group(1)) if runtime_match else None
+    _, is_unreleased = _metadata_release_state(release_date)
     if genre.casefold() in {'', 'n/a', 'na', 'none', 'unknown'}:
         genre = ''
     if description.casefold() in {'', 'n/a', 'na', 'none', 'unknown'}:
         description = ''
+    if language.casefold() in {'', 'n/a', 'na', 'none', 'unknown'}:
+        language = ''
     snapshot = {
         'via': 'OMDb',
         'imdb_id': imdb_id,
@@ -4595,6 +4619,10 @@ def _fetch_omdb_snapshot(imdb_id):
         'year': year,
         'media_type': provider_kind,
         'genre': genre,
+        'language': language,
+        'runtime': runtime,
+        'release_date': release_date,
+        'is_unreleased': is_unreleased,
         'category': _metadata_category_from_signals(
             payload.get('Country'), payload.get('Language'), genre
         ),
@@ -4772,6 +4800,7 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
         provider_title = str((details.get('name') if media_type == 'tv' else details.get('title')) or '').strip()
         provider_date = details.get('first_air_date') if media_type == 'tv' else details.get('release_date')
         provider_year = str(provider_date or '')[:4]
+        release_date, is_unreleased = _metadata_release_state(provider_date)
         if not _metadata_identity_matches(
             identity_title, local_year or reference_year, local_kind,
             provider_title, provider_year, media_type,
@@ -4822,6 +4851,8 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
             'title': provider_title,
             'original_title': str((details.get('original_name') if media_type == 'tv' else details.get('original_title')) or '').strip(),
             'year': provider_year,
+            'release_date': release_date,
+            'is_unreleased': is_unreleased,
             'rating': details.get('vote_average'),
             'vote_count': details.get('vote_count'),
             'category': _metadata_category_from_signals(
@@ -4832,6 +4863,11 @@ def _fetch_verified_tmdb_snapshot(record, reference_year=None):
             'backdrop_url': normalize_artwork_url(f"https://image.tmdb.org/t/p/original{details.get('backdrop_path')}" if details.get('backdrop_path') else None),
             'trailer_key': normalize_trailer_key(trailer),
             'genre': ', '.join(str(item.get('name')) for item in details.get('genres') or [] if item.get('name')),
+            'language': ', '.join(dict.fromkeys(
+                str(item.get('english_name') or item.get('name') or '').strip()
+                for item in details.get('spoken_languages') or []
+                if isinstance(item, dict) and str(item.get('english_name') or item.get('name') or '').strip()
+            )),
             'description': str(details.get('overview') or '').strip(),
             'cast': ', '.join(str(item.get('name')) for item in cast[:10] if item.get('name')),
             'runtime': int(runtime) if isinstance(runtime, (int, float)) and not isinstance(runtime, bool) and runtime > 0 else None,
@@ -4934,6 +4970,14 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
     trailer = (tmdb_snapshot or {}).get('trailer_key')
     genre = (imdb_snapshot or {}).get('genre') or (tmdb_snapshot or {}).get('genre')
     category = (imdb_snapshot or {}).get('category') or (tmdb_snapshot or {}).get('category')
+    language = (tmdb_snapshot or {}).get('language') or (imdb_snapshot or {}).get('language')
+    runtime = (tmdb_snapshot or {}).get('runtime') or (imdb_snapshot or {}).get('runtime')
+    release_date = (tmdb_snapshot or {}).get('release_date') or (imdb_snapshot or {}).get('release_date')
+    is_unreleased = (tmdb_snapshot or {}).get('is_unreleased')
+    if is_unreleased is None:
+        is_unreleased = (imdb_snapshot or {}).get('is_unreleased')
+    if is_unreleased is None and release_date:
+        _, is_unreleased = _metadata_release_state(release_date)
     description = (tmdb_snapshot or {}).get('description') or (imdb_snapshot or {}).get('description')
     cast = (tmdb_snapshot or {}).get('cast')
     try:
@@ -4970,6 +5014,9 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
                 rating = COALESCE(NULLIF(%s::text, ''), rating),
                 description = COALESCE(NULLIF(%s, ''), description),
                 "cast" = COALESCE(NULLIF(%s, ''), "cast"),
+                language = COALESCE(NULLIF(%s, ''), language),
+                runtime = COALESCE(%s, runtime),
+                is_unreleased = COALESCE(%s, is_unreleased),
                 seasons_data = CASE WHEN %s::jsonb IS NOT NULL AND %s::jsonb <> '{}'::jsonb
                                     THEN %s::jsonb ELSE seasons_data END
             WHERE id = %s
@@ -4982,7 +5029,7 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
             (tmdb_snapshot or imdb_snapshot)['title'], (tmdb_snapshot or imdb_snapshot)['title'],
             int((tmdb_snapshot or imdb_snapshot)['year']),
             (tmdb_snapshot or {}).get('imdb_id'), (tmdb_snapshot or {}).get('tmdb_id'), resolved_kind, category, poster, backdrop, trailer,
-            genre, rating, description, cast,
+            genre, rating, description, cast, language, runtime, is_unreleased,
             json.dumps(seasons_data) if seasons_data else None,
             json.dumps(seasons_data) if seasons_data else None,
             json.dumps(seasons_data) if seasons_data else None,

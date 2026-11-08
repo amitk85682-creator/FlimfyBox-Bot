@@ -246,7 +246,8 @@ def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fie
     snapshot={
         'imdb_id':'tt39330776','title':'Obsession','year':'2025','media_type':'tv',
         'rating':'7.1','votes':'1,234','genre':'Drama','category':'Bollywood',
-        'poster_url':None,'description':None,'cast':None,
+        'language':'English, Hindi','runtime':47,'release_date':'1900-01-01',
+        'is_unreleased':False,'poster_url':None,'description':None,'cast':None,
     }
     cached=[]
     ns=_load_functions({
@@ -267,9 +268,10 @@ def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fie
     sql,params=writes.queries[-1]
     assert 'poster_url = COALESCE(%s, poster_url)' in sql
     assert 'title IS NOT DISTINCT FROM %s' in sql
-    assert sql.count('%s')==len(params)==23
+    assert sql.count('%s')==len(params)==26
     assert params[7] is None and params[8] is None and params[9] is None
-    assert params[17:]==(16972,'Obsession',2025,'Web Series','tt39330776',None)
+    assert params[14:17]==('English, Hindi',47,False)
+    assert params[20:]==(16972,'Obsession',2025,'Web Series','tt39330776',None)
     assert writes.commits==1
 
 
@@ -309,6 +311,16 @@ def test_idless_tmdb_lookup_requires_unique_exact_title_year_and_type():
 def test_provider_signals_only_assign_supported_catalogue_categories(country,language,genre,expected):
     ns=_load_functions({'_metadata_category_from_signals'})
     assert ns['_metadata_category_from_signals'](country,language,genre)==expected
+
+
+def test_release_state_accepts_only_real_iso_dates():
+    from datetime import datetime, timezone
+    ns=_load_functions({'_metadata_release_state'}, {
+        'datetime':datetime,'timezone':timezone,
+    })
+    assert ns['_metadata_release_state']('1900-01-01')==('1900-01-01',False)
+    assert ns['_metadata_release_state']('2999-01-01')==('2999-01-01',True)
+    assert ns['_metadata_release_state']('2026-02-31')==(None,None)
 
 
 def test_conflicting_file_stops_before_storage_copy():
