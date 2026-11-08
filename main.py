@@ -16205,71 +16205,176 @@ async def notify_user_by_username(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Error in notify_user_by_username: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
-async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast HTML message to all users with formatting support"""
-    if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Admin only command.")
-        return
-
+def _get_broadcast_recipient_ids():
+    """Return known private Telegram users from every tracked user source."""
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError('Database connection unavailable')
     try:
-        # Command ke baad wala pura text (Formatting ke sath)
-        if not context.args:
-            await update.message.reply_text("Usage: /broadcast <b>Message Title</b>\n\nYour formatted text here...")
-            return
-
-        # Pure message ko extract karein
-        message_text = update.message.text.replace('/broadcast', '').strip()
-
-        conn = get_db_connection()
-        if not conn:
-            await update.message.reply_text("❌ Database connection failed.")
-            return
-
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT user_id FROM user_requests")
-        all_users = cur.fetchall()
-
-        if not all_users:
-            await update.message.reply_text("No users found in database.")
-            cur.close()
-            close_db_connection(conn)
-            return
-
-        status_msg = await update.message.reply_text(f"📤 Broadcasting to {len(all_users)} users...\n⏳ Please wait...")
-
-        success_count = 0
-        failed_count = 0
-
-        for user_id_tuple in all_users:
-            user_id = user_id_tuple[0]
-            try:
-                # 📢 YAHAN PAR 'HTML' USE HOGA
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message_text,
-                    parse_mode='HTML',  # Isse Enter aur Bold kaam karega
-                    disable_web_page_preview=True
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '10s'")
+            cur.execute("""
+                WITH recipients AS (
+                    SELECT user_id FROM user_activity
+                    UNION SELECT user_id FROM miniapp_users
+                    UNION SELECT user_id FROM user_requests
                 )
-                success_count += 1
-                await asyncio.sleep(0.05) # Flood protection
-            except telegram.error.Forbidden:
-                failed_count += 1
-            except Exception as e:
-                failed_count += 1
-
-        await status_msg.edit_text(
-            f"📊 <b>Broadcast Complete</b>\n\n"
-            f"✅ Sent: {success_count}\n"
-            f"❌ Failed: {failed_count}",
-            parse_mode='HTML'
-        )
-
-        cur.close()
+                SELECT DISTINCT user_id
+                FROM recipients
+                WHERE user_id > 0
+                ORDER BY user_id
+            """)
+            rows = cur.fetchall()
+        return sorted({int(row[0]) for row in rows if row and row[0] and int(row[0]) > 0})
+    finally:
         close_db_connection(conn)
 
-    except Exception as e:
-        logger.error(f"Error in broadcast_message: {e}")
-        await update.message.reply_text(f"❌ Error: {e}")
+
+def _broadcast_is_html_parse_error(error):
+    message = str(error).casefold()
+    return any(marker in message for marker in (
+        "can't parse entities", 'unsupported start tag', 'unexpected end tag',
+    ))
+
+
+async def _send_broadcast_to_user(bot, user_id, message_text):
+    """Retry rate-limited sends once and fall back to readable plain text for bad HTML."""
+    text = message_text
+    parse_mode = 'HTML'
+    plain_fallback = False
+    for attempt in range(3):
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode=parse_mode,
+                disable_web_page_preview=True,
+            )
+            return plain_fallback
+        except telegram.error.RetryAfter as error:
+            if attempt >= 2:
+                raise
+            try:
+                retry_after = error.retry_after
+                delay = (
+                    retry_after.total_seconds()
+                    if isinstance(retry_after, timedelta)
+                    else float(retry_after)
+                )
+                delay = max(1.0, delay)
+            except (TypeError, ValueError):
+                delay = 1.0
+            await asyncio.sleep(delay + 0.25)
+        except telegram.error.BadRequest as error:
+            if parse_mode != 'HTML' or not _broadcast_is_html_parse_error(error):
+                raise
+            readable_text = BeautifulSoup(message_text, 'html.parser').get_text()
+            text = readable_text if readable_text.strip() else message_text
+            parse_mode = None
+            plain_fallback = True
+    raise RuntimeError('Broadcast send retry limit reached')
+
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Broadcast an HTML message to registered private users with visible progress."""
+    message = update.effective_message
+    if not message:
+        return
+    if not update.effective_user or update.effective_user.id not in ADMIN_IDS:
+        await message.reply_text("⛔ Admin only command.")
+        return
+
+    raw_text = message.text or ''
+    message_text = re.sub(r'^/broadcast(?:@\w+)?\s*', '', raw_text, count=1, flags=re.I).strip()
+    if not message_text:
+        await message.reply_text(
+            "Usage: /broadcast <b>Message title</b>\n\nYour message here..."
+        )
+        return
+
+    # Acknowledge before any database call so a slow connection cannot look like
+    # the command was ignored. Recipient lookup runs outside the bot event loop.
+    status_msg = await message.reply_text("📣 Broadcast received. Checking the recipient list…")
+    try:
+        all_users = await asyncio.wait_for(
+            run_interactive(_get_broadcast_recipient_ids), timeout=15,
+        )
+    except Exception as error:
+        logger.exception(
+            'Broadcast recipient lookup failed for admin=%s (%s)',
+            update.effective_user.id, type(error).__name__,
+        )
+        try:
+            await status_msg.edit_text(
+                "❌ Broadcast could not start because the recipient list could not be loaded. "
+                "Please try again shortly."
+            )
+        except telegram.error.TelegramError:
+            logger.warning('Could not update broadcast status after recipient lookup failed.')
+        return
+
+    if not all_users:
+        await status_msg.edit_text("No registered users were found for the broadcast.")
+        return
+
+    success_count = 0
+    failed_count = 0
+    blocked_count = 0
+    plain_fallback_count = 0
+    total = len(all_users)
+    await status_msg.edit_text(f"📤 Broadcast started for {total} users.\n⏳ Sending…")
+    logger.info('Broadcast started by admin=%s recipients=%s', update.effective_user.id, total)
+
+    for processed, user_id in enumerate(all_users, start=1):
+        try:
+            used_plain_fallback = await _send_broadcast_to_user(
+                context.bot, user_id, message_text,
+            )
+            success_count += 1
+            plain_fallback_count += int(used_plain_fallback)
+        except telegram.error.Forbidden:
+            failed_count += 1
+            blocked_count += 1
+        except Exception as error:
+            failed_count += 1
+            logger.warning(
+                'Broadcast delivery failed for user_id=%s (%s): %s',
+                user_id, type(error).__name__,
+                re.sub(r'\s+', ' ', str(error))[:180],
+            )
+
+        if processed % 100 == 0 and processed < total:
+            try:
+                await status_msg.edit_text(
+                    f"📤 Broadcast is running…\n"
+                    f"✅ Sent: {success_count}/{total}\n"
+                    f"❌ Failed: {failed_count}"
+                )
+            except telegram.error.TelegramError:
+                logger.debug('Could not update broadcast progress message.')
+        await asyncio.sleep(0.05)
+
+    final_text = (
+        "📊 Broadcast complete\n\n"
+        f"✅ Sent: {success_count}\n"
+        f"❌ Failed: {failed_count}\n"
+        f"🚫 Blocked/unreachable: {blocked_count}\n"
+        f"📝 Total: {total}"
+    )
+    if plain_fallback_count:
+        final_text += f"\nℹ️ Sent as plain text due to invalid HTML: {plain_fallback_count}"
+    try:
+        await status_msg.edit_text(final_text)
+    except telegram.error.TelegramError:
+        logger.exception('Broadcast completed but its status message could not be edited.')
+        try:
+            await message.reply_text(final_text)
+        except telegram.error.TelegramError:
+            logger.exception('Could not send the final broadcast summary.')
+    logger.info(
+        'Broadcast finished admin=%s sent=%s failed=%s plain_fallback=%s total=%s',
+        update.effective_user.id, success_count, failed_count, plain_fallback_count, total,
+    )
 
 async def schedule_notification(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Schedule a notification for later"""
