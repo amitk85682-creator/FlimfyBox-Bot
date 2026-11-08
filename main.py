@@ -6954,10 +6954,10 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # It always carries a concrete movie_files id; if that record has no usable
     # source, fail clearly instead of sending every available quality.
     if require_exact_file and not url and not file_id:
-        await context.bot.send_message(
+        await safe_send(lambda: context.bot.send_message(
             chat_id=update.effective_user.id,
             text="❌ Selected file is unavailable. Please choose another quality from the Mini App."
-        )
+        ))
         return
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
@@ -7013,13 +7013,13 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             keyboard = create_quality_selection_keyboard(movie_id, view="main", page=1, total_pages=total_pages, current_files=current_files)
             
             # ✅ NAYA: parse_mode='HTML' kar diya aur link preview off kar diya
-            msg = await context.bot.send_message(
+            msg = await safe_send(lambda: context.bot.send_message(
                 chat_id=chat_id, 
                 text=text, 
                 reply_markup=keyboard, 
                 parse_mode='HTML', 
                 disable_web_page_preview=True
-            )
+            ))
             # 👆 FIX KHATAM 👆
             
             track_message_for_deletion(
@@ -7111,12 +7111,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     logger.error(f"Send Document failed: {e}")
 
         if not sent_msg and url and "http" in url and "t.me" not in url:
-             sent_msg = await context.bot.send_message(
+             sent_msg = await safe_send(lambda: context.bot.send_message(
                 chat_id=target_chat_id,
                 text=f"🎬 <b>{title}</b>\n\n🔗 <b>Watch/Download:</b> {url}",
                 parse_mode='HTML',
                 reply_markup=join_keyboard
-            )
+            ))
 
         if sent_msg:
             # Downloadable media is retained for 2 minutes; link-only replies
@@ -7133,7 +7133,12 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if warning_msg:
             track_user_message_for_deletion(context, target_chat_id, warning_msg)
         elif not sent_msg:
-            err_msg = await context.bot.send_message(chat_id=target_chat_id, text="❌ Error: File not found or Bot needs Admin rights in Source Channel.")
+            err_msg = await safe_send(lambda: context.bot.send_message(
+                chat_id=target_chat_id,
+                text="❌ Error: File not found or Bot needs Admin rights in Source Channel.",
+            ))
+            if not err_msg:
+                return
             track_message_for_deletion(context, target_chat_id, err_msg.message_id, USER_TEXT_DELETE_SECONDS)
 
         if sent_msg and update.callback_query:
@@ -7145,7 +7150,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             # 🛡️ PM search / Deep link — no callback popup available, so text warning bhejo
             # Send All flow suppresses this and sends one notice after the loop.
             try:
-                warn_text_msg = await context.bot.send_message(
+                warn_text_msg = await safe_send(lambda: context.bot.send_message(
                     chat_id=target_chat_id,
                     text=(
                         "⚠️ <b>𝗔𝘂𝘁𝗼-𝗗𝗲𝗹𝗲𝘁𝗲 𝗡𝗼𝘁𝗶𝗰𝗲</b>\n\n"
@@ -7153,7 +7158,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         "◈ कृपया file को <b>forward/save</b> कर लें। 🔄"
                     ),
                     parse_mode='HTML'
-                )
+                ))
                 # Keep the notice in the same deletion window as the file it
                 # describes, so no stale warning remains after the file is gone.
                 track_message_for_deletion(
@@ -7184,7 +7189,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.warning(f"User {target_chat_id} blocked or hasn't started the bot.")
     except Exception as e:
         logger.error(f"Critical Error in send_movie: {e}")
-        try: await context.bot.send_message(chat_id=target_chat_id, text="❌ System Error.")
+        try: await safe_send(lambda: context.bot.send_message(chat_id=target_chat_id, text="❌ System Error."))
         except: pass
 
 # ==================== TELEGRAM BOT HANDLERS ====================
