@@ -24,7 +24,7 @@ def test_search_merges_only_by_typed_provider_identity():
 def test_frontend_distinguishes_available_unavailable_and_upcoming_results():
     # Actual status behavior is tested in miniapp_search_theme.test.js.
     assert "FlimfyUI.availabilityLabel(movie)" in FRONTEND
-    assert "function renderUnavailableAction(movie)" in FRONTEND
+    assert "function renderUnavailableAction(movie, remoteTitle = false)" in FRONTEND
 
 
 def test_upcoming_availability_checks_use_tmdb_identity():

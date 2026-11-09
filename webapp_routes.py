@@ -22,6 +22,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from fuzzywuzzy import process, fuzz
+from observability import bind_request_id, new_request_id, reset_request_id
 
 _RATING_SOURCE_EXECUTOR = ThreadPoolExecutor(
     max_workers=8, thread_name_prefix='miniapp-rating-source'
@@ -254,25 +255,43 @@ def register_webapp_routes(
     provider_failure_ttl = configured_ttl('MINIAPP_PROVIDER_FAILURE_CACHE_SECONDS', 60)
     provider_stale_retry_ttl = configured_ttl('MINIAPP_PROVIDER_STALE_RETRY_SECONDS', 30)
 
-    detail_api_path = re.compile(
-        r'^/api/(?:movie/\d+(?:/(?:rating-sources|rating|reviews|audience-reviews))?'
-        r'|tmdb/(?:movie|tv)/\d+/(?:rating-sources|audience-reviews))$'
-    )
+    measured_api_routes = {
+        '/api/search',
+        '/api/movies',
+        '/api/movie/<int:movie_id>',
+        '/api/movie/<int:movie_id>/rating',
+        '/api/movie/<int:movie_id>/reviews',
+        '/api/movie/<int:movie_id>/rating-sources',
+        '/api/movie/<int:movie_id>/audience-reviews',
+        '/api/tmdb/<media_type>/<int:tmdb_id>/rating-sources',
+        '/api/tmdb/<media_type>/<int:tmdb_id>/audience-reviews',
+    }
 
     @flask_app.before_request
-    def start_detail_api_timer():
-        if detail_api_path.fullmatch(request.path):
-            request.environ['flimfy_detail_api_started'] = time.perf_counter()
+    def start_measured_api_request():
+        route = getattr(request.url_rule, 'rule', None)
+        if route not in measured_api_routes:
+            return
+        request_id = new_request_id()
+        request.environ['flimfy_request_id'] = request_id
+        request.environ['flimfy_request_id_token'] = bind_request_id(request_id)
+        request.environ['flimfy_api_started'] = time.perf_counter()
 
     @flask_app.after_request
-    def log_detail_api_duration(response):
-        started = request.environ.pop('flimfy_detail_api_started', None)
-        if started is not None:
+    def log_measured_api_duration(response):
+        started = request.environ.pop('flimfy_api_started', None)
+        request_id = request.environ.pop('flimfy_request_id', None)
+        request_id_token = request.environ.pop('flimfy_request_id_token', None)
+        if started is not None and request_id:
             elapsed_ms = (time.perf_counter() - started) * 1000
+            route = getattr(request.url_rule, 'rule', 'unknown')
+            response.headers['X-Request-ID'] = request_id
             logger.info(
-                'miniapp_detail_api route=%s status=%s duration_ms=%.1f',
-                request.path, response.status_code, elapsed_ms,
+                'miniapp_api request_id=%s route=%s method=%s status=%s duration_ms=%.1f',
+                request_id, route, request.method, response.status_code, elapsed_ms,
             )
+        if request_id_token is not None:
+            reset_request_id(request_id_token)
         return response
 
     def singleflight_movie_details(route_function):
@@ -3606,7 +3625,10 @@ def register_webapp_routes(
                 local_failed = True
                 # A local schema/connection failure should not hide a valid TMDB
                 # result. The title can still be shown as request-only.
-                logger.error(f"Local search error; continuing with TMDB: {e}")
+                logger.error(
+                    'Local search failed; continuing with TMDB type=%s',
+                    type(e).__name__,
+                )
             finally:
                 close_db_connection(conn)
 
@@ -3666,7 +3688,7 @@ def register_webapp_routes(
                         })
             except Exception as e:
                 discovery_failed = True
-                logger.error(f"TMDB search error: {e}")
+                logger.error('TMDB search failed type=%s', type(e).__name__)
     
         # Only verified, typed provider IDs identify the same work. A local
         # title/year match may still be a different film or an unreviewed upload.

@@ -32,6 +32,7 @@ from telegram.error import NetworkError, RetryAfter, TelegramError
 from typing import Optional
 from psycopg2 import pool
 from io import BytesIO
+from observability import current_request_id, log_search_timing
 
 # Naya Lock banaya Auto-Batch ke liye
 auto_batch_lock = asyncio.Lock()
@@ -2837,8 +2838,9 @@ def is_movie_posted_recently(movie_id, days=7):
 # 👇👇👇 START COPY HERE (New Function) 👇👇👇
 def _checkout_db_connection(*, web_request=False):
     """Wait briefly for a shared DB slot and discard stale pooled connections."""
+    request_id = current_request_id()
     if not db_pool:
-        logger.error("Database pool is not ready.")
+        logger.error("Database pool is not ready request_id=%s", request_id)
         return None
     started = time.monotonic()
     bot_slot_acquired = False
@@ -2850,7 +2852,8 @@ def _checkout_db_connection(*, web_request=False):
             with _db_pool_lease_lock:
                 active = len(_db_pool_leases)
             logger.warning(
-                "db_pool_checkout_timeout role=bot wait_ms=%s active=%s max=%s",
+                "db_pool_checkout_timeout request_id=%s role=bot wait_ms=%s active=%s max=%s",
+                request_id,
                 int(DB_POOL_ACQUIRE_TIMEOUT_SECONDS * 1000), active,
                 DB_POOL_MAX_CONNECTIONS,
             )
@@ -2861,7 +2864,8 @@ def _checkout_db_connection(*, web_request=False):
         with _db_pool_lease_lock:
             active = len(_db_pool_leases)
         logger.warning(
-            "db_pool_checkout_timeout role=%s wait_ms=%s active=%s max=%s",
+            "db_pool_checkout_timeout request_id=%s role=%s wait_ms=%s active=%s max=%s",
+            request_id,
             'web' if web_request else 'bot',
             int(DB_POOL_ACQUIRE_TIMEOUT_SECONDS * 1000), active,
             DB_POOL_MAX_CONNECTIONS,
@@ -2901,20 +2905,23 @@ def _checkout_db_connection(*, web_request=False):
             waited_ms = int((time.monotonic() - started) * 1000)
             if waited_ms >= 100:
                 logger.info(
-                    "db_pool_checkout_wait role=%s wait_ms=%s active=%s max=%s",
+                    "db_pool_checkout_wait request_id=%s role=%s wait_ms=%s active=%s max=%s",
+                    request_id,
                     'web' if web_request else 'bot', waited_ms,
                     active_connections, DB_POOL_MAX_CONNECTIONS,
                 )
             return connection
 
         logger.error(
-            "db_pool_checkout_unhealthy role=%s attempts=2",
+            "db_pool_checkout_unhealthy request_id=%s role=%s attempts=2",
+            request_id,
             'web' if web_request else 'bot',
         )
         return None
     except Exception as e:
         logger.error(
-            "Error getting DB connection role=%s type=%s",
+            "Error getting DB connection request_id=%s role=%s type=%s",
+            request_id,
             'web' if web_request else 'bot', type(e).__name__,
         )
         return None
@@ -3840,7 +3847,7 @@ def get_google_title_suggestions(query: str, limit: int = 3):
                 clean.append(title)
         result = clean[:limit]
     except Exception as e:
-        logger.info(f"Google suggestion lookup skipped for '{query}': {e}")
+        logger.info('Google suggestion lookup skipped type=%s', type(e).__name__)
         result = []
     search_cache.set(cache_key, result)
     return result
@@ -3877,7 +3884,7 @@ def _get_movies_from_db_nocache(user_query, limit=10):
 
         cur = conn.cursor()
 
-        logger.info(f"Searching for: '{user_query}'")
+        logger.info('catalogue_search_started')
 
         # Match the expression used by the existing normalized trigram indexes.
         norm_query = re.sub(r'[^a-z0-9]', '', user_query.lower())
@@ -3944,7 +3951,7 @@ def _get_movies_from_db_nocache(user_query, limit=10):
         return filtered_movies[:limit]
 
     except Exception as e:
-        logger.error(f"Database query error: {e}")
+        logger.error('catalogue_search_failed type=%s', type(e).__name__)
         return []
     finally:
         if conn:
@@ -5751,7 +5758,10 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
     search_query = query.strip()
     is_imdb_id = bool(re.match(r'^tt\d{7,8}$', search_query))
 
-    logger.info(f"🔍 Metadata fetch for: '{search_query}' | year={search_year} | category={hint_category}")
+    logger.info(
+        'metadata_search_started query_length=%s year=%s category_hint=%s',
+        len(search_query), search_year or '-', hint_category or '-',
+    )
 
     # ----- एडल्ट मोड: OMDb का उपयोग न करें (क्योंकि उसमें एडल्ट डेटा नहीं) -----
     if adult_mode:
@@ -5917,7 +5927,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
             return title, year, normalize_artwork_url(poster_url), genre, imdb_id, rating, plot, category, seasons_data
 
         # ━━━━━ STEP 3: OMDb fail — TMDb SMART FALLBACK ━━━━━
-        logger.info(f"⚠️ OMDb miss for '{search_query}', trying TMDb smart search...")
+        logger.info('OMDb metadata miss; trying TMDb smart search')
         
         # 🔧 FIX: search/multi use karo (movie + tv dono milenge) 
         if is_imdb_id:
@@ -5938,7 +5948,7 @@ def fetch_movie_metadata(query: str, search_year: str = "", search_lang: str = "
                 t_resp = requests.get(tmdb_tv, timeout=10).json()
             
             if not t_resp.get('results'):
-                logger.warning(f"❌ TMDb bhi fail for '{search_query}'")
+                logger.warning('TMDb metadata search returned no results')
                 return None
 
         # 🔧 FIX: Smart match — blindly first nahi lega!
@@ -7747,10 +7757,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     try:
                         # Background search function call karein
                         await background_search_and_send(update, context, query_text, status_msg)
-                        logger.info(f"✅ Deep link SEARCH SUCCESS for user {user_id}, query: {query_text}")
+                        logger.info(
+                            'deep_link_search_succeeded update_id=%s',
+                            getattr(update, 'update_id', None) or '-',
+                        )
                         
                     except Exception as e:
-                        logger.error(f"❌ Deep link SEARCH FAILED: {e}")
+                        logger.error(
+                            'deep_link_search_failed update_id=%s type=%s',
+                            getattr(update, 'update_id', None) or '-',
+                            type(e).__name__,
+                        )
                         error_text = f"❌ Search failed for '{query_text}'.\nTry searching manually."
                         try: await status_msg.edit_text(error_text)
                         except: await context.bot.send_message(chat_id=chat_id, text=error_text)
@@ -8091,7 +8108,10 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         times = {}
         if SEARCH_TIMING_ENABLED:
             times['handler_start'] = time.perf_counter()
-            logger.info("Search timing stage=handler_started")
+            logger.info(
+                'search_timing update_id=%s stage=handler_started',
+                getattr(update, 'update_id', None) or '-',
+            )
 
         progress_message = context.user_data.pop('_search_progress_message', None)
         if progress_message is None:
@@ -8216,7 +8236,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
 
     except Exception as e:
         await remove_search_progress(progress_message)
-        logger.error(f"Error in search_movies: {e}")
+        logger.error(
+            'search_failed update_id=%s type=%s',
+            getattr(update, 'update_id', None) or '-',
+            type(e).__name__,
+        )
         # await update.message.reply_text("An error occurred during search.") <--- ERROR MSG HATA DIYA TAKI USER DISTURB NA HO
         return
     finally:
@@ -8246,11 +8270,13 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
                     if key in ('delivery_data_ms', 'poster_ms', 'telegram_response_ms')
                 }
                 deltas.update(timing_data)
-                # Truncate query for privacy in logs
-                q_display = (query[:80] + '...') if query and len(query) > 80 else (query or '')
-                logger.info(f"Search timing for '{q_display}': {deltas}")
+                log_search_timing(
+                    logger,
+                    getattr(update, 'update_id', None),
+                    deltas,
+                )
         except Exception as e:
-            logger.debug(f"Failed to log search timing: {e}")
+            logger.debug("Failed to log search timing type=%s", type(e).__name__)
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle movie requests with duplicate detection, fuzzy matching and cooldowns"""
@@ -14415,7 +14441,7 @@ async def _batch18_cse_search(query: str, image: bool = False) -> list:
         data = response.json()
         return data.get('items', []) or []
     except Exception as exc:
-        logger.warning('Batch18 CSE query failed (%s): %s', query, exc)
+        logger.warning('Batch18 CSE search failed type=%s', type(exc).__name__)
         return []
 
 
@@ -17923,7 +17949,10 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if SEARCH_TIMING_ENABLED:
-        logger.info("Search timing stage=update_received")
+        logger.info(
+            'search_timing update_id=%s stage=update_received',
+            getattr(update, 'update_id', None) or '-',
+        )
         
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -17954,7 +17983,8 @@ async def main_menu_or_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         check = await is_user_member(context, user_id)
         if fsub_start is not None:
             logger.info(
-                "Search timing stage=fsub_check duration_ms=%d",
+                "search_timing update_id=%s stage=fsub_check duration_ms=%d",
+                getattr(update, 'update_id', None) or '-',
                 int((time.perf_counter() - fsub_start) * 1000),
             )
         if not check['is_member']:
