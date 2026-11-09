@@ -5031,6 +5031,30 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         return None
     try:
         cur = conn.cursor()
+        provider_imdb_id = (
+            (tmdb_snapshot or {}).get('imdb_id')
+            or (imdb_snapshot or {}).get('imdb_id')
+            or imdb_id
+        )
+        provider_tmdb_id = (tmdb_snapshot or {}).get('tmdb_id')
+        try:
+            identity_owner_id = _find_movie_by_provider_identity(
+                cur, provider_imdb_id, provider_tmdb_id, resolved_kind
+            )
+        except ValueError:
+            conn.rollback()
+            logger.info(
+                'metadata_refresh_skipped conflicting_provider_identity movie_id=%s',
+                movie_id,
+            )
+            return 'duplicate_identity'
+        if identity_owner_id is not None and identity_owner_id != movie_id:
+            conn.rollback()
+            logger.info(
+                'metadata_refresh_skipped duplicate_provider_identity movie_id=%s owner_id=%s',
+                movie_id, identity_owner_id,
+            )
+            return 'duplicate_identity'
         cur.execute("SET LOCAL statement_timeout = '10s'")
         cur.execute("""
             UPDATE movies
@@ -5078,6 +5102,19 @@ def auto_fetch_and_update_metadata(movie_id: int, movie_title: str):
         if tmdb_snapshot:
             _refresh_tmdb_reviews_for_catalogue(tmdb_snapshot['tmdb_id'], resolved_kind)
         return True
+    except psycopg2.errors.UniqueViolation as exc:
+        if conn:
+            conn.rollback()
+        constraint_name = getattr(getattr(exc, 'diag', None), 'constraint_name', None)
+        if constraint_name in {
+            'movies_imdb_id_unique_idx', 'movies_tmdb_id_unique_idx', 'movies_imdb_key',
+        }:
+            logger.info(
+                'metadata_refresh_skipped concurrent_provider_identity movie_id=%s constraint=%s',
+                movie_id, constraint_name,
+            )
+            return 'duplicate_identity'
+        raise
     except Exception:
         if conn:
             conn.rollback()
@@ -5146,6 +5183,11 @@ def _finish_movie_metadata_refresh(movie_id, outcome):
         except (TypeError, ValueError):
             refresh_days = 30
         status, delay_seconds, error_text = 'success', refresh_days * 86400, None
+    elif outcome == 'duplicate_identity':
+        status, delay_seconds, error_text = (
+            'skipped', 7 * 86400,
+            'Provider identity is already attached to another catalogue row; review duplicate before linking.',
+        )
     elif outcome is False:
         status, delay_seconds, error_text = 'skipped', 7 * 86400, 'Identity not verified or provider returned no matching title.'
     else:

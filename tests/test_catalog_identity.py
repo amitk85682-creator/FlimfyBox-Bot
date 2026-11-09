@@ -236,6 +236,8 @@ def test_review_assignment_is_owned_failed_state_only_and_transactional():
 
 
 def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fields():
+    import psycopg2
+
     row=(16972,'Obsession','tt39330776',None,2025,'Web Series','Bollywood',
          'manual-poster','manual-backdrop','manual-trailer','Drama','N/A',
          'Manual plot','Manual cast',{})
@@ -252,7 +254,7 @@ def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fie
     cached=[]
     ns=_load_functions({
         'auto_fetch_and_update_metadata','_metadata_identity_kind',
-        '_metadata_identity_matches',
+        '_metadata_identity_matches','_find_movie_by_provider_identity',
     }, {
         'get_db_connection':lambda:next(pool), 'close_db_connection':lambda c:c.close(),
         'clean_catalog_title':lambda value,*_args:value,
@@ -261,7 +263,7 @@ def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fie
         '_fetch_verified_tmdb_snapshot':lambda *_args:(None,'unavailable'),
         '_upsert_movie_provider_snapshot':lambda *args:cached.append(args) or True,
         '_refresh_tmdb_reviews_for_catalogue':lambda *_args:True,
-        'math':__import__('math'), 'json':__import__('json'),
+        'math':__import__('math'), 'json':__import__('json'), 'psycopg2':psycopg2,
     })
     assert ns['auto_fetch_and_update_metadata'](16972,'Obsession')
     assert cached[0][0:3]==('imdb','tt39330776','tv')
@@ -273,6 +275,112 @@ def test_missing_metadata_repair_uses_verified_snapshot_and_preserves_manual_fie
     assert params[14:17]==('English, Hindi',47,False)
     assert params[20:]==(16972,'Obsession',2025,'Web Series','tt39330776',None)
     assert writes.commits==1
+
+
+def test_duplicate_provider_identity_is_held_for_review_instead_of_retried():
+    row=(17081,'Ikka',None,None,2026,'Movie','Bollywood',None,None,None,None,
+         'N/A',None,None,{})
+    reads=Connection(single=row)
+    writes=Connection(rows=[(6668,'tt39632269',1484913)])
+    writes.rowcount=1
+    snapshot={
+        'imdb_id':'tt39632269','tmdb_id':'1484913','title':'Ikka','year':'2026',
+        'media_type':'movie','rating':'6.5','vote_count':1234,'genre':'Drama',
+        'category':'Bollywood','language':'Hindi','runtime':120,
+        'release_date':'2026-01-01','is_unreleased':False,'poster_url':'poster',
+        'backdrop_url':'backdrop','trailer_key':'AbCdEf12345','description':'plot',
+        'cast':'Actor One','seasons_data':None,
+    }
+    cached=[]
+    pool=iter([reads,writes])
+    ns=_load_functions({
+        'auto_fetch_and_update_metadata','_metadata_identity_kind',
+        '_metadata_identity_matches','_find_movie_by_provider_identity',
+    }, {
+        'get_db_connection':lambda:next(pool), 'close_db_connection':lambda c:c.close(),
+        'clean_catalog_title':lambda value,*_args:value,
+        'is_valid_imdb_id':lambda value:str(value or '').startswith('tt'),
+        '_fetch_omdb_snapshot':lambda _imdb_id:(None,'unavailable'),
+        '_fetch_verified_tmdb_snapshot':lambda *_args:(snapshot,'success'),
+        '_upsert_movie_provider_snapshot':lambda *args:cached.append(args) or True,
+        '_refresh_tmdb_reviews_for_catalogue':lambda *_args:True,
+        'math':__import__('math'), 'json':__import__('json'),
+    })
+
+    outcome=ns['auto_fetch_and_update_metadata'](17081,'Ikka')
+
+    assert outcome=='duplicate_identity'
+    assert writes.rollbacks==1 and writes.commits==0 and writes.closed
+    assert cached[0][0:3]==('tmdb','1484913','movie')
+    assert not any(sql.lstrip().startswith('UPDATE movies') for sql,_ in writes.queries)
+
+
+def test_concurrent_provider_identity_unique_conflict_is_held_for_review():
+    row=(17081,'Ikka',None,None,2026,'Movie','Bollywood',None,None,None,None,
+         'N/A',None,None,{})
+    reads=Connection(single=row)
+    class UniqueViolation(Exception):
+        diag=SimpleNamespace(constraint_name='movies_tmdb_id_unique_idx')
+    class RacingConnection(Connection):
+        def execute(self, sql, params=None):
+            super().execute(sql,params)
+            if sql.lstrip().startswith('UPDATE movies'):
+                raise UniqueViolation()
+    writes=RacingConnection()
+    pool=iter([reads,writes])
+    snapshot={
+        'imdb_id':'tt39632269','tmdb_id':'1484913','title':'Ikka','year':'2026',
+        'media_type':'movie','rating':'6.5','vote_count':1234,'genre':'Drama',
+        'category':'Bollywood','language':'Hindi','runtime':120,
+        'release_date':'2026-01-01','is_unreleased':False,'poster_url':'poster',
+        'backdrop_url':'backdrop','trailer_key':'AbCdEf12345','description':'plot',
+        'cast':'Actor One','seasons_data':None,
+    }
+    ns=_load_functions({
+        'auto_fetch_and_update_metadata','_metadata_identity_kind',
+        '_metadata_identity_matches','_find_movie_by_provider_identity',
+    }, {
+        'get_db_connection':lambda:next(pool), 'close_db_connection':lambda c:c.close(),
+        'clean_catalog_title':lambda value,*_args:value,
+        'is_valid_imdb_id':lambda value:str(value or '').startswith('tt'),
+        '_fetch_omdb_snapshot':lambda _imdb_id:(None,'unavailable'),
+        '_fetch_verified_tmdb_snapshot':lambda *_args:(snapshot,'success'),
+        '_upsert_movie_provider_snapshot':lambda *_args:True,
+        '_refresh_tmdb_reviews_for_catalogue':lambda *_args:True,
+        'math':__import__('math'), 'json':__import__('json'),
+        'psycopg2':SimpleNamespace(errors=SimpleNamespace(UniqueViolation=UniqueViolation)),
+    })
+
+    outcome=ns['auto_fetch_and_update_metadata'](17081,'Ikka')
+
+    assert outcome=='duplicate_identity'
+    assert writes.rollbacks==1 and writes.commits==0 and writes.closed
+
+
+def test_duplicate_provider_identity_uses_non_retrying_review_state():
+    class RefreshConnection:
+        def __init__(self): self.queries=[]; self.commits=0; self.closed=False
+        def cursor(self): return self
+        def __enter__(self): return self
+        def __exit__(self,*_args): return False
+        def execute(self,sql,params=None): self.queries.append((sql,params))
+        def commit(self): self.commits+=1
+        def rollback(self): pass
+        def close(self): self.closed=True
+
+    connection=RefreshConnection()
+    ns=_load_functions({'_finish_movie_metadata_refresh'}, {
+        'get_db_connection':lambda:connection,
+        'close_db_connection':lambda conn:conn.close(),
+        'os':__import__('os'),
+    })
+
+    ns['_finish_movie_metadata_refresh'](17081,'duplicate_identity')
+
+    _,params=connection.queries[-1]
+    assert params[0]=='skipped' and params[1]==7*86400
+    assert 'already attached to another catalogue row' in params[3]
+    assert connection.commits==1 and connection.closed
 
 
 def test_idless_tmdb_lookup_requires_unique_exact_title_year_and_type():
