@@ -383,6 +383,66 @@ def test_duplicate_provider_identity_uses_non_retrying_review_state():
     assert connection.commits==1 and connection.closed
 
 
+def test_omdb_auth_failure_pauses_requests_and_recovers_after_cooldown(caplog):
+    import logging
+    import threading
+    from datetime import datetime
+
+    clock=[100.0]
+    calls=[]
+    class Unauthorized(Exception):
+        def __init__(self):
+            self.response=SimpleNamespace(status_code=401)
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                'Response':'True','imdbID':'tt1234567','Type':'movie','Year':'2024',
+                'Title':'Test Film','Released':'N/A','Runtime':'N/A','Genre':'Drama',
+                'Plot':'A test plot','Language':'English','imdbRating':'7.0',
+                'imdbVotes':'100','Poster':'N/A','Country':'USA',
+            }
+    def get(_url,**_kwargs):
+        calls.append(1)
+        if len(calls)==1:
+            raise Unauthorized()
+        return Response()
+
+    ns=_load_functions({
+        '_fetch_omdb_snapshot','_omdb_auth_failure_active','_record_omdb_auth_failure',
+    }, {
+        'os':SimpleNamespace(environ={
+            'OMDB_API_KEY':'synthetic-secret',
+            'OMDB_AUTH_FAILURE_COOLDOWN_SECONDS':'60',
+        }),
+        'time':SimpleNamespace(monotonic=lambda:clock[0]),
+        '_OMDB_AUTH_FAILURE_LOCK':threading.Lock(),
+        '_OMDB_AUTH_FAILURE_UNTIL':0.0,
+        'requests':SimpleNamespace(RequestException=Unauthorized,get=get),
+        'is_valid_imdb_id':lambda _value:True,
+        'normalize_artwork_url':lambda _value:None,
+        '_metadata_category_from_signals':lambda *_args:'Hollywood',
+        '_metadata_release_state':lambda _value:(None,None),
+        'datetime':datetime,
+        'logger':logging.getLogger('test.omdb_cooldown'),
+    })
+    caplog.set_level(logging.WARNING, logger='test.omdb_cooldown')
+
+    first=ns['_fetch_omdb_snapshot']('tt1234567')
+    clock[0]=159.0
+    second=ns['_fetch_omdb_snapshot']('tt1234567')
+    assert first==(None,'unavailable') and second==(None,'unavailable')
+    assert len(calls)==1
+
+    clock[0]=161.0
+    recovered,status=ns['_fetch_omdb_snapshot']('tt1234567')
+
+    assert status=='success' and recovered['title']=='Test Film'
+    assert len(calls)==2
+    assert caplog.text.count('OMDb credentials rejected')==1
+    assert 'synthetic-secret' not in caplog.text
+
+
 def test_idless_tmdb_lookup_requires_unique_exact_title_year_and_type():
     class Response:
         def __init__(self,payload): self.payload=payload

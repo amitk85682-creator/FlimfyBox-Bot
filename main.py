@@ -4602,10 +4602,36 @@ def _refresh_tmdb_reviews_for_catalogue(tmdb_id, media_type):
         close_db_connection(conn)
 
 
+_OMDB_AUTH_FAILURE_LOCK = threading.Lock()
+_OMDB_AUTH_FAILURE_UNTIL = 0.0
+
+
+def _omdb_auth_failure_active():
+    with _OMDB_AUTH_FAILURE_LOCK:
+        return time.monotonic() < _OMDB_AUTH_FAILURE_UNTIL
+
+
+def _record_omdb_auth_failure():
+    global _OMDB_AUTH_FAILURE_UNTIL
+    try:
+        cooldown_seconds = max(
+            60, min(int(os.environ.get('OMDB_AUTH_FAILURE_COOLDOWN_SECONDS', '900')), 86400)
+        )
+    except (TypeError, ValueError):
+        cooldown_seconds = 900
+    with _OMDB_AUTH_FAILURE_LOCK:
+        _OMDB_AUTH_FAILURE_UNTIL = max(
+            _OMDB_AUTH_FAILURE_UNTIL, time.monotonic() + cooldown_seconds
+        )
+    return cooldown_seconds
+
+
 def _fetch_omdb_snapshot(imdb_id):
     api_key = os.environ.get('OMDB_API_KEY', '').strip()
     if not api_key or not is_valid_imdb_id(imdb_id):
         return None, 'not_configured'
+    if _omdb_auth_failure_active():
+        return None, 'unavailable'
     try:
         response = requests.get(
             'https://www.omdbapi.com/',
@@ -4617,10 +4643,17 @@ def _fetch_omdb_snapshot(imdb_id):
         payload = response.json()
     except (requests.RequestException, ValueError, TypeError) as exc:
         status_code = getattr(getattr(exc, 'response', None), 'status_code', None)
-        logger.warning(
-            'OMDb metadata refresh unavailable for %s (error_class=%s http_status=%s)',
-            imdb_id, type(exc).__name__, status_code or 'n/a',
-        )
+        if status_code == 401:
+            cooldown_seconds = _record_omdb_auth_failure()
+            logger.warning(
+                'OMDb credentials rejected; pausing metadata lookups cooldown_seconds=%s',
+                cooldown_seconds,
+            )
+        else:
+            logger.warning(
+                'OMDb metadata refresh unavailable for %s (error_class=%s http_status=%s)',
+                imdb_id, type(exc).__name__, status_code or 'n/a',
+            )
         return None, 'unavailable'
     if not isinstance(payload, dict) or payload.get('Response') != 'True' or payload.get('imdbID') != imdb_id:
         return None, 'unmatched'
