@@ -3991,26 +3991,43 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             cur.close()
             return []
         normalized_title_sql = "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g')"
-        exact_sql = f"""
-            SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
-                   0.0 as sim_score
-            FROM movies m
-            WHERE {normalized_title_sql} LIKE %s
-            ORDER BY
-                CASE
-                    WHEN {normalized_title_sql} = %s THEN 0
-                    WHEN {normalized_title_sql} LIKE %s THEN 1
-                    ELSE 2
-                END,
-                m.year DESC NULLS LAST, LENGTH(m.title), m.title
-            LIMIT %s
-        """
-        cur.execute(exact_sql, (
-            f'%{normalized_query}%', normalized_query, f'{normalized_query}%', limit
-        ))
-        results = cur.fetchall()
+        if len(normalized_query) < 3:
+            # One/two-character patterns have no useful trigrams. Use the
+            # existing text_pattern_ops expression index instead of scanning
+            # the whole catalogue for a contains match.
+            prefix_sql = f"""
+                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
+                       0.0 as sim_score
+                FROM movies m
+                WHERE {normalized_title_sql} LIKE %s
+                ORDER BY
+                    CASE WHEN {normalized_title_sql} = %s THEN 0 ELSE 1 END,
+                    m.year DESC NULLS LAST, LENGTH(m.title), m.title
+                LIMIT %s
+            """
+            cur.execute(prefix_sql, (f'{normalized_query}%', normalized_query, limit))
+            results = cur.fetchall()
+        else:
+            exact_sql = f"""
+                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
+                       0.0 as sim_score
+                FROM movies m
+                WHERE {normalized_title_sql} LIKE %s
+                ORDER BY
+                    CASE
+                        WHEN {normalized_title_sql} = %s THEN 0
+                        WHEN {normalized_title_sql} LIKE %s THEN 1
+                        ELSE 2
+                    END,
+                    m.year DESC NULLS LAST, LENGTH(m.title), m.title
+                LIMIT %s
+            """
+            cur.execute(exact_sql, (
+                f'%{normalized_query}%', normalized_query, f'{normalized_query}%', limit
+            ))
+            results = cur.fetchall()
 
-        if not results:
+        if not results and len(normalized_query) >= 3:
             cur.execute("SET LOCAL pg_trgm.similarity_threshold = 0.3")
             fuzzy_sql = """
                 SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
@@ -8208,7 +8225,8 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         movies = await run_interactive(get_movies_fast_sql, search_term, limit=10)
         if SEARCH_TIMING_ENABLED:
             times['first_db'] = time.perf_counter()
-        if not movies:
+        short_prefix_query = len(_normalize_search_text(search_term)) < 3
+        if not movies and not short_prefix_query:
             if SEARCH_TIMING_ENABLED:
                 times['fuzzy_db_start'] = time.perf_counter()
             movies = await run_interactive(get_movies_from_db, search_term, limit=10)
@@ -8219,13 +8237,15 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         if not movies:
             # Google runs on the server (not through a WebView JSONP callback),
             # so a spelling such as "rechar" can be retried from Telegram too.
-            if SEARCH_TIMING_ENABLED:
-                times['google_start'] = time.perf_counter()
-            suggestions = await get_google_title_suggestions_with_timeout(
-                search_term, limit=3
-            )
-            if SEARCH_TIMING_ENABLED:
-                times['google_end'] = time.perf_counter()
+            suggestions = []
+            if not short_prefix_query:
+                if SEARCH_TIMING_ENABLED:
+                    times['google_start'] = time.perf_counter()
+                suggestions = await get_google_title_suggestions_with_timeout(
+                    search_term, limit=3
+                )
+                if SEARCH_TIMING_ENABLED:
+                    times['google_end'] = time.perf_counter()
 
             not_found_text = (
                 "<b>━━━━ ❌ 𝗡𝗼𝘁 𝗙𝗼𝘂𝗻𝗱 ━━━━</b>\n\n"

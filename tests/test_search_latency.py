@@ -22,16 +22,27 @@ MAIN_SOURCE = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(
 
 
 def test_fast_search_separates_indexed_lookup_from_similarity_fallback():
-    search_source = MAIN_SOURCE[
-        MAIN_SOURCE.index("def _get_movies_fast_sql_nocache"):
-        MAIN_SOURCE.index("def get_movie_by_imdb_id", MAIN_SOURCE.index("def _get_movies_fast_sql_nocache"))
-    ]
-    assert "exact_sql = " in search_source
-    assert "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g')" in search_source
-    assert "normalized_query = _normalize_search_text(query)" in search_source
-    assert "if not results:" in search_source
-    assert "fuzzy_sql = " in search_source
-    assert "OR SIMILARITY" not in search_source
+    movie = (1, 'Reacher', '', '', '', '', 2022, '')
+    queries = []
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            queries.append((sql, params))
+
+        def fetchall(self):
+            return [movie + (0.0,)] if 'WHERE m.title %% %s' not in queries[-1][0] else []
+
+        def close(self):
+            pass
+
+    ns = load_functions('_normalize_search_text', '_get_movies_fast_sql_nocache',
+                        get_db_connection=lambda: SimpleNamespace(cursor=Cursor),
+                        close_db_connection=lambda _: None)
+
+    assert ns['_get_movies_fast_sql_nocache']('Reacher') == [movie]
+    assert len(queries) == 1
+    assert 'LIKE %s' in queries[0][0]
+    assert '%%' not in queries[0][0]
 
 
 def test_search_bounds_google_fallback_and_joins_delivery_data():
@@ -97,6 +108,113 @@ def test_fast_typo_lookup_uses_trigram_operator_and_returns_movie_rows():
                         close_db_connection=lambda _: None)
     assert ns['_get_movies_fast_sql_nocache']('rechar') == [movie]
     assert queries[-1][1] == ('rechar', 'rechar', 5)
+
+
+@pytest.mark.parametrize(('query', 'normalized_prefix'), [('r', 'r'), ('re', 're')])
+def test_fast_short_prefix_lookup_uses_existing_prefix_index(query, normalized_prefix):
+    movie = (1, 'Reacher', '', '', '', '', 2022, '')
+    queries = []
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            queries.append((sql, params))
+
+        def fetchall(self):
+            return [movie + (0.0,)]
+
+        def close(self):
+            pass
+
+    ns = load_functions('_normalize_search_text', '_get_movies_fast_sql_nocache',
+                        get_db_connection=lambda: SimpleNamespace(cursor=Cursor),
+                        close_db_connection=lambda _: None)
+
+    assert ns['_get_movies_fast_sql_nocache'](query) == [movie]
+    assert len(queries) == 1
+    assert "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g') LIKE %s" in queries[0][0]
+    assert queries[0][1][0] == f'{normalized_prefix}%'
+
+
+def test_short_prefix_miss_does_not_run_trigram_scan():
+    query_rows = []
+
+    class Cursor:
+        def execute(self, sql, params=None):
+            query_rows.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    ns = load_functions('_normalize_search_text', '_get_movies_fast_sql_nocache',
+                        get_db_connection=lambda: SimpleNamespace(cursor=Cursor),
+                        close_db_connection=lambda _: None)
+    assert ns['_get_movies_fast_sql_nocache']('zz') == []
+    assert len(query_rows) == 1
+    assert "LIKE %s" in query_rows[0][0]
+    assert "%%" not in query_rows[0][0]
+
+
+def test_short_prefix_miss_skips_legacy_and_google_suggestions():
+    fallback_calls = []
+    suggestion_calls = []
+
+    async def run_interactive(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    async def get_suggestions(*args, **kwargs):
+        suggestion_calls.append((args, kwargs))
+        return []
+
+    async def send_search_progress(*_args, **_kwargs):
+        return None
+
+    async def remove_search_progress(_message):
+        return None
+
+    async def reply_text(*_args, **_kwargs):
+        return SimpleNamespace(message_id=22)
+
+    message = SimpleNamespace(text='zz', reply_text=reply_text)
+    update = SimpleNamespace(
+        callback_query=None,
+        message=message,
+        effective_user=SimpleNamespace(id=7),
+        effective_chat=SimpleNamespace(id=9),
+    )
+    context = SimpleNamespace(user_data={})
+    handler = load_functions(
+        'search_movies',
+        SEARCH_TIMING_ENABLED=False,
+        send_search_progress=send_search_progress,
+        remove_search_progress=remove_search_progress,
+        run_interactive=run_interactive,
+        get_movies_fast_sql=lambda *_args, **_kwargs: [],
+        get_movies_from_db=lambda *args, **kwargs: fallback_calls.append((args, kwargs)) or [],
+        get_google_title_suggestions_with_timeout=get_suggestions,
+        schedule_recommendation_event=lambda **_kwargs: None,
+        _normalize_search_text=lambda value: re.sub(r'[^a-z0-9]', '', value.lower()),
+        quote=lambda value: value,
+        WEB_APP_URL='https://example.invalid/webapp',
+        InlineKeyboardButton=lambda *args, **kwargs: (args, kwargs),
+        InlineKeyboardMarkup=lambda rows: rows,
+        WebAppInfo=lambda **kwargs: kwargs,
+        UPDATE_CHANNEL_URL='https://example.invalid/channel',
+        USER_TEXT_DELETE_SECONDS=300,
+        track_user_message_for_deletion=lambda *_args: None,
+    )
+    coroutine = handler['search_movies'](update, context)
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        pass
+    else:
+        pytest.fail('The short-prefix search handler suspended unexpectedly')
+
+    assert fallback_calls == []
+    assert suggestion_calls == []
 
 
 def test_fast_search_ignores_title_punctuation():
