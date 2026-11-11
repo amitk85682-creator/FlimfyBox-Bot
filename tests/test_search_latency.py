@@ -22,7 +22,7 @@ MAIN_SOURCE = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(
 
 
 def test_fast_search_separates_indexed_lookup_from_similarity_fallback():
-    movie = (1, 'Reacher', '', '', '', '', 2022, '')
+    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series', True)
     queries = []
 
     class Cursor:
@@ -63,8 +63,8 @@ def load_functions(*names, **dependencies):
 
 
 def test_fuzzy_fallback_bounds_candidates_and_preserves_duplicate_titles():
-    movies = [(1, 'Reacher', '', '', '', '', 2022, ''),
-              (2, 'Reacher', '', '', '', '', 2025, '')]
+    movies = [(1, 'Reacher', '', '', '', '', 2022, '', 'Series', True),
+              (2, 'Reacher', '', '', '', '', 2025, '', 'Series', True)]
     queries, released = [], []
 
     class Cursor:
@@ -90,7 +90,7 @@ def test_fuzzy_fallback_bounds_candidates_and_preserves_duplicate_titles():
 
 
 def test_fast_typo_lookup_uses_trigram_operator_and_returns_movie_rows():
-    movie = (1, 'Reacher', '', '', '', '', 2022, '')
+    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series', True)
     queries = []
 
     class Cursor:
@@ -112,7 +112,7 @@ def test_fast_typo_lookup_uses_trigram_operator_and_returns_movie_rows():
 
 @pytest.mark.parametrize(('query', 'normalized_prefix'), [('r', 'r'), ('re', 're')])
 def test_fast_short_prefix_lookup_uses_existing_prefix_index(query, normalized_prefix):
-    movie = (1, 'Reacher', '', '', '', '', 2022, '')
+    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series', True)
     queries = []
 
     class Cursor:
@@ -133,6 +133,9 @@ def test_fast_short_prefix_lookup_uses_existing_prefix_index(query, normalized_p
     assert len(queries) == 1
     assert "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g') LIKE %s" in queries[0][0]
     assert queries[0][1][0] == f'{normalized_prefix}%'
+    assert 'AS content_type' in queries[0][0]
+    assert 'AS has_files' in queries[0][0]
+    assert 'FROM movie_files mf' in queries[0][0]
 
 
 def test_short_prefix_miss_does_not_run_trigram_scan():
@@ -217,8 +220,246 @@ def test_short_prefix_miss_skips_legacy_and_google_suggestions():
     assert suggestion_calls == []
 
 
+def test_exact_title_with_related_movies_requires_a_user_choice():
+    exact_spider_man = (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True)
+    related_movie = (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True)
+    ns = load_functions('_normalize_search_text', '_select_single_search_result', fuzz=fuzz)
+
+    assert ns['_select_single_search_result']('Spider-Man', [exact_spider_man, related_movie]) is None
+    assert ns['_select_single_search_result']('Spider-Man', [exact_spider_man]) == exact_spider_man
+    assert ns['_select_single_search_result']('Reacher', [(3, 'The Matrix')]) is None
+
+
+@pytest.mark.parametrize(
+    ('candidate_count', 'expected_summary'),
+    [(3, '<b>3</b> results'), (100, 'Showing the first <b>100</b> matches')],
+)
+def test_telegram_search_shows_all_bounded_matches_instead_of_auto_opening_exact_one(
+    candidate_count, expected_summary
+):
+    movies = [
+        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True),
+        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True),
+        (3, 'Spider-Man: Homecoming', '', '', '', '', 2017, 'Action', 'Movie', True),
+    ]
+    movies.extend(
+        (movie_id, f'Spider-Man related title {movie_id}', '', '', '', '', 2000 + movie_id % 25,
+         'Action', 'Movie', True)
+        for movie_id in range(4, candidate_count + 1)
+    )
+    fast_search_calls = []
+    opened_movies = []
+    sent = {}
+    selection_keyboard = object()
+
+    async def run_interactive(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    def fast_search(*args, **kwargs):
+        fast_search_calls.append((args, kwargs))
+        return movies
+
+    async def reply_text(text, **kwargs):
+        sent['text'] = text
+        sent.update(kwargs)
+        return SimpleNamespace(message_id=44)
+
+    async def search_progress(*_args, **_kwargs):
+        return None
+
+    async def process_movie_exact_match(*args, **_kwargs):
+        opened_movies.append(args)
+
+    message = SimpleNamespace(text='Spider-Man', reply_text=reply_text)
+    update = SimpleNamespace(
+        callback_query=None,
+        message=message,
+        effective_user=SimpleNamespace(id=7),
+        effective_chat=SimpleNamespace(id=9),
+    )
+    context = SimpleNamespace(user_data={})
+    ns = load_functions(
+        'search_movies', '_normalize_search_text', '_select_single_search_result',
+        SEARCH_TIMING_ENABLED=False,
+        send_search_progress=search_progress,
+        remove_search_progress=search_progress,
+        run_interactive=run_interactive,
+        get_movies_fast_sql=fast_search,
+        get_movies_from_db=lambda *_args, **_kwargs: pytest.fail('Unexpected fallback search'),
+        get_google_title_suggestions_with_timeout=lambda *_args, **_kwargs: pytest.fail('Unexpected suggestion request'),
+        schedule_recommendation_event=lambda **_kwargs: None,
+        process_movie_exact_match=process_movie_exact_match,
+        create_movie_selection_keyboard=lambda _movies, page=0: selection_keyboard,
+        html_escape=lambda value: value,
+        track_message_for_deletion=lambda *_args: None,
+        USER_TEXT_DELETE_SECONDS=300,
+    )
+
+    coroutine = ns['search_movies'](update, context)
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        pass
+    else:
+        pytest.fail('The search handler suspended unexpectedly')
+
+    assert fast_search_calls == [(('Spider-Man',), {'limit': 100})]
+    assert opened_movies == []
+    assert context.user_data['search_results'] == movies
+    assert expected_summary in sent['text']
+    assert sent['reply_markup'] is selection_keyboard
+
+
+def test_start_link_uses_the_same_ambiguous_catalogue_search():
+    movies = [
+        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True),
+        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True),
+    ]
+    fast_calls = []
+    sent = {}
+    selection_keyboard = object()
+
+    async def run_async(function, *args, **kwargs):
+        fast_calls.append((function.__name__, args, kwargs))
+        return function(*args, **kwargs)
+
+    def fast_search(*_args, **_kwargs):
+        return movies
+
+    async def send_message(**kwargs):
+        sent.update(kwargs)
+        return SimpleNamespace(message_id=88)
+
+    async def delete_status():
+        return None
+
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=9))
+    context = SimpleNamespace(
+        user_data={}, bot=SimpleNamespace(send_message=send_message)
+    )
+    ns = load_functions(
+        'background_search_and_send',
+        run_async=run_async,
+        get_movies_fast_sql=fast_search,
+        get_movies_from_db=lambda *_args, **_kwargs: pytest.fail('Unexpected fallback search'),
+        _normalize_search_text=lambda value: re.sub(r'[^a-z0-9]', '', value.lower()),
+        get_google_title_suggestions=lambda *_args, **_kwargs: pytest.fail('Unexpected suggestion request'),
+        quote=lambda value: value,
+        WEB_APP_URL='https://example.invalid/webapp',
+        InlineKeyboardButton=lambda *args, **kwargs: (args, kwargs),
+        InlineKeyboardMarkup=lambda rows: rows,
+        create_movie_selection_keyboard=lambda values, page=0: selection_keyboard,
+        html_escape=lambda value: value,
+    )
+
+    coroutine = ns['background_search_and_send'](
+        update, context, 'Spider-Man', SimpleNamespace(delete=delete_status)
+    )
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        pass
+    else:
+        pytest.fail('The start-link search handler suspended unexpectedly')
+
+    assert fast_calls == [('fast_search', ('Spider-Man',), {'limit': 100})]
+    assert context.user_data['search_results'] == movies
+    assert sent['reply_markup'] is selection_keyboard
+    assert 'Multiple results found' in sent['text']
+
+
+def test_group_search_uses_the_same_paginated_catalogue_results():
+    movies = [
+        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True),
+        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True),
+    ]
+    fast_calls = []
+    sent = {}
+    selection_keyboard = object()
+
+    async def run_interactive(function, *args, **kwargs):
+        fast_calls.append((function.__name__, args, kwargs))
+        return function(*args, **kwargs)
+
+    def fast_search(*_args, **_kwargs):
+        return movies
+
+    async def reply_text(text, **kwargs):
+        sent['text'] = text
+        sent.update(kwargs)
+        return SimpleNamespace(message_id=99)
+
+    def make_keyboard(values, page=0, requester_id=None):
+        sent['requester_id'] = requester_id
+        return selection_keyboard
+
+    update = SimpleNamespace(
+        message=SimpleNamespace(text='Spider-Man', reply_text=reply_text),
+        effective_chat=SimpleNamespace(id=-12345),
+        effective_user=SimpleNamespace(id=77),
+    )
+    context = SimpleNamespace(user_data={})
+    ns = load_functions(
+        'handle_group_message',
+        GLOBAL_CHAT_GROUP_ID=-4327792876,
+        run_interactive=run_interactive,
+        get_movies_fast_sql=fast_search,
+        _select_single_search_result=lambda _query, _values: None,
+        schedule_recommendation_event=lambda **_kwargs: None,
+        process_movie_exact_match=lambda *_args, **_kwargs: pytest.fail('Unexpected auto-open'),
+        create_movie_selection_keyboard=make_keyboard,
+        html_escape=lambda value: value,
+        USER_TEXT_DELETE_SECONDS=300,
+        track_message_for_deletion=lambda *_args: None,
+    )
+
+    coroutine = ns['handle_group_message'](update, context)
+    try:
+        coroutine.send(None)
+    except StopIteration:
+        pass
+    else:
+        pytest.fail('The group search handler suspended unexpectedly')
+
+    assert fast_calls == [('fast_search', ('Spider-Man',), {'limit': 100})]
+    assert context.user_data['search_results'] == movies
+    assert sent['requester_id'] == 77
+    assert sent['reply_markup'] is selection_keyboard
+
+
+def test_movie_selection_buttons_show_year_type_and_file_availability():
+    rows = [
+        (1, 'Spider-Man: No Way Home', '', '', '', '', 2021, 'Action', 'Movie', True),
+        (2, 'Marvel\'s Ultimate Spider-Man', '', '', '', '', 2012, 'Animation', 'Web Series', False),
+    ]
+    rows.extend(
+        (movie_id, 'A Very Long Movie Title That Needs To Be Safely Trimmed For Telegram Buttons',
+         '', '', '', '', 2020, 'Drama', 'Movie', True)
+        for movie_id in range(3, 13)
+    )
+    ns = load_functions(
+        'create_movie_selection_keyboard',
+        InlineKeyboardButton=lambda text, **kwargs: {'text': text, **kwargs},
+        InlineKeyboardMarkup=lambda rows: rows,
+        UPDATE_CHANNEL_URL='https://example.invalid/updates',
+    )
+
+    keyboard = ns['create_movie_selection_keyboard'](rows)
+    buttons = [row[0]['text'] for row in keyboard[:2]]
+
+    assert '2021' in buttons[0] and 'Movie' in buttons[0] and 'Available' in buttons[0]
+    assert '2012' in buttons[1] and 'Series' in buttons[1] and 'No files' in buttons[1]
+    assert len(buttons[0]) <= 60
+    assert len(keyboard[2][0]['text']) <= 60
+    assert '2020' in keyboard[2][0]['text'] and 'Available' in keyboard[2][0]['text']
+    assert any(button.get('callback_data') == 'page_1' for row in keyboard for button in row)
+
+    second_page = ns['create_movie_selection_keyboard'](rows, page=1)
+    assert any(button.get('callback_data') == 'page_0' for row in second_page for button in row)
+
+
 def test_fast_search_ignores_title_punctuation():
-    movie = (6815, 'Spider-Man: Brand New Day', '', '', 'tt22084616', '', 2026, '')
+    movie = (6815, 'Spider-Man: Brand New Day', '', '', 'tt22084616', '', 2026, '', 'Movie', True)
     queries = []
 
     class Cursor:

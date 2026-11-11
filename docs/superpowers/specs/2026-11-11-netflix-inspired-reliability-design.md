@@ -41,7 +41,7 @@ flowchart LR
 
 The Render service starts Flask and Telegram polling from `python main.py`. Flask uses Waitress with 8 threads. The shared psycopg2 pool is capped at 8 connections; bot checkouts are separately limited so two slots remain available to web requests. Telegram updates can run concurrently, and interactive database work has a dedicated 8-thread executor.
 
-The Mini App search endpoint handles autocomplete with a normalized title-prefix query. The database already has `idx_movies_title_norm_prefix`. The Telegram bot search path currently runs a normalized contains query first; for short prefixes, that query cannot use the trigram index effectively even though a prefix index exists. A no-result search then repeats a broader title/alias lookup and may wait up to 1.5 seconds for Google suggestions. This is a concrete avoidable-work path; it is not proof that it explains every production delay.
+The Mini App search endpoint handles autocomplete with a normalized title-prefix query. The database already has `idx_movies_title_norm_prefix`. Telegram search now uses that index for one- and two-character prefixes, while longer searches use normalized contains/trigram matching. It returns up to 100 candidate records into the existing five-item inline keyboard pages. A multiple-match search always asks the user to choose, even when one result is an exact title; each option includes year, Movie/Series type, and whether downloadable files are attached. A single distinct catalogue result can still open directly. A short-prefix miss skips the broad title/alias lookup and Google suggestions.
 
 Movie details are loaded from local PostgreSQL data and file rows, with a 2-second server response cache and 5-second browser cache. Ratings and reviews load independently, use persistent provider caches, and can refresh in the background. Provider failures should not hold the core detail response. The metadata refresh worker uses durable database state and skips provider-ID collisions rather than retrying the same unique-constraint failure. OMDb 401 responses now enter a bounded cooldown; TMDb can continue independently.
 
@@ -68,6 +68,8 @@ The recent live database inventory estimates roughly 9,003 movies, 67,920 files,
 
 - Use the existing normalized B-tree prefix index for Telegram searches of one or two characters.
 - Do not repeat broad fuzzy/database/provider work when a short prefix has no match.
+- Return up to 100 matching catalogue records to Telegram's existing five-item pages; require a user choice whenever there is more than one distinct result, including exact-title matches with sequels/remakes.
+- Show each candidate's year, Movie/Series type, and file availability so the user can choose the intended title and a deliverable version.
 - Preserve full contains/fuzzy behavior for longer search terms and preserve Mini App API contracts.
 - Read live per-route and pool-wait metrics from Render before making further query/cache changes.
 - Establish baseline p50/p95 latency and error rates before setting numeric service targets.
@@ -102,8 +104,10 @@ The recent live database inventory estimates roughly 9,003 movies, 67,920 files,
 
 - A one- or two-character bot search uses a prefix pattern compatible with `idx_movies_title_norm_prefix`.
 - A short-prefix miss does not launch the legacy full contains/alias search or external Google suggestion request.
+- Searches with multiple catalogue matches display a paginated chooser rather than auto-selecting an exact or high-scoring title; chooser labels include year, media type, and file availability.
+- A production read-only Spider-Man search returned all 17 matching records under the 100-result cap. The updated query used the title trigram index and movie-file index; one run measured 1.839 ms execution (4.506 ms planning), while a preceding run had a 51 ms execution outlier. This is variable database query time, not end-to-end Telegram latency.
 - Longer searches retain their existing contains/trigram and typo fallback behavior.
-- Search results, request buttons, and Mini App response shapes are unchanged.
+- Telegram results keep their existing movie-selection callback and five-item paging, with year/type/availability labels added; Mini App response shapes and request actions remain unchanged.
 - Regression tests prove both the fast prefix query and the no-fallback miss behavior.
 
 ## Risks and Boundaries

@@ -3772,11 +3772,10 @@ def _normalize_search_text(text: str) -> str:
 
 
 def _select_single_search_result(query, movies):
-    """Return one confident match; return None when the user should choose."""
+    """Return one result only when the catalogue has a single candidate."""
     if not movies:
         return None
 
-    normalized_query = _normalize_search_text(query)
     unique_movies = []
     seen_ids = set()
     for movie in movies:
@@ -3786,33 +3785,18 @@ def _select_single_search_result(query, movies):
         seen_ids.add(movie_id)
         unique_movies.append(movie)
 
-    exact_matches = [
-        movie for movie in unique_movies
-        if len(movie) > 1 and _normalize_search_text(movie[1]) == normalized_query
-    ]
-    if len(exact_matches) == 1:
-        return exact_matches[0]
-    if len(exact_matches) > 1:
+    # An exact title may still have sequels, remakes, or a series with the
+    # same name. Only skip the chooser when the database returned one unique
+    # exact or confidently similar catalogue record.
+    if len(unique_movies) != 1 or len(unique_movies[0]) <= 1:
         return None
 
-    scored_matches = sorted(
-        (
-            (fuzz.WRatio(normalized_query, _normalize_search_text(movie[1])), movie)
-            for movie in unique_movies
-            if len(movie) > 1 and _normalize_search_text(movie[1])
-        ),
-        key=lambda item: item[0],
-        reverse=True,
-    )
-    strong_matches = [item for item in scored_matches if item[0] >= 62]
-    if not strong_matches:
-        return None
-    if len(strong_matches) == 1:
-        return strong_matches[0][1]
-
-    top_score, top_movie = strong_matches[0]
-    second_score = strong_matches[1][0]
-    return top_movie if top_score - second_score >= 12 else None
+    candidate = unique_movies[0]
+    normalized_query = _normalize_search_text(query)
+    normalized_title = _normalize_search_text(candidate[1])
+    if normalized_query and normalized_title == normalized_query:
+        return candidate
+    return candidate if fuzz.WRatio(normalized_query, normalized_title) >= 62 else None
 
 
 def get_google_title_suggestions(query: str, limit: int = 3):
@@ -3894,11 +3878,28 @@ def _get_movies_from_db_nocache(user_query, limit=10):
             cur.close()
             return []
 
+        selection_metadata_sql = """
+            COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
+            (
+                NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
+                OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
+                OR EXISTS (
+                    SELECT 1 FROM movie_files mf
+                    WHERE mf.movie_id = m.id
+                      AND (
+                          NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
+                          OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
+                      )
+                )
+            ) AS has_files
+        """
+
         cur.execute(
-            """SELECT id, title, url, file_id, imdb_id, poster_url, year, genre 
-               FROM movies
-               WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') LIKE %s
-               ORDER BY title LIMIT %s""",
+            f"""SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
+                      m.year, m.genre, {selection_metadata_sql}
+               FROM movies m
+               WHERE regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g') LIKE %s
+               ORDER BY m.title LIMIT %s""",
             (f'%{norm_query}%', limit)
         )
         exact_matches = cur.fetchall()
@@ -3909,7 +3910,21 @@ def _get_movies_from_db_nocache(user_query, limit=10):
             return exact_matches
 
         cur.execute("""
-            SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre
+            SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
+                   m.year, m.genre,
+                   COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
+                   (
+                       NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
+                       OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
+                       OR EXISTS (
+                           SELECT 1 FROM movie_files mf
+                           WHERE mf.movie_id = m.id
+                             AND (
+                                 NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
+                                 OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
+                             )
+                       )
+                   ) AS has_files
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
             WHERE regexp_replace(LOWER(ma.alias), '[^a-z0-9]', '', 'g') LIKE %s
@@ -3927,11 +3942,25 @@ def _get_movies_from_db_nocache(user_query, limit=10):
         # alone cannot. SET LOCAL is reset when the pooled transaction closes.
         cur.execute("SET LOCAL pg_trgm.similarity_threshold = 0.15")
         cur.execute("""
-            SELECT id, title, url, file_id, imdb_id, poster_url, year, genre
-            FROM movies
-            WHERE regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g') %% %s
+            SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
+                   m.year, m.genre,
+                   COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
+                   (
+                       NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
+                       OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
+                       OR EXISTS (
+                           SELECT 1 FROM movie_files mf
+                           WHERE mf.movie_id = m.id
+                             AND (
+                                 NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
+                                 OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
+                             )
+                       )
+                   ) AS has_files
+            FROM movies m
+            WHERE regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g') %% %s
             ORDER BY SIMILARITY(
-                regexp_replace(LOWER(title), '[^a-z0-9]', '', 'g'), %s
+                regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g'), %s
             ) DESC, id
             LIMIT %s
         """, (norm_query, norm_query, min(max(limit * 5, 50), 100)))
@@ -3991,12 +4020,28 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             cur.close()
             return []
         normalized_title_sql = "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g')"
+        selection_metadata_sql = """
+            COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
+            (
+                NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
+                OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
+                OR EXISTS (
+                    SELECT 1 FROM movie_files mf
+                    WHERE mf.movie_id = m.id
+                      AND (
+                          NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
+                          OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
+                      )
+                )
+            ) AS has_files
+        """
         if len(normalized_query) < 3:
             # One/two-character patterns have no useful trigrams. Use the
             # existing text_pattern_ops expression index instead of scanning
             # the whole catalogue for a contains match.
             prefix_sql = f"""
-                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
+                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
+                       m.year, m.genre, {selection_metadata_sql},
                        0.0 as sim_score
                 FROM movies m
                 WHERE {normalized_title_sql} LIKE %s
@@ -4009,7 +4054,8 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             results = cur.fetchall()
         else:
             exact_sql = f"""
-                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
+                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
+                       m.year, m.genre, {selection_metadata_sql},
                        0.0 as sim_score
                 FROM movies m
                 WHERE {normalized_title_sql} LIKE %s
@@ -4029,8 +4075,9 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
 
         if not results and len(normalized_query) >= 3:
             cur.execute("SET LOCAL pg_trgm.similarity_threshold = 0.3")
-            fuzzy_sql = """
-                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url, m.year, m.genre,
+            fuzzy_sql = f"""
+                SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
+                       m.year, m.genre, {selection_metadata_sql},
                        SIMILARITY(m.title, %s) as sim_score
                 FROM movies m
                 WHERE m.title %% %s
@@ -4041,7 +4088,7 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             results = cur.fetchall()
         
         # Format results (remove score from tuple)
-        final_results = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]) for r in results]
+        final_results = [tuple(r[:10]) for r in results]
         
         cur.close()
         return final_results
@@ -6619,10 +6666,33 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5, requester
 
         year_text = ""
         if len(movie) >= 7 and movie[6]:
-            year_text = str(movie[6])[:4]
-        button_text = f"{title}   {year_text}" if year_text else title
-        if len(button_text) > 40:
-            button_text = button_text[:37] + "..."
+            try:
+                parsed_year = int(movie[6])
+                if parsed_year > 0:
+                    year_text = str(parsed_year)[:4]
+            except (TypeError, ValueError):
+                year_text = str(movie[6])[:4]
+
+        raw_content_type = str(movie[8] or "").strip().lower() if len(movie) >= 9 else ""
+        if "series" in raw_content_type or "tv" in raw_content_type:
+            media_type = "Series"
+        elif raw_content_type in ("movie", "film"):
+            media_type = "Movie"
+        else:
+            media_type = raw_content_type[:14]
+
+        details = [part for part in (year_text, media_type) if part]
+        if len(movie) >= 10:
+            details.append("Available" if movie[9] else "No files")
+        suffix = f" · {' · '.join(details)}" if details else ""
+
+        button_text = f"{title}{suffix}"
+        # Keep Telegram's 64-character inline-button limit while preserving
+        # the year, media type, and availability that disambiguate matches.
+        max_button_chars = 60
+        if len(button_text) > max_button_chars:
+            max_title_chars = max(1, max_button_chars - len("🎬 ") - len(suffix) - 1)
+            button_text = f"{title[:max_title_chars]}…{suffix}"
         keyboard.append([InlineKeyboardButton(f"🎬 {button_text}", callback_data=f"movie_{movie_id}{u_suffix}")])
 
     total_pages = (len(movies) + movies_per_page - 1) // movies_per_page
@@ -7305,38 +7375,12 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
     """
     chat_id = update.effective_chat.id
     try:
-        # 1. PEHLE EXACT MATCH CHECK KAREIN (Ye FAST hai - 0.1 sec)
-        # This saves resources if the user clicked a precise link
-        conn = get_db_connection()
-        exact_movies = []
-        if conn:
-            try:
-                cur = conn.cursor()
-                # Keep every exact-title row so duplicate titles can be
-                # disambiguated by year in the selection keyboard.
-                cur.execute(
-                    """
-                    SELECT id, title, url, file_id, imdb_id, poster_url, year, genre
-                    FROM movies
-                    WHERE title ILIKE %s
-                    ORDER BY year DESC NULLS LAST, id DESC
-                    LIMIT 20
-                    """,
-                    (query_text.strip(),),
-                )
-                exact_movies = cur.fetchall()
-            except Exception as db_e:
-                logger.error(f"Database error in exact match: {db_e}")
-            finally:
-                if conn: close_db_connection(conn)
-
-        movies_found = []
-        if exact_movies:
-            movies_found = exact_movies
-        else:
-            # Agar exact nahi mila to hi Fuzzy Search karein (Slower process)
-            # Assuming get_movies_from_db is your existing function
-            movies_found = await run_async(get_movies_from_db, query_text, limit=1)
+        # Use the same indexed catalogue path as normal Telegram searches so
+        # deep links don't bypass sibling titles (for example Spider-Man 2).
+        normalized_query = _normalize_search_text(query_text)
+        movies_found = await run_async(get_movies_fast_sql, query_text, limit=100)
+        if not movies_found and len(normalized_query) >= 3:
+            movies_found = await run_async(get_movies_from_db, query_text, limit=100)
 
         # 2. Result Handle karein
         if not movies_found:
@@ -7345,7 +7389,9 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             
             safe_query = quote(query_text)
             web_app_url = f"{WEB_APP_URL}?req={safe_query}"
-            suggestions = await run_async(get_google_title_suggestions, query_text, limit=3)
+            suggestions = []
+            if len(normalized_query) >= 3:
+                suggestions = await run_async(get_google_title_suggestions, query_text, limit=3)
             keyboard_rows = []
             for title in suggestions:
                 callback_title = quote(title[:35], safe='')
@@ -7358,7 +7404,7 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             keyboard = InlineKeyboardMarkup(keyboard_rows)
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"😕 Sorry, <b>'{query_text}'</b> not found.\n\nस्पेलिंग चेक करने और Request भेजने के लिए नीचे क्लिक करें 👇",
+                text=f"😕 Sorry, <b>'{html_escape(query_text)}'</b> not found.\n\nस्पेलिंग चेक करने और Request भेजने के लिए नीचे क्लिक करें 👇",
                 reply_markup=keyboard,
                 parse_mode='HTML'
             )
@@ -7372,13 +7418,19 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
                 await status_msg.delete()
             except:
                 pass
+            if len(movies_found) >= 100:
+                selection_text = (
+                    f"🎬 <b>Showing the first 100 matches for</b> "
+                    f"<b>{html_escape(query_text)}</b>. Add words to narrow your search.\n\n"
+                )
+            else:
+                selection_text = (
+                    f"🎬 <b>Multiple results found for</b> "
+                    f"<b>{html_escape(query_text)}</b>\n\n"
+                )
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=(
-                    f"🎬 <b>Multiple results found for</b> "
-                    f"<b>{query_text}</b>\n\n"
-                    "👇 Select the correct title and year:"
-                ),
+                text=selection_text + "👇 Select the correct title and year:",
                 reply_markup=create_movie_selection_keyboard(movies_found, page=0),
                 parse_mode="HTML",
             )
@@ -8222,14 +8274,14 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         # alias/fuzzy search remains a fallback for titles not covered by SQL.
         if SEARCH_TIMING_ENABLED:
             times['before_first_db'] = time.perf_counter()
-        movies = await run_interactive(get_movies_fast_sql, search_term, limit=10)
+        movies = await run_interactive(get_movies_fast_sql, search_term, limit=100)
         if SEARCH_TIMING_ENABLED:
             times['first_db'] = time.perf_counter()
         short_prefix_query = len(_normalize_search_text(search_term)) < 3
         if not movies and not short_prefix_query:
             if SEARCH_TIMING_ENABLED:
                 times['fuzzy_db_start'] = time.perf_counter()
-            movies = await run_interactive(get_movies_from_db, search_term, limit=10)
+            movies = await run_interactive(get_movies_from_db, search_term, limit=100)
             if SEARCH_TIMING_ENABLED:
                 times['fuzzy_db_end'] = time.perf_counter()
         
@@ -8317,10 +8369,21 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, quer
         context.user_data['search_query'] = query
 
         keyboard = create_movie_selection_keyboard(movies, page=0)
+        if len(movies) >= 100:
+            result_summary = (
+                f"✦ Showing the first <b>100</b> matches for "
+                f"'<b>{html_escape(query)}</b>'. "
+                "Add more words to narrow your search."
+            )
+        else:
+            result_summary = (
+                f"✦ 𝗙𝗼𝘂𝗻𝗱 <b>{len(movies)}</b> results for "
+                f"'<b>{html_escape(query)}</b>'"
+            )
         
         msg = await update.message.reply_text(
             f"<b>━━━━━━ 🎬 𝗦𝗲𝗮𝗿𝗰𝗵 𝗥𝗲𝘀𝘂𝗹𝘁𝘀 ━━━━━━</b>\n\n"
-            f"✦ 𝗙𝗼𝘂𝗻𝗱 <b>{len(movies)}</b> results for '<b>{query}</b>'\n\n"
+            f"{result_summary}\n\n"
             f"👇 <b>𝗦𝗲𝗹𝗲𝗰𝘁 𝘆𝗼𝘂𝗿 𝗺𝗼𝘃𝗶𝗲 𝗯𝗲𝗹𝗼𝘄:</b>",
             reply_markup=keyboard,
             parse_mode='HTML'
@@ -8610,7 +8673,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         suggested_title = unquote(data[len("retrysearch_"):]).strip()
         if not suggested_title:
             return
-        movies = await run_interactive(get_movies_from_db, suggested_title, limit=10)
+        movies = await run_interactive(get_movies_from_db, suggested_title, limit=100)
         if not movies:
             request_title = quote(suggested_title[:35], safe='')
             keyboard_rows = []
@@ -8652,9 +8715,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         context.user_data['search_results'] = movies
         context.user_data['search_query'] = suggested_title
+        result_summary = (
+            f"✦ Showing the first <b>100</b> matches for '<b>{html_escape(suggested_title)}</b>'. "
+            "Add more words to narrow your search."
+            if len(movies) >= 100 else
+            f"✦ Found <b>{len(movies)}</b> results for '<b>{html_escape(suggested_title)}</b>'"
+        )
         await query.edit_message_text(
             f"<b>━━━━━━ 🎬 𝗦𝗲𝗮𝗿𝗰𝗵 𝗥𝗲𝘀𝘂𝗹𝘁𝘀 ━━━━━━</b>\n\n"
-            f"✦ Found <b>{len(movies)}</b> results for '<b>{suggested_title}</b>'\n\n"
+            f"{result_summary}\n\n"
             "👇 <b>Select your movie below:</b>",
             reply_markup=create_movie_selection_keyboard(movies, page=0),
             parse_mode='HTML'
@@ -10084,13 +10153,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except (ValueError, IndexError):
                     pass
 
-            selection_text = f"🎬 **Found {len(movies)} movies matching '{search_query}'**\n\nPlease select the movie you want:"
+            if len(movies) >= 100:
+                selection_text = (
+                    f"🎬 <b>Showing the first 100 movies matching "
+                    f"'{html_escape(search_query)}'</b>\n\n"
+                    "Add more words to narrow your search."
+                )
+            else:
+                selection_text = (
+                    f"🎬 <b>Found {len(movies)} movies matching "
+                    f"'{html_escape(search_query)}'</b>\n\n"
+                    "Please select the movie you want:"
+                )
             keyboard = create_movie_selection_keyboard(movies, page=page, requester_id=requester_id)
 
             await query.edit_message_text(
                 selection_text,
                 reply_markup=keyboard,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
 
         elif query.data.startswith("cancel_selection"):
@@ -18418,7 +18498,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 3. 🚀 FAST SEARCH CALL (Sirf SQL Check)
     # Hum 5 results maang rahe hain taaki agar typos ho to best match mile
-    movies = await run_interactive(get_movies_fast_sql, text, limit=5)
+    movies = await run_interactive(get_movies_fast_sql, text, limit=100)
     schedule_recommendation_event(
         user_id=update.effective_user.id if update.effective_user else None,
         event_type='group_search',
@@ -18455,9 +18535,16 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard = create_movie_selection_keyboard(movies, page=0, requester_id=requester_id)
     
     # Reply to user with premium header
+    if len(movies) >= 100:
+        result_summary = (
+            f"✦ Showing the first <b>100</b> matches for '<b>{html_escape(text)}</b>'. "
+            "Add more words to narrow your search."
+        )
+    else:
+        result_summary = f"✦ Found <b>{len(movies)}</b> results for '<b>{html_escape(text)}</b>'"
     msg = await update.message.reply_text(
         f"<b>━━━━━━ 🎬 𝗦𝗲𝗮𝗿𝗰𝗵 𝗥𝗲𝘀𝘂𝗹𝘁𝘀 ━━━━━━</b>\n\n"
-        f"✦ 𝗙𝗼𝘂𝗻𝗱 <b>{len(movies)}</b> results for '<b>{text}</b>'\n\n"
+        f"{result_summary}\n\n"
         f"👇 <b>𝗦𝗲𝗹𝗲𝗰𝘁 𝗺𝗼𝘃𝗶𝗲:</b>",
         reply_markup=keyboard,
         parse_mode='HTML'
