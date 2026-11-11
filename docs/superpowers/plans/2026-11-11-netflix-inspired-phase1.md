@@ -69,6 +69,8 @@
 - [x] Verify the updated search SQL read-only against Supabase. The normalized Spider-Man query returned 17 records and used `idx_movies_title_norm_trgm` plus the movie-file index; one run measured 1.839 ms execution (4.506 ms planning), with a prior 51 ms outlier.
 - [x] Run focused search regressions, Python compilation, and `git diff --check`; document that the complete search-test file stalls in an unrelated Windows async queue test.
 - [x] Review the full diff for unrelated changes, message/API regressions, destructive operations, and secrets.
-- [ ] Commit, push to `main`, and deploy/verify Render.
+- [x] Commit the chooser fix (`58868c8`).
+- [x] Push the chooser fix to `main` (`58868c8`).
+- [ ] Deploy/verify Render.
 
 **Bound:** The Telegram chooser holds at most 100 matches per search in user state. If a broader term reaches that cap, the user should refine the query; the UI must say it is showing the first 100 rather than imply it found every match.
