@@ -62,11 +62,11 @@
 - Modify: `main.py` (`_select_single_search_result`, fast and fallback search queries, `create_movie_selection_keyboard`, `search_movies`, `background_search_and_send`, `handle_group_message`, retry-search callback)
 - Test: `tests/test_search_latency.py`
 
-- [x] Add regressions proving an exact Spider-Man title cannot bypass related matches, Telegram fetches the bounded result set, and result buttons show year/type/file availability with working pagination.
+- [x] Add regressions proving an exact Spider-Man title cannot bypass related matches, Telegram fetches the bounded result set, and result buttons show year/type without availability labels and keep working pagination.
 - [x] Change direct opening to only a single unique catalogue result; otherwise retain the full set for user selection across PM, start-link, retry-suggestion, and group searches.
-- [x] Raise Telegram's result window to 100 and include the media type and file-availability fields in fast and fallback search results.
-- [x] Keep the existing five-result pages and add concise, Telegram-safe labels for year, media type, and file availability.
-- [x] Verify the updated search SQL read-only against Supabase. The normalized Spider-Man query returned 17 records and used `idx_movies_title_norm_trgm` plus the movie-file index; one run measured 1.839 ms execution (4.506 ms planning), with a prior 51 ms outlier.
+- [x] Raise Telegram's result window to 100 and include the media type in fast and fallback search results.
+- [x] Keep the existing five-result pages and add concise, Telegram-safe year and media-type labels; omit local file availability from Telegram result buttons.
+- [x] Verify the earlier search SQL read-only against Supabase. The normalized Spider-Man query returned 17 records; its earlier measured query plan is historical and did not represent end-to-end Telegram latency.
 - [x] Run focused search regressions, Python compilation, and `git diff --check`; document that the complete search-test file stalls in an unrelated Windows async queue test.
 - [x] Review the full diff for unrelated changes, message/API regressions, destructive operations, and secrets.
 - [x] Commit the chooser fix (`58868c8`).

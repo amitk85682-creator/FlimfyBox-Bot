@@ -3879,19 +3879,7 @@ def _get_movies_from_db_nocache(user_query, limit=10):
             return []
 
         selection_metadata_sql = """
-            COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
-            (
-                NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
-                OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
-                OR EXISTS (
-                    SELECT 1 FROM movie_files mf
-                    WHERE mf.movie_id = m.id
-                      AND (
-                          NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
-                          OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
-                      )
-                )
-            ) AS has_files
+            COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type
         """
 
         cur.execute(
@@ -3912,19 +3900,7 @@ def _get_movies_from_db_nocache(user_query, limit=10):
         cur.execute("""
             SELECT DISTINCT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
                    m.year, m.genre,
-                   COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
-                   (
-                       NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
-                       OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
-                       OR EXISTS (
-                           SELECT 1 FROM movie_files mf
-                           WHERE mf.movie_id = m.id
-                             AND (
-                                 NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
-                                 OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
-                             )
-                       )
-                   ) AS has_files
+                   COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type
             FROM movies m
             JOIN movie_aliases ma ON m.id = ma.movie_id
             WHERE regexp_replace(LOWER(ma.alias), '[^a-z0-9]', '', 'g') LIKE %s
@@ -3944,19 +3920,7 @@ def _get_movies_from_db_nocache(user_query, limit=10):
         cur.execute("""
             SELECT m.id, m.title, m.url, m.file_id, m.imdb_id, m.poster_url,
                    m.year, m.genre,
-                   COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
-                   (
-                       NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
-                       OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
-                       OR EXISTS (
-                           SELECT 1 FROM movie_files mf
-                           WHERE mf.movie_id = m.id
-                             AND (
-                                 NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
-                                 OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
-                             )
-                       )
-                   ) AS has_files
+                   COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type
             FROM movies m
             WHERE regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g') %% %s
             ORDER BY SIMILARITY(
@@ -4021,19 +3985,7 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             return []
         normalized_title_sql = "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g')"
         selection_metadata_sql = """
-            COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type,
-            (
-                NULLIF(BTRIM(COALESCE(m.url, '')), '') IS NOT NULL
-                OR NULLIF(BTRIM(COALESCE(m.file_id, '')), '') IS NOT NULL
-                OR EXISTS (
-                    SELECT 1 FROM movie_files mf
-                    WHERE mf.movie_id = m.id
-                      AND (
-                          NULLIF(BTRIM(COALESCE(mf.url, '')), '') IS NOT NULL
-                          OR NULLIF(BTRIM(COALESCE(mf.file_id, '')), '') IS NOT NULL
-                      )
-                )
-            ) AS has_files
+            COALESCE(NULLIF(BTRIM(m.content_type), ''), 'Movie') AS content_type
         """
         if len(normalized_query) < 3:
             # One/two-character patterns have no useful trigrams. Use the
@@ -4088,7 +4040,7 @@ def _get_movies_fast_sql_nocache(query: str, limit: int = 5):
             results = cur.fetchall()
         
         # Format results (remove score from tuple)
-        final_results = [tuple(r[:10]) for r in results]
+        final_results = [tuple(r[:9]) for r in results]
         
         cur.close()
         return final_results
@@ -6682,13 +6634,11 @@ def create_movie_selection_keyboard(movies, page=0, movies_per_page=5, requester
             media_type = raw_content_type[:14]
 
         details = [part for part in (year_text, media_type) if part]
-        if len(movie) >= 10:
-            details.append("Available" if movie[9] else "No files")
         suffix = f" · {' · '.join(details)}" if details else ""
 
         button_text = f"{title}{suffix}"
         # Keep Telegram's 64-character inline-button limit while preserving
-        # the year, media type, and availability that disambiguate matches.
+        # the year and media type that disambiguate matches.
         max_button_chars = 60
         if len(button_text) > max_button_chars:
             max_title_chars = max(1, max_button_chars - len("🎬 ") - len(suffix) - 1)

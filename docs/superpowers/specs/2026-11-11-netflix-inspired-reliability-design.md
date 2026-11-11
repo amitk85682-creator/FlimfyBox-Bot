@@ -69,7 +69,7 @@ The recent live database inventory estimates roughly 9,003 movies, 67,920 files,
 - Use the existing normalized B-tree prefix index for Telegram searches of one or two characters.
 - Do not repeat broad fuzzy/database/provider work when a short prefix has no match.
 - Return up to 100 matching catalogue records to Telegram's existing five-item pages; require a user choice whenever there is more than one distinct result, including exact-title matches with sequels/remakes.
-- Show each candidate's year, Movie/Series type, and file availability so the user can choose the intended title and a deliverable version.
+- Show each candidate's year and Movie/Series type so the user can choose the intended title. Do not append local file availability to Telegram search buttons.
 - Preserve full contains/fuzzy behavior for longer search terms and preserve Mini App API contracts.
 - Read live per-route and pool-wait metrics from Render before making further query/cache changes.
 - Establish baseline p50/p95 latency and error rates before setting numeric service targets.
@@ -104,10 +104,10 @@ The recent live database inventory estimates roughly 9,003 movies, 67,920 files,
 
 - A one- or two-character bot search uses a prefix pattern compatible with `idx_movies_title_norm_prefix`.
 - A short-prefix miss does not launch the legacy full contains/alias search or external Google suggestion request.
-- Searches with multiple catalogue matches display a paginated chooser rather than auto-selecting an exact or high-scoring title; chooser labels include year, media type, and file availability.
-- A production read-only Spider-Man search returned all 17 matching records under the 100-result cap. The updated query used the title trigram index and movie-file index; one run measured 1.839 ms execution (4.506 ms planning), while a preceding run had a 51 ms execution outlier. This is variable database query time, not end-to-end Telegram latency.
+- Searches with multiple catalogue matches display a paginated chooser rather than auto-selecting an exact or high-scoring title; chooser labels include year and media type, with no availability suffix.
+- A production read-only Spider-Man search returned all 17 matching records under the 100-result cap. An earlier query-plan measurement is historical and does not represent end-to-end Telegram latency.
 - Longer searches retain their existing contains/trigram and typo fallback behavior.
-- Telegram results keep their existing movie-selection callback and five-item paging, with year/type/availability labels added; Mini App response shapes and request actions remain unchanged.
+- Telegram results keep their existing movie-selection callback and five-item paging, with year/type labels; Mini App response shapes and request actions remain unchanged.
 - Regression tests prove both the fast prefix query and the no-fallback miss behavior.
 
 ## Risks and Boundaries

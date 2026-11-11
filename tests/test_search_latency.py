@@ -22,7 +22,7 @@ MAIN_SOURCE = Path(__file__).resolve().parents[1].joinpath("main.py").read_text(
 
 
 def test_fast_search_separates_indexed_lookup_from_similarity_fallback():
-    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series', True)
+    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series')
     queries = []
 
     class Cursor:
@@ -63,8 +63,8 @@ def load_functions(*names, **dependencies):
 
 
 def test_fuzzy_fallback_bounds_candidates_and_preserves_duplicate_titles():
-    movies = [(1, 'Reacher', '', '', '', '', 2022, '', 'Series', True),
-              (2, 'Reacher', '', '', '', '', 2025, '', 'Series', True)]
+    movies = [(1, 'Reacher', '', '', '', '', 2022, '', 'Series'),
+              (2, 'Reacher', '', '', '', '', 2025, '', 'Series')]
     queries, released = [], []
 
     class Cursor:
@@ -90,7 +90,7 @@ def test_fuzzy_fallback_bounds_candidates_and_preserves_duplicate_titles():
 
 
 def test_fast_typo_lookup_uses_trigram_operator_and_returns_movie_rows():
-    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series', True)
+    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series')
     queries = []
 
     class Cursor:
@@ -112,7 +112,7 @@ def test_fast_typo_lookup_uses_trigram_operator_and_returns_movie_rows():
 
 @pytest.mark.parametrize(('query', 'normalized_prefix'), [('r', 'r'), ('re', 're')])
 def test_fast_short_prefix_lookup_uses_existing_prefix_index(query, normalized_prefix):
-    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series', True)
+    movie = (1, 'Reacher', '', '', '', '', 2022, '', 'Series')
     queries = []
 
     class Cursor:
@@ -134,8 +134,8 @@ def test_fast_short_prefix_lookup_uses_existing_prefix_index(query, normalized_p
     assert "regexp_replace(LOWER(m.title), '[^a-z0-9]', '', 'g') LIKE %s" in queries[0][0]
     assert queries[0][1][0] == f'{normalized_prefix}%'
     assert 'AS content_type' in queries[0][0]
-    assert 'AS has_files' in queries[0][0]
-    assert 'FROM movie_files mf' in queries[0][0]
+    assert 'AS has_files' not in queries[0][0]
+    assert 'FROM movie_files mf' not in queries[0][0]
 
 
 def test_short_prefix_miss_does_not_run_trigram_scan():
@@ -221,8 +221,8 @@ def test_short_prefix_miss_skips_legacy_and_google_suggestions():
 
 
 def test_exact_title_with_related_movies_requires_a_user_choice():
-    exact_spider_man = (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True)
-    related_movie = (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True)
+    exact_spider_man = (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie')
+    related_movie = (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie')
     ns = load_functions('_normalize_search_text', '_select_single_search_result', fuzz=fuzz)
 
     assert ns['_select_single_search_result']('Spider-Man', [exact_spider_man, related_movie]) is None
@@ -238,13 +238,13 @@ def test_telegram_search_shows_all_bounded_matches_instead_of_auto_opening_exact
     candidate_count, expected_summary
 ):
     movies = [
-        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True),
-        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True),
-        (3, 'Spider-Man: Homecoming', '', '', '', '', 2017, 'Action', 'Movie', True),
+        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie'),
+        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie'),
+        (3, 'Spider-Man: Homecoming', '', '', '', '', 2017, 'Action', 'Movie'),
     ]
     movies.extend(
         (movie_id, f'Spider-Man related title {movie_id}', '', '', '', '', 2000 + movie_id % 25,
-         'Action', 'Movie', True)
+         'Action', 'Movie')
         for movie_id in range(4, candidate_count + 1)
     )
     fast_search_calls = []
@@ -312,8 +312,8 @@ def test_telegram_search_shows_all_bounded_matches_instead_of_auto_opening_exact
 
 def test_start_link_uses_the_same_ambiguous_catalogue_search():
     movies = [
-        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True),
-        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True),
+        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie'),
+        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie'),
     ]
     fast_calls = []
     sent = {}
@@ -370,8 +370,8 @@ def test_start_link_uses_the_same_ambiguous_catalogue_search():
 
 def test_group_search_uses_the_same_paginated_catalogue_results():
     movies = [
-        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie', True),
-        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie', True),
+        (1, 'Spider-Man', '', '', '', '', 2002, 'Action', 'Movie'),
+        (2, 'Spider-Man 2', '', '', '', '', 2004, 'Action', 'Movie'),
     ]
     fast_calls = []
     sent = {}
@@ -427,8 +427,10 @@ def test_group_search_uses_the_same_paginated_catalogue_results():
     assert sent['reply_markup'] is selection_keyboard
 
 
-def test_movie_selection_buttons_show_year_type_and_file_availability():
+def test_movie_selection_buttons_show_year_and_type_without_availability_labels():
     rows = [
+        # Ignore a legacy trailing availability value if an older cached row
+        # is passed to the keyboard helper.
         (1, 'Spider-Man: No Way Home', '', '', '', '', 2021, 'Action', 'Movie', True),
         (2, 'Marvel\'s Ultimate Spider-Man', '', '', '', '', 2012, 'Animation', 'Web Series', False),
     ]
@@ -447,11 +449,13 @@ def test_movie_selection_buttons_show_year_type_and_file_availability():
     keyboard = ns['create_movie_selection_keyboard'](rows)
     buttons = [row[0]['text'] for row in keyboard[:2]]
 
-    assert '2021' in buttons[0] and 'Movie' in buttons[0] and 'Available' in buttons[0]
-    assert '2012' in buttons[1] and 'Series' in buttons[1] and 'No files' in buttons[1]
+    assert '2021' in buttons[0] and 'Movie' in buttons[0]
+    assert '2012' in buttons[1] and 'Series' in buttons[1]
+    button_texts = [row[0]['text'] for row in keyboard if row and 'text' in row[0]]
+    assert all('Available' not in text and 'No files' not in text for text in button_texts)
     assert len(buttons[0]) <= 60
     assert len(keyboard[2][0]['text']) <= 60
-    assert '2020' in keyboard[2][0]['text'] and 'Available' in keyboard[2][0]['text']
+    assert '2020' in keyboard[2][0]['text'] and 'Movie' in keyboard[2][0]['text']
     assert any(button.get('callback_data') == 'page_1' for row in keyboard for button in row)
 
     second_page = ns['create_movie_selection_keyboard'](rows, page=1)
@@ -459,7 +463,7 @@ def test_movie_selection_buttons_show_year_type_and_file_availability():
 
 
 def test_fast_search_ignores_title_punctuation():
-    movie = (6815, 'Spider-Man: Brand New Day', '', '', 'tt22084616', '', 2026, '', 'Movie', True)
+    movie = (6815, 'Spider-Man: Brand New Day', '', '', 'tt22084616', '', 2026, '', 'Movie')
     queries = []
 
     class Cursor:
