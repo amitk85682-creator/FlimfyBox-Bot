@@ -1869,6 +1869,7 @@ Required JSON example:
 """
 
     last_error_class = None
+    per_attempt_timeout = min(int(GEMINI_RECONCILIATION_TIMEOUT_SECONDS or 10), 10)
     for attempt, key in enumerate(gemini_keys[:3]):
         started_at = time.monotonic()
         try:
@@ -1879,11 +1880,11 @@ Required JSON example:
                     model.generate_content,
                     prompt,
                     request_options={
-                        "timeout": GEMINI_RECONCILIATION_TIMEOUT_SECONDS,
+                        "timeout": per_attempt_timeout,
                         "retry": None,
                     },
                 ),
-                timeout=GEMINI_RECONCILIATION_TIMEOUT_SECONDS + 1,
+                timeout=per_attempt_timeout + 1,
             )
             response_text = (getattr(response, "text", "") or "").strip()
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
@@ -1930,7 +1931,50 @@ Required JSON example:
                     last_error_class,
                 )
             if attempt < min(len(gemini_keys), 3) - 1:
-                await asyncio.sleep(min(0.5 * (2 ** attempt) + random.random() * 0.25, 2.0))
+                await asyncio.sleep(min(0.4 * (attempt + 1), 1.0))
+
+    # Fast Groq fallback if Gemini keys timed out or hit quota
+    groq_keys = [k for k in (os.environ.get("GROQ_API_KEY"), os.environ.get("GROQ_API_KEY_1"), os.environ.get("GROQ_API_KEY_2")) if k]
+    for g_key in groq_keys:
+        started_at = time.monotonic()
+        try:
+            g_resp = await run_async(
+                requests.post,
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {g_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 250,
+                },
+                timeout=8,
+            )
+            if g_resp.status_code == 200:
+                response_text = (g_resp.json()["choices"][0]["message"]["content"] or "").strip()
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    if isinstance(parsed, dict):
+                        final_data = _normalize_evidence_dict(parsed)
+                        for field in _EVIDENCE_KEYS:
+                            if not final_data.get(field):
+                                final_data[field] = fallback.get(field, "")
+                        if not _valid_evidence_title(final_data.get("title")):
+                            final_data["title"] = fallback.get("title", "UNKNOWN")
+                        final_data = _reconcile_filename_metadata_title(final_data, filename_evidence)
+                        logger.info(
+                            "✅ Evidence reconciliation success via Groq. Final identity: '%s' (%s)",
+                            final_data.get("title"),
+                            final_data.get("year") or "no year",
+                        )
+                        logger.info(
+                            "batch_event=IDENTITY_RECONCILIATION_COMPLETED duration_ms=%d outcome=groq_fallback",
+                            int((time.monotonic() - started_at) * 1000),
+                        )
+                        return final_data
+        except Exception as g_exc:
+            logger.warning("Evidence Groq fallback failed with %s", type(g_exc).__name__)
 
     logger.error(
         "Evidence Engine reconciliation failed after bounded attempts; "
@@ -14782,15 +14826,20 @@ async def _batch18_public_evidence(title: str, year: str) -> dict:
 
 
 async def _batch18_source_pipeline(title: str, year: str) -> dict:
-    evidence = await _batch18_public_evidence(title, year)
-    yt = await _batch18_youtube_search(title, year)
-    accepted_youtube = [x for x in yt[:10] if _batch18_relevant_candidate(x, title, year)]
-    if accepted_youtube:
-        _batch18_merge_source(evidence['sources'], 'YouTube')
-        evidence['candidates'].extend(
-            {'source': 'YouTube', 'title': x.get('title', ''), 'snippet': x.get('snippet', ''), 'link': x.get('link', '')}
-            for x in accepted_youtube
-        )
+    has_cse = bool(os.environ.get('GOOGLE_API_KEY') and os.environ.get('GOOGLE_CX_ID'))
+    if has_cse:
+        evidence = await _batch18_public_evidence(title, year)
+    else:
+        evidence = {'sources': [], 'candidates': [], 'snippets': [], 'posters': [], 'ocr': []}
+    if has_cse or os.environ.get('YOUTUBE_API_KEY'):
+        yt = await _batch18_youtube_search(title, year)
+        accepted_youtube = [x for x in yt[:10] if _batch18_relevant_candidate(x, title, year)]
+        if accepted_youtube:
+            _batch18_merge_source(evidence['sources'], 'YouTube')
+            evidence['candidates'].extend(
+                {'source': 'YouTube', 'title': x.get('title', ''), 'snippet': x.get('snippet', ''), 'link': x.get('link', '')}
+                for x in accepted_youtube
+            )
     history = await _batch18_internal_history(title, year)
     if history:
         _batch18_merge_source(evidence['sources'], 'Internal history')
@@ -14942,19 +14991,92 @@ async def fetch_adult_metadata_combo(
         logger.warning(f"⚠️ TMDB failed: {e}")
 
     # ─────────────────────────────────────────────
-    # SOURCE 1B: OMDb fallback (IMDb ID, poster, plot, cast)
+    # SOURCE 1A: IMDb Suggestion API (fast, free, fuzzy — works great for Ullu/Indian OTT)
     # ─────────────────────────────────────────────
-    if (not result["poster_url"] or not result["plot"] or not result["cast"]) and os.environ.get("OMDB_API_KEY"):
+    if not result["imdb_id"] or not result["poster_url"] or not result["cast"]:
         try:
-            omdb_params = {"apikey": os.environ["OMDB_API_KEY"], "t": movie_name, "plot": "short"}
-            if movie_year and str(movie_year).isdigit():
-                omdb_params["y"] = str(movie_year)
-            omdb_resp = await run_async(requests.get, "https://www.omdbapi.com/", params=omdb_params, timeout=8)
-            omdb_data = omdb_resp.json()
-            if omdb_data.get("Response") != "True" and "y" in omdb_params:
-                omdb_params.pop("y", None)
+            clean_first = re.sub(r"[^a-z0-9]", "", movie_name.lower())[:1] or "x"
+            imdb_sug_url = f"https://v3.sg.media-imdb.com/suggestion/{clean_first}/{quote(movie_name)}.json"
+            sug_resp = await run_async(
+                requests.get,
+                imdb_sug_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=6,
+            )
+            if sug_resp.status_code == 200:
+                sug_items = [
+                    x for x in (sug_resp.json().get("d") or [])
+                    if str(x.get("id", "")).startswith("tt")
+                ]
+                target_norm = re.sub(r"[^a-z0-9]+", " ", movie_name.lower()).strip()
+                best_sug = None
+                best_sug_score = -1
+                for x in sug_items:
+                    label_norm = re.sub(r"[^a-z0-9]+", " ", str(x.get("l") or "").lower()).strip()
+                    score = 0
+                    if label_norm == target_norm:
+                        score += 60
+                    elif target_norm and (target_norm in label_norm or label_norm in target_norm):
+                        score += 35
+                    else:
+                        t_words = set(target_norm.split())
+                        l_words = set(label_norm.split())
+                        if t_words and l_words:
+                            score += int(35 * len(t_words & l_words) / len(t_words))
+                    y_val = x.get("y")
+                    if movie_year and str(movie_year).isdigit() and y_val:
+                        diff = abs(int(movie_year) - int(y_val))
+                        if diff == 0:
+                            score += 30
+                        elif diff <= 2:
+                            score += 12
+                        elif diff > 3:
+                            score -= 60
+                    if x.get("i", {}).get("imageUrl"):
+                        score += 10
+                    if score > best_sug_score:
+                        best_sug_score = score
+                        best_sug = x
+                if best_sug and best_sug_score >= 30:
+                    if not result["imdb_id"]:
+                        result["imdb_id"] = best_sug.get("id")
+                    img_url = (best_sug.get("i") or {}).get("imageUrl")
+                    if img_url and not result["poster_url"]:
+                        result["poster_url"] = img_url
+                    if best_sug.get("s") and not result["cast"]:
+                        result["cast"] = best_sug["s"]
+                    if best_sug.get("y") and result["year"] == 0:
+                        result["year"] = int(best_sug["y"])
+                    _batch18_merge_source(result["evidence_sources"], "IMDb")
+                    result["source"] = result["source"] + "+IMDb" if result["source"] not in ("Default", "Filename/Caption") else "IMDb"
+                    logger.info(f"✅ Batch18 IMDb Suggestion found: {best_sug.get('l')} ({best_sug.get('id')})")
+        except Exception as e:
+            logger.warning(f"⚠️ Batch18 IMDb Suggestion failed: {e}")
+
+    # ─────────────────────────────────────────────
+    # SOURCE 1B: OMDb fallback (IMDb ID exact lookup first, then title)
+    # ─────────────────────────────────────────────
+    if (not result["poster_url"] or not result["plot"] or not result["cast"] or result["rating"] == "18+") and os.environ.get("OMDB_API_KEY"):
+        try:
+            omdb_data = {}
+            if result["imdb_id"]:
+                omdb_resp = await run_async(
+                    requests.get,
+                    "https://www.omdbapi.com/",
+                    params={"apikey": os.environ["OMDB_API_KEY"], "i": result["imdb_id"], "plot": "full"},
+                    timeout=8,
+                )
+                omdb_data = omdb_resp.json()
+            if omdb_data.get("Response") != "True":
+                omdb_params = {"apikey": os.environ["OMDB_API_KEY"], "t": movie_name, "plot": "full"}
+                if movie_year and str(movie_year).isdigit():
+                    omdb_params["y"] = str(movie_year)
                 omdb_resp = await run_async(requests.get, "https://www.omdbapi.com/", params=omdb_params, timeout=8)
                 omdb_data = omdb_resp.json()
+                if omdb_data.get("Response") != "True" and "y" in omdb_params:
+                    omdb_params.pop("y", None)
+                    omdb_resp = await run_async(requests.get, "https://www.omdbapi.com/", params=omdb_params, timeout=8)
+                    omdb_data = omdb_resp.json()
             if omdb_data.get("Response") == "True":
                 o_year = str(omdb_data.get("Year", ""))[:4]
                 year_ok = not (movie_year and str(movie_year).isdigit() and o_year.isdigit() and abs(int(movie_year) - int(o_year)) > 3)
@@ -14972,7 +15094,7 @@ async def fetch_adult_metadata_combo(
                     if omdb_data.get("Genre") not in (None, "", "N/A"):
                         result["genre"] = omdb_data["Genre"]
                     _batch18_merge_source(result["evidence_sources"], "OMDb")
-                    result["source"] = result["source"] + "+OMDb" if result["source"] != "Default" else "OMDb"
+                    result["source"] = result["source"] + "+OMDb" if result["source"] not in ("Default", "Filename/Caption") else "OMDb"
                     logger.info(f"✅ Batch18 OMDb found: {movie_name}")
         except Exception as e:
             logger.warning(f"⚠️ Batch18 OMDb failed: {e}")
@@ -15055,13 +15177,13 @@ async def fetch_adult_metadata_combo(
             pass
 
     # ─────────────────────────────────────────────
-    # SOURCE 3: DuckDuckGo Instant Answer (no key)
+    # SOURCE 3: DuckDuckGo Instant Answer (only if still missing poster AND no IMDb ID; fast timeout)
     # ─────────────────────────────────────────────
-    if not result["plot"] or not result["poster_url"]:
+    if not result["poster_url"] and not result["imdb_id"]:
         try:
-            ddg_query = quote(f"{movie_name} {movie_year} ullu altbalaji web series")
+            ddg_query = quote(f"{movie_name} {movie_year} web series")
             ddg_url = f"https://api.duckduckgo.com/?q={ddg_query}&format=json&no_html=1&skip_disambig=1"
-            ddg_resp = await run_async(requests.get, ddg_url, timeout=8,
+            ddg_resp = await run_async(requests.get, ddg_url, timeout=3,
                                        headers={"User-Agent": "Mozilla/5.0"})
             if ddg_resp.status_code == 200:
                 ddg_data = ddg_resp.json()
@@ -15229,6 +15351,40 @@ Respond ONLY in this exact JSON format (no markdown, no backticks):
 
         if not gemini_success:
             logger.warning(f"⚠️ All {len(api_keys)} Gemini keys exhausted for: {movie_name}")
+            # SOURCE 5B: Groq fast fallback when Gemini quota is exhausted
+            groq_keys = [k for k in [os.environ.get("GROQ_API_KEY"), os.environ.get("GROQ_API_KEY_1"), os.environ.get("GROQ_API_KEY_2")] if k]
+            for gk in groq_keys:
+                try:
+                    groq_resp = await run_async(
+                        requests.post,
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {gk}", "Content-Type": "application/json"},
+                        json={
+                            "model": "llama-3.3-70b-versatile",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.2,
+                            "max_tokens": 350,
+                        },
+                        timeout=10,
+                    )
+                    if groq_resp.status_code == 200:
+                        raw = groq_resp.json()["choices"][0]["message"]["content"].strip()
+                        raw = re.sub(r'```json\s*|```\s*', '', raw).strip()
+                        g_data = json.loads(raw)
+                        if not result["plot"] or len(result["plot"]) < 50:
+                            gp = g_data.get("plot", "")
+                            if gp and len(gp) > 20:
+                                result["plot"] = gp
+                        if not result["cast"] and g_data.get("cast"):
+                            result["cast"] = g_data["cast"]
+                        if (not result["genre"] or result["genre"] == "Adult, Romance, Drama") and g_data.get("genre"):
+                            result["genre"] = g_data["genre"]
+                        _batch18_merge_source(result["evidence_sources"], "Groq AI")
+                        result["source"] = result["source"] + "+Groq" if result["source"] not in ("Default", "Filename/Caption") else "Groq AI"
+                        logger.info(f"✅ Batch18 Groq fallback success for: {movie_name}")
+                        break
+                except Exception as ge:
+                    logger.warning(f"⚠️ Batch18 Groq fallback failed: {ge}")
 
     # ─────────────────────────────────────────────
     # FINAL: Default fallback values fill karo
@@ -15290,11 +15446,19 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quote=True
         )
 
-        # === BATCH18 EVIDENCE EXTRACTION ===
-        # Read the exact same file's caption and Telegram filename together.
-        # This stays inside batch18; other batch flows are not changed here.
+        # === BATCH18 EVIDENCE EXTRACTION (fast local-first to avoid 27s Gemini quota stalls) ===
         try:
-            ai_data = await process_file_with_evidence_engine(message)
+            evidence_bundle = await extract_same_file_evidence(message)
+            local_data = _local_evidence_fallback(
+                evidence_bundle.get("caption_evidence", {}),
+                evidence_bundle.get("filename_evidence", {}),
+                forward_source=evidence_bundle.get("forward_source"),
+            )
+            local_title = (local_data.get("title") or "").strip()
+            if local_title and local_title.upper() != "UNKNOWN" and len(local_title) >= 2:
+                ai_data = local_data
+            else:
+                ai_data = await process_file_with_evidence_engine(message)
             movie_name = ai_data.get("title", "UNKNOWN")
             movie_year = ai_data.get("year", "")
             movie_lang = ai_data.get("language", "Hindi") or "Hindi"
@@ -15305,8 +15469,7 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 movie_name, movie_year, raw_filename or "<none>", movie_extra or "<none>",
             )
 
-            # Batch18 always remains Adult; the reconciler supplies only identity
-            # fields such as clean title/year/language/season/part evidence.
+            # Batch18 always remains Adult
             gemini_category = "Adult"
             
         except Exception as e:
@@ -15477,22 +15640,30 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'language': movie_lang
             })
 
-            # Build success message
-            cast_display = f"\n👥 **Cast:** {cast_str}" if cast_str else ""
+            # Build safe HTML success message (avoids Markdown crashes on underscores/special chars)
+            safe_sources = html_escape(', '.join(evidence_sources) if evidence_sources else str(data_source or 'Filename'))
+            safe_identity = html_escape(str(identity_status or 'Unverified'))
+            safe_title_msg = html_escape(str(title or ''))
+            safe_genre_msg = html_escape(str(genre or 'Adult'))
+            safe_rating_msg = html_escape(str(rating or '18+'))
+            safe_cat_msg = html_escape(str(category or 'Adult'))
+            cast_display = f"\n👥 <b>Cast:</b> {html_escape(str(cast_str))}" if cast_str else ""
             poster_display = "✅ Found" if poster_url else "❌ Not Found"
-            
+            plot_preview = f"\n📝 <b>Plot:</b> {html_escape(str(plot)[:160])}" if plot else ""
+
             success_msg = (
-                f"✅ **18+ Metadata Ready**\n"
-                f"📡 **Sources:** {', '.join(evidence_sources) if evidence_sources else data_source}\n"
-                f"🧾 **Identity:** {identity_status}\n\n"
-                f"🎬 **Title:** `{title}`\n"
-                f"📅 **Year:** {year if year else 'N/A'}\n"
-                f"🎭 **Genre:** {genre}\n"
-                f"⭐️ **Rating:** {rating}\n"
-                f"🖼️ **Poster:** {poster_display}\n"
-                f"🏷️ **Category:** {category}\n"
-                f"{cast_display}\n"
-                f"🚀 **Ab files bhejein, phir `/done18` likhein.**"
+                f"✅ <b>18+ Metadata Ready</b>\n"
+                f"📡 <b>Sources:</b> {safe_sources}\n"
+                f"🧾 <b>Identity:</b> {safe_identity}\n\n"
+                f"🎬 <b>Title:</b> <code>{safe_title_msg}</code>\n"
+                f"📅 <b>Year:</b> {year if year else 'N/A'}\n"
+                f"🎭 <b>Genre:</b> {safe_genre_msg}\n"
+                f"⭐️ <b>Rating:</b> {safe_rating_msg}\n"
+                f"🖼️ <b>Poster:</b> {poster_display}\n"
+                f"🏷️ <b>Category:</b> {safe_cat_msg}"
+                f"{cast_display}"
+                f"{plot_preview}\n\n"
+                f"🚀 <b>Yeh pehli file save ho rahi hai — aur files bhejein, phir /done18 likhein.</b>"
             )
 
             # Build keyboard
@@ -15507,20 +15678,28 @@ async def batch18_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data="cancel_batch18"
             )])
 
-            await status_msg.edit_text(
-                success_msg, 
-                parse_mode='Markdown', 
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-
         except Exception as e:
             logger.error(f"❌ 18+ DB Error: {e}")
             if conn: conn.rollback()
             await status_msg.edit_text(f"❌ Database Error: {e}")
+            return
         finally:
             close_db_connection(conn)
-        
-        return  # First file processed, wait for more
+
+        try:
+            await status_msg.edit_text(
+                success_msg,
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as edit_err:
+            logger.warning(f"⚠️ Batch18 status edit failed: {edit_err}")
+            await status_msg.edit_text(
+                f"✅ 18+ Metadata Ready: {title} ({year or 'N/A'}). Saving first file...",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        # Continue into Phase 2 so the FIRST file is also backed up & saved to movie_files!
 
     # === PHASE 2: SUBSEQUENT FILES ===
     upload_status = await message.reply_text(
@@ -15722,9 +15901,12 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         photo_to_send = DEFAULT_POSTER
 
-    # Build caption
-    safe_title = movie_title.replace('<', '').replace('>', '')
-    unicode_title = get_safe_font(safe_title)
+    # Build caption (properly HTML-escaped so &/<> never break Telegram HTML)
+    safe_title = html_escape(str(movie_title or 'Unknown'))
+    unicode_title = html_escape(get_safe_font(str(movie_title or 'Unknown')))
+    safe_genre = html_escape(str(genre or 'Romance, Drama'))
+    safe_lang = html_escape(str(language or 'Hindi'))
+    safe_res = html_escape(str(dynamic_res))
     
     style_choice = random.choice([1, 2])
     
@@ -15732,9 +15914,9 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption = (
             f"🔞 <b>{safe_title}</b>\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"✨ <b>Genre:</b> {genre or 'Romance, Drama'}\n"
-            f"🔊 <b>Language:</b> {language or 'Hindi'}\n"
-            f"💿 <b>Quality:</b> V2 HQ-HDTC {dynamic_res}\n"
+            f"✨ <b>Genre:</b> {safe_genre}\n"
+            f"🔊 <b>Language:</b> {safe_lang}\n"
+            f"💿 <b>Quality:</b> V2 HQ-HDTC {safe_res}\n"
             f"➖➖➖➖➖➖➖➖➖➖\n"
             f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
             f"👇 <b>Download Below</b> 👇"
@@ -15742,9 +15924,9 @@ async def batch18_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         caption = (
             f"🔥 <b>{unicode_title}</b>\n"
-            f" ├ ✨ Genre: {genre or 'Romance, Drama'}\n"
-            f" ├ 🔊 Language: {language or 'Hindi'}\n"
-            f" └ 💿 Quality: V2 HQ-HDTC {dynamic_res}\n"
+            f" ├ ✨ Genre: {safe_genre}\n"
+            f" ├ 🔊 Language: {safe_lang}\n"
+            f" └ 💿 Quality: V2 HQ-HDTC {safe_res}\n"
             f"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
             f"<b>Update Channel:</b> <a href='https://t.me/FlimfyBoxBackUp'>Join BackUp</a>\n"
             f"👇 <b>Download Below</b> 👇"
@@ -19189,9 +19371,9 @@ def register_handlers(application: Application):
     application.add_handler(CommandHandler("cancel18", batch18_cancel))
 
     
-    # ✅ FIX: group=1 जोड़ा गया ताकि यह दूसरे फाइल्स को ब्लॉक न करे
+    # ✅ FIX: group=1 — Accept both forwarded AND direct document/video uploads when /batch18 is active
     application.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.FORWARDED & ~broadcast_caption_filter,
+        filters.ChatType.PRIVATE & (filters.Document.ALL | filters.VIDEO) & ~broadcast_caption_filter,
         batch18_listener,
     ), group=1)
     

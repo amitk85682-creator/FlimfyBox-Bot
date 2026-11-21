@@ -748,6 +748,15 @@ def _migration_20(conn):
         """)
 
 
+def _migration_21(conn):
+    """Enable RLS across all audited public tables and revoke direct anon/authenticated grants."""
+    from services.rls_audit import build_rls_remediation_statements
+
+    with conn.cursor() as cur:
+        for statement in build_rls_remediation_statements():
+            cur.execute(statement)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -769,6 +778,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (18, _migration_18),
     (19, _migration_19),
     (20, _migration_20),
+    (21, _migration_21),
 )
 
 

@@ -3,8 +3,32 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
+
+import { sendApiError, sendApiSuccess } from './src/contracts.ts';
+import {
+  fetchCatalogMovieFromDb,
+  fetchCatalogPageFromDb,
+  fetchGlobalChatFromDb,
+  getActiveDataMode,
+  getDatabaseStatus,
+  insertGlobalChatInDb,
+  isDatabaseActive,
+  persistDownloadTokenInDb,
+  verifyDatabaseConnection,
+  verifyMovieAndFileInDb,
+} from './src/db.ts';
+import { attachRequestContext, logEvent } from './src/logger.ts';
+import {
+  buildAllowedOrigins,
+  createRateLimiter,
+  isOriginAllowed,
+  requireMutationIdentity,
+  resolveIdentityFromRequest,
+  securityHeadersMiddleware,
+} from './src/security.ts';
+import { relayGlobalChatToTelegram } from './src/telegramRelay.ts';
 
 import { CATALOG_MOVIES, UPCOMING_TITLES } from './src/catalog.ts';
 import type { CatalogMovie } from './src/catalog.ts';
@@ -87,10 +111,54 @@ function setCached<T>(key: string, value: T, ttlMs: number): void {
 }
 
 const app = express();
-app.use(cors());
+app.set('trust proxy', 1);
+
+const allowedOrigins = buildAllowedOrigins();
+app.use(attachRequestContext);
+app.use(securityHeadersMiddleware);
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (isOriginAllowed(origin, undefined, allowedOrigins)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Origin not allowed by CORS'));
+      }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'X-Telegram-Init-Data', 'X-Guest-Token', 'X-Request-Id'],
+  }),
+);
 app.use(express.json({ limit: '1mb' }));
 
+const apiRateLimiter = createRateLimiter({
+  bucketName: 'api_read',
+  windowMs: 60_000,
+  maxRequests: 120,
+});
+const writeRateLimiter = createRateLimiter({
+  bucketName: 'api_write',
+  windowMs: 60_000,
+  maxRequests: 30,
+});
+const chatAndLinkRateLimiter = createRateLimiter({
+  bucketName: 'api_chat_link',
+  windowMs: 60_000,
+  maxRequests: 15,
+});
+
+app.use('/api/', apiRateLimiter);
+app.use('/api/', (req: Request, res: Response, next: NextFunction) => {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') {
+    writeRateLimiter(req, res, next);
+    return;
+  }
+  next();
+});
+
 // Static assets from /static and local vendor GSAP bundle
+app.use('/static/vendor/gsap', express.static(path.join(__dirname, 'static', 'vendor', 'gsap')));
 app.use('/static/vendor/gsap', express.static(path.join(__dirname, 'node_modules', 'gsap', 'dist')));
 app.use('/static', express.static(path.join(__dirname, 'static')));
 
@@ -130,67 +198,8 @@ function renderMiniAppHtml(): string {
   return html;
 }
 
-function verifyTelegramInitData(initData: string): AppUser | null {
-  if (!initData || !TELEGRAM_BOT_TOKEN) return null;
-  const params = new URLSearchParams(initData);
-  const receivedHash = params.get('hash') || '';
-  const authDateRaw = params.get('auth_date') || '';
-  const authDate = Number(authDateRaw);
-  const maxAge = Number(process.env.TELEGRAM_AUTH_MAX_AGE_SECONDS || '86400');
-  if (!receivedHash || !Number.isFinite(authDate) || maxAge <= 0) return null;
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (authDate > nowSec + 60 || nowSec - authDate > maxAge) return null;
-
-  params.delete('hash');
-  const entries = [...params.entries()].sort(([a], [b]) => a.localeCompare(b));
-  const dataCheckString = entries.map(([k, v]) => `${k}=${v}`).join('\n');
-  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(TELEGRAM_BOT_TOKEN).digest();
-  const expectedHash = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
-  const expectedBuf = Buffer.from(expectedHash, 'hex');
-  const receivedBuf = Buffer.from(receivedHash, 'hex');
-  if (expectedBuf.length !== receivedBuf.length || !crypto.timingSafeEqual(expectedBuf, receivedBuf)) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(params.get('user') || '{}') as Record<string, unknown>;
-    const id = Number(parsed.id);
-    if (!Number.isFinite(id) || id <= 0) return null;
-    return {
-      id,
-      username: String(parsed.username || ''),
-      first_name: String(parsed.first_name || 'Member'),
-      photo_url: typeof parsed.photo_url === 'string' ? parsed.photo_url : '',
-      is_guest: false,
-    };
-  } catch {
-    return null;
-  }
-}
-
 function resolveUserFromRequest(req: Request): AppUser {
-  const initData = String(req.header('X-Telegram-Init-Data') || '');
-  const tgUser = verifyTelegramInitData(initData);
-  if (tgUser) return tgUser;
-
-  const guestToken = String(req.header('X-Guest-Token') || '').trim();
-  if (/^[A-Za-z0-9_-]{16,128}$/.test(guestToken)) {
-    const digest = crypto.createHash('sha256').update(guestToken).digest();
-    const numeric = Number(digest.readBigUInt64BE(0) & BigInt(0x7fffffff));
-    return {
-      id: -(Math.max(1, numeric)),
-      username: 'guest',
-      first_name: 'You',
-      photo_url: '',
-      is_guest: true,
-    };
-  }
-  return {
-    id: 1001,
-    username: 'preview_user',
-    first_name: 'You',
-    photo_url: '',
-    is_guest: true,
-  };
+  return resolveIdentityFromRequest(req, TELEGRAM_BOT_TOKEN);
 }
 
 function serializeMovieCard(movie: CatalogMovie) {
@@ -336,12 +345,35 @@ async function fetchJsonSafe(url: string, timeoutMs = 2500): Promise<Record<stri
 
 // ---------- Page & Health Routes ----------
 
+const serverStartedAtMs = Date.now();
+
 app.get('/healthz', (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store');
+  const db = getDatabaseStatus();
   res.json({
     status: 'ok',
     service: 'flimfybox-miniapp',
     revision: process.env.RENDER_GIT_COMMIT || 'local',
+    data_mode: db.data_mode,
+    database: {
+      configured: db.configured,
+      connected: db.connected,
+    },
+    uptime_seconds: Number(((Date.now() - serverStartedAtMs) / 1000).toFixed(2)),
+  });
+});
+
+app.get('/readyz', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const db = getDatabaseStatus();
+  const ready = db.data_mode === 'demo' || db.connected;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'not_ready',
+    data_mode: db.data_mode,
+    database: {
+      configured: db.configured,
+      connected: db.connected,
+    },
   });
 });
 
@@ -460,7 +492,8 @@ app.get('/api/home/daily-checkin', (req: Request, res: Response) => {
 });
 
 app.post('/api/home/daily-checkin', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const todayIso = getIndiaDateString();
   res.json(computeDailyCheckinPayload(user.id, todayIso, true));
 });
@@ -630,7 +663,8 @@ app.get('/api/upcoming/reminder', (req: Request, res: Response) => {
 });
 
 app.post('/api/upcoming/reminder', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const body = (req.body || {}) as Record<string, unknown>;
   const rawTmdbId = String(body.tmdb_id || body.id || '').replace(/^tmdb_/, '').trim();
   const action = String(body.action || 'set').toLowerCase();
@@ -865,50 +899,83 @@ app.get('/api/browse/surprise', (req: Request, res: Response) => {
 
 // ---------- Catalogue Pagination & Movie Details ----------
 
-app.get('/api/movies', (req: Request, res: Response) => {
-  const page = Number(req.query.page ?? 1);
-  const limit = Number(req.query.limit ?? 40);
-  const availability = String(req.query.availability || 'all').trim().toLowerCase();
+app.get('/api/movies', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const page = Number(req.query.page ?? 1);
+    const limit = Number(req.query.limit ?? 40);
+    const availability = String(req.query.availability || 'all').trim().toLowerCase();
 
-  if (!Number.isInteger(page) || !Number.isInteger(limit) || page < 1 || limit < 1 || limit > 100) {
-    res.status(400).json({ status: 'error', message: 'Page must be positive and limit must be between 1 and 100.' });
-    return;
+    if (!Number.isInteger(page) || !Number.isInteger(limit) || page < 1 || limit < 1 || limit > 100) {
+      sendApiError(res, 400, 'INVALID_PAGINATION', 'Page must be positive and limit must be between 1 and 100.');
+      return;
+    }
+    if (!['all', 'available', 'request'].includes(availability)) {
+      sendApiError(res, 400, 'INVALID_AVAILABILITY', 'Availability must be all, available, or request.');
+      return;
+    }
+
+    if (isDatabaseActive()) {
+      const dbAvailability = availability === 'request' ? 'unavailable' : availability;
+      const dbPage = await fetchCatalogPageFromDb({
+        page,
+        limit,
+        availability: dbAvailability,
+      });
+      if (dbPage) {
+        const offset = (page - 1) * limit;
+        sendApiSuccess(res, {
+          movies: dbPage.movies.map(serializeMovieCard),
+          has_more: offset + limit < dbPage.total,
+          data_mode: 'production',
+        });
+        return;
+      }
+    }
+
+    const filtered = CATALOG_MOVIES
+      .filter((movie) => {
+        if (availability === 'available') return movie.is_available;
+        if (availability === 'request') return !movie.is_available;
+        return true;
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
+
+    const offset = (page - 1) * limit;
+    const slice = filtered.slice(offset, offset + limit).map(serializeMovieCard);
+
+    sendApiSuccess(res, {
+      movies: slice,
+      has_more: offset + limit < filtered.length,
+      data_mode: getActiveDataMode(),
+    });
+  } catch (err) {
+    next(err);
   }
-  if (!['all', 'available', 'request'].includes(availability)) {
-    res.status(400).json({ status: 'error', message: 'Availability must be all, available, or request.' });
-    return;
-  }
-
-  const filtered = CATALOG_MOVIES
-    .filter((movie) => {
-      if (availability === 'available') return movie.is_available;
-      if (availability === 'request') return !movie.is_available;
-      return true;
-    })
-    .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
-
-  const offset = (page - 1) * limit;
-  const slice = filtered.slice(offset, offset + limit).map(serializeMovieCard);
-
-  res.json({
-    status: 'success',
-    movies: slice,
-    has_more: offset + limit < filtered.length,
-  });
 });
 
-app.get('/api/movie/:movieId', (req: Request, res: Response) => {
-  const movieId = Number(req.params.movieId);
-  if (!Number.isInteger(movieId) || movieId <= 0) {
-    res.status(404).json({ status: 'error', message: 'Movie not found' });
-    return;
+app.get('/api/movie/:movieId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const movieId = Number(req.params.movieId);
+    if (!Number.isInteger(movieId) || movieId <= 0) {
+      sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
+      return;
+    }
+    if (isDatabaseActive()) {
+      const dbMovie = await fetchCatalogMovieFromDb(movieId);
+      if (dbMovie) {
+        sendApiSuccess(res, { movie: serializeMovieDetail(dbMovie), data_mode: 'production' });
+        return;
+      }
+    }
+    const movie = getMovieById(movieId);
+    if (!movie) {
+      sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
+      return;
+    }
+    sendApiSuccess(res, { movie: serializeMovieDetail(movie), data_mode: getActiveDataMode() });
+  } catch (err) {
+    next(err);
   }
-  const movie = getMovieById(movieId);
-  if (!movie) {
-    res.status(404).json({ status: 'error', message: 'Movie not found' });
-    return;
-  }
-  res.json({ status: 'success', movie: serializeMovieDetail(movie) });
 });
 
 // ---------- Ratings, Rating Sources & Reviews ----------
@@ -937,22 +1004,23 @@ app.get('/api/movie/:movieId/rating', (req: Request, res: Response) => {
 });
 
 app.post('/api/movie/:movieId/rating', (req: Request, res: Response) => {
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const movieId = Number(req.params.movieId);
   const movie = getMovieById(movieId);
   if (!movie) {
-    res.status(404).json({ status: 'error', message: 'Movie not found' });
+    sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
     return;
   }
   if (movie.is_unreleased) {
-    res.status(409).json({ status: 'error', message: 'Ratings open after release.' });
+    sendApiError(res, 409, 'RATINGS_LOCKED', 'Ratings open after release.');
     return;
   }
   const rating = (req.body as Record<string, unknown>)?.rating;
   if (typeof rating !== 'number' || !Number.isInteger(rating) || rating < 1 || rating > 5) {
-    res.status(400).json({ status: 'error', message: 'Rating must be an integer from 1 to 5.' });
+    sendApiError(res, 400, 'INVALID_RATING', 'Rating must be an integer from 1 to 5.');
     return;
   }
-  const user = resolveUserFromRequest(req);
   let movieRatings = ratingsByMovie.get(movieId);
   if (!movieRatings) {
     movieRatings = new Map();
@@ -997,19 +1065,21 @@ app.get('/api/movie/:movieId/reviews', (req: Request, res: Response) => {
 });
 
 app.post('/api/movie/:movieId/reviews', (req: Request, res: Response) => {
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const movieId = Number(req.params.movieId);
   const movie = getMovieById(movieId);
   if (!movie) {
-    res.status(404).json({ status: 'error', message: 'Movie not found' });
+    sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
     return;
   }
   if (movie.is_unreleased) {
-    res.status(409).json({ status: 'error', message: 'Reviews open after release.' });
+    sendApiError(res, 409, 'REVIEWS_LOCKED', 'Reviews open after release.');
     return;
   }
   const rawReview = (req.body as Record<string, unknown>)?.review;
   if (typeof rawReview !== 'string') {
-    res.status(400).json({ status: 'error', message: 'Write a review between 20 and 800 characters.' });
+    sendApiError(res, 400, 'INVALID_REVIEW', 'Write a review between 20 and 800 characters.');
     return;
   }
   const review = rawReview
@@ -1021,11 +1091,10 @@ app.post('/api/movie/:movieId/reviews', (req: Request, res: Response) => {
     .trim();
 
   if (review.length < 20 || review.length > 800) {
-    res.status(400).json({ status: 'error', message: 'Write a review between 20 and 800 characters.' });
+    sendApiError(res, 400, 'INVALID_REVIEW', 'Write a review between 20 and 800 characters.');
     return;
   }
 
-  const user = resolveUserFromRequest(req);
   let list = reviewsByMovie.get(movieId);
   if (!list) {
     list = [];
@@ -1376,7 +1445,8 @@ app.post('/api/request', async (req: Request, res: Response) => {
     return;
   }
 
-  const user = resolveUserFromRequest(req);
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const existing = movieRequests.find(
     (item) => item.user_id === user.id && item.title.toLowerCase() === title.toLowerCase()
   );
@@ -1486,15 +1556,16 @@ app.get('/api/my-list', (req: Request, res: Response) => {
 });
 
 app.post('/api/my-list', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const movieId = Number((req.body as Record<string, unknown>)?.movie_id);
   if (!Number.isInteger(movieId) || movieId <= 0) {
-    res.status(400).json({ status: 'error', message: 'Invalid movie' });
+    sendApiError(res, 400, 'INVALID_MOVIE', 'Invalid movie');
     return;
   }
   const movie = getMovieById(movieId);
   if (!movie) {
-    res.status(404).json({ status: 'error', message: 'Movie not found' });
+    sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
     return;
   }
   const list = getUserWatchlist(user.id);
@@ -1517,7 +1588,8 @@ app.get('/api/my-list/:movieId/status', (req: Request, res: Response) => {
 });
 
 app.delete('/api/my-list/:movieId', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const movieId = Number(req.params.movieId);
   const list = getUserWatchlist(user.id);
   list.delete(movieId);
@@ -1543,7 +1615,8 @@ app.get('/api/my-list/:movieId/availability-notification', (req: Request, res: R
 });
 
 app.post('/api/my-list/:movieId/availability-notification', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
+  const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+  if (!user) return;
   const movieId = Number(req.params.movieId);
   const movie = getMovieById(movieId);
   if (!movie) {
@@ -1593,111 +1666,177 @@ app.post('/api/my-list/:movieId/availability-notification', (req: Request, res: 
   });
 });
 
-// ---------- Global Community Chat ----------
+// ---------- Global Community Chat (PostgreSQL + Real Telegram Relay) ----------
 
-app.get('/api/global-chat', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
-  const afterIdParam = req.query.after_id;
-  const afterId = afterIdParam !== undefined ? Number(afterIdParam) : null;
+app.get('/api/global-chat', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const user = resolveUserFromRequest(req);
+    const afterIdParam = req.query.after_id;
+    const afterId = afterIdParam !== undefined ? Number(afterIdParam) : null;
 
-  const filtered =
-    afterId !== null && Number.isFinite(afterId) && afterId >= 0
-      ? globalChatMessages.filter((msg) => msg.id > afterId).slice(0, 100)
-      : globalChatMessages.slice(-80);
+    if (isDatabaseActive()) {
+      const dbMessages = await fetchGlobalChatFromDb(afterId);
+      if (dbMessages) {
+        const messages = dbMessages.map((msg) => ({
+          id: msg.id,
+          is_mine: user.id !== 0 && msg.user_id === user.id,
+          username: msg.username,
+          first_name: msg.first_name || 'Community member',
+          message: msg.message,
+          created_at: msg.created_at,
+          source: msg.source,
+          client_id: msg.client_id,
+          relay_status: msg.relay_status,
+          photo_url: msg.photo_url,
+        }));
+        const relayUpdates = dbMessages
+          .filter((msg) => user.id !== 0 && msg.user_id === user.id)
+          .slice(-50)
+          .map((msg) => ({ id: msg.id, relay_status: msg.relay_status }));
+        sendApiSuccess(res, { messages, relay_updates: relayUpdates, data_mode: 'production' });
+        return;
+      }
+    }
 
-  const messages = filtered.map((msg) => ({
-    id: msg.id,
-    is_mine: msg.user_id === user.id,
-    username: msg.username,
-    first_name: msg.first_name || 'Community member',
-    message: msg.message,
-    created_at: msg.created_at,
-    source: msg.source,
-    client_id: msg.client_id,
-    relay_status: msg.relay_status,
-    photo_url: msg.photo_url,
-  }));
+    const filtered =
+      afterId !== null && Number.isFinite(afterId) && afterId >= 0
+        ? globalChatMessages.filter((msg) => msg.id > afterId).slice(0, 100)
+        : globalChatMessages.slice(-80);
 
-  const relayUpdates = globalChatMessages
-    .filter((msg) => msg.user_id === user.id)
-    .slice(-50)
-    .map((msg) => ({ id: msg.id, relay_status: msg.relay_status }));
+    const messages = filtered.map((msg) => ({
+      id: msg.id,
+      is_mine: user.id !== 0 && msg.user_id === user.id,
+      username: msg.username,
+      first_name: msg.first_name || 'Community member',
+      message: msg.message,
+      created_at: msg.created_at,
+      source: msg.source,
+      client_id: msg.client_id,
+      relay_status: msg.relay_status,
+      photo_url: msg.photo_url,
+    }));
 
-  res.json({ status: 'success', messages, relay_updates: relayUpdates });
+    const relayUpdates = globalChatMessages
+      .filter((msg) => user.id !== 0 && msg.user_id === user.id)
+      .slice(-50)
+      .map((msg) => ({ id: msg.id, relay_status: msg.relay_status }));
+
+    sendApiSuccess(res, { messages, relay_updates: relayUpdates, data_mode: getActiveDataMode() });
+  } catch (err) {
+    next(err);
+  }
 });
 
-app.post('/api/global-chat', (req: Request, res: Response) => {
-  const user = resolveUserFromRequest(req);
-  const body = (req.body || {}) as Record<string, unknown>;
-  const message = String(body.message || '').trim();
-  const clientId = String(body.client_id || '').trim();
+app.post('/api/global-chat', chatAndLinkRateLimiter, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const user = requireMutationIdentity(req, res, TELEGRAM_BOT_TOKEN);
+    if (!user) return;
+    const body = (req.body || {}) as Record<string, unknown>;
+    const message = String(body.message || '').trim();
+    const clientId = String(body.client_id || '').trim();
 
-  if (!message || message.length > 3800) {
-    res.status(400).json({ status: 'error', message: 'Message must be between 1 and 3800 characters.' });
-    return;
-  }
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId)) {
-    res.status(400).json({ status: 'error', message: 'Invalid message id. Please retry.' });
-    return;
-  }
-
-  const duplicate = globalChatMessages.find((m) => m.user_id === user.id && m.client_id === clientId);
-  if (duplicate) {
-    if (duplicate.message !== message) {
-      res.status(409).json({ status: 'error', message: 'Message retry did not match.' });
+    if (!message || message.length > 3800) {
+      sendApiError(res, 400, 'INVALID_MESSAGE', 'Message must be between 1 and 3800 characters.');
       return;
     }
-    res.json({
-      status: 'success',
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientId)) {
+      sendApiError(res, 400, 'INVALID_CLIENT_ID', 'Invalid message id. Please retry.');
+      return;
+    }
+
+    const relay = await relayGlobalChatToTelegram(user, message, String(res.locals.requestId || ''));
+
+    if (isDatabaseActive()) {
+      const saved = await insertGlobalChatInDb({
+        user,
+        message,
+        clientId,
+        relayStatus: relay.relay_status,
+        telegramChatId: relay.telegram_chat_id,
+        telegramMessageId: relay.telegram_message_id,
+      });
+      if (saved) {
+        sendApiSuccess(res, {
+          message: {
+            id: saved.id,
+            is_mine: true,
+            username: saved.username,
+            first_name: saved.first_name,
+            message: saved.message,
+            photo_url: saved.photo_url,
+            created_at: saved.created_at,
+            source: saved.source,
+            client_id: saved.client_id,
+            relay_status: saved.relay_status,
+          },
+          telegram_relayed: relay.relayed,
+          data_mode: 'production',
+        });
+        return;
+      }
+    }
+
+    const duplicate = globalChatMessages.find((m) => m.user_id === user.id && m.client_id === clientId);
+    if (duplicate) {
+      if (duplicate.message !== message) {
+        sendApiError(res, 409, 'CLIENT_ID_CONFLICT', 'Message retry did not match.');
+        return;
+      }
+      sendApiSuccess(res, {
+        message: {
+          id: duplicate.id,
+          is_mine: true,
+          username: duplicate.username,
+          first_name: duplicate.first_name,
+          message: duplicate.message,
+          photo_url: duplicate.photo_url,
+          created_at: duplicate.created_at,
+          source: duplicate.source,
+          client_id: duplicate.client_id,
+          relay_status: duplicate.relay_status,
+        },
+        telegram_relayed: relay.relayed,
+      });
+      return;
+    }
+
+    const entry = {
+      id: allocateChatId(),
+      user_id: user.id,
+      username: user.username || '',
+      first_name: user.first_name || 'Guest',
+      message,
+      created_at: new Date().toISOString(),
+      source: 'miniapp' as const,
+      client_id: clientId,
+      relay_status: relay.relay_status,
+      photo_url: user.photo_url || '',
+    };
+    globalChatMessages.push(entry);
+    if (globalChatMessages.length > 200) globalChatMessages.shift();
+
+    sendApiSuccess(res, {
       message: {
-        id: duplicate.id,
+        id: entry.id,
         is_mine: true,
-        username: duplicate.username,
-        first_name: duplicate.first_name,
-        message: duplicate.message,
-        photo_url: duplicate.photo_url,
-        created_at: duplicate.created_at,
-        source: duplicate.source,
-        client_id: duplicate.client_id,
-        relay_status: duplicate.relay_status,
+        username: entry.username,
+        first_name: entry.first_name,
+        message: entry.message,
+        photo_url: entry.photo_url,
+        created_at: entry.created_at,
+        source: entry.source,
+        client_id: entry.client_id,
+        relay_status: entry.relay_status,
       },
+      telegram_relayed: relay.relayed,
+      data_mode: getActiveDataMode(),
     });
-    return;
+  } catch (err) {
+    next(err);
   }
-
-  const entry = {
-    id: allocateChatId(),
-    user_id: user.id,
-    username: user.username || '',
-    first_name: user.first_name || 'You',
-    message,
-    created_at: new Date().toISOString(),
-    source: 'miniapp' as const,
-    client_id: clientId,
-    relay_status: 'sent' as const,
-    photo_url: user.photo_url || '',
-  };
-  globalChatMessages.push(entry);
-  if (globalChatMessages.length > 200) globalChatMessages.shift();
-
-  res.json({
-    status: 'success',
-    message: {
-      id: entry.id,
-      is_mine: true,
-      username: entry.username,
-      first_name: entry.first_name,
-      message: entry.message,
-      photo_url: entry.photo_url,
-      created_at: entry.created_at,
-      source: entry.source,
-      client_id: entry.client_id,
-      relay_status: entry.relay_status,
-    },
-  });
 });
 
-// ---------- External IDs & Secure Watch Links ----------
+// ---------- External IDs & Unified Python/Node Secure Watch Links ----------
 
 app.get('/api/imdb_id/:tmdbId', async (req: Request, res: Response) => {
   const tmdbId = Number(req.params.tmdbId);
@@ -1717,7 +1856,7 @@ app.get('/api/imdb_id/:tmdbId', async (req: Request, res: Response) => {
       }
     }
   }
-  res.status(404).json({ status: 'error', message: 'No IMDB ID found' });
+  sendApiError(res, 404, 'IMDB_NOT_FOUND', 'No IMDB ID found');
 });
 
 function renderSecureWatchHtml(movieId: number, movieFileId: number | null): string {
@@ -1729,32 +1868,63 @@ function renderSecureWatchHtml(movieId: number, movieFileId: number | null): str
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FlimfyBox - Verifying Secure Connection...</title>
   <style>
-    body { background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; margin: 0; text-align: center; padding: 24px; }
-    .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
+    body { background: #06070b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; margin: 0; text-align: center; padding: 24px; }
+    .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #8b5cf6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    a { color: #fb7185; margin-top: 16px; }
+    a { color: #a78bfa; margin-top: 16px; }
+    .cta { display: inline-block; padding: 10px 18px; background: #8b5cf6; color: #fff; border-radius: 8px; text-decoration: none; margin: 12px; }
   </style>
 </head>
 <body>
-  <div class="loader"></div>
-  <h3>Securely verifying your connection...</h3>
-  <p style="color: #a1a1aa; font-size: 13px;">Preparing your Telegram link for FlimfyBox.</p>
-  <a href="/webapp?movie=${movieId}">Return to FlimfyBox</a>
+  <div id="watchRoot">
+    <div class="loader"></div>
+    <h3>Securely verifying your connection...</h3>
+    <p style="color: #a1a1aa; font-size: 13px;">Preparing your Telegram link for FlimfyBox.</p>
+    <a href="/webapp?movie=${movieId}">Return to FlimfyBox</a>
+  </div>
   <script>
+    function renderState(headingText, bodyText, telegramUrl) {
+      const root = document.getElementById('watchRoot');
+      root.replaceChildren();
+      const h3 = document.createElement('h3');
+      h3.textContent = headingText;
+      root.appendChild(h3);
+      if (bodyText) {
+        const p = document.createElement('p');
+        p.style.color = '#a1a1aa';
+        p.style.fontSize = '13px';
+        p.textContent = bodyText;
+        root.appendChild(p);
+      }
+      if (typeof telegramUrl === 'string' && telegramUrl.startsWith('https://t.me/')) {
+        const cta = document.createElement('a');
+        cta.className = 'cta';
+        cta.href = telegramUrl;
+        cta.rel = 'noopener noreferrer';
+        cta.textContent = 'Open in Telegram';
+        root.appendChild(cta);
+        root.appendChild(document.createElement('br'));
+      }
+      const back = document.createElement('a');
+      back.href = '/webapp?movie=${movieId}';
+      back.textContent = 'Back to FlimfyBox';
+      root.appendChild(back);
+    }
+
     setTimeout(() => {
       fetch(${JSON.stringify(apiPath)}, { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-          if (data.url) {
-            document.body.innerHTML = '<h3>Link Ready</h3><p style="color:#a1a1aa;font-size:13px;">Open in Telegram or return to the catalogue.</p><a href="' + data.url + '" style="display:inline-block;padding:10px 18px;background:#f43f5e;color:#fff;border-radius:8px;text-decoration:none;margin:12px;">Open in Telegram</a><br><a href="/webapp?movie=${movieId}">Back to FlimfyBox</a>';
+        .then((r) => r.json())
+        .then((data) => {
+          if (data && typeof data.url === 'string' && data.url.startsWith('https://t.me/')) {
+            renderState('Link Ready', 'Open in Telegram or return to the catalogue.', data.url);
           } else {
-            document.body.innerHTML = '<h3>Link unavailable</h3><a href="/webapp?movie=${movieId}">Back to FlimfyBox</a>';
+            renderState('Link unavailable', 'Please try again from the catalogue.', null);
           }
         })
         .catch(() => {
-          document.body.innerHTML = '<h3>Connection failed</h3><a href="/webapp?movie=${movieId}">Back to FlimfyBox</a>';
+          renderState('Connection failed', 'Unable to reach the server right now.', null);
         });
-    }, 800);
+    }, 600);
   </script>
 </body>
 </html>`;
@@ -1763,7 +1933,7 @@ function renderSecureWatchHtml(movieId: number, movieFileId: number | null): str
 app.get('/watch/:movieId', (req: Request, res: Response) => {
   const movieId = Number(req.params.movieId);
   if (!Number.isInteger(movieId) || movieId <= 0) {
-    res.status(400).json({ status: 'error', message: 'Invalid movie or file' });
+    sendApiError(res, 400, 'INVALID_WATCH_TARGET', 'Invalid movie or file');
     return;
   }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -1774,42 +1944,103 @@ app.get('/watch/:movieId/file/:movieFileId', (req: Request, res: Response) => {
   const movieId = Number(req.params.movieId);
   const movieFileId = Number(req.params.movieFileId);
   if (!Number.isInteger(movieId) || movieId <= 0 || !Number.isInteger(movieFileId) || movieFileId <= 0) {
-    res.status(400).json({ status: 'error', message: 'Invalid movie or file' });
+    sendApiError(res, 400, 'INVALID_WATCH_TARGET', 'Invalid movie or file');
     return;
   }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(renderSecureWatchHtml(movieId, movieFileId));
 });
 
-function handleGenLink(req: Request, res: Response): void {
-  const movieId = Number(req.params.movieId);
-  const movieFileId = req.params.movieFileId !== undefined ? Number(req.params.movieFileId) : null;
-  if (!Number.isInteger(movieId) || movieId <= 0 || (movieFileId !== null && (!Number.isInteger(movieFileId) || movieFileId <= 0))) {
-    res.status(400).json({ status: 'error', message: 'Invalid movie or file' });
-    return;
-  }
-  const movie = getMovieById(movieId);
-  if (!movie) {
-    res.status(404).json({ status: 'error', message: 'Movie not found' });
-    return;
-  }
-  if (movieFileId !== null && !movie.files.some((f) => f.id === movieFileId)) {
-    res.status(404).json({ status: 'error', message: 'Selected file not found' });
-    return;
-  }
+async function handleGenLink(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const movieId = Number(req.params.movieId);
+    const movieFileId = req.params.movieFileId !== undefined ? Number(req.params.movieFileId) : null;
+    if (
+      !Number.isInteger(movieId) ||
+      movieId <= 0 ||
+      (movieFileId !== null && (!Number.isInteger(movieFileId) || movieFileId <= 0))
+    ) {
+      sendApiError(res, 400, 'INVALID_WATCH_TARGET', 'Invalid movie or file');
+      return;
+    }
 
-  const now = Date.now();
-  for (const [k, v] of tempLinks.entries()) {
-    if (now - v.created_at > 60_000) tempLinks.delete(k);
+    // P0: Unified PostgreSQL temp_links token storage shared with Python Telegram bot /start tmp_...
+    if (isDatabaseActive()) {
+      const dbCheck = await verifyMovieAndFileInDb(movieId, movieFileId);
+      if (dbCheck) {
+        if (!dbCheck.movieExists) {
+          sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
+          return;
+        }
+        if (!dbCheck.fileExists) {
+          sendApiError(res, 404, 'FILE_NOT_FOUND', 'Selected file not found');
+          return;
+        }
+        const persisted = await persistDownloadTokenInDb(movieId, movieFileId);
+        if (persisted) {
+          res.json({
+            status: 'success',
+            url: `https://t.me/${BOT_USERNAME}?start=${persisted.token}`,
+            storage: persisted.storage,
+            expires_in_seconds: persisted.expires_in_seconds,
+          });
+          return;
+        }
+      }
+    }
+
+    // Demo / offline fallback when DATABASE_URL is not connected
+    const movie = getMovieById(movieId);
+    if (!movie) {
+      sendApiError(res, 404, 'MOVIE_NOT_FOUND', 'Movie not found');
+      return;
+    }
+    if (movieFileId !== null && !movie.files.some((f) => f.id === movieFileId)) {
+      sendApiError(res, 404, 'FILE_NOT_FOUND', 'Selected file not found');
+      return;
+    }
+
+    const now = Date.now();
+    for (const [k, v] of tempLinks.entries()) {
+      if (now - v.created_at > 600_000) tempLinks.delete(k);
+    }
+    const token = `tmp_${crypto.randomBytes(8).toString('hex')}`;
+    tempLinks.set(token, { movie_id: movieId, movie_file_id: movieFileId, created_at: now });
+    res.json({
+      status: 'success',
+      url: `https://t.me/${BOT_USERNAME}?start=${token}`,
+      storage: 'memory',
+      expires_in_seconds: 600,
+    });
+  } catch (err) {
+    next(err);
   }
-  const token = `tmp_${crypto.randomBytes(6).toString('hex')}`;
-  tempLinks.set(token, { movie_id: movieId, movie_file_id: movieFileId, created_at: now });
-  res.json({ url: `https://t.me/${BOT_USERNAME}?start=${token}` });
 }
 
-app.post('/api/gen_link/:movieId', handleGenLink);
-app.post('/api/gen_link/:movieId/file/:movieFileId', handleGenLink);
+app.post('/api/gen_link/:movieId', chatAndLinkRateLimiter, handleGenLink);
+app.post('/api/gen_link/:movieId/file/:movieFileId', chatAndLinkRateLimiter, handleGenLink);
+
+// Global structured error handler (never leaks stack traces to clients)
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+  if (err.message === 'Origin not allowed by CORS') {
+    sendApiError(res, 403, 'CORS_ORIGIN_DENIED', 'Origin is not allowed.');
+    return;
+  }
+  logEvent('error', 'unhandled_http_error', {
+    request_id: res.locals.requestId,
+    method: req.method,
+    path: req.path,
+    error: err,
+  });
+  sendApiError(res, 500, 'INTERNAL_ERROR', 'Something went wrong while processing your request.');
+});
+
+void verifyDatabaseConnection();
 
 app.listen(PORT, HOST, () => {
-  console.log(`FlimfyBox server running on http://${HOST}:${PORT}`);
+  logEvent('info', 'server_started', {
+    host: HOST,
+    port: PORT,
+    data_mode: getActiveDataMode(),
+  });
 });

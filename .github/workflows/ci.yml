@@ -1,0 +1,76 @@
+name: FlimfyBox CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-quality:
+    name: Node.js Build, Lint & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Node dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript typecheck & lint
+        run: npm run lint && npm run build
+
+      - name: Run Node & Mini App test suite
+        run: |
+          npx tsx --test tests/backend_p0_p1_contracts.test.js
+          node --test tests/frontend_reliability.test.js tests/miniapp_detail_behaviors.test.js tests/miniapp_interactions.test.js tests/miniapp_rating_meter.test.js tests/miniapp_search_theme.test.js
+          node tests/test_trailer_playback.js
+
+  python-quality:
+    name: Python Compile & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+
+      - name: Syntax check all Python modules
+        run: |
+          python3 -m py_compile main.py webapp_routes.py catalog_identity.py db_migrations.py observability.py services/*.py
+
+      - name: Run Python unit tests
+        run: pytest -q tests/test_rls_and_batch18_services.py
+
+  secret-hygiene:
+    name: Secret & Config Hygiene Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ensure .env is never tracked in git
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "ERROR: .env file is committed to git!"
+            exit 1
+          fi
+          echo "OK: .env is not tracked."

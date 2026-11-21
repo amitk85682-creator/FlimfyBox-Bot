@@ -11,9 +11,11 @@
     "start": "node server.ts"
   },
   "dependencies": {
+    "@types/pg": "^8.23.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "gsap": "^3.15.1",
+    "pg": "^8.23.1",
     "tsx": "^4.19.3"
   },
   "devDependencies": {

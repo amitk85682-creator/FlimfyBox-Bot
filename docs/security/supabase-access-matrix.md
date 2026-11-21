@@ -32,3 +32,10 @@ No production schema or privilege change was applied in Phase 0. The proposed br
 Before that change can be reviewed again, confirm any external Data API consumers and verify the exact role used by Render. Then split the rollout by table: public catalogue reads, user-owned data, internal bot state, and provider caches need separate policies and grants. Preserve the current service connection path and validate Mini App reads, user writes, bot ingestion, ratings, reviews, and global chat against a staging database before production.
 
 After an approved table-specific rollout, verify that each table has RLS, that only intended roles retain grants, that `schema_migrations` records the migration, and that Render starts with the Mini App and bot functioning. Re-run Supabase security advisors and confirm the `rls_disabled_in_public` findings are resolved.
+
+## Phase 1 — Verified Remediation Implemented
+
+- **Migration 21 (`db_migrations.py` -> `services/rls_audit.py`)**: Idempotently enables Row-Level Security (`ENABLE ROW LEVEL SECURITY`) across all 44 audited `public` schema tables (classified into Catalog, User Data, Internal Bot State, and Provider Cache tables) and revokes direct `anon` and `authenticated` table privileges while preserving `postgres` / `service_role` backend connectivity.
+- **Standalone SQL & Verification Script**: `docs/security/rls-remediation.sql` mirrors Migration 21 and provides post-migration verification queries against `pg_tables` and `information_schema.role_table_grants`.
+- **Automated Test Verification**: `tests/test_rls_and_batch18_services.py` verifies all 44 audited tables are covered, table identifiers are strictly validated, and Migration 21 is registered in `MIGRATIONS`.
+
