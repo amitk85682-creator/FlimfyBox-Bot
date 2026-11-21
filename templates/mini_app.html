@@ -1,85 +1,87 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    {% set miniapp_asset_version = '20261107-detail-pool-priority-1' %}
+    {% set miniapp_asset_version = '20261120-detail-obsidian-1' %}
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#101113">
+    <meta name="theme-color" content="#06070b">
     <meta name="color-scheme" content="dark light">
     <title>FlimfyBox · Discover your next favorite</title>
+    <meta name="description" content="Discover movies, TV series, anime, curated daily picks, mood-based recommendations, community reviews, and watchlists in FlimfyBox.">
+    <meta property="og:title" content="FlimfyBox">
+    <meta property="og:description" content="Discover movies, TV series, anime, curated daily picks, mood-based recommendations, community reviews, and watchlists in FlimfyBox.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
     <script src="{{ url_for('static', filename='miniapp/ui-core.js') }}?v=availability-4"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='miniapp/cinema.css') }}?v={{ miniapp_asset_version }}">
 </head>
 <body class="cinema screen-home">
-    <aside class="desktop-sidebar" aria-label="Sidebar">
-        <button class="sidebar-brand" type="button" onclick="showHome()" aria-label="FlimfyBox home"><span class="brand-mark"><i class="fas fa-play"></i></span><span>Flimfy<span class="brand-accent">Box</span><small>A WORLD OF STORIES</small></span></button>
-        <span class="sidebar-label">DISCOVER</span>
-        <nav aria-label="Desktop navigation">
-            <button data-nav="0" class="active" onclick="showHome()"><i class="fas fa-house"></i>Home</button>
-            <button data-nav="1" onclick="showSearch()"><i class="fas fa-magnifying-glass"></i>Search</button>
-            <button data-nav="2" onclick="showExplore()"><i class="fas fa-compass"></i>Browse</button>
-            <button data-nav="3" onclick="showMyList()"><i class="far fa-bookmark"></i>My watchlist</button>
-        </nav>
-        <span class="sidebar-label">MORE TO EXPLORE</span>
-        <nav aria-label="Collections">
-            <button onclick="showTvSeries()"><i class="fas fa-tv"></i>TV series</button>
-            <button onclick="showUpcoming()"><i class="far fa-calendar"></i>Coming soon</button>
-            <button onclick="showGlobalChat()"><i class="far fa-comment"></i>Community</button>
-        </nav>
-        <div class="sidebar-note"><span class="note-icon">✦</span><strong>Your next favourite<br>is out there.</strong><p>A new story. A different world.<br>Find your kind of cinema.</p><button onclick="showExplore()">Find a story <span>↗</span></button></div>
-        <button class="sidebar-settings" onclick="showSettings()"><i class="fas fa-gear"></i> Preferences</button>
-    </aside>
     <section class="app-loading-screen" id="appLoadingScreen" aria-live="polite" aria-label="Loading FlimfyBox">
         <div class="app-loading-mark"><i class="fas fa-play"></i></div>
         <strong>FlimfyBox</strong>
-        <span>Curating your next watch<span class="loading-dots">...</span></span>
+        <span>Preparing your screening room<span class="loading-dots">...</span></span>
         <div class="app-loading-bar"><span></span></div>
     </section>
-    <header class="app-header" aria-label="FlimfyBox header">
-        <div class="brand-mark"><i class="fas fa-play"></i></div>
-        <div class="brand-copy"><div class="logo">FlimfyBox</div><span>YOUR NEXT WATCH</span></div>
-        <div class="header-page-title"><span id="pageTitle">Discover</span><small>Good stories start here.</small></div>
+
+    <header class="app-header" id="appHeader" aria-label="FlimfyBox navigation">
+        <button class="brand-wordmark" type="button" onclick="showHome()" aria-label="FlimfyBox home">Flimfy<span class="brand-accent">Box</span></button>
+        <span class="sr-only" id="pageTitle" aria-live="polite">Discover</span>
+
+        <nav class="header-nav" aria-label="Primary navigation">
+            <button type="button" data-nav="0" class="active" onclick="showHome()">Discover</button>
+            <button type="button" data-nav="2" onclick="showExplore()">Browse</button>
+            <button type="button" onclick="showUpcoming()">Coming soon</button>
+            <button type="button" data-nav="3" onclick="showMyList()">My list</button>
+            <button type="button" onclick="showGlobalChat()">Community</button>
+        </nav>
+
         <div class="header-tools">
-            <button class="header-action" type="button" aria-label="Appearance and settings" onclick="showSettings()"><i class="fas fa-circle-half-stroke"></i></button>
-            <button class="header-action" type="button" aria-label="Coming soon" onclick="showUpcoming()"><i class="far fa-calendar"></i></button>
-            <button class="header-action header-profile" type="button" aria-label="My list" onclick="showMyList()"><i class="far fa-bookmark"></i></button>
-            <button class="header-more" type="button" aria-label="More options" onclick="openMorePanel()"><i class="fas fa-ellipsis-vertical"></i></button>
+            <button class="header-search-cta" type="button" id="desktopSearchTrigger" onclick="toggleDesktopSearch()" aria-label="Search movies and series">
+                <i class="fas fa-magnifying-glass" aria-hidden="true"></i>
+                <span>Search</span>
+            </button>
+            <button class="header-action header-mobile-action" type="button" aria-label="Appearance and settings" onclick="showSettings()"><i class="fas fa-circle-half-stroke"></i></button>
+            <button class="header-action header-mobile-action" type="button" aria-label="More options" onclick="openMorePanel()"><i class="fas fa-ellipsis-vertical"></i></button>
         </div>
     </header>
-    <div class="search-section">
+
+    <div class="search-section" id="searchSection">
         <div class="search-box">
             <button class="search-icon-button" type="button" onclick="triggerSearchAgain()" aria-label="Search"><i class="fas fa-search"></i></button>
-            <input type="search" id="searchInput" placeholder="Search movies & series" aria-label="Search movies and series" autocomplete="off" enterkeyhint="search" role="combobox" aria-autocomplete="list" aria-controls="searchDropdown" aria-expanded="false">
+            <input type="search" id="searchInput" placeholder="Search titles, genres, or cast" aria-label="Search movies and series" autocomplete="off" enterkeyhint="search" role="combobox" aria-autocomplete="list" aria-controls="searchDropdown" aria-expanded="false">
             <button class="search-icon-button clear-search" type="button" id="clearSearchBtn" style="display:none" onclick="clearSearchInput()" aria-label="Clear search"><i class="fas fa-times"></i></button>
         </div>
         <div class="search-dropdown-container">
             <div id="searchDropdown" class="search-dropdown" role="listbox" aria-label="Matching titles"></div>
         </div>
     </div>
+
     <div id="mainContent">
-        <div class="home-heading"><div><span class="section-kicker">YOUR PERSONAL CINEMA</span><h1>A world worth watching<span>.</span></h1></div><span class="home-heading-note">Find your next obsession.</span></div>
-        <div class="home-categories" aria-label="Quick collections">
-            <button class="selected" onclick="showHome()"><i class="fas fa-layer-group"></i> For you</button>
-            <button onclick="showExplore(); setBrowseType('movies')">Movies</button>
-            <button onclick="showTvSeries()">TV series</button>
-            <button onclick="scrollToCollection('rowAnime')">Anime</button>
-            <button onclick="showUpcoming()">Coming soon <span class="tiny-dot"></span></button>
-        </div>
-        <div class="hero-slider" id="heroSlider" aria-label="Featured title">
+        <section class="hero-slider" id="heroSlider" aria-label="Featured title">
+            <canvas class="hero-atmosphere" id="heroAtmosphere" aria-hidden="true"></canvas>
             <div class="hero-art" id="heroArt" aria-hidden="true"></div>
+            <div class="hero-vignette" aria-hidden="true"></div>
             <div class="hero-overlay">
                 <div class="hero-info">
-                    <span class="eyebrow">THE SPOTLIGHT</span>
+                    <span class="eyebrow">Featured Premiere</span>
                     <h2 id="heroTitle">A great story awaits.</h2>
                     <p id="heroMeta">Discover your next favourite</p>
-                    <p class="hero-description" id="heroDescription">Explore movies and series, all in one place.</p>
+                    <p class="hero-description" id="heroDescription">Explore curated cinema, acclaimed series, and anime in one place.</p>
                     <div class="hero-actions">
-                        <button class="watch-button" type="button" id="heroWatch" disabled><i class="fas fa-play"></i> Discover now</button>
-                        <button class="hero-info-button" type="button" id="heroInfo" aria-label="View details" disabled><i class="fas fa-circle-info"></i> Details</button>
-                        <button class="round-button" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
+                        <button class="watch-button" type="button" id="heroWatch" disabled><i class="fas fa-play" aria-hidden="true"></i> Explore title</button>
+                        <button class="hero-info-button" type="button" id="heroInfo" aria-label="View details" disabled><i class="fas fa-circle-info" aria-hidden="true"></i> Details</button>
+                        <button class="round-button" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus" aria-hidden="true"></i></button>
                     </div>
+                </div>
+                <div class="hero-stage-poster" id="heroPosterFloat" aria-hidden="true">
+                    <div class="hero-poster-frame">
+                        <img id="heroPosterImg" src="/static/miniapp/poster-placeholder.svg" alt="Featured title poster" referrerpolicy="no-referrer">
+                        <div class="hero-poster-sheen"></div>
+                    </div>
+                    <span class="hero-poster-caption" id="heroPosterMeta">Featured</span>
                 </div>
             </div>
             <div class="hero-controls" aria-label="Featured title controls">
@@ -87,221 +89,256 @@
                 <span id="heroPosition" aria-live="polite">1 / 1</span>
                 <button type="button" id="heroNext" aria-label="Next featured title" onclick="stepHero(1)"><i class="fas fa-chevron-right"></i></button>
             </div>
-        </div>
-
-        <section class="movie-row daily-picks-row" id="rowDailyPicks" aria-labelledby="dailyPicksTitle">
-            <div class="row-header daily-picks-header">
-                <div>
-                    <span class="daily-picks-kicker">TODAY'S PICKS</span>
-                    <div class="row-header-left" id="dailyPicksTitle"><i class="fas fa-sparkles" aria-hidden="true"></i> Three for today</div>
-                    <p class="daily-picks-subtitle">Fresh picks every day</p>
-                </div>
-                <span class="daily-picks-date" id="dailyPicksDate">Fresh today</span>
-            </div>
-            <div class="horizontal-scroll daily-picks-scroll" id="dailyPicksScroll" aria-live="polite">
-                <div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Loading today's picks…</span></div>
+            <div class="hero-scroll-cue" aria-hidden="true">
+                <span>Scroll</span>
+                <span class="hero-scroll-line"></span>
             </div>
         </section>
 
-        <section class="watch-streak-card" id="watchStreakCard" hidden aria-labelledby="watchStreakHeading" aria-live="polite">
-            <span class="watch-streak-icon" aria-hidden="true"><i class="fas fa-fire-flame-curved"></i></span>
-            <div class="watch-streak-main">
-                <div class="watch-streak-topline">
+        <div class="discovery-stage">
+            <div class="home-categories" aria-label="Quick collections">
+                <button type="button" class="selected" onclick="showHome()">For you</button>
+                <button type="button" onclick="showExplore(); setBrowseType('movies')">Movies</button>
+                <button type="button" onclick="showTvSeries()">TV series</button>
+                <button type="button" onclick="scrollToCollection('rowAnime')">Anime</button>
+                <button type="button" onclick="showUpcoming()">Coming soon</button>
+                <button type="button" onclick="showSettings()">Preferences</button>
+            </div>
+
+            <section class="movie-row daily-picks-row cinema-reveal" id="rowDailyPicks" aria-labelledby="dailyPicksTitle">
+                <div class="row-header daily-picks-header">
                     <div>
-                        <span class="watch-streak-kicker">YOUR DAILY STREAK</span>
-                        <h2 id="watchStreakHeading">Start your streak today</h2>
+                        <span class="daily-picks-kicker">01. Curated Selection</span>
+                        <div class="row-header-left" id="dailyPicksTitle"><i class="fas fa-sparkles" aria-hidden="true"></i> Three for today</div>
+                        <p class="daily-picks-subtitle">Handpicked titles rotated every day</p>
                     </div>
-                    <div class="watch-streak-count" aria-label="Current daily streak">
-                        <strong id="watchStreakCount">0</strong><span>days</span>
+                    <span class="daily-picks-date" id="dailyPicksDate">Fresh today</span>
+                </div>
+                <div class="horizontal-scroll daily-picks-scroll" id="dailyPicksScroll" aria-live="polite">
+                    <div class="daily-picks-loading" role="status"><span class="daily-picks-shimmer"></span><span>Loading today's picks…</span></div>
+                </div>
+            </section>
+
+            <section class="watch-streak-card cinema-reveal" id="watchStreakCard" hidden aria-labelledby="watchStreakHeading" aria-live="polite">
+                <span class="watch-streak-icon" aria-hidden="true"><i class="fas fa-fire-flame-curved"></i></span>
+                <div class="watch-streak-main">
+                    <div class="watch-streak-topline">
+                        <div>
+                            <span class="watch-streak-kicker">Daily Cadence</span>
+                            <h2 id="watchStreakHeading">Start your streak today</h2>
+                        </div>
+                        <div class="watch-streak-count" aria-label="Current daily streak">
+                            <strong id="watchStreakCount">0</strong><span>days</span>
+                        </div>
+                    </div>
+                    <p id="watchStreakMessage">Check in once a day and build your streak.</p>
+                    <div class="watch-streak-action-row">
+                        <button class="watch-streak-checkin" id="watchStreakCheckin" type="button" onclick="checkInToday()">
+                            <i class="fas fa-bolt" aria-hidden="true"></i><span>Check in today</span>
+                        </button>
+                        <span class="watch-streak-best" id="watchStreakBest">Best: 0 days</span>
+                    </div>
+                    <div class="watch-streak-reward" id="watchStreakReward" data-ready="false">
+                        <span class="watch-streak-reward-icon" aria-hidden="true"><i class="fas fa-ticket"></i></span>
+                        <span class="watch-streak-reward-copy"><strong>Priority movie request</strong><small id="watchStreakRewardHint">Earn one with a 7-day streak.</small></span>
+                        <strong class="watch-streak-ticket-count" id="watchStreakTickets">0</strong>
+                    </div>
+                    <div class="watch-streak-milestone">
+                        <div class="watch-streak-milestone-copy">
+                            <span>Next badge</span>
+                            <strong id="watchStreakProgressLabel">3 days to Fresh Start</strong>
+                        </div>
+                        <div class="watch-streak-progress" role="progressbar" aria-label="Progress to next streak badge" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                            <span id="watchStreakProgressBar"></span>
+                        </div>
+                    </div>
+                    <div class="watch-streak-badges" id="watchStreakBadges" role="list" aria-label="Streak badges"></div>
+                    <div class="watch-streak-week" id="watchStreakWeek" role="list" aria-label="Last seven days"></div>
+                    <span class="watch-streak-note">One check-in per day. You don’t need to watch a movie.</span>
+                </div>
+            </section>
+
+            <div class="movie-row cinema-reveal" id="rowTrending">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-fire"></i> Popular Today</div>
+                    <span class="row-caption">Updated daily</span>
+                </div>
+                <div class="horizontal-scroll" id="trendingScroll"></div>
+            </div>
+
+            <div class="movie-row cinema-reveal" id="rowActualNewReleases">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-star"></i> New Movies &amp; Series</div>
+                    <span class="row-caption">Released in the last 60 days</span>
+                </div>
+                <div class="horizontal-scroll" id="actualNewReleasesScroll"></div>
+            </div>
+
+            <div class="movie-row cinema-reveal" id="rowUpcoming">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-calendar-plus"></i> Upcoming</div>
+                    <span class="row-caption">Coming soon</span>
+                </div>
+                <div class="horizontal-scroll" id="upcomingScroll"></div>
+            </div>
+
+            <div class="movie-row cinema-reveal" id="rowHollywood">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-film"></i> Hollywood</div>
+                    <span class="row-caption">English movies &amp; shows</span>
+                </div>
+                <div class="horizontal-scroll" id="hollywoodScroll"></div>
+            </div>
+
+            <div class="movie-row cinema-reveal" id="rowBollywood">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-star"></i> Bollywood</div>
+                    <span class="row-caption">Hindi movies &amp; shows</span>
+                </div>
+                <div class="horizontal-scroll" id="bollywoodScroll"></div>
+            </div>
+
+            <div class="movie-row cinema-reveal" id="rowAnime">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-wand-magic-sparkles"></i> Anime</div>
+                    <span class="row-caption">Animated worlds &amp; series</span>
+                </div>
+                <div class="horizontal-scroll" id="animeScroll"></div>
+            </div>
+
+            <div class="movie-row cinema-reveal" id="rowRecent">
+                <div class="row-header">
+                    <div class="row-header-left"><i class="fas fa-clock"></i> Recently viewed</div>
+                </div>
+                <div class="horizontal-scroll" id="recentScroll"></div>
+            </div>
+
+            <section class="catalogue-library cinema-reveal" id="catalogueLibrary" aria-labelledby="catalogueLibraryTitle">
+                <div class="row-header catalogue-library-heading">
+                    <div>
+                        <span class="section-kicker">02. Full Archive</span>
+                        <div class="row-header-left" id="catalogueLibraryTitle"><i class="fas fa-layer-group"></i> Explore the catalogue</div>
+                        <span class="row-caption" id="catalogueAvailabilityCaption">Files you can open now</span>
                     </div>
                 </div>
-                <p id="watchStreakMessage">Check in once a day and build your streak.</p>
-                <div class="watch-streak-action-row">
-                    <button class="watch-streak-checkin" id="watchStreakCheckin" type="button" onclick="checkInToday()">
-                        <i class="fas fa-bolt" aria-hidden="true"></i><span>Check in today</span>
-                    </button>
-                    <span class="watch-streak-best" id="watchStreakBest">Best: 0 days</span>
+                <div class="availability-tabs" role="group" aria-label="Filter titles by FlimfyBox availability">
+                    <button type="button" class="availability-tab active" data-catalogue-availability="available" aria-pressed="true" onclick="setCatalogueAvailability('available')"><i class="fas fa-circle-check" aria-hidden="true"></i><span>Available</span><small>Files ready</small></button>
+                    <button type="button" class="availability-tab" data-catalogue-availability="request" aria-pressed="false" onclick="setCatalogueAvailability('request')"><i class="fas fa-bell" aria-hidden="true"></i><span>Request</span><small>No files yet</small></button>
                 </div>
-                <div class="watch-streak-reward" id="watchStreakReward" data-ready="false">
-                    <span class="watch-streak-reward-icon" aria-hidden="true"><i class="fas fa-ticket"></i></span>
-                    <span class="watch-streak-reward-copy"><strong>Priority movie request</strong><small id="watchStreakRewardHint">Earn one with a 7-day streak.</small></span>
-                    <strong class="watch-streak-ticket-count" id="watchStreakTickets">0</strong>
+                <div class="movie-grid" id="moreGrid"></div>
+            </section>
+
+            <footer class="cinema-footer" aria-label="FlimfyBox footer">
+                <div class="cinema-footer-brand">Flimfy<span class="brand-accent">Box</span></div>
+                <div class="cinema-footer-links">
+                    <button type="button" onclick="showExplore()">Browse</button>
+                    <button type="button" onclick="showGlobalChat()">Community</button>
+                    <button type="button" onclick="showSettings()">Preferences</button>
+                    <button type="button" onclick="showCredits()">Credits</button>
                 </div>
-                <div class="watch-streak-milestone">
-                    <div class="watch-streak-milestone-copy">
-                        <span>Next badge</span>
-                        <strong id="watchStreakProgressLabel">3 days to Fresh Start</strong>
-                    </div>
-                    <div class="watch-streak-progress" role="progressbar" aria-label="Progress to next streak badge" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                        <span id="watchStreakProgressBar"></span>
-                    </div>
-                </div>
-                <div class="watch-streak-badges" id="watchStreakBadges" role="list" aria-label="Streak badges"></div>
-                <div class="watch-streak-week" id="watchStreakWeek" role="list" aria-label="Last seven days"></div>
-                <span class="watch-streak-note">One check-in per day. You don’t need to watch a movie.</span>
-            </div>
-        </section>
-
-        <div class="movie-row" id="rowTrending">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-fire"></i> Popular Today</div>
-                <span class="row-caption">Updated daily</span>
-            </div>
-            <div class="horizontal-scroll" id="trendingScroll"></div>
+            </footer>
         </div>
-
-        <div class="movie-row" id="rowActualNewReleases">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-star"></i> New Movies &amp; Series</div>
-                <span class="row-caption">Released in the last 60 days</span>
-            </div>
-            <div class="horizontal-scroll" id="actualNewReleasesScroll"></div>
-        </div>
-
-        <div class="movie-row" id="rowUpcoming">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-calendar-plus"></i> Upcoming</div>
-                <span class="row-caption">Coming soon</span>
-            </div>
-            <div class="horizontal-scroll" id="upcomingScroll"></div>
-        </div>
-
-        <div class="movie-row" id="rowHollywood">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-film"></i> Hollywood</div>
-                <span class="row-caption">English movies & shows</span>
-            </div>
-            <div class="horizontal-scroll" id="hollywoodScroll"></div>
-        </div>
-
-        <div class="movie-row" id="rowBollywood">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-star"></i> Bollywood</div>
-                <span class="row-caption">Hindi movies & shows</span>
-            </div>
-            <div class="horizontal-scroll" id="bollywoodScroll"></div>
-        </div>
-
-        <div class="movie-row" id="rowAnime">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-wand-magic-sparkles"></i> Anime</div>
-                <span class="row-caption">Animated worlds & series</span>
-            </div>
-            <div class="horizontal-scroll" id="animeScroll"></div>
-        </div>
-
-        <div class="movie-row" id="rowRecent">
-            <div class="row-header">
-                <div class="row-header-left"><i class="fas fa-clock"></i> Recently viewed</div>
-            </div>
-            <div class="horizontal-scroll" id="recentScroll"></div>
-        </div>
-
-        <section class="catalogue-library" id="catalogueLibrary" aria-labelledby="catalogueLibraryTitle">
-            <div class="row-header catalogue-library-heading">
-                <div><div class="row-header-left" id="catalogueLibraryTitle"><i class="fas fa-layer-group"></i> Explore the catalogue</div><span class="row-caption" id="catalogueAvailabilityCaption">Files you can open now</span></div>
-            </div>
-            <div class="availability-tabs" role="group" aria-label="Filter titles by FlimfyBox availability">
-                <button type="button" class="availability-tab active" data-catalogue-availability="available" aria-pressed="true" onclick="setCatalogueAvailability('available')"><i class="fas fa-circle-check" aria-hidden="true"></i><span>Available</span><small>Files ready</small></button>
-                <button type="button" class="availability-tab" data-catalogue-availability="request" aria-pressed="false" onclick="setCatalogueAvailability('request')"><i class="fas fa-bell" aria-hidden="true"></i><span>Request</span><small>No files yet</small></button>
-            </div>
-            <div class="movie-grid" id="moreGrid"></div>
-        </section>
     </div>
 
     <div id="searchResultsContent" style="display: none;">
-        <div class="row-header" id="searchHeader"><i class="fas fa-search"></i> Search Results</div>
-        <div class="search-discover-state">
-            <div class="search-discover-icon"><i class="fas fa-magnifying-glass"></i></div>
-            <strong>Your next favourite starts here.</strong>
-            <span>Start typing a title. Matches appear as you type.</span>
+        <div class="screen-container">
+            <div class="row-header" id="searchHeader"><i class="fas fa-search"></i> Search Results</div>
+            <div class="search-discover-state">
+                <div class="search-discover-icon"><i class="fas fa-magnifying-glass"></i></div>
+                <strong>Your next favourite starts here.</strong>
+                <span>Start typing a title. Matches appear as you type.</span>
+            </div>
+            <div class="movie-grid" id="searchGrid"></div>
         </div>
-        <div class="movie-grid" id="searchGrid"></div>
     </div>
 
     <div id="myListContent" style="display: none;">
-        <div class="row-header"><div class="row-header-left"><i class="far fa-bookmark"></i> My List</div></div>
-        <div class="my-list-subtitle">Saved to your Telegram account</div>
-        <div class="movie-grid" id="myListGrid"></div>
+        <div class="screen-container">
+            <div class="row-header"><div class="row-header-left"><i class="far fa-bookmark"></i> My List</div></div>
+            <div class="my-list-subtitle">Saved to your FlimfyBox account</div>
+            <div class="movie-grid" id="myListGrid"></div>
+        </div>
     </div>
 
     <div id="exploreContent" style="display: none;">
-        <section class="browse-intro">
-            <span class="eyebrow">DISCOVER YOUR NEXT WATCH</span>
-            <h1>Browse</h1>
-            <p>Find something worth watching by mood, era, or a little surprise.</p>
-        </section>
-        <section class="browse-surprise-panel">
-            <div>
-                <span class="browse-kicker">MOOD PICK</span>
-                <h2>Tell us what you feel like watching.</h2>
-                <p>Choose a mood and FlimfyBox will find a title to match.</p>
-            </div>
-            <button class="browse-surprise-button" id="moodReaderToggle" type="button" aria-expanded="false" aria-controls="moodReader" onclick="toggleMoodReader()"><i class="fas fa-wand-magic-sparkles"></i> Choose a mood</button>
-        </section>
-        <section class="mood-reader" id="moodReader" hidden aria-label="Choose a movie mood">
-            <div class="mood-reader-question">
-                <span class="mood-reader-step">01</span>
-                <div><strong>What are you in the mood for?</strong><small>Choose a vibe</small></div>
-            </div>
-            <div class="mood-reader-options" data-mood-group="mood" role="group" aria-label="Choose a mood">
-                <button type="button" data-mood-value="fun" aria-pressed="false" onclick="setMoodReaderChoice('mood','fun',this)"><span>😂</span><b>Comedy</b></button>
-                <button type="button" data-mood-value="mind" aria-pressed="false" onclick="setMoodReaderChoice('mood','mind',this)"><span>🧠</span><b>Mind-bending</b></button>
-                <button type="button" data-mood-value="action" aria-pressed="false" onclick="setMoodReaderChoice('mood','action',this)"><span>💥</span><b>Action</b></button>
-                <button type="button" data-mood-value="heart" aria-pressed="false" onclick="setMoodReaderChoice('mood','heart',this)"><span>💗</span><b>Heartfelt</b></button>
-                <button type="button" data-mood-value="anime" aria-pressed="false" onclick="setMoodReaderChoice('mood','anime',this)"><span>🌀</span><b>Anime</b></button>
-                <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('mood','any',this)"><span>🎲</span><b>Surprise me</b></button>
-            </div>
-            <div class="mood-reader-filter-row">
-                <div class="mood-reader-filter">
-                    <span class="mood-reader-step">02</span>
-                    <div><strong>Language</strong><small>Choose your preference</small></div>
-                    <div class="mood-reader-chips" data-mood-group="language" role="group" aria-label="Choose a language">
-                        <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('language','any',this)">Any</button>
-                        <button type="button" data-mood-value="hindi" aria-pressed="false" onclick="setMoodReaderChoice('language','hindi',this)">Hindi</button>
-                        <button type="button" data-mood-value="english" aria-pressed="false" onclick="setMoodReaderChoice('language','english',this)">English</button>
+        <div class="screen-container">
+            <section class="browse-intro">
+                <span class="eyebrow">Curated Discovery</span>
+                <h1>Browse</h1>
+                <p>Find something worth watching by mood, era, or genre.</p>
+            </section>
+            <section class="browse-surprise-panel">
+                <div>
+                    <span class="browse-kicker">Mood Configurator</span>
+                    <h2>Tell us what you feel like watching.</h2>
+                    <p>Choose a mood, language, and availability and FlimfyBox will select a match.</p>
+                </div>
+                <button class="browse-surprise-button" id="moodReaderToggle" type="button" aria-expanded="false" aria-controls="moodReader" onclick="toggleMoodReader()"><i class="fas fa-wand-magic-sparkles"></i> Choose a mood</button>
+            </section>
+            <section class="mood-reader" id="moodReader" hidden aria-label="Choose a movie mood">
+                <div class="mood-reader-question">
+                    <span class="mood-reader-step">01</span>
+                    <div><strong>What are you in the mood for?</strong><small>Choose a vibe</small></div>
+                </div>
+                <div class="mood-reader-options" data-mood-group="mood" role="group" aria-label="Choose a mood">
+                    <button type="button" data-mood-value="fun" aria-pressed="false" onclick="setMoodReaderChoice('mood','fun',this)"><span>😂</span><b>Comedy</b></button>
+                    <button type="button" data-mood-value="mind" aria-pressed="false" onclick="setMoodReaderChoice('mood','mind',this)"><span>🧠</span><b>Mind-bending</b></button>
+                    <button type="button" data-mood-value="action" aria-pressed="false" onclick="setMoodReaderChoice('mood','action',this)"><span>💥</span><b>Action</b></button>
+                    <button type="button" data-mood-value="heart" aria-pressed="false" onclick="setMoodReaderChoice('mood','heart',this)"><span>💗</span><b>Heartfelt</b></button>
+                    <button type="button" data-mood-value="anime" aria-pressed="false" onclick="setMoodReaderChoice('mood','anime',this)"><span>🌀</span><b>Anime</b></button>
+                    <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('mood','any',this)"><span>🎲</span><b>Surprise me</b></button>
+                </div>
+                <div class="mood-reader-filter-row">
+                    <div class="mood-reader-filter">
+                        <span class="mood-reader-step">02</span>
+                        <div><strong>Language</strong><small>Choose your preference</small></div>
+                        <div class="mood-reader-chips" data-mood-group="language" role="group" aria-label="Choose a language">
+                            <button type="button" data-mood-value="any" aria-pressed="true" onclick="setMoodReaderChoice('language','any',this)">Any</button>
+                            <button type="button" data-mood-value="hindi" aria-pressed="false" onclick="setMoodReaderChoice('language','hindi',this)">Hindi</button>
+                            <button type="button" data-mood-value="english" aria-pressed="false" onclick="setMoodReaderChoice('language','english',this)">English</button>
+                        </div>
+                    </div>
+                    <div class="mood-reader-filter">
+                        <span class="mood-reader-step">03</span>
+                        <div><strong>Availability</strong><small>Where can you watch?</small></div>
+                        <div class="mood-reader-chips" data-mood-group="availability" role="group" aria-label="Choose title availability">
+                            <button type="button" data-mood-value="available" aria-pressed="true" onclick="setMoodReaderChoice('availability','available',this)">Available now</button>
+                            <button type="button" data-mood-value="all" aria-pressed="false" onclick="setMoodReaderChoice('availability','all',this)">Any title</button>
+                        </div>
                     </div>
                 </div>
-                <div class="mood-reader-filter">
-                    <span class="mood-reader-step">03</span>
-                    <div><strong>Availability</strong><small>Where can you watch?</small></div>
-                    <div class="mood-reader-chips" data-mood-group="availability" role="group" aria-label="Choose title availability">
-                        <button type="button" data-mood-value="available" aria-pressed="true" onclick="setMoodReaderChoice('availability','available',this)">Available now</button>
-                        <button type="button" data-mood-value="all" aria-pressed="false" onclick="setMoodReaderChoice('availability','all',this)">Any title</button>
-                    </div>
+                <div class="mood-reader-actions">
+                    <span><i class="fas fa-sparkles" aria-hidden="true"></i> Matched to your mood and FlimfyBox catalogue</span>
+                    <button type="button" id="moodReaderSubmit" onclick="surpriseMe()"><i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i> Find my pick</button>
+                </div>
+            </section>
+            <section class="surprise-recommendation" id="surpriseRecommendation" hidden aria-live="polite">
+                <div class="mood-pick-heading">
+                    <span class="mood-pick-orb"><i class="fas fa-sparkles" aria-hidden="true"></i></span>
+                    <div><span class="mood-pick-kicker">Selected for you</span><strong>Your pick</strong></div>
+                </div>
+                <p class="mood-pick-explanation" id="moodPickExplanation"></p>
+                <div class="movie-grid surprise-result-grid" id="surpriseResult"></div>
+                <div class="mood-pick-feedback" id="moodPickFeedback" hidden>
+                    <button type="button" class="mood-pick-liked" onclick="handleMoodReaderFeedback('liked')"><i class="fas fa-bullseye" aria-hidden="true"></i> Good match</button>
+                    <button type="button" class="mood-pick-again" onclick="handleMoodReaderFeedback('skip')"><i class="fas fa-shuffle" aria-hidden="true"></i> Show another</button>
+                </div>
+            </section>
+            <div class="browse-type-toggle" role="group" aria-label="Browse content type">
+                <button type="button" data-browse-type="all" onclick="setBrowseType('all')">All</button>
+                <button type="button" data-browse-type="movies" onclick="setBrowseType('movies')">Movies</button>
+                <button type="button" data-browse-type="tv" onclick="setBrowseType('tv')">TV Shows</button>
+            </div>
+            <div class="row-header browse-section-heading"><div class="row-header-left"><i class="fas fa-compass"></i> Browse by genre</div></div>
+            <div class="explore-search-wrap">
+                <div class="search-box genre-search-box">
+                    <i class="fas fa-search"></i>
+                    <input type="text" id="genreSearchInput" placeholder="Search genres, subgenres, mood" aria-label="Search genres, subgenres, and moods">
                 </div>
             </div>
-            <div class="mood-reader-actions">
-                <span><i class="fas fa-sparkles" aria-hidden="true"></i> Matched to your mood and FlimfyBox catalogue</span>
-                <button type="button" id="moodReaderSubmit" onclick="surpriseMe()"><i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i> Find my pick</button>
-            </div>
-        </section>
-        <section class="surprise-recommendation" id="surpriseRecommendation" hidden aria-live="polite">
-            <div class="mood-pick-heading">
-                <span class="mood-pick-orb"><i class="fas fa-sparkles" aria-hidden="true"></i></span>
-                <div><span class="mood-pick-kicker">PICKED FOR YOU</span><strong>Your pick</strong></div>
-            </div>
-            <p class="mood-pick-explanation" id="moodPickExplanation"></p>
-            <div class="movie-grid surprise-result-grid" id="surpriseResult"></div>
-            <div class="mood-pick-feedback" id="moodPickFeedback" hidden>
-                <button type="button" class="mood-pick-liked" onclick="handleMoodReaderFeedback('liked')"><i class="fas fa-bullseye" aria-hidden="true"></i> Good match</button>
-                <button type="button" class="mood-pick-again" onclick="handleMoodReaderFeedback('skip')"><i class="fas fa-shuffle" aria-hidden="true"></i> Show another</button>
-            </div>
-        </section>
-        <div class="browse-type-toggle" role="group" aria-label="Browse content type">
-            <button type="button" data-browse-type="all" onclick="setBrowseType('all')">All</button>
-            <button type="button" data-browse-type="movies" onclick="setBrowseType('movies')">Movies</button>
-            <button type="button" data-browse-type="tv" onclick="setBrowseType('tv')">TV Shows</button>
+            <div class="explore-body" id="exploreBody"></div>
+            <div id="browseCollections"></div>
         </div>
-        <div class="row-header browse-section-heading"><div class="row-header-left"><i class="fas fa-compass"></i> Browse by genre</div></div>
-        <div class="explore-search-wrap">
-            <div class="search-box genre-search-box">
-                <i class="fas fa-search"></i>
-                <input type="text" id="genreSearchInput" placeholder="Search genres, subgenres, mood" aria-label="Search genres, subgenres, and moods">
-            </div>
-        </div>
-        <div class="explore-body" id="exploreBody"></div>
-        <div id="browseCollections"></div>
     </div>
 
     <div class="details-page genre-detail-page" id="genreDetailPage">
@@ -334,7 +371,7 @@
             <div class="dp-info">
                 <div class="dp-title-row">
                     <div class="dp-poster-float" id="dpPosterFloat">
-                        <img id="dpFloatPoster" src="" alt="Poster">
+                        <img id="dpFloatPoster" src="" alt="Poster" referrerpolicy="no-referrer">
                     </div>
                     <div class="dp-title-copy">
                         <h1 class="dp-title" id="dpTitle">Title</h1>
@@ -356,7 +393,7 @@
                     <main class="dp-main-column">
                         <section class="overview-section">
                             <div class="detail-section-heading">
-                                <span class="section-kicker">THE STORY</span>
+                                <span class="section-kicker">The Story</span>
                                 <h2>Overview</h2>
                             </div>
                             <div class="rich-desc" id="dpDesc">Loading story...</div>
@@ -388,18 +425,15 @@
         <button class="close-trailer-btn" type="button" aria-label="Close trailer" onclick="closeTrailer()"><i class="fas fa-times"></i> Close</button>
     </div>
 
-    <!-- Web Player Modal -->
     <div class="web-player-modal" id="webPlayerModal">
         <div class="wp-header">
             <div class="wp-title" id="wpTitle">Loading...</div>
             <button class="wp-close" type="button" aria-label="Close web player" onclick="closeWebPlayer()"><i class="fas fa-times"></i></button>
         </div>
-        <div class="wp-iframe-container" id="wpIframeContainer">
-            <!-- Iframe dynamically inserted here -->
-        </div>
+        <div class="wp-iframe-container" id="wpIframeContainer"></div>
     </div>
 
-    <div class="toast" id="toast">✅ Done!</div>
+    <div class="toast" id="toast">Done</div>
 
     <section class="info-modal" id="infoModal" role="dialog" aria-modal="true" aria-labelledby="infoModalTitle">
         <div class="info-modal-card">
@@ -413,7 +447,7 @@
 
     <section class="more-panel" id="morePanel" aria-label="More options">
         <div class="more-panel-header">
-            <span>MORE</span>
+            <span>More</span>
             <button type="button" aria-label="Close more options" onclick="closeMorePanel()"><i class="fas fa-xmark"></i></button>
         </div>
         <div class="more-panel-grid">
@@ -423,7 +457,7 @@
             <button type="button" onclick="showGlobalChat()"><i class="far fa-comment"></i><span>Global Chat</span></button>
             <button type="button" onclick="showSettings()"><i class="fas fa-gear"></i><span>Settings</span></button>
             <button type="button" onclick="showInfoPanel('DMCA & Copyright', '<p>If you believe content violates your copyright, send the title, source URL and proof of ownership to the FlimfyBox administrator.</p><p class=&quot;info-note&quot;>Requests are reviewed and handled as quickly as possible.</p>', 'circle-info')"><i class="fas fa-circle-info"></i><span>DMCA</span></button>
-            <button type="button" onclick="showCredits()"><i class="fas fa-award"></i><span>About & Credits</span></button>
+            <button type="button" onclick="showCredits()"><i class="fas fa-award"></i><span>About &amp; Credits</span></button>
             <button type="button" onclick="showMyList()"><i class="far fa-bookmark"></i><span>Watchlist</span></button>
         </div>
     </section>
@@ -436,7 +470,10 @@
         <button class="nav-item" type="button" onclick="openMorePanel()"><i class="fas fa-ellipsis"></i><span>More</span></button>
     </nav>
 
+    <script src="/static/vendor/gsap/gsap.min.js"></script>
+    <script src="/static/vendor/gsap/ScrollTrigger.min.js"></script>
     <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v={{ miniapp_asset_version }}"></script>
     <script src="{{ url_for('static', filename='miniapp/app.js') }}?v={{ miniapp_asset_version }}"></script>
+    <script src="{{ url_for('static', filename='miniapp/cinematic-motion.js') }}?v={{ miniapp_asset_version }}"></script>
 </body>
 </html>

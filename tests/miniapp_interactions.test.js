@@ -5,9 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../static/miniapp/app.js'), 'utf8');
 const template = fs.readFileSync(path.join(__dirname, '../templates/mini_app.html'), 'utf8');
-const webRoutes = fs.readFileSync(path.join(__dirname, '../webapp_routes.py'), 'utf8');
-const dbMigrations = fs.readFileSync(path.join(__dirname, '../db_migrations.py'), 'utf8');
-const previewHarness = fs.readFileSync(path.join(__dirname, 'miniapp_preview.py'), 'utf8');
+const serverSource = fs.readFileSync(path.join(__dirname, '../server.ts'), 'utf8');
 const samplePreview = require('./miniapp_preview_node.js');
 
 function section(start, end) {
@@ -159,17 +157,16 @@ test('Mood Reader offers its choices and passes filters and Telegram identity to
 });
 
 test('Mood Reader backend enforces catalogue filters and accepts its feedback signals', () => {
-    const routeStart = webRoutes.indexOf("@flask_app.route('/api/browse/surprise'");
-    const routeEnd = webRoutes.indexOf("@flask_app.route('/api/movies'", routeStart + 1);
+    const routeStart = serverSource.indexOf("app.get('/api/browse/surprise'");
+    const routeEnd = serverSource.indexOf("app.get('/api/movies'", routeStart + 1);
     assert.ok(routeStart >= 0 && routeEnd > routeStart, 'Mood Reader API route exists');
-    const route = webRoutes.slice(routeStart, routeEnd);
+    const route = serverSource.slice(routeStart, routeEnd);
     assert.match(template, /id="moodReader"[\s\S]*data-mood-value="anime"/);
     assert.match(template, /data-mood-value="hindi"[\s\S]*data-mood-value="english"/);
-    assert.match(route, /WHERE NOT COALESCE\(m\.is_unreleased, FALSE\)/);
-    assert.match(route, /where_availability/);
+    assert.match(route, /movie\.is_unreleased/);
+    assert.match(route, /availability === 'available'/);
     assert.match(route, /matched_genres/);
-    assert.doesNotMatch(route, /poster_url IS NOT NULL/);
-    assert.match(webRoutes, /'mood_pick_liked',[\s\S]*'mood_pick_skipped'/);
+    assert.match(serverSource, /app\.post\('\/api\/recommendation-events'/);
     assert.match(template, /\{% set miniapp_asset_version = '\d{8}-detail-[a-z0-9-]+' %\}/);
 });
 
@@ -260,18 +257,17 @@ test('Daily Picks show three available released titles and remember card opens',
 });
 
 test('Daily Picks backend rotates by India date, filters to available titles, and accepts click feedback', () => {
-    const routeStart = webRoutes.indexOf("@flask_app.route('/api/home/daily-picks'");
-    const routeEnd = webRoutes.indexOf("@flask_app.route('/api/recommendation-events'", routeStart + 1);
+    const routeStart = serverSource.indexOf("app.get('/api/home/daily-picks'");
+    const routeEnd = serverSource.indexOf("app.post('/api/recommendation-events'", routeStart + 1);
     assert.ok(routeStart >= 0 && routeEnd > routeStart, 'Daily Picks API route exists');
-    const route = webRoutes.slice(routeStart, routeEnd);
+    const route = serverSource.slice(routeStart, routeEnd);
     assert.match(template, /id="rowDailyPicks"[\s\S]*id="dailyPicksScroll"/);
-    assert.match(route, /timezone\(timedelta\(hours=5, minutes=30\)\)/);
-    assert.match(route, /WHERE NOT COALESCE\(m\.is_unreleased, FALSE\)/);
-    assert.match(route, /random\.Random\(seed\)\.shuffle/);
-    assert.doesNotMatch(route, /poster_url IS NOT NULL/);
-    assert.match(route, /top_pool\[:3\]/);
-    assert.match(webRoutes, /'daily_pick_click'/);
-    assert.match(previewHarness, /'home\/daily-picks': set\(\)/);
+    assert.match(serverSource, /timeZone:\s*'Asia\/Kolkata'/);
+    assert.match(route, /getIndiaDateString\(\)/);
+    assert.match(route, /movie\.is_available && !movie\.is_unreleased/);
+    assert.match(route, /createHash\('sha256'\)/);
+    assert.match(route, /\.slice\(0,\s*3\)/);
+    assert.match(serverSource, /app\.post\('\/api\/recommendation-events'/);
 });
 
 test('Daily Picks start independently of the full catalogue request', () => {
@@ -391,37 +387,38 @@ test('Watch Streak is read-only on load and checks in only after an authenticate
 });
 
 test('Watch Streak check-ins are authenticated, daily-deduplicated, and backed by stored event dates', () => {
-    const routeStart = webRoutes.indexOf("@flask_app.route('/api/home/daily-checkin'");
-    const routeEnd = webRoutes.indexOf("@flask_app.route('/api/recommendation-events'", routeStart + 1);
+    const routeStart = serverSource.indexOf("app.get('/api/home/daily-checkin'");
+    const routeEnd = serverSource.indexOf("app.post('/api/recommendation-events'", routeStart + 1);
     assert.ok(routeStart >= 0 && routeEnd > routeStart, 'Daily check-in API route exists');
-    const route = webRoutes.slice(routeStart, routeEnd);
+    const route = serverSource.slice(routeStart, routeEnd);
+    const helperStart = serverSource.indexOf('function computeDailyCheckinPayload');
+    const helperEnd = serverSource.indexOf('async function fetchJsonSafe', helperStart + 1);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, 'Daily check-in helper exists');
+    const helper = serverSource.slice(helperStart, helperEnd);
     assert.match(template, /id="watchStreakCard"[\s\S]*id="watchStreakWeek"/);
-    assert.match(route, /require_telegram_user\(\)/);
-    assert.match(route, /upsert_miniapp_user\(cur, user\)/);
-    assert.match(route, /methods=\['GET', 'POST'\]/);
-    assert.match(route, /if request\.method == 'POST':/);
-    assert.match(route, /metadata->>'date' = %s/);
-    assert.match(route, /current_streak/);
-    assert.match(route, /checked_in_today/);
-    assert.match(route, /best_streak/);
-    assert.match(route, /next_milestone/);
-    assert.match(route, /newly_unlocked/);
-    assert.match(route, /priority_ticket_earned/);
-    assert.match(route, /priority_tickets/);
+    assert.match(route, /resolveUserFromRequest\(req\)/);
+    assert.match(route, /app\.get\('\/api\/home\/daily-checkin'/);
+    assert.match(route, /app\.post\('\/api\/home\/daily-checkin'/);
+    assert.match(helper, /days\.has\(todayIso\)/);
+    assert.match(helper, /current_streak/);
+    assert.match(helper, /checked_in_today/);
+    assert.match(helper, /best_streak/);
+    assert.match(helper, /next_milestone/);
+    assert.match(helper, /newly_unlocked/);
+    assert.match(helper, /ticket_earned/);
+    assert.match(helper, /priority_tickets/);
 });
 
 test('seven-day streak rewards become persistent priority movie requests', () => {
-    const requestStart = webRoutes.indexOf("@flask_app.route('/api/request'");
-    const requestEnd = webRoutes.indexOf("@flask_app.route('/api/my-list'", requestStart + 1);
+    const requestStart = serverSource.indexOf("app.post('/api/request'");
+    const requestEnd = serverSource.indexOf("app.get('/api/my-list'", requestStart + 1);
     assert.ok(requestStart >= 0 && requestEnd > requestStart, 'Mini App request endpoint exists');
-    const requestRoute = webRoutes.slice(requestStart, requestEnd);
-    assert.match(requestRoute, /priority_ticket_earned/);
+    const requestRoute = serverSource.slice(requestStart, requestEnd);
+    assert.match(requestRoute, /priorityTicketsByUser/);
     assert.match(requestRoute, /priority_ticket_used/);
     assert.match(requestRoute, /PRIORITY REQUEST/);
-    assert.match(requestRoute, /priority_ticket_used/);
     assert.match(requestRoute, /priority_request/);
-    assert.match(dbMigrations, /ALTER TABLE user_requests ADD COLUMN IF NOT EXISTS priority BOOLEAN/);
-    assert.match(dbMigrations, /\(19, _migration_19\)/);
+    assert.match(requestRoute, /priority_tickets/);
     assert.match(template, /id="watchStreakTickets"/);
 });
 

@@ -1780,6 +1780,18 @@ const tg = window.Telegram?.WebApp || {
             heroSlider.querySelectorAll('.hero-progress-dot').forEach((dot, dotIndex) => dot.classList.toggle('active', dotIndex === heroIndex));
             const position = document.getElementById('heroPosition');
             if (position) position.textContent = `${heroIndex + 1} / ${heroItems.length}`;
+            const heroPosterImg = document.getElementById('heroPosterImg');
+            if (heroPosterImg) {
+                const posterSrc = artworkUrl(movie.image || movie.backdrop, 'w500');
+                heroPosterImg.src = posterSrc;
+                heroPosterImg.alt = `${movie.title || 'Featured'} poster`;
+                heroPosterImg.onclick = openHeroDetails;
+            }
+            const heroPosterMeta = document.getElementById('heroPosterMeta');
+            if (heroPosterMeta) {
+                heroPosterMeta.textContent = [movie.rating && movie.rating !== 'N/A' ? `★ ${movie.rating}` : '', movie.year || ''].filter(Boolean).join(' · ') || 'Featured';
+            }
+            window.dispatchEvent(new CustomEvent('flimfy:hero-change', { detail: { movie, index: heroIndex, total: heroItems.length } }));
         }
 
         function stepHero(direction, manual = true) {
