@@ -43,6 +43,8 @@ USER_DATA_TABLES: Tuple[str, ...] = (
 
 INTERNAL_BOT_TABLES: Tuple[str, ...] = (
     "auto_delete_queue",
+    "batch18_job_items",
+    "batch18_jobs",
     "bot_commands",
     "candidate_links",
     "channel_posts",

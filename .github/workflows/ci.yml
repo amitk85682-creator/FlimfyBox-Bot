@@ -58,7 +58,7 @@ jobs:
           python3 -m py_compile main.py webapp_routes.py catalog_identity.py db_migrations.py observability.py services/*.py
 
       - name: Run Python unit tests
-        run: pytest -q tests/test_rls_and_batch18_services.py
+        run: pytest -q tests/test_rls_and_batch18_services.py tests/test_batch18_automation.py
 
   secret-hygiene:
     name: Secret & Config Hygiene Check

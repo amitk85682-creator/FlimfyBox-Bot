@@ -122,9 +122,14 @@
             return document.documentElement.dataset.theme === 'light';
         }
 
+        function isDetailOverlayOpen() {
+            const dp = document.getElementById('detailsPage');
+            return Boolean(dp && dp.classList.contains('open'));
+        }
+
         function render(now) {
             rafId = 0;
-            if (!inViewport || document.hidden || prefersReducedMotion()) return;
+            if (!inViewport || document.hidden || isDetailOverlayOpen() || prefersReducedMotion()) return;
 
             currentX += (pointerX - currentX) * 0.045;
             currentY += (pointerY - currentY) * 0.045;
@@ -177,7 +182,7 @@
         }
 
         function start() {
-            if (rafId || !inViewport || document.hidden || prefersReducedMotion()) return;
+            if (rafId || !inViewport || document.hidden || isDetailOverlayOpen() || prefersReducedMotion()) return;
             rafId = window.requestAnimationFrame(render);
         }
 
@@ -207,6 +212,15 @@
                 else stop();
             }, { threshold: 0.02 });
             io.observe(hero);
+        }
+
+        const detailEl = document.getElementById('detailsPage');
+        if (detailEl && 'MutationObserver' in window) {
+            const detailObs = new MutationObserver(() => {
+                if (isDetailOverlayOpen()) stop();
+                else start();
+            });
+            detailObs.observe(detailEl, { attributes: true, attributeFilter: ['class'] });
         }
 
         document.addEventListener('visibilitychange', () => {
@@ -464,35 +478,59 @@
         function animateDetailEntrance() {
             if (!gsapLib || prefersReducedMotion()) return;
             const poster = document.getElementById('dpPosterFloat');
+            const kicker = detailsPage.querySelector('.dp-kicker-row');
             const title = document.getElementById('dpTitle');
             const meta = document.getElementById('dpRichInfo');
             const actions = detailsPage.querySelector('.detail-actions');
-            const grid = detailsPage.querySelector('.dp-content-grid');
+            const watchPanel = document.getElementById('dpWatchPanel');
+            const mainCol = detailsPage.querySelector('.dp-main-column');
+            const sideCol = detailsPage.querySelector('.dp-side-column');
 
             if (dpBackdrop) {
                 gsapLib.killTweensOf(dpBackdrop);
                 gsapLib.fromTo(
                     dpBackdrop,
-                    { scale: 1.07, opacity: 0.45 },
-                    { scale: 1, opacity: 1, duration: 0.85, ease: 'power3.out', clearProps: 'opacity' }
+                    { scale: 1.07, opacity: 0.42 },
+                    { scale: 1, opacity: 1, duration: 0.9, ease: 'power3.out', clearProps: 'opacity' }
                 );
             }
 
-            const sequence = [poster, title, meta, actions, grid].filter(Boolean);
+            const sequence = [poster, kicker, title, meta, actions, watchPanel, mainCol, sideCol].filter(Boolean);
             gsapLib.killTweensOf(sequence);
             gsapLib.fromTo(
                 sequence,
-                { y: 24, opacity: 0 },
+                { y: 22, opacity: 0 },
                 {
                     y: 0,
                     opacity: 1,
-                    duration: 0.64,
-                    stagger: 0.06,
+                    duration: 0.62,
+                    stagger: 0.048,
                     ease: 'power3.out',
                     clearProps: 'transform,opacity',
                 }
             );
         }
+
+        function animateEpisodeList() {
+            if (!gsapLib || prefersReducedMotion()) return;
+            const episodes = detailsPage.querySelectorAll('.episodes-list .episode-card');
+            if (!episodes.length) return;
+            gsapLib.killTweensOf(episodes);
+            gsapLib.fromTo(
+                episodes,
+                { y: 16, opacity: 0 },
+                {
+                    y: 0,
+                    opacity: 1,
+                    duration: 0.46,
+                    stagger: 0.04,
+                    ease: 'power3.out',
+                    clearProps: 'transform,opacity',
+                }
+            );
+        }
+
+        window.addEventListener('flimfy:season-change', animateEpisodeList);
 
         if ('MutationObserver' in window) {
             let wasOpen = detailsPage.classList.contains('open');
@@ -507,7 +545,7 @@
             observer.observe(detailsPage, { attributes: true, attributeFilter: ['class'] });
         }
 
-        // Smooth backdrop depth glide while scrolling inside the movie detail scene
+        // Smooth backdrop depth glide while scrolling inside the movie/series detail scene
         let scrollRaf = 0;
         detailsPage.addEventListener('scroll', () => {
             if (!dpBackdrop || prefersReducedMotion()) return;
@@ -515,7 +553,7 @@
             scrollRaf = window.requestAnimationFrame(() => {
                 scrollRaf = 0;
                 const y = Math.min(detailsPage.scrollTop, 560);
-                const shift = (y * 0.28).toFixed(1);
+                const shift = (y * 0.26).toFixed(1);
                 const scale = (1 + y * 0.00018).toFixed(4);
                 dpBackdrop.style.transform = `translate3d(0, ${shift}px, 0) scale(${scale})`;
             });

@@ -757,6 +757,80 @@ def _migration_21(conn):
             cur.execute(statement)
 
 
+def _migration_22(conn):
+    """Create dedicated durable checkpoint tables for Batch18 400-file automation (isolated from SuperBatch)."""
+    from services.rls_audit import build_rls_remediation_statements
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS batch18_jobs (
+                id TEXT PRIMARY KEY,
+                admin_id BIGINT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'collecting'
+                    CHECK (status IN (
+                        'collecting', 'processing', 'completed',
+                        'completed_with_errors', 'failed', 'cancelled'
+                    )),
+                max_files INTEGER NOT NULL DEFAULT 400,
+                collected_count INTEGER NOT NULL DEFAULT 0,
+                duplicates_skipped INTEGER NOT NULL DEFAULT 0,
+                junk_skipped INTEGER NOT NULL DEFAULT 0,
+                titles_total INTEGER NOT NULL DEFAULT 0,
+                titles_posted INTEGER NOT NULL DEFAULT 0,
+                titles_failed INTEGER NOT NULL DEFAULT 0,
+                files_saved INTEGER NOT NULL DEFAULT 0,
+                files_failed INTEGER NOT NULL DEFAULT 0,
+                summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMPTZ
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS batch18_job_items (
+                id BIGSERIAL PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES batch18_jobs(id) ON DELETE CASCADE,
+                item_index INTEGER NOT NULL,
+                update_id BIGINT,
+                source_chat_id BIGINT,
+                source_message_id BIGINT,
+                media_type TEXT NOT NULL DEFAULT 'document',
+                file_id TEXT,
+                file_unique_id TEXT,
+                file_name TEXT NOT NULL DEFAULT '',
+                file_size BIGINT NOT NULL DEFAULT 0,
+                caption TEXT NOT NULL DEFAULT '',
+                forward_title TEXT NOT NULL DEFAULT '',
+                detected_title TEXT NOT NULL DEFAULT '',
+                detected_year TEXT NOT NULL DEFAULT '',
+                group_key TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN (
+                        'pending', 'processing', 'succeeded',
+                        'duplicate', 'downgrade_blocked', 'failed', 'cancelled'
+                    )),
+                stage TEXT NOT NULL DEFAULT 'accepted',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                movie_id BIGINT,
+                error_class TEXT,
+                error_detail TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (batch_id, item_index)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_batch18_jobs_admin_created
+            ON batch18_jobs (admin_id, created_at DESC)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_batch18_job_items_batch_state
+            ON batch18_job_items (batch_id, state, item_index)
+        """)
+        for statement in build_rls_remediation_statements(("batch18_jobs", "batch18_job_items")):
+            cur.execute(statement)
+
+
 MIGRATIONS: Tuple[Migration, ...] = (
     (1, _migration_1),
     (2, _migration_2),
@@ -779,6 +853,7 @@ MIGRATIONS: Tuple[Migration, ...] = (
     (19, _migration_19),
     (20, _migration_20),
     (21, _migration_21),
+    (22, _migration_22),
 )
 
 

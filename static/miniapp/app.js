@@ -1726,10 +1726,20 @@ const tg = window.Telegram?.WebApp || {
 
         function renderHeroProgress(total, activeIndex) {
             const dots = Array.from({ length: total }, (_, i) =>
-                `<span class="hero-progress-dot ${i === activeIndex ? 'active' : ''}"></span>`
+                `<button type="button" class="hero-progress-dot ${i === activeIndex ? 'active' : ''}" aria-label="Featured title ${i + 1} of ${total}" aria-pressed="${i === activeIndex ? 'true' : 'false'}" onclick="goToHeroSlide(${i})"><span></span></button>`
             ).join('');
-            document.getElementById('heroSlider').insertAdjacentHTML('beforeend', `<div class="hero-progress">${dots}</div>`);
+            document.getElementById('heroSlider').insertAdjacentHTML('beforeend', `<div class="hero-progress" role="group" aria-label="Featured title slides">${dots}</div>`);
         }
+
+        function goToHeroSlide(index) {
+            if (!heroItems.length) return;
+            showHeroSlide(index);
+            if (heroTimer) {
+                clearInterval(heroTimer);
+                heroTimer = setInterval(() => stepHero(1, false), 6500);
+            }
+        }
+        window.goToHeroSlide = goToHeroSlide;
 
         function showHeroSlide(index) {
             if (!heroItems.length) return;
@@ -1752,32 +1762,53 @@ const tg = window.Telegram?.WebApp || {
             }
             const heroArtwork = movie.backdrop || movie.image;
             const heroArt = document.getElementById('heroArt');
+            const heroArtPrev = document.getElementById('heroArtPrev');
             const artwork = heroArtwork
                 ? `url("${artworkUrl(heroArtwork, 'w1280')}"), ${IMAGE_FALLBACK_GRADIENT}`
                 : IMAGE_FALLBACK_GRADIENT;
             const slideId = String(movie.id);
             heroSlider.dataset.slideId = slideId;
-            const preload = new Image();
-            preload.onload = () => {
+            const commitBackdrop = () => {
                 if (heroSlider.dataset.slideId !== slideId) return;
+                if (heroArtPrev && heroArt.style.backgroundImage) {
+                    heroArtPrev.style.backgroundImage = heroArt.style.backgroundImage;
+                }
                 heroSlider.style.backgroundImage = heroArt.style.backgroundImage || artwork;
+                heroArt.classList.remove('is-kenburns');
                 heroArt.style.opacity = '0';
                 heroArt.style.backgroundImage = artwork;
-                requestAnimationFrame(() => requestAnimationFrame(() => { heroArt.style.opacity = '1'; }));
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    heroArt.style.opacity = '1';
+                    heroArt.classList.add('is-kenburns');
+                }));
             };
+            const preload = new Image();
+            preload.onload = commitBackdrop;
+            preload.onerror = commitBackdrop;
             preload.src = artworkUrl(heroArtwork, 'w1280');
             const copy = heroSlider.querySelector('.hero-info');
             copy.classList.remove('changing');
             requestAnimationFrame(() => copy.classList.add('changing'));
             document.getElementById('heroTitle').innerText = movie.title;
-            document.getElementById('heroMeta').innerText = [movie.year, movie.category, movie.language].filter(Boolean).join(' • ');
+            const heroRating = parseFloat(movie.rating);
+            const heroTypeLabel = window.FlimfyCinema?.isSeriesItem(movie) ? 'TV Series' : (movie.category || 'Film');
+            document.getElementById('heroMeta').innerText = [
+                movie.year,
+                heroTypeLabel,
+                movie.language,
+                Number.isFinite(heroRating) && heroRating > 0 ? `★ ${heroRating.toFixed(1)}` : ''
+            ].filter(Boolean).join(' · ');
             document.getElementById('heroDescription').textContent = movie.description || movie.overview || `${movie.genre || movie.category || 'Something new'} for your next movie night. Open this title for its story and available files.`;
-            document.querySelector('#heroSlider .eyebrow').innerText = 'TRENDING NOW';
+            document.querySelector('#heroSlider .eyebrow').innerText = window.FlimfyCinema?.isSeriesItem(movie) ? 'FEATURED SERIES' : 'TRENDING NOW';
             document.getElementById('heroWatch').onclick = openHeroDetails;
             document.getElementById('heroInfo').onclick = openHeroDetails;
             document.getElementById('heroWatch').disabled = false;
             document.getElementById('heroInfo').disabled = false;
-            heroSlider.querySelectorAll('.hero-progress-dot').forEach((dot, dotIndex) => dot.classList.toggle('active', dotIndex === heroIndex));
+            heroSlider.querySelectorAll('.hero-progress-dot').forEach((dot, dotIndex) => {
+                const isActive = dotIndex === heroIndex;
+                dot.classList.toggle('active', isActive);
+                dot.setAttribute('aria-pressed', String(isActive));
+            });
             const position = document.getElementById('heroPosition');
             if (position) position.textContent = `${heroIndex + 1} / ${heroItems.length}`;
             const heroPosterImg = document.getElementById('heroPosterImg');
@@ -2351,12 +2382,26 @@ const tg = window.Telegram?.WebApp || {
                     : unavailable
                         ? `<span class="card-badge request"><i class="fas fa-${upcoming ? 'calendar' : 'bell'}" aria-hidden="true"></i> ${upcoming ? 'Coming soon' : 'Request'}</span>`
                         : '<span class="card-badge unknown" title="Availability has not been confirmed">Checking</span>';
+                const ratingNum = parseFloat(m.rating);
+                const hasRating = Number.isFinite(ratingNum) && ratingNum > 0;
+                const isSeries = Boolean(window.FlimfyCinema?.isSeriesItem(m));
+                const hoverMeta = [
+                    hasRating ? `★ ${ratingNum.toFixed(1)}` : '',
+                    isSeries ? 'Series' : (m.year && String(m.year) !== '0' ? String(m.year) : '')
+                ].filter(Boolean).join(' · ');
                 const payload = encodeURIComponent(JSON.stringify(m)).replace(/'/g, '%27');
                 return `<button type="button" class="${cardClass}" aria-label="Open ${escapeHtml(m.title)}"
                     data-movie="${payload}" data-tmdb="${isTMDB}"
                     onclick="openCardDetails(JSON.parse(decodeURIComponent(this.dataset.movie)), this.dataset.tmdb === 'true')">
-                    <img src="${escapeHtml(artworkUrl(m.image))}" alt="${escapeHtml(m.title)} poster" class="card-img" loading="lazy" decoding="async" width="342" height="513"
-                        onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback')">
+                    <span class="card-poster-wrap">
+                        <img src="${escapeHtml(artworkUrl(m.image))}" alt="${escapeHtml(m.title)} poster" class="card-img" loading="lazy" decoding="async" width="342" height="513"
+                            onload="this.classList.add('is-loaded')"
+                            onerror="this.onerror=null; this.src='${POSTER_PLACEHOLDER}'; this.classList.add('image-fallback','is-loaded')">
+                        <span class="card-hover-veil" aria-hidden="true">
+                            ${hoverMeta ? `<span class="card-hover-score">${escapeHtml(hoverMeta)}</span>` : '<span></span>'}
+                            <span class="card-hover-cue"><i class="fas fa-arrow-up-right-from-square"></i></span>
+                        </span>
+                    </span>
                     <div class="card-title">${escapeHtml(m.title)}</div>
                     <div class="card-meta"><span>${escapeHtml(FlimfyUI.identityLabel(m))}</span>${badge}</div>
                 </button>`;
@@ -2628,13 +2673,140 @@ document.addEventListener('keydown', (e) => {
             });
             return html + '</div>';
         }
-        function setMovieDetailsMeta(movie) {
+        function setMovieDetailsMeta(movie, seasonCount = 0) {
+            const cinema = window.FlimfyCinema;
+            const isSeries = seasonCount > 0 || Boolean(cinema?.isSeriesItem(movie));
+            const detailsPage = document.getElementById('detailsPage');
+            if (detailsPage) detailsPage.dataset.mediaMode = isSeries ? 'series' : 'movie';
+
+            const meta = cinema
+                ? cinema.buildDetailMetadataItems(movie, isSeries, seasonCount)
+                : {
+                    kicker: isSeries ? 'TV SERIES' : 'FEATURE FILM',
+                    year: movie.year || 'Year unavailable',
+                    durationOrSeasons: '',
+                    certification: '',
+                    genres: movie.genre || 'Genre unavailable',
+                    language: movie.language || 'Audio details below',
+                    rating: '',
+                    primaryCtaLabel: isSeries ? 'Browse episodes' : 'Watch & Download',
+                    shareAriaLabel: isSeries ? 'Share series' : 'Share movie'
+                };
+
+            const kickerNode = document.getElementById('dpTypeKicker');
+            if (kickerNode) kickerNode.textContent = meta.kicker;
+
+            const storyKicker = document.getElementById('dpStoryKicker');
+            if (storyKicker) storyKicker.textContent = isSeries ? 'SERIES PREMISE' : 'THE STORY';
+
+            const certNode = document.getElementById('dpCertification');
+            if (certNode) {
+                certNode.textContent = meta.certification;
+                certNode.hidden = !meta.certification;
+            }
+
+            const scoreNode = document.getElementById('dpInlineScore');
+            if (scoreNode) {
+                scoreNode.innerHTML = meta.rating ? `<i class="fas fa-star" aria-hidden="true"></i> ${escapeHtml(meta.rating)}` : '';
+                scoreNode.hidden = !meta.rating;
+            }
+
             const year = movie.year || String(movie.release_date || movie.first_air_date || '').slice(0, 4);
             const yearNode = document.getElementById('dpYear');
             if (yearNode) yearNode.textContent = year && String(year) !== '0' ? String(year) : 'Year unavailable';
-            document.getElementById('dpGenre').textContent = [FlimfyUI.identityLabel(movie), movie.genre]
-                .filter(Boolean).join(' • ') || 'Genre unavailable';
+
+            const durationWrap = document.getElementById('dpDurationWrap');
+            const durationNode = document.getElementById('dpDuration');
+            if (durationWrap && durationNode) {
+                durationNode.textContent = meta.durationOrSeasons;
+                durationWrap.hidden = !meta.durationOrSeasons;
+            }
+
+            document.getElementById('dpGenre').textContent = meta.genres
+                || movie.genre
+                || (window.FlimfyUI ? FlimfyUI.contentLabel(movie) : '')
+                || 'Genre unavailable';
             document.getElementById('dpLanguage').textContent = movie.language || 'Audio details below';
+
+            const ctaLabel = document.getElementById('dpPrimaryCtaLabel');
+            if (ctaLabel) ctaLabel.textContent = meta.primaryCtaLabel;
+            const ctaIcon = document.getElementById('dpPrimaryCtaIcon');
+            if (ctaIcon) ctaIcon.className = isSeries ? 'fas fa-layer-group' : 'fas fa-download';
+            const shareBtn = document.getElementById('detailShareButton');
+            if (shareBtn) shareBtn.setAttribute('aria-label', meta.shareAriaLabel);
+        }
+
+        function applyDetailSynopsis(rawText) {
+            const descNode = document.getElementById('dpDesc');
+            const toggleBtn = document.getElementById('dpDescToggle');
+            if (!descNode) return;
+            const state = window.FlimfyCinema
+                ? window.FlimfyCinema.getSynopsisState(rawText)
+                : { text: String(rawText || '').trim() || 'Story details are not available yet.', canToggle: false };
+            descNode.innerText = state.text;
+            descNode.classList.toggle('is-clamped', state.canToggle);
+            if (toggleBtn) {
+                toggleBtn.hidden = !state.canToggle;
+                toggleBtn.textContent = 'Read full synopsis';
+                toggleBtn.setAttribute('aria-expanded', 'false');
+            }
+        }
+
+        window.toggleDetailSynopsis = function() {
+            const descNode = document.getElementById('dpDesc');
+            const toggleBtn = document.getElementById('dpDescToggle');
+            if (!descNode || !toggleBtn) return;
+            const expanding = descNode.classList.contains('is-clamped');
+            descNode.classList.toggle('is-clamped', !expanding);
+            toggleBtn.textContent = expanding ? 'Show less' : 'Read full synopsis';
+            toggleBtn.setAttribute('aria-expanded', String(expanding));
+        };
+
+        function renderDetailCastAndCrew(movie) {
+            const wrap = document.getElementById('castSectionWrap');
+            const container = document.getElementById('castSection');
+            if (!container) return;
+            const credits = window.FlimfyCinema
+                ? window.FlimfyCinema.parseCredits(movie?.cast, movie?.director)
+                : [];
+            if (!credits.length) {
+                container.innerHTML = '';
+                if (wrap) wrap.hidden = true;
+                return;
+            }
+            container.innerHTML = credits.map(person => `
+                <article class="credit-card" data-tone="${escapeHtml(person.tone)}">
+                    <span class="credit-avatar" aria-hidden="true">${escapeHtml(person.initials)}</span>
+                    <div class="credit-copy">
+                        <strong class="credit-name">${escapeHtml(person.name)}</strong>
+                        <span class="credit-role">${escapeHtml(person.role)}</span>
+                    </div>
+                </article>
+            `).join('');
+            if (wrap) wrap.hidden = false;
+        }
+
+        function renderDetailSimilarTitles(movie) {
+            const section = document.getElementById('similarSection');
+            const grid = document.getElementById('similarGrid');
+            const kicker = document.getElementById('similarKicker');
+            const heading = document.getElementById('similarHeading');
+            if (!section || !grid || !window.FlimfyCinema) return;
+            const pool = [
+                ...allMovies,
+                ...Object.values(tmdbMoviesMap || {})
+            ];
+            const isSeries = window.FlimfyCinema.isSeriesItem(movie);
+            const similar = window.FlimfyCinema.selectSimilarTitles(movie, pool, 10);
+            if (!similar.length) {
+                grid.innerHTML = '';
+                section.hidden = true;
+                return;
+            }
+            if (kicker) kicker.textContent = isSeries ? 'MORE SERIES LIKE THIS' : 'MORE FILMS LIKE THIS';
+            if (heading) heading.textContent = isSeries ? 'Similar Series' : 'Similar Movies';
+            grid.innerHTML = renderCards(similar, 'card', false);
+            section.hidden = false;
         }
         const DETAIL_CACHE_PREFIX = 'flimfybox:detail:v2:';
         const DETAIL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -3019,8 +3191,9 @@ document.addEventListener('keydown', (e) => {
                 detailsPoster.src = POSTER_PLACEHOLDER;
             };
             detailsTitle.innerText = movie.title || 'Loading details…';
-            detailsDescription.innerText = 'Loading story and availability…';
-            document.getElementById('castSection').innerHTML = '';
+            applyDetailSynopsis(movie.description || 'Details and availability are loading…');
+            renderDetailCastAndCrew(movie);
+            renderDetailSimilarTitles(movie);
             document.getElementById('dpTrailerBtn').innerHTML = '';
             if (isTMDB || movie.source === 'tmdb') {
                 renderUnavailableCommunityRating(movie.title || 'this title');
@@ -3033,12 +3206,11 @@ document.addEventListener('keydown', (e) => {
                 );
                 document.getElementById('communityRating').innerHTML = '<p class="community-rating-summary">Loading your rating…</p>';
             }
-            document.getElementById('dpSeasons').innerHTML = '<div class="dl-heading">Loading seasons…</div>';
+            document.getElementById('dpSeasons').innerHTML = '';
             document.getElementById('dpLinks').innerHTML = '<div class="dl-heading">Loading available files…</div>';
             detailsPage.classList.add('open', 'is-loading');
             // The card already contains the title, poster, year, rating and genre.
             // Show that immediately while files/cast finish loading in the background.
-            detailsDescription.innerText = movie.description || 'Details and availability are loading…';
             detailsPage.classList.remove('is-loading');
             if (isTMDB || movie.is_upcoming || movie.is_available === false) {
                 const backdropImg = movie.backdrop || movie.image;
@@ -3048,8 +3220,9 @@ document.addEventListener('keydown', (e) => {
                 document.getElementById('dpFloatPoster').src = artworkUrl(movie.image);
                 document.getElementById('dpTitle').innerText = movie.title;
                 setMovieDetailsMeta(movie);
-                document.getElementById('dpDesc').innerText = movie.description || 'No description available.';
-                document.getElementById('castSection').innerHTML = '';
+                applyDetailSynopsis(movie.description || 'No description available.');
+                renderDetailCastAndCrew(movie);
+                renderDetailSimilarTitles(movie);
                 // Only show "upcoming" UI if the movie is genuinely pre-release.
                 // A TMDB result that has already released should show the Request flow.
                 const isGenuinelyUpcoming = FlimfyUI.futureRelease(movie);
@@ -3108,7 +3281,7 @@ document.addEventListener('keydown', (e) => {
                         const m = data.movie;
                         movieDetailsCache.set(String(id), { movie: m, cachedAt: Date.now() });
                         activeMovie = { ...movie, ...m, source: 'local' };
-                        setMovieDetailsMeta({ ...movie, ...m });
+                        setMovieDetailsMeta(activeMovie);
                         addRecentlyViewed(activeMovie);
                         const backdropUrl = m.backdrop ? m.backdrop : m.image;
                         document.getElementById('dpBackdrop').style.backgroundImage = backdropUrl
@@ -3116,19 +3289,9 @@ document.addEventListener('keydown', (e) => {
                             : IMAGE_FALLBACK_GRADIENT;
                         document.getElementById('dpFloatPoster').src = artworkUrl(m.image);
                         document.getElementById('dpTitle').innerText = m.title;
-                        document.getElementById('dpDesc').innerText = m.description || 'Story details are not available yet.';
-                        if (m.cast && m.cast.trim().length > 0) {
-                            const actors = m.cast.split(',');
-                            let castHtml = '<div style="margin-bottom:20px;">';
-                            actors.forEach(actor => {
-                                const cleanName = actor.trim();
-                                if (cleanName) castHtml += `<span class="cast-chip">${escapeHtml(cleanName)}</span>`;
-                            });
-                            castHtml += '</div>';
-                            document.getElementById('castSection').innerHTML = castHtml;
-                        } else {
-                            document.getElementById('castSection').innerHTML = '';
-                        }
+                        applyDetailSynopsis(m.description || 'Story details are not available yet.');
+                        renderDetailCastAndCrew(activeMovie);
+                        renderDetailSimilarTitles(activeMovie);
                         document.getElementById('dpTrailerBtn').innerHTML = '';
                         if (m.is_upcoming) {
                             renderLockedCommunityRating(m.title || movie.title || 'this title');
@@ -3181,7 +3344,8 @@ document.addEventListener('keydown', (e) => {
 
                             if (hasSeasons) {
                                 const seasonNumbers = Object.keys(seasonsMap).map(Number).sort((a, b) => a - b);
-                                let seasonsHtml = `<div class="season-scroll-wrapper"><div class="season-pill-container" id="seasonPillContainer">`;
+                                setMovieDetailsMeta(activeMovie, seasonNumbers.length);
+                                let seasonsHtml = `<div class="seasons-bar-head"><span class="section-kicker">EPISODE GUIDE</span><span class="seasons-count-label">${seasonNumbers.length} ${seasonNumbers.length === 1 ? 'Season' : 'Seasons'}</span></div><div class="season-scroll-wrapper"><div class="season-pill-container" id="seasonPillContainer">`;
                                 seasonNumbers.forEach(sn => {
                                     seasonsHtml += `<button type="button" class="season-pill" data-season="${sn}" aria-pressed="false" onclick="selectSeason(${m.id}, ${sn})">Season ${sn}</button>`;
                                 });
@@ -3673,6 +3837,9 @@ document.addEventListener('keydown', (e) => {
             const seasonSummary = episodeCount
                 ? `${episodeCount} EPISODES`
                 : 'COMPLETE SEASON';
+            const placeholderArt = typeof POSTER_PLACEHOLDER !== 'undefined' ? POSTER_PLACEHOLDER : '/static/miniapp/poster-placeholder.svg';
+            const rawThumb = (typeof activeMovie !== 'undefined' && (activeMovie?.backdrop || activeMovie?.image)) || placeholderArt;
+            const fallbackThumb = typeof artworkUrl === 'function' ? artworkUrl(rawThumb, 'w780') : rawThumb;
             let html = `<div class="dl-heading">SEASON ${seasonNum} • ${seasonSummary}</div><div class="episodes-list">`;
             
             epNumbers.forEach(epNum => {
@@ -3684,36 +3851,55 @@ document.addEventListener('keydown', (e) => {
                     : (isEpisodeRange
                         ? `${String(ep.episodeStart).padStart(2, '0')}-${String(ep.episodeEnd).padStart(2, '0')}`
                         : String(ep.episodeStart ?? epNum).padStart(2, '0'));
+                const displayMeta = window.FlimfyCinema
+                    ? window.FlimfyCinema.buildEpisodeDisplayMeta(ep, seasonNum, epDisplayNum, fallbackThumb)
+                    : {
+                        badgeCode: isCompleteSeason ? `S${String(seasonNum).padStart(2, '0')} · FULL` : `S${String(seasonNum).padStart(2, '0')} · E${epDisplayNum}`,
+                        title: isCompleteSeason ? 'Complete Season' : (isEpisodeRange ? `Episode ${epDisplayNum} Combined` : `Episode ${epDisplayNum}`),
+                        subtitle: `${(ep.qualities || []).length} ready`,
+                        thumbUrl: fallbackThumb
+                    };
                 html += `
-                <div class="episode-card">
-                    <div class="ep-header">
-                        ${isCompleteSeason
-                            ? '<div class="ep-title">Complete Season</div>'
-                            : (isEpisodeRange
-                                ? `<div class="ep-title">Episode ${epDisplayNum} Combined</div>`
-                                : `<div class="ep-number-group">
-                                    <div class="ep-number-label">EPISODE</div>
-                                    <div class="ep-number">${epDisplayNum}</div>
-                                </div>`)}
+                <article class="episode-card">
+                    <div class="ep-thumb" aria-hidden="true">
+                        <img src="${escapeHtml(displayMeta.thumbUrl)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"
+                            onerror="this.onerror=null; this.src='${placeholderArt}'; this.classList.add('image-fallback')">
+                        <span class="ep-thumb-code">${escapeHtml(displayMeta.badgeCode)}</span>
                     </div>
-                    <div class="ep-qualities">`;
+                    <div class="ep-body">
+                        <div class="ep-header">
+                            ${isCompleteSeason
+                                ? '<div class="ep-title">Complete Season</div>'
+                                : (isEpisodeRange
+                                    ? `<div class="ep-title">Episode ${epDisplayNum} Combined</div>`
+                                    : `<div class="ep-number-group">
+                                        <span class="ep-number-label">EP</span>
+                                        <span class="ep-number">${epDisplayNum}</span>
+                                        <span class="ep-title">${escapeHtml(displayMeta.title)}</span>
+                                    </div>`)}
+                            <span class="ep-subtitle">${escapeHtml(displayMeta.subtitle)}</span>
+                        </div>
+                        <div class="ep-qualities">`;
                 
                 sortMovieFilesForDisplay(ep.qualities).forEach(q => {
                     const qualityLabel = escapeHtml(formatMiniAppQuality(q.quality) || 'Download');
                     const fileSize = escapeHtml(q.size || '');
                     html += `
-                        <button class="ep-dl-btn" onclick="downloadMovie(${movieId}, ${q.id})">
-                            <span class="ep-qtext"><i class="fas fa-play-circle"></i> ${qualityLabel} <span class="ep-size">${fileSize}</span></span>
-                            <span class="ep-action"><i class="fas fa-download"></i></span>
-                        </button>
+                            <button type="button" class="ep-dl-btn" onclick="downloadMovie(${movieId}, ${q.id})">
+                                <span class="ep-qtext"><i class="fas fa-play-circle" aria-hidden="true"></i> ${qualityLabel}${fileSize ? ` <span class="ep-size">${fileSize}</span>` : ''}</span>
+                                <span class="ep-action"><span>Download</span><i class="fas fa-download" aria-hidden="true"></i></span>
+                            </button>
                     `;
                 });
                 
-                html += `</div></div>`;
+                html += `</div></div></article>`;
             });
             html += `</div>`;
             
             linksContainer.innerHTML = html;
+            if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+                window.dispatchEvent(new CustomEvent('flimfy:season-change', { detail: { movieId, seasonNum } }));
+            }
         };
 
         window.closeDetails = function() {
@@ -3826,6 +4012,11 @@ document.addEventListener('keydown', (e) => {
         };
 
         window.downloadMovie = function(id, fileId = null) {
+            const trigger = document.activeElement?.closest?.('.download-option, .ep-dl-btn');
+            if (trigger) {
+                trigger.classList.add('is-launching');
+                window.setTimeout(() => trigger.classList.remove('is-launching'), 500);
+            }
             tg.HapticFeedback.impactOccurred('heavy');
             trackRecommendationEvent('miniapp_download', id, { file_id: fileId });
             const filePath = fileId ? `/file/${fileId}` : '';

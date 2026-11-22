@@ -23,8 +23,11 @@
         const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
         return date > today;
     }
-    function themePreference(value) { return ['dark', 'light', 'system'].includes(value) ? value : 'system'; }
-    function resolveTheme(value, systemDark) { return themePreference(value) === 'system' ? (systemDark ? 'dark' : 'light') : value; }
+    function themePreference(value) { return ['dark', 'light', 'system'].includes(value) ? value : 'dark'; }
+    function resolveTheme(value, systemDark) {
+        const pref = themePreference(value);
+        return pref === 'system' ? (systemDark ? 'dark' : 'light') : pref;
+    }
     function availabilityLabel(movie) {
         if (futureRelease(movie)) return 'Coming soon';
         if (movie.is_available === true || movie.availability_state === 'available') return 'Available';
@@ -45,7 +48,7 @@
     root.FlimfyUI = api;
     if (!root.document) return;
     const media = root.matchMedia('(prefers-color-scheme: dark)');
-    let preference = 'system';
+    let preference = 'dark';
     try { preference = themePreference(root.localStorage.getItem('flimfybox-theme')); } catch (_) {}
     api.applyTheme = function (value, persist = true) {
         preference = themePreference(value);

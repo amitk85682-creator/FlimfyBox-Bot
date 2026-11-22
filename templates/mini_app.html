@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    {% set miniapp_asset_version = '20261120-detail-obsidian-1' %}
+    {% set miniapp_asset_version = '20261121-detail-cinema-v2' %}
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#06070b">
@@ -62,7 +62,9 @@
     <div id="mainContent">
         <section class="hero-slider" id="heroSlider" aria-label="Featured title">
             <canvas class="hero-atmosphere" id="heroAtmosphere" aria-hidden="true"></canvas>
+            <div class="hero-art-prev" id="heroArtPrev" aria-hidden="true"></div>
             <div class="hero-art" id="heroArt" aria-hidden="true"></div>
+            <div class="hero-ambient-rim" aria-hidden="true"></div>
             <div class="hero-vignette" aria-hidden="true"></div>
             <div class="hero-overlay">
                 <div class="hero-info">
@@ -361,54 +363,80 @@
         </div>
     </div>
 
-    <div class="details-page" id="detailsPage">
+    <div class="details-page" id="detailsPage" data-media-mode="movie">
         <div class="dp-header">
             <button class="btn-back details-back-button" type="button" onclick="closeDetails()" aria-label="Back to catalogue"><i class="fas fa-chevron-left"></i><span>Back</span></button>
             <button class="btn-more" type="button" aria-label="Share title" onclick="shareCurrentMovie()"><i class="fas fa-share-alt"></i></button>
         </div>
         <div class="dp-layout">
-            <div class="dp-backdrop" id="dpBackdrop"></div>
+            <div class="dp-backdrop-stage">
+                <div class="dp-backdrop" id="dpBackdrop"></div>
+                <div class="dp-backdrop-atmosphere" aria-hidden="true"></div>
+            </div>
             <div class="dp-info">
                 <div class="dp-title-row">
                     <div class="dp-poster-float" id="dpPosterFloat">
-                        <img id="dpFloatPoster" src="" alt="Poster" referrerpolicy="no-referrer">
+                        <img id="dpFloatPoster" src="/static/miniapp/poster-placeholder.svg" alt="Poster" referrerpolicy="no-referrer">
+                        <div class="dp-poster-sheen" aria-hidden="true"></div>
                     </div>
                     <div class="dp-title-copy">
+                        <div class="dp-kicker-row">
+                            <span class="dp-type-kicker" id="dpTypeKicker">FEATURE FILM</span>
+                            <span class="dp-cert-tag" id="dpCertification" hidden></span>
+                            <span class="dp-inline-score" id="dpInlineScore" hidden></span>
+                        </div>
                         <h1 class="dp-title" id="dpTitle">Title</h1>
                         <div class="rich-info-box" id="dpRichInfo">
-                            <div class="info-pill"><i class="far fa-calendar"></i> <span id="dpYear">—</span></div>
-                            <div class="info-pill"><i class="fas fa-film"></i> <span id="dpGenre">—</span></div>
-                            <div class="info-pill"><i class="fas fa-volume-up"></i> <span id="dpLanguage">Audio details below</span></div>
+                            <div class="info-pill"><i class="far fa-calendar" aria-hidden="true"></i> <span id="dpYear">—</span></div>
+                            <div class="info-pill" id="dpDurationWrap" hidden><i class="far fa-clock" aria-hidden="true"></i> <span id="dpDuration"></span></div>
+                            <div class="info-pill"><i class="fas fa-film" aria-hidden="true"></i> <span id="dpGenre">—</span></div>
+                            <div class="info-pill"><i class="fas fa-volume-up" aria-hidden="true"></i> <span id="dpLanguage">Audio details below</span></div>
                         </div>
                     </div>
                 </div>
                 <div class="detail-actions">
-                    <button class="detail-play" type="button" onclick="playCurrentTrailer()"><i class="fas fa-play"></i> Play trailer</button>
-                    <button class="detail-download-jump" type="button" onclick="scrollToDetailDownloads()"><i class="fas fa-arrow-down-to-line"></i> Find a version</button>
-                    <button class="detail-rating-jump" type="button" onclick="scrollToCommunityRating()"><i class="fas fa-star"></i> Rate this</button>
-                    <button class="detail-icon-button" id="detailMyListButton" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus"></i></button>
-                    <button class="detail-icon-button" type="button" aria-label="Share movie" onclick="shareCurrentMovie()"><i class="fas fa-share-alt"></i></button>
+                    <button class="detail-download-jump detail-primary-cta" id="dpPrimaryCta" type="button" onclick="scrollToDetailDownloads()"><i class="fas fa-download" id="dpPrimaryCtaIcon" aria-hidden="true"></i> <span id="dpPrimaryCtaLabel">Watch &amp; Download</span></button>
+                    <button class="detail-play" type="button" onclick="playCurrentTrailer()"><i class="fas fa-play" aria-hidden="true"></i> Play trailer</button>
+                    <button class="detail-rating-jump" type="button" onclick="scrollToCommunityRating()"><i class="fas fa-star" aria-hidden="true"></i> Rate this</button>
+                    <button class="detail-icon-button" id="detailMyListButton" type="button" aria-label="Add to My List" onclick="toggleCurrentMyList()"><i class="fas fa-plus" aria-hidden="true"></i></button>
+                    <button class="detail-icon-button" id="detailShareButton" type="button" aria-label="Share movie" onclick="shareCurrentMovie()"><i class="fas fa-share-alt" aria-hidden="true"></i></button>
                 </div>
                 <div class="dp-content-grid">
+                    <section class="dp-watch-panel" id="dpWatchPanel" aria-label="Available versions and episodes">
+                        <div id="dpTrailerBtn" class="detail-request-actions"></div>
+                        <div id="dpSeasons" class="seasons-container"></div>
+                        <section class="dl-section" id="dpLinks" aria-live="polite"></section>
+                    </section>
                     <main class="dp-main-column">
                         <section class="overview-section">
                             <div class="detail-section-heading">
-                                <span class="section-kicker">The Story</span>
-                                <h2>Overview</h2>
+                                <span class="section-kicker" id="dpStoryKicker">THE STORY</span>
+                                <h2>Synopsis</h2>
                             </div>
                             <div class="rich-desc" id="dpDesc">Loading story...</div>
+                            <button type="button" class="dp-desc-toggle" id="dpDescToggle" hidden onclick="toggleDetailSynopsis()">Read full synopsis</button>
                         </section>
-                        <div id="castSection" class="cast-list"></div>
+                        <section class="cast-section-shell" id="castSectionWrap" hidden aria-labelledby="castSectionHeading">
+                            <div class="detail-section-heading">
+                                <span class="section-kicker">ENSEMBLE &amp; CREATORS</span>
+                                <h2 id="castSectionHeading">Cast &amp; Crew</h2>
+                            </div>
+                            <div id="castSection" class="cast-list"></div>
+                        </section>
                         <section class="flimfy-reviews-panel" id="flimfyReviews" aria-live="polite"></section>
+                        <section class="similar-section" id="similarSection" hidden aria-labelledby="similarHeading">
+                            <div class="detail-section-heading">
+                                <span class="section-kicker" id="similarKicker">RECOMMENDED NEXT</span>
+                                <h2 id="similarHeading">Similar titles</h2>
+                            </div>
+                            <div class="horizontal-scroll similar-scroll" id="similarGrid"></div>
+                        </section>
                     </main>
-                    <aside class="dp-side-column" aria-label="Ratings and available versions">
+                    <aside class="dp-side-column" aria-label="Ratings and verdict">
                         <section class="verdict-meter-panel" aria-label="FlimfyBox rating and your rating">
                             <div id="flimfyVerdict" aria-live="polite"></div>
                             <section class="community-rating" id="communityRating" aria-live="polite" aria-label="Your rating"></section>
                         </section>
-                        <div id="dpTrailerBtn" class="detail-request-actions"></div>
-                        <div id="dpSeasons" class="seasons-container"></div>
-                        <section class="dl-section" id="dpLinks" aria-live="polite"></section>
                     </aside>
                 </div>
             </div>
@@ -473,6 +501,7 @@
     <script src="/static/vendor/gsap/gsap.min.js"></script>
     <script src="/static/vendor/gsap/ScrollTrigger.min.js"></script>
     <script src="{{ url_for('static', filename='miniapp/rating-meter.js') }}?v={{ miniapp_asset_version }}"></script>
+    <script src="{{ url_for('static', filename='miniapp/cinematic-helpers.js') }}?v={{ miniapp_asset_version }}"></script>
     <script src="{{ url_for('static', filename='miniapp/app.js') }}?v={{ miniapp_asset_version }}"></script>
     <script src="{{ url_for('static', filename='miniapp/cinematic-motion.js') }}?v={{ miniapp_asset_version }}"></script>
 </body>
