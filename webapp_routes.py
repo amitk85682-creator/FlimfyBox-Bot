@@ -4298,40 +4298,411 @@ def register_webapp_routes(
     def secure_watch(movie_id, movie_file_id=None):
         if movie_id <= 0 or (movie_file_id is not None and movie_file_id <= 0):
             return jsonify({'status': 'error', 'message': 'Invalid movie or file'}), 400
-        # Yeh HTML page user ko dikhega. Bots JS run nahi kar pate.
+        # Keep the secure-link interstitial self-contained and light enough for
+        # mobile browsers. Its animation is decorative; the API response alone
+        # controls whether the Telegram redirect happens.
         html = """
         <!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>FlimfyBox - Verifying Secure Connection...</title>
+            <meta name="theme-color" content="#080914">
+            <meta name="color-scheme" content="dark">
+            <title>Opening your FlimfyBox link</title>
             <style>
-                body { background: #09090b; color: white; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
-                .loader { border: 4px solid rgba(255,255,255,0.1); border-top: 4px solid #f43f5e; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
-                @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                :root {
+                    color-scheme: dark;
+                    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                    background: #080914;
+                    color: #f8f7ff;
+                    font-synthesis: none;
+                    text-rendering: optimizeLegibility;
+                    -webkit-font-smoothing: antialiased;
+                    -moz-osx-font-smoothing: grayscale;
+                }
+                * { box-sizing: border-box; }
+                [hidden] { display: none !important; }
+                html, body { width: 100%; min-height: 100%; margin: 0; }
+                body {
+                    min-height: 100vh;
+                    min-height: 100svh;
+                    overflow: hidden;
+                    background:
+                        radial-gradient(ellipse at 50% 30%, rgba(105, 73, 199, .23), transparent 39%),
+                        radial-gradient(ellipse at 12% 85%, rgba(63, 45, 139, .18), transparent 35%),
+                        #080914;
+                }
+                .page {
+                    position: relative;
+                    display: grid;
+                    min-height: 100vh;
+                    min-height: 100svh;
+                    place-items: center;
+                    padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+                    isolation: isolate;
+                }
+                .grain {
+                    position: absolute;
+                    z-index: -1;
+                    inset: 0;
+                    opacity: .18;
+                    pointer-events: none;
+                    background-image: radial-gradient(rgba(255,255,255,.5) .55px, transparent .7px);
+                    background-size: 6px 6px;
+                    mask-image: linear-gradient(transparent, #000 20%, #000 80%, transparent);
+                }
+                .ambient {
+                    position: absolute;
+                    z-index: -1;
+                    width: min(78vw, 640px);
+                    aspect-ratio: 1;
+                    border-radius: 50%;
+                    background: radial-gradient(circle, rgba(119, 85, 232, .13), rgba(73, 48, 152, .035) 43%, transparent 70%);
+                    filter: blur(18px);
+                    animation: ambient-breathe 6s ease-in-out infinite alternate;
+                    pointer-events: none;
+                }
+                .card {
+                    width: min(100%, 440px);
+                    padding: clamp(24px, 6vw, 42px) clamp(20px, 6vw, 44px) 26px;
+                    border: 1px solid rgba(222, 217, 255, .13);
+                    border-radius: 30px;
+                    background: linear-gradient(145deg, rgba(24, 24, 43, .86), rgba(12, 13, 27, .88));
+                    box-shadow: 0 34px 100px rgba(0, 0, 0, .48), inset 0 1px rgba(255,255,255,.08);
+                    text-align: center;
+                    -webkit-backdrop-filter: blur(18px);
+                    backdrop-filter: blur(18px);
+                }
+                .brand {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 9px;
+                    color: rgba(237, 233, 255, .74);
+                    font-size: 11px;
+                    font-weight: 750;
+                    letter-spacing: .19em;
+                }
+                .brand-mark {
+                    display: grid;
+                    width: 27px;
+                    height: 27px;
+                    place-items: center;
+                    border: 1px solid rgba(204, 188, 255, .42);
+                    border-radius: 9px;
+                    background: linear-gradient(145deg, #a98cff, #6543d8 72%);
+                    box-shadow: 0 5px 22px rgba(130, 91, 245, .36);
+                    color: white;
+                    font-size: 15px;
+                    letter-spacing: 0;
+                }
+                .scene {
+                    position: relative;
+                    display: grid;
+                    height: 216px;
+                    place-items: center;
+                    perspective: 850px;
+                    isolation: isolate;
+                }
+                .scene::before {
+                    position: absolute;
+                    bottom: 24px;
+                    width: 174px;
+                    height: 28px;
+                    border-radius: 50%;
+                    background: rgba(134, 98, 255, .25);
+                    filter: blur(24px);
+                    content: "";
+                    animation: floor-glow 3.8s ease-in-out infinite;
+                }
+                .orbit {
+                    position: absolute;
+                    width: 248px;
+                    height: 104px;
+                    border: 1px solid rgba(185, 165, 255, .24);
+                    border-radius: 50%;
+                    transform: rotateX(67deg) rotateZ(-18deg);
+                    animation: orbit-tilt 9s linear infinite;
+                }
+                .orbit::before, .orbit::after {
+                    position: absolute;
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 50%;
+                    background: #d6caff;
+                    box-shadow: 0 0 14px 4px rgba(160, 126, 255, .76);
+                    content: "";
+                }
+                .orbit::before { top: 9px; left: 37px; }
+                .orbit::after { right: 29px; bottom: 8px; width: 4px; height: 4px; }
+                .orbit.orbit-back {
+                    width: 206px;
+                    height: 148px;
+                    border-color: rgba(124, 101, 198, .18);
+                    transform: rotateX(70deg) rotateZ(58deg);
+                    animation-duration: 13s;
+                    animation-direction: reverse;
+                }
+                .poster {
+                    position: relative;
+                    z-index: 1;
+                    display: flex;
+                    width: 124px;
+                    height: 164px;
+                    flex-direction: column;
+                    justify-content: space-between;
+                    padding: 12px;
+                    overflow: hidden;
+                    border: 1px solid rgba(240, 234, 255, .67);
+                    border-radius: 17px;
+                    background:
+                        radial-gradient(ellipse at 77% 27%, rgba(229, 207, 255, .47), transparent 15%),
+                        radial-gradient(ellipse at 35% 65%, rgba(99, 66, 207, .82), transparent 42%),
+                        linear-gradient(155deg, #3a286f 0%, #17162f 52%, #111326 100%);
+                    box-shadow: 0 22px 45px rgba(0, 0, 0, .52), 0 0 45px rgba(132, 95, 242, .24), inset 0 1px rgba(255,255,255,.3);
+                    transform: rotateY(-12deg) rotateX(5deg) rotateZ(-3deg);
+                    transform-style: preserve-3d;
+                    animation: poster-float 4.6s ease-in-out infinite;
+                }
+                .poster::before {
+                    position: absolute;
+                    top: -34px;
+                    right: -43px;
+                    width: 96px;
+                    height: 190px;
+                    border: 1px solid rgba(239, 229, 255, .18);
+                    border-radius: 50%;
+                    transform: rotate(32deg);
+                    content: "";
+                }
+                .poster::after {
+                    position: absolute;
+                    inset: 0;
+                    background: linear-gradient(112deg, transparent 16%, rgba(255,255,255,.14) 46%, transparent 64%);
+                    transform: translateX(-115%);
+                    animation: poster-sheen 4.8s ease-in-out infinite;
+                    content: "";
+                }
+                .poster-head, .poster-foot { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; }
+                .poster-head { color: rgba(255,255,255,.82); font-size: 7px; font-weight: 800; letter-spacing: .16em; }
+                .poster-logo {
+                    display: grid;
+                    width: 21px;
+                    height: 21px;
+                    place-items: center;
+                    border: 1px solid rgba(255,255,255,.5);
+                    border-radius: 7px;
+                    background: linear-gradient(145deg, #b495ff, #704be7);
+                    color: white;
+                    font-size: 12px;
+                    letter-spacing: 0;
+                }
+                .poster-art {
+                    position: absolute;
+                    inset: 43px 17px 39px;
+                    display: grid;
+                    place-items: center;
+                    border: 1px solid rgba(224, 207, 255, .16);
+                    border-radius: 48% 48% 36% 36%;
+                    background: radial-gradient(ellipse at 50% 39%, rgba(234, 221, 255, .29), transparent 28%), linear-gradient(180deg, rgba(169, 134, 255, .12), transparent 82%);
+                    box-shadow: inset 0 0 30px rgba(185, 152, 255, .12);
+                    transform: translateZ(14px);
+                }
+                .play-glyph {
+                    display: grid;
+                    width: 37px;
+                    height: 37px;
+                    place-items: center;
+                    padding-left: 3px;
+                    border: 1px solid rgba(255,255,255,.63);
+                    border-radius: 50%;
+                    background: rgba(255,255,255,.12);
+                    box-shadow: 0 0 24px rgba(208, 187, 255, .35);
+                    color: #fff;
+                    font-size: 11px;
+                    backdrop-filter: blur(8px);
+                }
+                .poster-foot { color: rgba(244, 239, 255, .8); font-size: 7px; font-weight: 750; letter-spacing: .18em; }
+                .poster-foot i { width: 33px; height: 2px; border-radius: 4px; background: linear-gradient(90deg, #e7dbff, rgba(231,219,255,.15)); }
+                .spark {
+                    position: absolute;
+                    z-index: 2;
+                    width: 5px;
+                    height: 5px;
+                    border-radius: 50%;
+                    background: #fff;
+                    box-shadow: 0 0 12px 3px rgba(189, 159, 255, .7);
+                    animation: spark-float 3.7s ease-in-out infinite;
+                }
+                .spark.one { top: 40px; left: calc(50% - 99px); }
+                .spark.two { top: 76px; right: calc(50% - 112px); width: 4px; height: 4px; animation-delay: -1.6s; }
+                .spark.three { bottom: 37px; left: calc(50% - 76px); width: 3px; height: 3px; animation-delay: -.8s; }
+                .eyebrow {
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 8px;
+                    margin: 0 0 13px;
+                    color: #b8a4ff;
+                    font-size: 9px;
+                    font-weight: 800;
+                    letter-spacing: .2em;
+                    text-transform: uppercase;
+                }
+                .live-dot { width: 6px; height: 6px; border-radius: 50%; background: #a88bff; box-shadow: 0 0 10px rgba(168,139,255,.9); animation: dot-pulse 1.7s ease-in-out infinite; }
+                h1 { margin: 0; color: #fbfaff; font-size: clamp(21px, 5vw, 27px); font-weight: 720; letter-spacing: -.045em; line-height: 1.18; }
+                .description { max-width: 300px; margin: 10px auto 0; color: #a5a3ba; font-size: 13px; line-height: 1.6; }
+                .progress-wrap { margin-top: 27px; text-align: left; }
+                .progress-track { position: relative; height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.1); }
+                .progress-track::after {
+                    position: absolute;
+                    inset: 0 auto 0 -48%;
+                    width: 48%;
+                    border-radius: inherit;
+                    background: linear-gradient(90deg, transparent, #a98aff 35%, #f1eaff 72%, transparent);
+                    box-shadow: 0 0 16px rgba(164, 132, 255, .75);
+                    animation: progress-sweep 1.65s cubic-bezier(.45,.05,.55,.95) infinite;
+                    content: "";
+                }
+                .progress-caption { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; color: #797990; font-size: 10px; letter-spacing: .025em; }
+                .privacy { margin: 23px 0 0; color: #77758b; font-size: 10px; }
+                .privacy span { color: #aaa2c8; }
+                .error-icon {
+                    display: grid;
+                    width: 52px;
+                    height: 52px;
+                    place-items: center;
+                    margin: 24px auto 18px;
+                    border: 1px solid rgba(255, 181, 191, .24);
+                    border-radius: 17px;
+                    background: rgba(148, 55, 78, .15);
+                    color: #ffacbd;
+                    font-size: 22px;
+                }
+                .retry {
+                    min-height: 46px;
+                    margin-top: 22px;
+                    padding: 0 21px;
+                    border: 1px solid rgba(219, 207, 255, .32);
+                    border-radius: 14px;
+                    background: linear-gradient(135deg, #a283fa, #6945d8);
+                    box-shadow: 0 10px 28px rgba(108, 70, 220, .28);
+                    color: #fff;
+                    font: inherit;
+                    font-size: 13px;
+                    font-weight: 700;
+                    cursor: pointer;
+                    transition: transform .18s ease, filter .18s ease, opacity .18s ease;
+                }
+                .retry:hover { filter: brightness(1.1); transform: translateY(-1px); }
+                .retry:focus-visible { outline: 2px solid #e5d9ff; outline-offset: 4px; }
+                .retry:disabled { cursor: wait; opacity: .65; }
+                @keyframes poster-float { 0%,100% { transform: translateY(1px) rotateY(-12deg) rotateX(5deg) rotateZ(-3deg); } 50% { transform: translateY(-9px) rotateY(-7deg) rotateX(2deg) rotateZ(-1deg); } }
+                @keyframes poster-sheen { 0%,55% { transform: translateX(-115%); } 83%,100% { transform: translateX(115%); } }
+                @keyframes orbit-tilt { from { rotate: 0deg; } to { rotate: 360deg; } }
+                @keyframes spark-float { 0%,100% { opacity: .32; transform: translate3d(0, 3px, 0) scale(.8); } 50% { opacity: 1; transform: translate3d(0, -7px, 8px) scale(1.2); } }
+                @keyframes ambient-breathe { from { opacity: .62; transform: scale(.92); } to { opacity: 1; transform: scale(1.08); } }
+                @keyframes floor-glow { 0%,100% { opacity: .55; transform: scaleX(.86); } 50% { opacity: 1; transform: scaleX(1.1); } }
+                @keyframes dot-pulse { 0%,100% { opacity: .55; transform: scale(.82); } 50% { opacity: 1; transform: scale(1.12); } }
+                @keyframes progress-sweep { to { transform: translateX(310%); } }
+                @media (max-width: 380px) {
+                    .card { padding-right: 19px; padding-left: 19px; border-radius: 25px; }
+                    .scene { height: 190px; }
+                    .poster { width: 111px; height: 149px; }
+                    .orbit { width: 218px; }
+                }
+                @media (max-height: 650px) and (min-width: 381px) {
+                    .card { padding-top: 20px; padding-bottom: 20px; }
+                    .scene { height: 172px; }
+                    .poster { width: 106px; height: 142px; }
+                    .privacy { margin-top: 16px; }
+                }
+                @media (prefers-reduced-motion: reduce) {
+                    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+                    .poster { transform: none; }
+                    .orbit { transform: rotateX(67deg) rotateZ(-18deg); }
+                }
             </style>
         </head>
         <body>
-            <div class="loader"></div>
-            <h3>Securely verifying your connection...</h3>
-            <p style="color: #a1a1aa; font-size: 13px;">Please wait 2 seconds. You will be redirected automatically.</p>
-            
+            <main class="page">
+                <div class="grain" aria-hidden="true"></div>
+                <div class="ambient" aria-hidden="true"></div>
+                <section class="card" aria-label="Secure file link">
+                    <div class="brand"><span class="brand-mark" aria-hidden="true">F</span> FLIMFYBOX</div>
+                    <div class="scene" aria-hidden="true">
+                        <div class="orbit orbit-back"></div>
+                        <div class="orbit"></div>
+                        <span class="spark one"></span><span class="spark two"></span><span class="spark three"></span>
+                        <div class="poster">
+                            <div class="poster-head"><span class="poster-logo">F</span><span>FLIMFYBOX</span><span>HD</span></div>
+                            <div class="poster-art"><span class="play-glyph">▶</span></div>
+                            <div class="poster-foot"><span>YOUR STORY</span><i></i></div>
+                        </div>
+                    </div>
+
+                    <div id="loading-state" role="status" aria-live="polite">
+                        <p class="eyebrow"><span class="live-dot" aria-hidden="true"></span> SECURE DELIVERY</p>
+                        <h1>Getting your title ready</h1>
+                        <p class="description">Preparing your selected version. Your story is just a moment away.</p>
+                        <div class="progress-wrap" aria-hidden="true">
+                            <div class="progress-track"></div>
+                            <div class="progress-caption"><span>Creating your link</span><span>Secure &amp; private</span></div>
+                        </div>
+                        <p class="privacy">A little pause. <span>Then straight to your file.</span></p>
+                    </div>
+
+                    <div id="error-state" role="alert" aria-live="assertive" hidden>
+                        <div class="error-icon" aria-hidden="true">↻</div>
+                        <h1>Your link needs another moment</h1>
+                        <p class="description">We couldn’t prepare it just now. Try again and we’ll reopen the same version.</p>
+                        <button class="retry" id="retry-button" type="button">Try again <span aria-hidden="true">↗</span></button>
+                    </div>
+                </section>
+            </main>
+
             <script>
-                // Invisible JS Challenge
-                setTimeout(() => {
-                    fetch('/api/gen_link/""" + str(movie_id) + (f"/file/{movie_file_id}" if movie_file_id else "") + """', { method: 'POST' })
-                    .then(response => response.json())
-                    .then(data => {
-                        if(data.url) {
-                            window.location.href = data.url; 
-                        } else {
-                            document.body.innerHTML = "<h3>❌ Server Error. Please try again.</h3>";
+                const secureLinkEndpoint = "/api/gen_link/""" + str(movie_id) + (f"/file/{movie_file_id}" if movie_file_id else "") + """";
+                const loadingState = document.getElementById("loading-state");
+                const errorState = document.getElementById("error-state");
+                const retryButton = document.getElementById("retry-button");
+                let requestInFlight = false;
+
+                async function createSecureLink() {
+                    if (requestInFlight) return;
+                    requestInFlight = true;
+                    loadingState.hidden = false;
+                    errorState.hidden = true;
+                    retryButton.disabled = true;
+
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+                    try {
+                        const response = await fetch(secureLinkEndpoint, {
+                            method: "POST",
+                            headers: { "Accept": "application/json" },
+                            credentials: "same-origin",
+                            cache: "no-store",
+                            signal: controller.signal
+                        });
+                        const data = await response.json().catch(() => null);
+                        if (!response.ok || !data || typeof data.url !== "string" || !data.url.trim()) {
+                            throw new Error("Secure link was not returned");
                         }
-                    }).catch(e => {
-                        document.body.innerHTML = "<h3>❌ Connection failed.</h3>";
-                    });
-                }, 1500); 
+                        window.location.assign(data.url);
+                    } catch (error) {
+                        loadingState.hidden = true;
+                        errorState.hidden = false;
+                    } finally {
+                        window.clearTimeout(timeoutId);
+                        requestInFlight = false;
+                        retryButton.disabled = false;
+                    }
+                }
+
+                retryButton.addEventListener("click", createSecureLink);
+                // Preserve the current short interstitial delay.
+                window.setTimeout(createSecureLink, 1500);
             </script>
         </body>
         </html>
