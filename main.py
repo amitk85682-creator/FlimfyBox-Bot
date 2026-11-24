@@ -7106,15 +7106,7 @@ def _load_movie_for_start_delivery_sync(movie_id: int):
 
 
 def _consume_temp_link_sync(token: str):
-    """Atomically burn a temp_links token and resolve the selected file in ONE DB checkout.
-
-    Returns a dict:
-      - {'status': 'db_error'}
-      - {'status': 'expired'}
-      - {'status': 'file_missing', 'movie_id': int}
-      - {'status': 'file', 'movie_id': int, 'title': str, 'url': ..., 'file_id': ..., 'meta': dict}
-      - {'status': 'movie', 'movie_id': int}
-    """
+    """Resolve a short-lived token without consuming it before delivery."""
     conn = get_db_connection()
     if not conn:
         return {'status': 'db_error'}
@@ -7122,22 +7114,18 @@ def _consume_temp_link_sync(token: str):
         cur = conn.cursor()
         cur.execute("SET LOCAL statement_timeout = '5s'")
         cur.execute("""
-            SELECT movie_id, movie_file_id, created_at
+            SELECT movie_id, movie_file_id
             FROM temp_links
             WHERE token = %s
               AND created_at >= NOW() - INTERVAL '1 minute'
         """, (token,))
         res = cur.fetchone()
-
-        # Token TURANT delete kar do (Single Use)
-        cur.execute("DELETE FROM temp_links WHERE token = %s", (token,))
-        conn.commit()
-
         if not res:
             cur.close()
+            conn.commit()
             return {'status': 'expired'}
 
-        movie_id, movie_file_id, _created_at = res
+        movie_id, movie_file_id = res
         if movie_file_id:
             cur.execute("""
                 SELECT m.title, mf.url, mf.file_id,
@@ -7148,12 +7136,15 @@ def _consume_temp_link_sync(token: str):
             """, (movie_file_id, movie_id))
             selected_file = cur.fetchone()
             cur.close()
+            conn.commit()
             if not selected_file:
                 return {'status': 'file_missing', 'movie_id': movie_id}
+
             title, url, file_id, db_genre, db_year, db_lang, db_seasons, extra_info = selected_file
             return {
                 'status': 'file',
                 'movie_id': movie_id,
+                'movie_file_id': movie_file_id,
                 'title': title,
                 'url': url,
                 'file_id': file_id,
@@ -7167,17 +7158,40 @@ def _consume_temp_link_sync(token: str):
             }
 
         cur.close()
+        conn.commit()
         return {'status': 'movie', 'movie_id': movie_id}
-    except Exception as e:
+    except Exception:
         try:
             conn.rollback()
         except Exception:
             pass
-        logger.error(f"Temp Link DB Error: {e}")
+        logger.exception("Secure temp-link lookup failed")
         return {'status': 'db_error'}
     finally:
         close_db_connection(conn)
 
+
+def _delete_temp_link_sync(token: str) -> bool:
+    """Delete a one-time token only after its delivery has succeeded."""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM temp_links WHERE token = %s", (token,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        return deleted
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.exception("Secure temp-link cleanup failed")
+        return False
+    finally:
+        close_db_connection(conn)
 
 def _load_file_click_payload_sync(movie_id: int, file_index: int):
     """Fetch movie metadata + requested file index in ONE DB round-trip (off event loop)."""
@@ -7348,6 +7362,7 @@ def load_movie_selection_data(movie_id):
 async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int, title: str, url: Optional[str] = None, file_id: Optional[str] = None, send_warning: bool = True, pre_fetched_meta: dict = None, require_exact_file: bool = False, suppress_delete_notice: bool = False):
     """Sends the movie file/link to the user with THUMBNAIL PROTECTION - OPTIMIZED & NON-BLOCKING"""
     chat_id = update.effective_chat.id
+    sent_msg = None
 
     # --- 1. Fetch movie details (Genre, Year, Language) + file extra_info off event loop ---
     genre = ""
@@ -7412,7 +7427,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             chat_id=update.effective_user.id,
             text="❌ Selected file is unavailable. Please choose another quality from the Mini App."
         ))
-        return
+        return False
 
     # 1. Multi-Quality Check (Agar direct link/file nahi hai)
     if not url and not file_id:
@@ -7476,6 +7491,8 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             ))
             # 👆 FIX KHATAM 👆
             
+            if not msg:
+                return False
             track_message_for_deletion(
                 context, chat_id, msg.message_id, USER_TEXT_DELETE_SECONDS
             )
@@ -7485,7 +7502,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     await update.callback_query.answer("This file menu expires in 5 minutes.", show_alert=True)
                 except:
                     pass
-            return
+            return True
 
     target_chat_id = update.effective_user.id if (url or file_id) else chat_id
 
@@ -7592,7 +7609,7 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 text="❌ Error: File not found or Bot needs Admin rights in Source Channel.",
             ))
             if not err_msg:
-                return
+                return False
             track_message_for_deletion(context, target_chat_id, err_msg.message_id, USER_TEXT_DELETE_SECONDS)
 
         if sent_msg and update.callback_query:
@@ -7624,7 +7641,11 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except:
                 pass
 
+        return bool(sent_msg)
+
     except telegram.error.Forbidden:
+        if sent_msg:
+            return True
         if update.callback_query:
             try:
                 bot_username = context.bot.username
@@ -7641,10 +7662,24 @@ async def send_movie_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except:
                 pass
         logger.warning(f"User {target_chat_id} blocked or hasn't started the bot.")
-    except Exception as e:
-        logger.error(f"Critical Error in send_movie: {e}")
-        try: await safe_send(lambda: context.bot.send_message(chat_id=target_chat_id, text="❌ System Error."))
-        except: pass
+        return False
+    except Exception:
+        logger.exception(
+            "Critical error sending movie movie_id=%s chat_id=%s",
+            movie_id,
+            target_chat_id,
+        )
+        # If Telegram accepted the file already, preserve success and avoid a duplicate retry.
+        if sent_msg:
+            return True
+        try:
+            await safe_send(lambda: context.bot.send_message(
+                chat_id=target_chat_id,
+                text="❌ System Error.",
+            ))
+        except Exception:
+            pass
+        return False
 
 # ==================== TELEGRAM BOT HANDLERS ====================
 # ============================================================================
@@ -7748,30 +7783,36 @@ async def background_search_and_send(update: Update, context: ContextTypes.DEFAU
             pass
 
 # ==================== CLEAN LOADING FUNCTION (FIXED) ====================
-async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int):
-    """
-    Fetches and sends a movie with a clean 'Loading' animation (non-blocking DB).
-    """
+async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_TYPE, movie_id: int) -> bool:
+    """Load and deliver an older movie-level deep link without consuming it on failure."""
     chat_id = update.effective_chat.id
-
-    # 1. Loading Effect
     status_msg = None
+    movie_data = None
+
     try:
-        status_msg = await context.bot.send_message(chat_id, "⏳ <b>Please wait...</b>", parse_mode='HTML')
+        status_msg = await context.bot.send_message(
+            chat_id,
+            "⏳ <b>Please wait...</b>",
+            parse_mode='HTML',
+        )
         track_message_for_deletion(
             context, chat_id, status_msg.message_id, USER_TEXT_DELETE_SECONDS
         )
-    except Exception:
-        pass
+    except Exception as error:
+        logger.info(
+            "Could not send legacy-link progress message (%s)",
+            type(error).__name__,
+        )
 
     try:
-        movie_data = await run_interactive(_load_movie_for_start_delivery_sync, movie_id)
-
-        # 2. Movie milne ke baad turant Loading Msg delete karo
+        movie_data = await run_interactive(
+            _load_movie_for_start_delivery_sync,
+            movie_id,
+        )
         if status_msg:
             try:
                 await status_msg.delete()
-            except Exception:
+            except TelegramError:
                 pass
 
         if movie_data is None:
@@ -7781,64 +7822,61 @@ async def deliver_movie_on_start(update: Update, context: ContextTypes.DEFAULT_T
                 parse_mode='HTML',
             )
             track_user_message_for_deletion(context, chat_id, retry_msg)
-            return
+            return False
 
-        if movie_data:
-            title, url, file_id, db_genre, db_year, db_lang, db_seasons = movie_data
-            pre_meta = {
-                'genre': db_genre,
-                'year': db_year,
-                'language': db_lang,
-                'seasons_data': db_seasons,
-            }
-            await send_movie_to_user(
-                update, context, movie_id, title, url, file_id,
-                pre_fetched_meta=pre_meta,
+        if movie_data is False:
+            fail_msg = await context.bot.send_message(
+                chat_id,
+                "❌ <b>Movie not found or deleted.</b>",
+                parse_mode='HTML',
             )
-        else:
-            # Agar movie nahi mili
-            fail_msg = await context.bot.send_message(chat_id, "❌ <b>Movie not found or deleted.</b>", parse_mode='HTML')
-            track_message_for_deletion(context, chat_id, fail_msg.message_id, USER_TEXT_DELETE_SECONDS)
+            track_message_for_deletion(
+                context, chat_id, fail_msg.message_id, USER_TEXT_DELETE_SECONDS
+            )
+            return False
 
-    except Exception as e:
-        logger.error(f"Error in deliver_movie: {e}")
+        title, url, file_id, db_genre, db_year, db_lang, db_seasons = movie_data
+        metadata = {
+            'genre': db_genre,
+            'year': db_year,
+            'language': db_lang,
+            'seasons_data': db_seasons,
+        }
+        return bool(await send_movie_to_user(
+            update,
+            context,
+            movie_id,
+            title,
+            url,
+            file_id,
+            pre_fetched_meta=metadata,
+        ))
+    except Exception:
+        logger.exception("Legacy temp-link delivery failed movie_id=%s", movie_id)
         if status_msg:
-            try: 
+            try:
                 await status_msg.delete()
-            except: 
+            except TelegramError:
                 pass
-        if movie_data:
-            title, url, file_id = movie_data
-            await send_movie_to_user(update, context, movie_id, title, url, file_id)
-        else:
+        try:
             await context.bot.send_message(
-                chat_id=chat_id, 
-                text="❌ Movie not found. It may have been removed from our database."
+                chat_id,
+                "⚠️ We couldn’t prepare this file just now. Please tap the version again to retry.",
             )
-
-    except Exception as e:
-        logger.error(f"CRITICAL ERROR in deliver_movie: {e}", exc_info=True)
-        error_msg = "❌ Failed to retrieve movie. Please try again or use search."
-        if status_msg:
-            try:
-                await status_msg.edit_text(error_msg)
-            except:
-                pass
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=error_msg)
-            
-    finally:
-        if conn:
-            try:
-                close_db_connection(conn)
-            except:
-                pass
+        except TelegramError:
+            logger.info(
+                "Could not send legacy-link retry notice movie_id=%s",
+                movie_id,
+            )
+        return False
 
 # Add this at the top level
 from asyncio import Lock
 from collections import defaultdict
 
 user_processing_locks = defaultdict(Lock)
+_processing_temp_links = set()
+_consumed_temp_links = {}
 
 
 def _configured_donation_upi():
@@ -8018,16 +8056,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await context.bot.send_message(chat_id, "❌ Link Expired ya Invalid hai!")
                     return
 
+                now = time.monotonic()
+                for old_token, expiry in list(_consumed_temp_links.items()):
+                    if expiry <= now:
+                        _consumed_temp_links.pop(old_token, None)
+                if payload in _consumed_temp_links:
+                    await context.bot.send_message(
+                        chat_id,
+                        "✅ This file link has already been used. Choose the version again for a fresh link.",
+                    )
+                    return
+                if payload in _processing_temp_links:
+                    await context.bot.send_message(
+                        chat_id,
+                        "⏳ This file is already being prepared. Please wait a moment.",
+                    )
+                    return
+
+                # Add before the first await to prevent two updates in this process
+                # from delivering the same short-lived link concurrently.
+                _processing_temp_links.add(payload)
+                processing_stage = "lookup"
+                movie_id = None
+                movie_file_id = None
                 try:
-                    # DB connection is acquired and released BEFORE any Telegram await
-                    # to eliminate event-loop blocking and nested-connection pool deadlocks.
+                    # The database helper reads and resolves the token, but only
+                    # a successful Telegram delivery is allowed to delete it.
                     token_result = await run_interactive(_consume_temp_link_sync, payload)
                     status = token_result.get('status')
 
                     if status == 'db_error':
                         await context.bot.send_message(
                             chat_id,
-                            "⏳ Server abhi busy hai. Kripya app par jaakar dobara click karein.",
+                            "⏳ Server abhi busy hai. Please tap the version again in a moment.",
                         )
                         return
 
@@ -8041,12 +8102,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return
 
                     movie_id = token_result['movie_id']
+                    movie_file_id = token_result.get('movie_file_id')
                     if status == 'file_missing':
-                        await context.bot.send_message(chat_id, "❌ Selected file is no longer available.")
+                        await context.bot.send_message(
+                            chat_id,
+                            "❌ Selected file is no longer available.",
+                        )
                         return
 
+                    processing_stage = "delivery"
                     if status == 'file':
-                        await send_movie_to_user(
+                        delivered = await send_movie_to_user(
                             update,
                             context,
                             movie_id,
@@ -8057,18 +8123,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             pre_fetched_meta=token_result['meta'],
                             require_exact_file=True,
                         )
+                    elif status == 'movie':
+                        delivered = await deliver_movie_on_start(update, context, movie_id)
                     else:
-                        await deliver_movie_on_start(update, context, movie_id)
+                        raise ValueError("Unsupported secure-link payload status")
 
-                    logger.info(f"✅ Secure token {payload} used successfully for movie {movie_id}")
+                    if not delivered:
+                        return
+
+                    # Keep successful redemptions blocked locally even if a
+                    # transient DB error prevents cleanup after the file was sent.
+                    _consumed_temp_links[payload] = time.monotonic() + 60
+                    processing_stage = "cleanup"
+                    removed = await run_interactive(_delete_temp_link_sync, payload)
+                    if not removed:
+                        logger.warning(
+                            "secure_temp_link_cleanup_deferred user_id=%s movie_id=%s file_id=%s",
+                            user_id,
+                            movie_id,
+                            movie_file_id or "legacy",
+                        )
+                    logger.info(
+                        "secure_temp_link_redeemed user_id=%s movie_id=%s file_id=%s",
+                        user_id,
+                        movie_id,
+                        movie_file_id or "legacy",
+                    )
                     return
 
-                except Exception as e:
-                    logger.error(f"Temp Link Error: {e}")
-                    await context.bot.send_message(chat_id, "❌ Processing error.")
+                except Exception:
+                    logger.exception(
+                        "secure_temp_link_processing_failed stage=%s user_id=%s movie_id=%s file_id=%s update_id=%s",
+                        processing_stage,
+                        user_id,
+                        movie_id,
+                        movie_file_id or "legacy",
+                        getattr(update, 'update_id', None) or "-",
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id,
+                            "⚠️ We couldn’t prepare this file just now. Please tap the version again to retry.",
+                        )
+                    except TelegramError:
+                        logger.info(
+                            "secure_temp_link_retry_notice_failed user_id=%s",
+                            user_id,
+                        )
                     return
+                finally:
+                    _processing_temp_links.discard(payload)
 
-                    
             # --- SEND ALL FROM GROUP: START PM THEN DELIVER THE REQUESTED PAGE ---
             if payload.startswith("sendall_"):
                 try:
