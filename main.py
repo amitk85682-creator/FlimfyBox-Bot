@@ -15362,7 +15362,7 @@ def _batch18_db_get_failed_items(admin_id: int, batch_id: Optional[str] = None):
 
 
 async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start Batch18 400-file automation session (single title or multi-title)."""
+    """Start Batch18 only after its durable parent checkpoint exists."""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         return
@@ -15377,6 +15377,7 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from services.batch18_automation import Batch18Collector, MAX_BATCH18_FILES
 
+    job_created = False
     async with BATCH18_SESSION_LOCK:
         if BATCH_18_SESSION.get('active') and BATCH_18_SESSION.get('status') == 'processing':
             await update.message.reply_text(
@@ -15400,9 +15401,12 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         batch_id = f"b18_{uuid.uuid4().hex[:12]}"
         collector = Batch18Collector(max_files=MAX_BATCH18_FILES)
 
+        # Hold the session lock while creating the durable parent row. Incoming
+        # file handlers wait on this same lock and cannot accept children until
+        # the foreign-key target has committed successfully.
         BATCH_18_SESSION.update({
             'active': True,
-            'status': 'collecting',
+            'status': 'starting',
             'batch_id': batch_id,
             'admin_id': user_id,
             'collector': collector,
@@ -15418,7 +15422,30 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'progress': {'current_title_index': 0, 'total_titles': 0, 'current_title': ''},
         })
 
-    await run_async(_batch18_db_create_job, batch_id, user_id, MAX_BATCH18_FILES)
+        try:
+            created_batch_id = await run_async(
+                _batch18_db_create_job,
+                batch_id,
+                user_id,
+                MAX_BATCH18_FILES,
+            )
+        except Exception:
+            logger.exception("Batch18 parent checkpoint initialization raised batch_id=%s", batch_id)
+            created_batch_id = None
+
+        if created_batch_id == batch_id:
+            BATCH_18_SESSION['status'] = 'collecting'
+            job_created = True
+        else:
+            _reset_batch18_session()
+
+    if not job_created:
+        await update.message.reply_text(
+            "❌ Batch18 could not start because its database checkpoint was unavailable. "
+            "No files were accepted; please try <code>/batch18</code> again in a moment.",
+            parse_mode='HTML',
+        )
+        return
 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("❌ Cancel Batch18", callback_data="cancel_batch18")
@@ -15437,10 +15464,6 @@ async def batch18_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML',
         reply_markup=keyboard,
     )
-
-# ============================================================================
-# 🔞 18+ BATCH LISTENER (Fully Optimized & Fixed)
-# ============================================================================
 
 # ============================================================================
 # 🔞 BATCH18 MULTI-SOURCE EVIDENCE HELPERS (ISOLATED)
